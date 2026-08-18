@@ -36,17 +36,23 @@ export const GET = handle(async (req: NextRequest) => {
     where.status = statusParam;
   }
 
-  const [convs, contacts, staff] = await Promise.all([
-    prisma.conversation.findMany({
-      where,
-      orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }],
-      take: 200,
-    }),
+  const convs = await prisma.conversation.findMany({
+    where,
+    orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }],
+    take: 200,
+  });
+  const [contacts, staff, pendingBookings] = await Promise.all([
     prisma.contact.findMany({ select: { id: true, waId: true, profileName: true, labels: true } }),
     prisma.staffUser.findMany({ select: { id: true, name: true } }),
+    // Phase 3：綠色卡 — 每對話最新 PENDING 預約（staff 一眼見到「有預約等處理」）
+    prisma.bookingRequest.findMany({
+      where: { conversationId: { in: convs.map((c) => c.id) }, status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+    }),
   ]);
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
+  const pendingBookingMap = new Map(pendingBookings.map((b) => [b.conversationId, b]));
   const now = Date.now();
 
   return NextResponse.json(
@@ -70,6 +76,19 @@ export const GET = handle(async (req: NextRequest) => {
         urgent: cv.urgent,
         aiSummary: cv.aiSummary,
         contact: contactMap.get(cv.contactId) ?? null,
+        // Phase 3：PENDING 預約卡（綠色卡）— null = 冇待處理預約
+        pendingBooking: (() => {
+          const b = pendingBookingMap.get(cv.id);
+          if (!b) return null;
+          return {
+            id: b.id,
+            providerName: b.providerName,
+            requestedDate: b.requestedDate,
+            requestedTime: b.requestedTime,
+            status: b.status,
+            createdAt: b.createdAt,
+          };
+        })(),
         window: {
           open,
           remainingMs,

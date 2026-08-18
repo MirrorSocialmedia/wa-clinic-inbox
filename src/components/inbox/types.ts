@@ -40,9 +40,21 @@ export interface ConversationItem {
   urgent: boolean;
   aiSummary: string | null;
   contact: ContactInfo | null;
+  /** Phase 3：最新 PENDING 預約（綠色卡）— null = 冇 */
+  pendingBooking: BookingInfo | null;
   window: WindowState;
   /** client-only：最後一則訊息 preview */
   preview?: string;
+}
+
+/** Phase 3：預約請求卡（BookingRequest 嘅 UI shape — 零病人 PII） */
+export interface BookingInfo {
+  id: string;
+  providerName: string;
+  requestedDate: string; // YYYY-MM-DD
+  requestedTime: string; // HH:mm
+  status: "PENDING" | "CONFIRMED" | "REJECTED" | "EXPIRED";
+  createdAt: string;
 }
 
 export interface MessageItem {
@@ -154,4 +166,11 @@ export interface UrgentEscalationEvent {
   contactId: string;
   contactName: string | null;
   waMessageId: string | null;
+}
+
+/** Phase 3：socket booking:new / booking:updated — 預約卡狀態變（綠色卡 + /bookings 隊列） */
+export interface BookingEvent {
+  conversationId: string;
+  clinicId: string;
+  booking: BookingInfo | null; // null = 已處理/失效（卡消失）
 }

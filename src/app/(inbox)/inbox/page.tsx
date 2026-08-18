@@ -14,23 +14,38 @@ export const dynamic = "force-dynamic";
 
 const WINDOW_MS = 24 * 3600 * 1000;
 
-export default async function InboxPage() {
+export default async function InboxPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const session = await getServerSession();
   if (!session) redirect("/login");
 
+  // Phase 3：/bookings 卡「開對話」深連結 → ?conv=<id>
+  const sp = await searchParams;
+  const convParam = typeof sp.conv === "string" ? sp.conv : "";
+
   const scope = session.role === "STAFF" ? { clinicId: session.clinicId! } : {};
 
-  const [clinics, convs, contacts, staff] = await Promise.all([
+  const [clinics, convs, contacts, staff, pendingBookings] = await Promise.all([
     session.role === "STAFF"
       ? prisma.clinic.findUnique({ where: { id: session.clinicId! } }).then((c) => (c ? [c] : []))
       : prisma.clinic.findMany({ orderBy: { code: "asc" } }),
     prisma.conversation.findMany({ where: scope, orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }], take: 200 }),
     prisma.contact.findMany({ where: scope, select: { id: true, waId: true, profileName: true, labels: true } }),
     prisma.staffUser.findMany({ where: { active: true, ...scope }, select: { id: true, name: true, role: true, clinicId: true } }),
+    // Phase 3：PENDING 預約（綠色卡）— 同 conversations API 一致
+    prisma.bookingRequest.findMany({
+      where: { ...scope, status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    }),
   ]);
 
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
+  const pendingBookingMap = new Map(pendingBookings.map((b) => [b.conversationId, b]));
   const now = Date.now();
 
   const conversations = convs.map((cv) => {
@@ -52,6 +67,19 @@ export default async function InboxPage() {
       urgent: cv.urgent,
       aiSummary: cv.aiSummary,
       contact: contactMap.get(cv.contactId) ?? null,
+      // Phase 3：綠色卡（PENDING 預約）
+      pendingBooking: (() => {
+        const b = pendingBookingMap.get(cv.id);
+        if (!b) return null;
+        return {
+          id: b.id,
+          providerName: b.providerName,
+          requestedDate: b.requestedDate,
+          requestedTime: b.requestedTime,
+          status: b.status as "PENDING",
+          createdAt: b.createdAt.toISOString(),
+        };
+      })(),
       window: {
         open: remainingMs > 0,
         remainingMs,
@@ -73,6 +101,7 @@ export default async function InboxPage() {
       initialClinics={clinics}
       initialConversations={conversations}
       initialStaff={staff}
+      initialSelectedConvId={convParam || null}
     />
   );
 }

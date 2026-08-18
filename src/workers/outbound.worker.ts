@@ -1,7 +1,7 @@
 import { Worker, type Job } from "bullmq";
 import { outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { publishNotify } from "@/lib/notify";
-import { sendTextMessage } from "@/lib/wa/graph";
+import { sendTextMessage, sendFlowMessage, type FlowMessageConfig } from "@/lib/wa/graph";
 import { acquireToken } from "@/lib/rate-limit";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -77,13 +77,30 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     return;
   }
 
+  const isFlow = msg.type === "interactive";
   const maxAttempts = job.opts.attempts ?? 3;
   try {
-    const { wamid } = await sendTextMessage({
-      phoneNumberId: clinic.waPhoneNumberId,
-      to: contactRow.waId,
-      body,
-    });
+    let wamid: string;
+    if (isFlow) {
+      // Phase 3：interactive flow message（body = flow config JSON — 無病人內容）
+      const flowCfg = JSON.parse(body) as FlowMessageConfig;
+      if (!flowCfg.flow_token || !flowCfg.flow_cdn_url || !flowCfg.flow_id) {
+        throw new Error("BAD_FLOW_CONFIG");
+      }
+      const r = await sendFlowMessage({
+        phoneNumberId: clinic.waPhoneNumberId,
+        to: contactRow.waId,
+        flow: flowCfg,
+      });
+      wamid = r.wamid;
+    } else {
+      const r = await sendTextMessage({
+        phoneNumberId: clinic.waPhoneNumberId,
+        to: contactRow.waId,
+        body,
+      });
+      wamid = r.wamid;
+    }
 
     const updated = await prisma.message.update({
       where: { id: msg.id },

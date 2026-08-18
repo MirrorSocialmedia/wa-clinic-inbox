@@ -21,6 +21,10 @@ interface Props {
   onDiscard: (draftId: string) => Promise<void>;
   /** 採用/棄 進行中（disable 掣） */
   draftBusy: boolean;
+  /** Phase 3：發 Booking Flow（📅 掣） */
+  onSendFlow: () => Promise<{ ok: boolean; error?: string }>;
+  /** Phase 3：發 Flow 進行中 */
+  flowBusy: boolean;
 }
 
 /** status tick（OUT API 訊息） */
@@ -56,6 +60,7 @@ export function ChatPane(p: Props) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [flowError, setFlowError] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(false);
   // 已自動填入過嘅 draft id（避免重複覆蓋；staff 改咗 composer 後唔會再被蓋）
@@ -106,6 +111,12 @@ export function ChatPane(p: Props) {
         ? "bg-amber-100 text-amber-700 border-amber-200"
         : "bg-emerald-100 text-emerald-700 border-emerald-200";
 
+  async function sendFlow() {
+    if (flowError) setFlowError(null);
+    const r = await p.onSendFlow();
+    if (!r.ok) setFlowError(r.error ?? "發送失敗");
+  }
+
   async function send() {
     const body = draft.trim();
     if (!body || sending || !c) return;
@@ -153,6 +164,7 @@ export function ChatPane(p: Props) {
           const isOut = m.direction === "OUT";
           const isEcho = m.channel === "APP_ECHO";
           const isHistory = m.channel === "HISTORY";
+          const isFlow = m.type === "interactive"; // Phase 3：Flow 訊息（OUT=發 Flow / IN=nfm_reply）
           // Phase 2b：AI 自動發送（AUTO 模式）— 視覺標記俾 staff 審計
           const isAuto = isOut && m.aiAutoSent === true;
           const prev = p.messages[i - 1];
@@ -164,12 +176,16 @@ export function ChatPane(p: Props) {
                   isOut
                     ? isEcho
                       ? "bg-teal-100 text-neutral-800"
-                      : "bg-emerald-100 text-neutral-800"
-                    : "bg-white text-neutral-800 border border-neutral-200"
+                      : isFlow
+                        ? "bg-violet-100 text-neutral-800 border border-violet-200"
+                        : "bg-emerald-100 text-neutral-800"
+                    : isFlow
+                      ? "bg-violet-50 text-neutral-800 border border-violet-200"
+                      : "bg-white text-neutral-800 border border-neutral-200"
                 } ${isHistory ? "opacity-70" : ""}`}
               >
                 {isAuto && (
-                  <div className="text-[10px] text-violet-700 font-medium mb-0.5">🤖 AI 自動覆</div>
+                  <div className="text-[10px] text-violet-700 font-medium mb-0.5">🤖 自動覆（系統）</div>
                 )}
                 {isEcho && (
                   <div className="text-[10px] text-teal-700 font-medium mb-0.5">📱 App 發出</div>
@@ -177,8 +193,13 @@ export function ChatPane(p: Props) {
                 {isHistory && (
                   <div className="text-[10px] text-neutral-400 mb-0.5">歷史訊息</div>
                 )}
-                {m.type === "text" && m.body && <div className="whitespace-pre-wrap break-words">{m.body}</div>}
-                {m.type !== "text" && (
+                {isFlow ? (
+                  <div className="text-sm">
+                    {isOut ? "📅 預約連結（WhatsApp Flow）已發" : "📅 病人完成預約 Flow（nfm_reply）"}
+                  </div>
+                ) : m.type === "text" && m.body ? (
+                  <div className="whitespace-pre-wrap break-words">{m.body}</div>
+                ) : (
                   <div className="flex flex-col gap-1">
                     {media ? (
                       m.type === "image" ? (
@@ -208,6 +229,38 @@ export function ChatPane(p: Props) {
 
       {/* composer */}
       <div className="shrink-0 bg-white border-t border-neutral-200 p-3">
+        {/* Phase 3：預約卡 — PENDING = 綠色卡（病人撳咗 Complete）；BOOKING_REQUEST intent = 📅 掣 */}
+        {c.pendingBooking ? (
+          <div className="mb-2 rounded border border-emerald-300 bg-emerald-50 p-2.5">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-emerald-800">📅 新預約請求</span>
+              <span className="text-sm text-emerald-900 font-medium">
+                {c.pendingBooking.providerName} · {c.pendingBooking.requestedDate} {c.pendingBooking.requestedTime}
+              </span>
+              <a
+                href="/bookings"
+                className="ml-auto text-xs px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+              >
+                去 /bookings 處理 →
+              </a>
+            </div>
+          </div>
+        ) : (
+          c.intent === "BOOKING_REQUEST" &&
+          c.window.open && (
+            <div className="mb-2 rounded border border-violet-200 bg-violet-50 p-2 flex items-center gap-2">
+              <span className="text-xs text-violet-800">🗓️ 病人想預約 — 發預約 Flow 俾病人揀醫生/日期/時間：</span>
+              <button
+                onClick={() => void sendFlow()}
+                disabled={p.flowBusy}
+                className="ml-auto text-xs px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white font-medium disabled:opacity-40"
+              >
+                {p.flowBusy ? "發送中…" : "📅 預約"}
+              </button>
+            </div>
+          )
+        )}
+        {flowError && <div className="text-xs text-red-600 mb-1.5">{flowError}</div>}
         {/* Phase 2：pending AI draft 卡 — 只係建議，staff 一鍵採用先入 composer */}
         {p.pendingDraft && (
           <div className="mb-2 rounded border border-sky-200 bg-sky-50 p-2.5">

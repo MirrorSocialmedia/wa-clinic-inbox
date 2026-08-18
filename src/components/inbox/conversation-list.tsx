@@ -153,6 +153,14 @@ export function ConversationList(p: Props) {
                   急
                 </span>
               )}
+              {c.pendingBooking && (
+                <span
+                  className="text-[10px] px-1 py-0.5 rounded shrink-0 bg-emerald-600 text-white font-semibold"
+                  title={`新預約請求：${c.pendingBooking.providerName} ${c.pendingBooking.requestedDate} ${c.pendingBooking.requestedTime}`}
+                >
+                  📅
+                </span>
+              )}
               {intentMeta && (
                 <span className={`text-[10px] px-1 py-0.5 rounded shrink-0 ${intentMeta.cls}`} title={`AI intent: ${c.intent}`}>
                   {intentMeta.label}

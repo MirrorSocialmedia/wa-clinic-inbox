@@ -46,7 +46,10 @@ interface WaTimestampedMessage {
   audio?: { id?: string; media_id?: string };
   document?: { id?: string; media_id?: string; caption?: string };
   sticker?: { id?: string; media_id?: string };
-  interactive?: { type?: string; nfm_reply?: { response_json?: string } };
+  interactive?: {
+    type?: string;
+    nfm_reply?: { response_json?: string | { payload?: string; iv?: string; key_id?: string; wrapped_key?: string } };
+  };
   location?: { latitude?: string; longitude?: string };
   contact?: { vcard?: string };
 }
@@ -276,6 +279,40 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
       { clinic: clinic.code, wamid, type: msgTypeOf(m), hasMedia: Boolean(mid), unread: updated?.unreadCount },
       "inbound: message processed"
     );
+
+    // Phase 3：nfm_reply（病人撳 Flow Complete）→ 預約 precheck + BookingRequest。
+    // ★ 不觸發 AI triage（flow 回覆唔係自然語言；避免誤分類）。
+    const nfmReply = m.interactive?.type === "nfm_reply" ? m.interactive.nfm_reply : undefined;
+    if (nfmReply?.response_json) {
+      try {
+        const raw = nfmReply.response_json;
+        const envelope =
+          typeof raw === "string" ? (JSON.parse(raw) as Record<string, unknown>) : (raw as Record<string, unknown>);
+        const { handleFlowReply } = await import("@/lib/booking/flow-reply");
+        const outcome = await handleFlowReply({
+          clinicId: clinic.id,
+          conversationId: conv.id,
+          waId,
+          responseJson: {
+            payload: String(envelope.payload ?? ""),
+            iv: String(envelope.iv ?? ""),
+            key_id: envelope.key_id ? String(envelope.key_id) : undefined,
+            wrapped_key: String(envelope.wrapped_key ?? ""),
+          },
+        });
+        log.info(
+          { clinic: clinic.code, wamid, outcome: outcome.status, reason: (outcome as { reason?: string }).reason },
+          "inbound: nfm_reply handled"
+        );
+      } catch (err) {
+        // message 已安全落地；flow 處理失敗只係 log（staff 可手動跟進）
+        log.error(
+          { clinic: clinic.code, wamid, err: err instanceof Error ? err.message : String(err) },
+          "inbound: nfm_reply handle failed（訊息已入庫）"
+        );
+      }
+      continue; // nfm_reply 唔入 AI triage
+    }
 
     // Phase 2：觸發 AI triage（只 IN+API；HISTORY/APP_ECHO 唔觸發 — 見 handleHistory/handleEchoes）。
     // jobId = ai-<messageId>：inbound job retry 重跑同一條 message 唔會重複 enqueue（BullMQ 冪等）。

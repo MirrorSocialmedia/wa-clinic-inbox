@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import type {
   AiClassifiedEvent,
+  BookingEvent,
   ClinicInfo,
   ConversationItem,
   ConvStatus,
@@ -47,11 +48,14 @@ export function InboxClient({
   initialClinics,
   initialConversations,
   initialStaff,
+  initialSelectedConvId,
 }: {
   user: UserCtx;
   initialClinics: ClinicInfo[];
   initialConversations: ConversationItem[];
   initialStaff: StaffInfo[];
+  /** Phase 3：?conv=<id> 深連結（/bookings 卡「開對話」） */
+  initialSelectedConvId?: string | null;
 }) {
   const clinics = initialClinics;
   const staff = initialStaff;
@@ -69,7 +73,7 @@ export function InboxClient({
   const [draftBusy, setDraftBusy] = useState(false);
   const [urgentToast, setUrgentToast] = useState<{ conversationId: string; contactName: string | null } | null>(null);
 
-  const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
+  const [selectedConvId, setSelectedConvId] = useState<string | null>(initialSelectedConvId ?? null);
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -116,6 +120,7 @@ export function InboxClient({
           urgent: existing?.urgent ?? false,
           aiSummary: existing?.aiSummary ?? null,
           contact: e.contact ?? existing?.contact ?? null,
+          pendingBooking: existing?.pendingBooking ?? null,
           window: windowFromLastInbound(
             isOut ? (existing?.lastInboundAt ?? null) : (e.conversation.lastInboundAt ?? null)
           ),
@@ -204,6 +209,19 @@ export function InboxClient({
       setUrgentToast({ conversationId: e.conversationId, contactName: e.contactName });
     });
 
+    // ── Phase 3：預約卡事件（綠色卡） ─────────────────────
+    // booking:new（病人 Complete 過 precheck）/ booking:updated（confirm/expire）
+    socket.on("booking:new", (e: BookingEvent) => {
+      setConversations((prev) =>
+        prev.map((c) => (c.id === e.conversationId ? { ...c, pendingBooking: e.booking } : c))
+      );
+    });
+    socket.on("booking:updated", (e: BookingEvent) => {
+      setConversations((prev) =>
+        prev.map((c) => (c.id === e.conversationId ? { ...c, pendingBooking: e.booking } : c))
+      );
+    });
+
     // 斷線重連 → backlog 補漏
     let wasDisconnected = false;
     socket.on("disconnect", () => {
@@ -231,6 +249,15 @@ export function InboxClient({
   // staffRef：socket handler 要最新 staff 名（assigneeName 顯示）
   const staffRef = useRef<StaffInfo[]>(initialStaff);
   staffRef.current = staff;
+
+  // Phase 3：?conv= 深連結 — 首屏直接載入對話訊息
+  useEffect(() => {
+    if (initialSelectedConvId) {
+      void fetchMessagesLatest(initialSelectedConvId);
+      void fetchPendingDrafts(initialSelectedConvId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 急症 toast 12s 自動消
   useEffect(() => {
@@ -459,6 +486,37 @@ export function InboxClient({
     [user.staffId, fetchPendingDrafts]
   );
 
+  // ── Phase 3：發 Booking Flow（📅 掣） ─────────────────────
+  const [flowBusy, setFlowBusy] = useState(false);
+  const sendFlow = useCallback(async () => {
+    const convId = selectedIdRef.current;
+    if (!convId) return { ok: false, error: "未選擇對話" };
+    setFlowBusy(true);
+    try {
+      const res = await fetch(`/api/conversations/${convId}/flows`, { method: "POST" });
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        reused?: boolean;
+        error?: string;
+        message?: string;
+      } | null;
+      if (res.status === 422) {
+        return { ok: false, error: data?.message ?? "窗口已過，Flow 要用 template" };
+      }
+      if (!res.ok) {
+        return { ok: false, error: data?.error ?? `發送失敗（${res.status}）` };
+      }
+      if (data?.reused) {
+        setNotice("預約連結已經發咗，病人撳入去繼續就得");
+      }
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "網絡錯誤" };
+    } finally {
+      setFlowBusy(false);
+    }
+  }, []);
+
   // ── 側欄 patch ────────────────────────────────────────────────────────
   const patchConversation = useCallback(
     async (body: { status?: ConvStatus; assigneeId?: string | null; urgent?: boolean }) => {
@@ -527,6 +585,7 @@ export function InboxClient({
             urgent: false,
             aiSummary: null,
             contact: { id: hit.id, waId: hit.waId, profileName: hit.profileName, labels: hit.labels },
+            pendingBooking: null,
             window: { open: false, remainingMs: 0, remainingHours: 0, tone: "red" },
             preview: "（未開始對話）",
           };
@@ -592,6 +651,8 @@ export function InboxClient({
         onAdopt={adoptDraft}
         onDiscard={discardDraft}
         draftBusy={draftBusy}
+        onSendFlow={sendFlow}
+        flowBusy={flowBusy}
       />
 
       <DetailPane conversation={selectedConv} staff={staff} onPatch={patchConversation} />

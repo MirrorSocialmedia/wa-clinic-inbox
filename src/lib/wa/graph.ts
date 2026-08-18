@@ -120,3 +120,83 @@ export async function getMediaInfo(mediaId: string): Promise<MediaInfo> {
   }
   return { url: data.url, mimeType: data.mime_type, fileSize: data.file_size ?? null, mocked: false };
 }
+
+// ── WhatsApp Flow（interactive flow message — Phase 3） ────────────────────
+
+export interface FlowMessageConfig {
+  flow_token: string;    // 簽咗 conversationId+clinicId 嘅 JWT（data_exchange 驗證用）
+  flow_cdn_url: string;  // WhatsApp Manager publish 後嘅 CDN URL（或 .flow.json）
+  flow_id: string;       // Flow id（publish 後固定）
+  flow_cta: string;      // 按鈕文字（「預約」）
+  flow_action?: string;  // 預設 NAVIGATE
+}
+
+export function defaultFlowConfig(flow_token: string): FlowMessageConfig {
+  return {
+    flow_token,
+    flow_cdn_url: process.env.FLOW_CDN_URL ?? "https://cdn.whatsapp.net/mock/clinic-booking.flow.json",
+    flow_id: process.env.FLOW_ID ?? "111111111111",
+    flow_cta: process.env.FLOW_CTA ?? "預約",
+    flow_action: "NAVIGATE",
+  };
+}
+
+/**
+ * 發 interactive flow message（MD §8.2：窗口內 free-form 唔收費）。
+ * mock mode 回假 wamid（同 sendTextMessage 一致）。
+ * ★ PII：flow config 只含 token/CDN/CTA（無病人內容）— log 只帶 wamid。
+ */
+export async function sendFlowMessage(opts: {
+  phoneNumberId: string;
+  to: string;
+  flow: FlowMessageConfig;
+}): Promise<SendTextResult> {
+  const { phoneNumberId, to, flow } = opts;
+
+  if (waMock()) {
+    await new Promise((r) => setTimeout(r, 10));
+    const wamid = `mock-wamid-${randomBytes(10).toString("hex")}`;
+    log.info(
+      { phoneNumberId, to, wamid, flowId: flow.flow_id, mock: true },
+      "graph: send flow (MOCK)"
+    );
+    return { wamid, mocked: true };
+  }
+
+  const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken()}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "flow",
+        flow: {
+          flow_token: flow.flow_token,
+          flow_cdn_url: flow.flow_cdn_url,
+          flow_id: flow.flow_id,
+          flow_cta: flow.flow_cta,
+          flow_action: flow.flow_action ?? "NAVIGATE",
+        },
+      },
+    }),
+  });
+
+  const data = (await res.json().catch(() => null)) as
+    | { messages?: { id: string }[]; error?: { message?: string; code?: number } }
+    | null;
+  if (!res.ok || !data?.messages?.[0]?.id) {
+    log.warn(
+      { phoneNumberId, to, httpStatus: res.status, waCode: data?.error?.code ?? null },
+      "graph: send flow FAILED"
+    );
+    throw new Error(`graph send flow failed: HTTP ${res.status} code=${data?.error?.code ?? "?"}`);
+  }
+  const wamid = data.messages[0].id;
+  log.info({ phoneNumberId, to, wamid }, "graph: send flow OK");
+  return { wamid, mocked: false };
+}
