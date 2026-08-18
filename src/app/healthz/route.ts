@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import IORedis from "ioredis";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
+import { checkAiHealth, type AiHealth } from "@/lib/ai";
 
 /**
  * Health endpoint — 框架 MD Phase 0 驗收：`/healthz` 回 200（檢查 DB/Redis/AI）。
@@ -11,8 +12,8 @@ import prisma from "@/lib/prisma";
  * - AI down → 降級（200 + ai: "degraded"），唔算 fail（D6：AI 斷線 inbox 照常）
  *
  * 返回 JSON：{ db: "ok"|"down", redis: "ok"|"down", ai: "ok"|"down"|"degraded" }
- *   ai: "ok"       = /models 回 200
- *       "degraded" = 連唔到 / timeout（GPU 機離線，已知容忍狀態）
+ *   ai: "ok"       = mock mode（AI_MOCK=1）或 /models 回 200
+ *       "degraded" = 連唔到 / timeout / 未設定（GPU 機離線，已知容忍狀態）
  *       "down"     = 連得到但服務端 error（5xx）— 有問題但唔影響 inbox
  */
 export const dynamic = "force-dynamic"; // 唔好 static pre-render（build 時唔准打 DB/Redis）
@@ -50,22 +51,11 @@ async function checkRedis(): Promise<"ok" | "down"> {
   }
 }
 
-async function checkAi(): Promise<"ok" | "down" | "degraded"> {
-  const base = process.env.AI_BASE_URL;
-  if (!base) return "degraded"; // 未設定 = 視為降級（本地開發常見）
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 3000);
-  try {
-    const res = await fetch(`${base.replace(/\/$/, "")}/models`, {
-      signal: controller.signal,
-    });
-    if (res.ok) return "ok";
-    return "down"; // 連得到但 4xx/5xx
-  } catch {
-    return "degraded"; // 連唔到 / timeout — GPU 機離線
-  } finally {
-    clearTimeout(timer);
-  }
+// AI probe 抽到 lib/ai/health.ts（Phase 2 起同 /admin AI 狀態卡共用）：
+// - AI_MOCK=1 → "ok"（mock 永遠喺度）
+// - real mode：GET {VLLM_BASE_URL}/models（3s timeout）
+async function checkAi(): Promise<AiHealth> {
+  return checkAiHealth();
 }
 
 export async function GET() {

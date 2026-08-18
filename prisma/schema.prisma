@@ -92,9 +92,19 @@ model Conversation {
   assigneeId       String?
   intent           String?                    // 最近一次分類結果
   intentConfidence Float?
+  // Phase 2（AI triage）：
+  // - urgency/aiSummary 同 intent 一齊落 Conversation（唔係 Message）：
+  //   UI 隊列欄/側欄要喺對話層顯示，且語義係「呢個對話而家嘅狀態」，
+  //   跟緊 Phase 1 已建嘅 intent 欄慣例，避免加新表多一層 join。
+  // - urgent 鐵律旗：urgency=HIGH 或 intent=URGENT_PAIN 時由 AI worker 置 true；
+  //   對話轉 RESOLVED 或 staff 手動清；置 true 後唔會自動清（避免新訊息蓋過未處理急症）。
+  urgency          String?                    // LOW / MED / HIGH（最近一次分類）
+  urgent           Boolean  @default(false)
+  aiSummary        String?                    // ≤50 字摘要（側欄顯示；語言跟病人）
   lastInboundAt    DateTime? @db.Timestamptz                  // ★ 24h 窗口由呢個欄計
   lastMessageAt    DateTime @db.Timestamptz
   unreadCount      Int        @default(0)
+
   @@unique([clinicId, contactId])
   @@index([clinicId, status, lastMessageAt])
 }
@@ -132,6 +142,22 @@ model AiDraft {
   status             DraftStatus @default(PROPOSED)
   finalText          String?                  // 員工改完實際發出嘅版本 → 攞嚟計採用率+做微調數據
   createdAt          DateTime @db.Timestamptz    @default(now())
+  // Phase 2 冪等：同一條 inbound Message 只可有一條 draft。
+  // AI job 重試（attempts 3）或部分失敗重跑時，唯一約束 + findUnique 前置檢查
+  // 保證唔會生成重複 draft。一條訊息只觸發一次 AI 分類，語義上多 draft 無意義。
+  @@unique([conversationId, inReplyToMessageId])
+}
+
+// Phase 2：AI call 統計（singleton row id=1）— admin AI 狀態卡「最近 call 成功率」數據源。
+// 由 AI worker 每次 call 後 atomic upsert；web process（admin 頁/API）讀。
+// 唔存任何 prompt/response 內容 — 只係計數 + 時間 + 錯訊短句（metadata only）。
+model AiCallStats {
+  id         Int       @id @default(1)
+  totalCalls Int       @default(0)
+  okCalls    Int       @default(0)
+  lastOkAt   DateTime? @db.Timestamptz
+  lastError  String?
+  updatedAt  DateTime  @db.Timestamptz @default(now()) @updatedAt
 }
 
 model BookingRequest {

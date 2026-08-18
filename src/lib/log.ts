@@ -19,6 +19,8 @@ import pino from "pino";
  * - content：通用內容欄（e.g. AI response choices[].message.content）
  * - title：訊息標題 / 選項文字
  * - response_json / responseJson：Flow nfm_reply 病人回覆（★ PII）
+ * - summary / aiSummary / draft / prompt：AI 分類摘要 / 草稿 / prompt —
+ *   全部係病人訊息嘅衍生內容（Phase 2 補）— 同訊息原文一樣唔准入 log
  */
 const SENSITIVE_KEYS = new Set([
   "body",
@@ -30,6 +32,10 @@ const SENSITIVE_KEYS = new Set([
   "title",
   "response_json",
   "responseJson",
+  "summary",
+  "aiSummary",
+  "draft",
+  "prompt",
 ]);
 
 /** pino censor function：只收到 leaf value */
@@ -54,6 +60,10 @@ const REDACT_PATHS = [
   "title",
   "response_json",
   "responseJson",
+  "summary",
+  "aiSummary",
+  "draft",
+  "prompt",
   // 一層 wildcard
   "*.body",
   "*.text",
@@ -64,6 +74,10 @@ const REDACT_PATHS = [
   "*.title",
   "*.response_json",
   "*.responseJson",
+  "*.summary",
+  "*.aiSummary",
+  "*.draft",
+  "*.prompt",
   // 兩層 wildcard（e.g. { error: { message } } / { data: { text } }）
   "*.*.body",
   "*.*.text",
@@ -74,6 +88,10 @@ const REDACT_PATHS = [
   "*.*.title",
   "*.*.response_json",
   "*.*.responseJson",
+  "*.*.summary",
+  "*.*.aiSummary",
+  "*.*.draft",
+  "*.*.prompt",
   // WA Cloud API webhook payload 常見路徑（defence in depth）
   "entry.*.changes.*.value.messages.*.text",
   "entry.*.changes.*.value.messages.*.image",

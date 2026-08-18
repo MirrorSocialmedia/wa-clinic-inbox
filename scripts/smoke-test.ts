@@ -1,14 +1,18 @@
-/* Phase 0-C smoke test — log redact + webhook HMAC 驗簽（純邏輯，唔使 DB/Redis）
+/* Phase 0-C smoke test — log redact + webhook HMAC 驗簽 + AI mock（純邏輯，唔使 DB/Redis）
  *
  * 覆蓋（2026-08-18 自審後擴充）：
  * 1. redactDeep — 任意深度（3 層嵌套 + 陣列）+ 邊界案例（空串 / undefined / 非字串值 / circular）
- *    + 全部 sensitive keys（body/text/draftText/message/caption/content/title/response_json）
+ *    + 全部 sensitive keys（body/text/draftText/message/caption/content/title/response_json/summary/draft）
  * 2. pino redact paths — top-level / 1-2 層 nested / WA payload shape（頂層 + wrapper key）
  * 3. HMAC 驗簽 — 正確 / 錯簽 / 空 / 短簽（唔 throw）/ 錯 secret / multi-algo header / 無 secret
+ * 4. AI mock determinism + 鐵律（Phase 2）— 急症無 draft / 預約有 draft / deterministic / AI_MOCK_FAIL throw
  */
 import assert from "node:assert";
 import { redactDeep, createLogger } from "../src/lib/log";
 import { verifyWaSignature } from "../src/lib/wa-signature";
+import { mockClassifyAndDraft, isAiMockFailEnabled } from "../src/lib/ai/mock";
+import type { ClassifyAndDraftInput } from "../src/lib/ai/types";
+import { AiCallError } from "../src/lib/ai/types";
 import { createHmac } from "node:crypto";
 
 // ===================== 1. redactDeep =====================
@@ -193,4 +197,63 @@ assert(verifyWaSignature(raw, `sha1=xxx,${goodSig}`, secret) === true, "multi-al
 assert(verifyWaSignature(raw, `  ${goodSig}  `, secret) === true, "header 有 whitespace 應該 trim 後過");
 console.log("3. HMAC verify OK");
 
-console.log("\nALL SMOKE TESTS PASSED");
+// ===================== 4. AI mock determinism + 鐵律（Phase 2） =====================
+
+// 呢節有 await → 包入 async IIFE（script 係 CJS context，唔得 top-level await）
+void (async () => {
+  process.env.AI_MOCK = "1";
+  delete process.env.AI_MOCK_FAIL;
+
+  function mockInput(body: string): ClassifyAndDraftInput {
+    return {
+      messages: [
+        { direction: "IN", channel: "API", type: "text", body, waTimestamp: new Date() },
+      ],
+      clinic: {
+        name: "TKW 診所（試點店）",
+        greetingConfig: { openingHours: "一至五 10:00-19:00" },
+      },
+    };
+  }
+
+  // (a) 急症：URGENT_PAIN + HIGH + needsHuman + **無 draft**（鐵律 3）
+  const urgent = await mockClassifyAndDraft(mockInput("医生我牙好痛，唔知係點"));
+  assert.strictEqual(urgent.intent, "URGENT_PAIN", "痛 → URGENT_PAIN");
+  assert.strictEqual(urgent.urgency, "HIGH", "急症 urgency HIGH");
+  assert.strictEqual(urgent.needsHuman, true, "急症 needsHuman=true");
+  assert.strictEqual(urgent.draft, null, "URGENT_PAIN 永不生成 draft（鐵律）");
+
+  // (b) 預約：BOOKING_REQUEST + 有 draft
+  const booking = await mockClassifyAndDraft(mockInput("我想預約下週三"));
+  assert.strictEqual(booking.intent, "BOOKING_REQUEST", "想約 → BOOKING_REQUEST");
+  assert(booking.draft !== null && booking.draft.includes("TKW"), "booking draft 應該含診所名");
+
+  // (c) 兜底：QUESTION + 有 draft
+  const q1 = await mockClassifyAndDraft(mockInput("請問幾時開門"));
+  const q2 = await mockClassifyAndDraft(mockInput("請問幾時開門"));
+  assert.strictEqual(q1.intent, "QUESTION", "一般查詢 → QUESTION");
+  assert.strictEqual(q1.summary, q2.summary, "mock 應該 deterministic（同 input 同 output）");
+  assert(q1.draft !== null, "QUESTION 應該有 draft");
+  assert(q1.summary.length <= 50, "summary ≤50 字");
+
+  // (d) 離題：OUT_OF_SCOPE
+  const oos = await mockClassifyAndDraft(mockInput("你哋係咪有股票賣"));
+  assert.strictEqual(oos.intent, "OUT_OF_SCOPE", "股票 → OUT_OF_SCOPE");
+
+  // (e) AI_MOCK_FAIL=1 → throw AiCallError（測降級路徑）
+  process.env.AI_MOCK_FAIL = "1";
+  assert(isAiMockFailEnabled(), "AI_MOCK_FAIL flag 應該生效");
+  let threw = false;
+  try {
+    await mockClassifyAndDraft(mockInput("任何訊息"));
+  } catch (e) {
+    threw = e instanceof AiCallError;
+    assert(!String(e).includes("任何訊息"), "fail 訊息唔可以含訊息原文");
+  }
+  assert(threw, "AI_MOCK_FAIL 應該 throw AiCallError");
+  delete process.env.AI_MOCK_FAIL;
+  delete process.env.AI_MOCK;
+  console.log("4. AI mock determinism + 鐵律 OK");
+
+  console.log("\nALL SMOKE TESTS PASSED");
+})();
