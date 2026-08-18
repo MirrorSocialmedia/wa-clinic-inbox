@@ -50,10 +50,12 @@ export async function closeRedis(): Promise<void> {
   }
 }
 
+export const QUEUE_PREFIX = "wa-inbox";
+
 function queueOptions(): QueueOptions {
   return {
     connection: getRedis(),
-    prefix: "wa-inbox",
+    prefix: QUEUE_PREFIX,
     defaultJobOptions: {
       attempts: 3,
       backoff: { type: "exponential", delay: 2000 },

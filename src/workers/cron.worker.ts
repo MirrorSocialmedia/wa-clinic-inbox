@@ -1,5 +1,5 @@
 import { Worker, type Job } from "bullmq";
-import { cronQueue, getRedis } from "@/lib/queue";
+import { cronQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import log from "@/lib/log";
 
 /**
@@ -30,7 +30,7 @@ export function startCronWorker(): Worker {
       );
       return { stub: true, jobId: job.id };
     },
-    { connection: getRedis(), concurrency: 1 }
+    { connection: getRedis(), prefix: QUEUE_PREFIX, concurrency: 1 }
   );
 
   worker.on("completed", (job) => {

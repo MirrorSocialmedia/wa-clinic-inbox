@@ -92,8 +92,8 @@ model Conversation {
   assigneeId       String?
   intent           String?                    // 最近一次分類結果
   intentConfidence Float?
-  lastInboundAt    DateTime?                  // ★ 24h 窗口由呢個欄計
-  lastMessageAt    DateTime
+  lastInboundAt    DateTime? @db.Timestamptz                  // ★ 24h 窗口由呢個欄計
+  lastMessageAt    DateTime @db.Timestamptz
   unreadCount      Int        @default(0)
   @@unique([clinicId, contactId])
   @@index([clinicId, status, lastMessageAt])
@@ -102,7 +102,12 @@ model Conversation {
 model Message {
   id             String    @id @default(cuid())
   conversationId String
-  waMessageId    String    @unique            // ★ 冪等 key（webhook 會重發）
+  // Phase 1 改動：waMessageId 由 NOT NULL 變 nullable。
+  // 原因：outbound 發送鏈係「先寫 Message(OUT,API,QUEUED) 先入 queue」，
+  // Graph API 回傳 wamid 之後先 UPDATE 入呢欄（MD §6.3）。NOT NULL 會令
+  // QUEUED row 寫唔到。Postgres unique index 允許多 NULL，冪等語義唔變
+  // （inbound/status 永遠有 wamid，webhook 冪等仍然成立）。
+  waMessageId    String?   @unique            // ★ 冪等 key（webhook 會重發）
   direction      Direction
   channel        Channel
   type           String                       // text/image/audio/document/interactive/nfm_reply...
@@ -112,8 +117,8 @@ model Message {
   errorCode      String?
   sentByStaffId  String?
   aiDraftId      String?
-  waTimestamp    DateTime
-  createdAt      DateTime  @default(now())
+  waTimestamp    DateTime @db.Timestamptz
+  createdAt      DateTime @db.Timestamptz  @default(now())
   @@index([conversationId, waTimestamp])
 }
 
@@ -126,7 +131,7 @@ model AiDraft {
   latencyMs          Int
   status             DraftStatus @default(PROPOSED)
   finalText          String?                  // 員工改完實際發出嘅版本 → 攞嚟計採用率+做微調數據
-  createdAt          DateTime    @default(now())
+  createdAt          DateTime @db.Timestamptz    @default(now())
 }
 
 model BookingRequest {
@@ -141,8 +146,8 @@ model BookingRequest {
   precheckPassed    Boolean                   // 發卡嗰刻對照空檔 cache 嘅結果
   status            BookingStatus @default(PENDING)
   handledByStaffId  String?
-  handledAt         DateTime?
-  createdAt         DateTime      @default(now())
+  handledAt         DateTime? @db.Timestamptz
+  createdAt         DateTime @db.Timestamptz      @default(now())
 }
 
 model AvailabilitySlot {                       // Apricot 讀返嚟嘅空檔 cache — ★ 只存時段佔用，零病人資料
@@ -154,7 +159,7 @@ model AvailabilitySlot {                       // Apricot 讀返嚟嘅空檔 cac
   endTime           String
   bookedCount       Int
   isOpen            Boolean                    // practitionerOpenSchs 開診 = true
-  syncedAt          DateTime
+  syncedAt          DateTime @db.Timestamptz
   @@unique([clinicId, providerApricotId, date, startTime])
 }
 
@@ -163,14 +168,14 @@ model ApricotSession {                         // 三件套（加密存），機
   accessTokenEnc  String
   refreshTokenEnc String
   iatEnc          String
-  updatedAt       DateTime @updatedAt
+  updatedAt       DateTime @db.Timestamptz @updatedAt
 }
 
 model WebhookEvent {                           // 冪等 + 除錯（★ 唔存 payload 原文，只存 metadata）
   id          String   @id                     // wamid / event id
   field       String
-  receivedAt  DateTime @default(now())
-  processedAt DateTime?
+  receivedAt  DateTime @db.Timestamptz @default(now())
+  processedAt DateTime? @db.Timestamptz
 }
 
 model AuditLog {
@@ -179,5 +184,5 @@ model AuditLog {
   action    String                             // SEND / CONFIRM_BOOKING / LOGIN / EXPORT ...
   entity    String?
   entityId  String?
-  createdAt DateTime @default(now())
+  createdAt DateTime @db.Timestamptz @default(now())
 }

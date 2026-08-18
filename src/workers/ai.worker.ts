@@ -1,5 +1,5 @@
 import { Worker, type Job } from "bullmq";
-import { aiQueue, getRedis } from "@/lib/queue";
+import { aiQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import log from "@/lib/log";
 
 /**
@@ -30,7 +30,7 @@ export function startAiWorker(): Worker {
       );
       return { stub: true, jobId: job.id };
     },
-    { connection: getRedis(), concurrency: 3 }
+    { connection: getRedis(), prefix: QUEUE_PREFIX, concurrency: 3 }
   );
 
   worker.on("completed", (job) => {

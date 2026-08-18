@@ -1,8 +1,10 @@
+import "@/lib/als-polyfill"; // 必須係第一行 import — 見該檔註釋
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import next from "next";
 import { Server } from "socket.io";
-import { initHub } from "@/sockets/hub";
-import { closeRedis } from "@/lib/queue";
+import { initHub, notifyClinic } from "@/sockets/hub";
+import { getRedis, closeRedis } from "@/lib/queue";
+import { NOTIFY_CHANNEL, type NotifyMessage } from "@/lib/notify";
 import log from "@/lib/log";
 
 /**
@@ -36,6 +38,28 @@ app.prepare().then(() => {
     transports: ["websocket", "polling"],
   });
   initHub(io);
+
+  // Redis pub/sub 橋：worker process 處理完 webhook 後 publish 通知，
+  // 呢度 subscribe 並 emit 去對應 clinic room（見 lib/notify.ts）。
+  // 用 duplicate() 開獨立 connection（subscribe 會独占個 connection）。
+  const notifySub = getRedis().duplicate();
+  notifySub.on("error", (err) => {
+    log.warn({ err: err.message }, "notify subscriber error");
+  });
+  notifySub.subscribe(NOTIFY_CHANNEL, (err) => {
+    if (err) log.error({ err: err.message }, "notify subscribe failed");
+  });
+  notifySub.on("message", (_channel, msg) => {
+    try {
+      const data = JSON.parse(msg) as NotifyMessage;
+      notifyClinic(data.clinicId, data.event, data.payload);
+    } catch (err) {
+      log.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        "notify: bad message ignored"
+      );
+    }
+  });
 
   server.on("request", (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
@@ -71,6 +95,7 @@ app.prepare().then(() => {
     shuttingDown = true;
     log.info({ signal }, "wa-clinic-inbox shutting down");
     io.close();
+    notifySub.quit().catch(() => notifySub.disconnect());
     server.close(() => {
       void closeRedis().catch(() => undefined).finally(() => process.exit(0));
     });
