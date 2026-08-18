@@ -101,6 +101,15 @@ export function assertClinicAccess(
 }
 
 function toContext(data: SessionData, res: AuthContext["res"]): AuthContext {
+  // Fail-closed：role 必須係已知值（防壞 session / role 字串注入）
+  if (data.role !== "ADMIN" && data.role !== "STAFF") {
+    throw new RbacError(401, "invalid session role");
+  }
+  // Fail-closed：STAFF 必須有 clinicId — 冇 clinicId 嘅 STAFF context 會令 query 變成無 scope（跨店讀），
+  // 所以喺最底層呢度就擋死，唔靠每個 route 記得調 clinicScope。
+  if (data.role === "STAFF" && !data.clinicId) {
+    throw new RbacError(401, "staff session missing clinicId");
+  }
   return {
     staff: {
       id: data.staffId,

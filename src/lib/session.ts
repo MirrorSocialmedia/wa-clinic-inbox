@@ -1,5 +1,6 @@
 import { getIronSession, type SessionOptions } from "iron-session";
 import { type NextRequest, NextResponse } from "next/server";
+import log from "@/lib/log";
 
 /**
  * Session 基礎 — iron-session encrypted cookie（框架 MD §2：自建 email+argon2+iron-session）。
@@ -66,12 +67,24 @@ export interface SessionResult {
  *   const { data, res } = await getSession(req);
  *   ...
  *   return next(res)  // 或將 res 嘅 set-cookie header 帶落自己個 response
+ *
+ * 壞 cookie（被篡改 / 解密失敗 / SESSION_SECRET 冇設）→ 當未登入（401 由 requireAuth 抛），
+ * 唔好俾佢變 500。
  */
 export async function getSession(req: NextRequest): Promise<SessionResult> {
   const res = NextResponse.next();
-  const session = await getIronSession<SessionData>(req, res, sessionOptions());
-  const data = session.staffId ? (session as unknown as SessionData) : null;
-  return { data, res };
+  try {
+    const session = await getIronSession<SessionData>(req, res, sessionOptions());
+    const data = session.staffId ? (session as unknown as SessionData) : null;
+    return { data, res };
+  } catch (err) {
+    // 只 log 錯誤 metadata — cookie 內容可能係客戶 PII，絕對唔可以入 log
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      "session: invalid cookie, treating as unauthenticated"
+    );
+    return { data: null, res };
+  }
 }
 
 /** 寫 session（login 時用）。改完必需要 save() 先寫 cookie。 */

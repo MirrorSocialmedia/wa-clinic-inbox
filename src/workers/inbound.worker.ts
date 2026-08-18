@@ -38,6 +38,12 @@ export function startInboundWorker(): Worker {
   worker.on("failed", (job, err) => {
     log.error({ jobId: job?.id, err: err.message }, "inbound job failed");
   });
+  worker.on("error", (err) => {
+    // Connection-level error（e.g. Redis retry 耗盡）→ log 後 exit，PM2 重啟 process。
+    // 唔好留低一個死咗嘅 worker 冇聲冇息（silent outage 比 crash 可怕）。
+    log.error({ queue: inboundQueue.name, err: err.message }, "inbound worker error — exiting for PM2 restart");
+    process.exit(1);
+  });
 
   return worker;
 }

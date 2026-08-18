@@ -39,6 +39,12 @@ export function startAiWorker(): Worker {
   worker.on("failed", (job, err) => {
     log.error({ jobId: job?.id, err: err.message }, "ai job failed");
   });
+  worker.on("error", (err) => {
+    // Connection-level error（e.g. Redis retry 耗盡）→ log 後 exit，PM2 重啟 process。
+    // 唔好留低一個死咗嘅 worker 冇聲冇息（silent outage 比 crash 可怕）。
+    log.error({ queue: aiQueue.name, err: err.message }, "ai worker error — exiting for PM2 restart");
+    process.exit(1);
+  });
 
   return worker;
 }

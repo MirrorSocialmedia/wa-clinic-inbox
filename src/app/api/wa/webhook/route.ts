@@ -1,6 +1,6 @@
 import { type NextRequest } from "next/server";
-import { createHmac, timingSafeEqual } from "crypto";
 import { inboundQueue } from "@/lib/queue";
+import { verifyWaSignature } from "@/lib/wa-signature";
 import log from "@/lib/log";
 
 /**
@@ -19,37 +19,62 @@ export const dynamic = "force-dynamic";
 const ENQUEUE_TIMEOUT_MS = 1500;
 
 /**
- * HMAC-SHA256 驗簽。
- * Meta 傳 `x-hub-signature-256: sha256=<hex>`（可能連其他 algo 一齊傳，用 comma 分隔）。
- * timingSafeEqual 要求 buffer 等長 — 長度唔同直接 false（唔好俾佢 throw）。
+ * body 上限（bytes）。WA payload 一般 KB 級；公網 endpoint 唔限 size = 內存 DoS 入口。
+ * 超上限 → 413（Meta 唔會送超過 1MB 嘅合法 payload）。
  */
-function verifySignature(rawBody: string, header: string): boolean {
-  const appSecret = process.env.WA_APP_SECRET;
-  if (!appSecret || !header) return false;
+const MAX_BODY_BYTES = 1024 * 1024;
 
-  const sha256Part = header
-    .split(",")
-    .map((s) => s.trim())
-    .find((s) => s.startsWith("sha256="));
-  if (!sha256Part) return false;
+class BodyTooLarge extends Error {
+  constructor(
+    public size: number
+  ) {
+    super(`body too large: ${size} bytes`);
+    this.name = "BodyTooLarge";
+  }
+}
 
-  const expected =
-    "sha256=" +
-    createHmac("sha256", appSecret).update(rawBody).digest("hex");
-
-  const a = Buffer.from(sha256Part);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+/**
+ * 讀 body 帶硬上限 — 同時 cover content-length 同 chunked transfer：
+ * - content-length 声明 > 上限 → 唔讀直接 413
+ * - chunked（無 content-length）→ streaming 讀，累計超上限即 cancel
+ */
+async function readCappedBody(req: NextRequest): Promise<string> {
+  const declared = Number(req.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    throw new BodyTooLarge(declared);
+  }
+  const body = req.body;
+  if (!body) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new BodyTooLarge(size);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return new TextDecoder().decode(out);
 }
 
 /** Meta 驗證握手 */
 export async function GET(req: NextRequest) {
   const p = req.nextUrl.searchParams;
+  const verifyToken = p.get("hub.verify_token");
   if (
     p.get("hub.mode") === "subscribe" &&
-    p.get("hub.verify_token") === process.env.WA_VERIFY_TOKEN &&
-    p.get("hub.verify_token") !== undefined
+    verifyToken &&
+    verifyToken === process.env.WA_VERIFY_TOKEN
   ) {
     return new Response(p.get("hub.challenge"), { status: 200 });
   }
@@ -58,13 +83,22 @@ export async function GET(req: NextRequest) {
 
 /** 事件入隊 — 極速回 200 */
 export async function POST(req: NextRequest) {
-  const raw = await req.text();
-  const sig = req.headers.get("x-hub-signature-256") ?? "";
+  let raw: string;
+  try {
+    raw = await readCappedBody(req);
+  } catch (err) {
+    if (err instanceof BodyTooLarge) {
+      log.warn({ bytes: err.size }, "webhook: body too large");
+      return new Response("too large", { status: 413 });
+    }
+    throw err; // 真正嘅讀取錯誤 → 500，Meta 會重試
+  }
 
-  if (!verifySignature(raw, sig)) {
+  const sig = req.headers.get("x-hub-signature-256");
+  if (!verifyWaSignature(raw, sig, process.env.WA_APP_SECRET)) {
     // 快速 401 — log 只記 metadata（request size / 有冇 signature），唔記 body
     log.warn(
-      { bodyLen: raw.length, hasSig: sig.length > 0 },
+      { bodyLen: raw.length, hasSig: (sig ?? "").length > 0 },
       "webhook: bad signature"
     );
     return new Response("bad sig", { status: 401 });
@@ -78,15 +112,16 @@ export async function POST(req: NextRequest) {
     return new Response("bad json", { status: 400 });
   }
 
+  let enqueueTimer: NodeJS.Timeout | undefined;
   try {
     await Promise.race([
       inboundQueue.add("event", event as object),
-      new Promise<never>((_, reject) =>
-        setTimeout(
+      new Promise<never>((_, reject) => {
+        enqueueTimer = setTimeout(
           () => reject(new Error(`enqueue timeout ${ENQUEUE_TIMEOUT_MS}ms`)),
           ENQUEUE_TIMEOUT_MS
-        )
-      ),
+        );
+      }),
     ]);
   } catch (err) {
     // queue fail（Redis 死 / 塞）：快速 500 令 Meta 重試。
@@ -96,6 +131,8 @@ export async function POST(req: NextRequest) {
       "webhook: enqueue failed"
     );
     return new Response("queue unavailable", { status: 500 });
+  } finally {
+    if (enqueueTimer) clearTimeout(enqueueTimer);
   }
 
   return new Response("ok", { status: 200 });

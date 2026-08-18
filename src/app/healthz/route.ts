@@ -36,6 +36,9 @@ async function checkRedis(): Promise<"ok" | "down"> {
     retryStrategy: () => null,
     lazyConnect: true,
   });
+  // probe 係短命 client — 加靜音 error listener，避免 Redis down 時 ioredis
+  // 噴 "[ioredis] Unhandled error event" noise 入 PM2 error log（error 本身已 catch 處理）
+  probe.on("error", () => undefined);
   try {
     await probe.connect();
     await probe.ping();
