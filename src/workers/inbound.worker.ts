@@ -1,5 +1,5 @@
 import { Worker, type Job } from "bullmq";
-import { inboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { inboundQueue, aiQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { publishNotify } from "@/lib/notify";
 import { downloadWaMedia } from "@/lib/wa/media";
 import prisma from "@/lib/prisma";
@@ -276,7 +276,23 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
       { clinic: clinic.code, wamid, type: msgTypeOf(m), hasMedia: Boolean(mid), unread: updated?.unreadCount },
       "inbound: message processed"
     );
-    // Phase 2：入 AI queue（aiQueue.add）— 而家未開
+
+    // Phase 2：觸發 AI triage（只 IN+API；HISTORY/APP_ECHO 唔觸發 — 見 handleHistory/handleEchoes）。
+    // jobId = ai-<messageId>：inbound job retry 重跑同一條 message 唔會重複 enqueue（BullMQ 冪等）。
+    // ★ BullMQ 唔准 jobId 含 ":"（Redis key namespace）— 用 "-" 做前綴分隔。
+    // enqueue 失敗唔準影響 inbound pipeline（訊息已入 DB + UI 已收到；AI 只係降級）。
+    try {
+      await aiQueue.add(
+        "classify",
+        { conversationId: conv.id, messageId: msg.id, clinicId: clinic.id },
+        { jobId: `ai-${msg.id}` }
+      );
+    } catch (err) {
+      log.warn(
+        { clinic: clinic.code, wamid, err: err instanceof Error ? err.message : String(err) },
+        "inbound: ai enqueue failed (message 已入庫，AI 降級)"
+      );
+    }
   }
 }
 

@@ -87,6 +87,38 @@ export const POST = handle(async (req: NextRequest) => {
     })
     .catch(() => undefined);
 
+  // Phase 2：AI draft 採用追蹤（採用率 + 微調數據）。
+  // 查對話最新嘅 PROPOSED draft（ai.worker 已將 Message.aiDraftId 指向佢）：
+  // - 發出內容同 draft 一字不差 → SENT_AS_IS；改過 → SENT_EDITED（finalText 留底）
+  // ★ 失敗唔準影響發送（try/catch 吞掉）— draft 統計只係观测数据。
+  try {
+    const linkedMsg = await prisma.message.findFirst({
+      where: { conversationId: conv.id, direction: "IN", aiDraftId: { not: null } },
+      orderBy: { waTimestamp: "desc" },
+      select: { aiDraftId: true },
+    });
+    if (linkedMsg?.aiDraftId) {
+      const draft = await prisma.aiDraft.findUnique({ where: { id: linkedMsg.aiDraftId } });
+      if (draft && draft.conversationId === conv.id && draft.status === "PROPOSED") {
+        const asIs = parsed.data.body.trim() === draft.draftText.trim();
+        await prisma.aiDraft.update({
+          where: { id: draft.id },
+          data: { status: asIs ? "SENT_AS_IS" : "SENT_EDITED", finalText: parsed.data.body },
+        });
+        await prisma.message.update({ where: { id: msg.id }, data: { aiDraftId: draft.id } });
+        log.info(
+          { clinicId: conv.clinicId, conversationId: conv.id, draftId: draft.id, messageId: msg.id, adopted: asIs },
+          "send: ai draft linked (SENT_AS_IS/SENT_EDITED)"
+        );
+      }
+    }
+  } catch (err) {
+    log.warn(
+      { clinicId: conv.clinicId, conversationId: conv.id, err: err instanceof Error ? err.message : String(err) },
+      "send: ai draft link failed (ignored, 不影響發送)"
+    );
+  }
+
   try {
     await Promise.race([
       outboundQueue.add("send", { messageId: msg.id }),

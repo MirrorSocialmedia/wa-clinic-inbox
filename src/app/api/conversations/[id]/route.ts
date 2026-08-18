@@ -7,10 +7,12 @@ import { handle, toResponse } from "@/lib/api-error";
 import { publishNotify } from "@/lib/notify";
 
 /**
- * GET /api/conversations/[id] — 單個對話（+ contact）。別店 → 403。
- * PATCH /api/conversations/[id] — 狀態轉換 / assignee / markRead。
- *   { status?: OPEN|PENDING|RESOLVED, assigneeId?: string|null, markRead?: boolean }
+ * GET /api/conversations/[id] — 單個對話（+ contact；conversation 含 AI 欄位 intent/urgency/urgent/aiSummary）。別店 → 403。
+ * PATCH /api/conversations/[id] — 狀態轉換 / assignee / markRead / urgent。
+ *   { status?: OPEN|PENDING|RESOLVED, assigneeId?: string|null, markRead?: boolean, urgent?: boolean }
  *   markRead=true → unreadCount=0（打開對話時調）
+ *   urgent=false → 人工清急症紅標（true 由 AI worker 置；staff 唔可以手動標 false 假急症）
+ *   status→RESOLVED → 自動清 urgent（急症已處理）
  */
 export const dynamic = "force-dynamic";
 
@@ -20,6 +22,7 @@ const patchSchema = z.object({
   status: z.enum(["OPEN", "PENDING", "RESOLVED"]).optional(),
   assigneeId: z.string().min(1).nullable().optional(),
   markRead: z.boolean().optional(),
+  urgent: z.literal(false).optional(), // 只准清（AI 嘅紅標 staff 唔可以手動加重）
 });
 
 export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
@@ -42,7 +45,7 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertClinicAccess(auth, conv.clinicId);
 
-  const { status, assigneeId, markRead } = parsed.data;
+  const { status, assigneeId, markRead, urgent } = parsed.data;
 
   // assignee 必須係同店嘅 staff（STAFF 唔會見到別店 staff；ADMIN 都可以指定）
   if (assigneeId) {
@@ -62,6 +65,8 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
       ...(status !== undefined ? { status } : {}),
       ...(assigneeId !== undefined ? { assigneeId } : {}),
       ...(markRead === true ? { unreadCount: 0 } : {}),
+      // 急症紅標：status→RESOLVED 自動清；urgent=false 手動清；唔會由呢度設 true
+      ...(status === "RESOLVED" || urgent === false ? { urgent: false } : {}),
     },
   });
 

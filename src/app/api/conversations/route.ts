@@ -7,8 +7,8 @@ import { handle } from "@/lib/api-error";
  * GET /api/conversations?clinicId=&status= — 隊列列表（MD §6.4 隊列欄）。
  * - clinicId：ADMIN 可以指定（tab 切換）；STAFF 忽略（硬性綁自己店，砌別店 → 403 實測）
  * - status：OPEN / PENDING / RESOLVED（filter）
- * - 排序 lastMessageAt desc
- * - 回傳 contact 資料 + 24h 窗口狀態（UI chip 用）
+ * - 排序：urgent 優先（Phase 2 鐵律：急症排頂），其餘 lastMessageAt desc
+ * - 回傳 contact 資料 + 24h 窗口狀態（UI chip 用）+ AI triage 欄位（intent/urgency/urgent/aiSummary）
  */
 export const dynamic = "force-dynamic";
 
@@ -39,7 +39,7 @@ export const GET = handle(async (req: NextRequest) => {
   const [convs, contacts, staff] = await Promise.all([
     prisma.conversation.findMany({
       where,
-      orderBy: { lastMessageAt: "desc" },
+      orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }],
       take: 200,
     }),
     prisma.contact.findMany({ select: { id: true, waId: true, profileName: true, labels: true } }),
@@ -65,6 +65,10 @@ export const GET = handle(async (req: NextRequest) => {
         lastInboundAt: cv.lastInboundAt,
         lastMessageAt: cv.lastMessageAt,
         intent: cv.intent,
+        intentConfidence: cv.intentConfidence,
+        urgency: cv.urgency,
+        urgent: cv.urgent,
+        aiSummary: cv.aiSummary,
         contact: contactMap.get(cv.contactId) ?? null,
         window: {
           open,
