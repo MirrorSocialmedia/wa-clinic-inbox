@@ -1,4 +1,4 @@
-import { getIronSession, type SessionOptions } from "iron-session";
+import { getIronSession, unsealData, type SessionOptions } from "iron-session";
 import { type NextRequest, NextResponse } from "next/server";
 import log from "@/lib/log";
 
@@ -27,6 +27,8 @@ export interface SessionData {
   loginAt: number;
 }
 
+export const SESSION_COOKIE_NAME = "wa_inbox_session";
+
 const TTL_SECONDS = 60 * 60 * 24 * 7; // 7 日
 
 function assertSecret(): string {
@@ -42,7 +44,7 @@ function assertSecret(): string {
 
 export function sessionOptions(): SessionOptions {
   return {
-    cookieName: "wa_inbox_session",
+    cookieName: SESSION_COOKIE_NAME,
     password: assertSecret(),
     ttl: TTL_SECONDS,
     cookieOptions: {
@@ -105,4 +107,39 @@ export async function destroySession(req: NextRequest): Promise<NextResponse> {
   const session = await getIronSession<SessionData>(req, res, sessionOptions());
   session.destroy();
   return res;
+}
+
+/**
+ * 簡單 cookie header 解析（socket.io handshake 用 — 唔使引 cookie package）。
+ * 只取 name → value 第一個；value 唔 decode（iron-session 會自行處理 base64）。
+ */
+export function parseCookieHeader(header: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+    const name = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (!(name in out)) out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * Socket.IO handshake 用：由 request cookie 解 iron-session（唔郁 res）。
+ * unsealData 內置 tamper 檢查 + ttl 過期檢查；任何異常 → null（fail-closed）。
+ * ★ PII 鐵律：log 只帶 staffId/role，cookie 內容絕唔入 log。
+ */
+export async function getSocketSession(req: { headers: { cookie?: string } }): Promise<SessionData | null> {
+  try {
+    const value = parseCookieHeader(req.headers.cookie ?? "")[SESSION_COOKIE_NAME] ?? "";
+    if (!value) return null;
+    const data = await unsealData<SessionData>(value, {
+      password: assertSecret(),
+      ttl: TTL_SECONDS,
+    });
+    return data && data.staffId ? data : null;
+  } catch {
+    return null;
+  }
 }
