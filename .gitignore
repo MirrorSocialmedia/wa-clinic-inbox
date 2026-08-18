@@ -43,3 +43,9 @@ next-env.d.ts
 
 # PM2 logs
 /logs
+
+# local dev (embedded postgres data dir, pg logs — 本地開發 DB，唔入 repo)
+/.dev/pgdata
+/.dev/pg.log
+/.dev/*.log
+/.dev/credentials.txt

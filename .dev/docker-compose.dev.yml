@@ -1,0 +1,48 @@
+# WA Clinic Inbox — 本地開發基建（開發記錄，指揮大神 machine 用）
+#
+# 用法：
+#   docker compose -f .dev/docker-compose.dev.yml up -d
+#   pnpm prisma:migrate   # 或 prisma migrate dev
+#   pnpm db:seed
+#
+# 沙箱備註（CTO 2026-08-18）：開發沙箱冇 docker（permission denied）→ 本機
+# 改用 embedded-postgres（pnpm dev:db，PG18 beta，port 15432，data dir
+# .dev/pgdata）。呢個 compose file 係有 docker 環境（VPS/指挥大神機器）嘅記錄：
+# Postgres 16 + Redis 7，同一組 port（15432 / 16379）避免同系統服務撞。
+# Redis：沙箱用咗系統 Redis 7.0.15（127.0.0.1:6379），compose 版本開 16379。
+# （有 docker 嘅環境用呢套時 REDIS_URL=redis://127.0.0.1:16379）
+#
+# 注意：呢兩個 stack 都係「本地開發用」，唔係 production 部署（production
+# 按 MD §5.2 用 VPS 上 Postgres 16 + 獨立 role wa_inbox + Redis）。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wa-inbox-dev-pg
+    environment:
+      POSTGRES_USER: wa_inbox
+      POSTGRES_PASSWORD: ***
+      POSTGRES_DB: wa_inbox
+    ports:
+      - "15432:5432"
+    volumes:
+      - pgdata-dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wa_inbox -d wa_inbox"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: wa-inbox-dev-redis
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata-dev:

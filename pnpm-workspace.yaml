@@ -6,3 +6,7 @@ allowBuilds:
   msgpackr-extract: true
   '@prisma/engines': true
   prisma: true
+
+  embedded-postgres: true
+  '@embedded-postgres/linux-x64': true
+  '@prisma/client': true
