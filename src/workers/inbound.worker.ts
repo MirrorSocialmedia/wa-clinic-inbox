@@ -546,6 +546,12 @@ async function processInboundEvent(payload: unknown): Promise<void> {
         continue;
       }
 
+      // Phase 4：webhook 最後事件時間（5 分鐘健康自檢 stale 判斷用）—
+      // 任何 field 嘅事件都算 traffic。寫失敗唔阻主 pipeline（fire-and-forget）。
+      prisma.clinic
+        .update({ where: { id: clinic.id }, data: { lastWebhookEventAt: new Date() } })
+        .catch((e) => log.warn({ clinic: clinic.code, err: e instanceof Error ? e.message : String(e) }, "inbound: lastWebhookEventAt update failed (ignored)"));
+
       try {
         if (value?.messages?.length) await handleMessages(clinic, value);
         else if (value?.smb_message_echoes?.length) await handleEchoes(clinic, value);

@@ -77,6 +77,12 @@ model Clinic {
   aiMode           AiMode  @default(DRAFT)
   // Phase 3：該店醫生名錄（SCREEN_PROVIDER 來源；sync 表 — 多對多，醫生可以跨店）
   providers        ProviderClinic[]
+  // Phase 4：webhook 最後事件時間（inbound worker 每 event 更新）— 5 分鐘健康自檢
+  // stale 判斷用：有 traffic（!= null）但 > 30 分鐘無事件 → 警報；null = 從來無 traffic 唔計。
+  lastWebhookEventAt DateTime? @db.Timestamptz
+  // Phase 4：quality_rating 每日檢查結果（GREEN/YELLOW/RED）+ 上次檢查時間（/admin 顯示）
+  qualityRating    String?                    // GREEN / YELLOW / RED
+  qualityCheckedAt DateTime? @db.Timestamptz
 }
 
 model StaffUser {
@@ -281,4 +287,42 @@ model AuditLog {
   // AI_AUTO_SEND 用：{ conversationId, draftId, intent, urgency }
   meta      Json?
   createdAt DateTime @db.Timestamptz @default(now())
+}
+
+// Phase 4：健康自檢 / 監控警報（MD §9.3）。
+// - 由 cron `health-check`（5 分鐘）/ `quality-check`（每日）產生；異常行 + 通知（ALERT_CHANNEL）。
+// - 冪等：同 (type, clinicId) 未解決（resolvedAt IS NULL）只可有一條 —
+//   cron 每 5 分鐘重跑唔會重覆彈警報；狀況恢復後由下一次 check 自動 set resolvedAt。
+// - ★ detail 只准 metadata（queue 名/計數/分鐘數/rating/disk %）— 永不存訊息原文（iron rule 1）。
+// - clinicId：per-clinic 警報（webhook_stale / quality_rating）帶店；系統級（queue_depth /
+//   ai_breaker_open / apricot_sync_stale / disk_low）= null。
+model Alert {
+  id         String    @id @default(cuid())
+  type       String    // webhook_stale | queue_depth | ai_breaker_open | apricot_sync_stale | disk_low | quality_rating
+  severity   String    // MEDIUM | HIGH
+  clinicId   String?
+  clinicCode String?   // 快照（顯示用；唔 join — 店被刪都睇到）
+  detail     Json?     // metadata only
+  createdAt  DateTime  @db.Timestamptz @default(now())
+  resolvedAt DateTime? @db.Timestamptz
+  @@index([type, clinicId, resolvedAt])
+  @@index([resolvedAt, createdAt])
+}
+
+// Phase 4：週一自動營運報表（MD §9.3：訊息量/店、FRT 中位數、草稿採用率、Flow 完成率、
+// 預約卡→確認轉化率 + 中位處理時間）。
+// - 每星期一 07:00 cron 對「上一週（Mon 00:00 → Sun 24:00，本地時區）」生成。
+// - 一行一個 scope：clinicId=null = ALL（ADMIN 視角，metrics 內含逐店 breakdown）；
+//   clinicId=店 = 該店（STAFF /admin/ops 視角）。
+// - metrics/text 全部係計數/中位數/比率（metadata only）— 零病人資料。
+model OpsReport {
+  id          String   @id @default(cuid())
+  periodStart DateTime @db.Timestamptz   // 週一 00:00（本地）
+  periodEnd   DateTime @db.Timestamptz   // 下週一 00:00（exclusive）
+  clinicId    String   @default("")      // "" = ALL（全部店；Postgres unique 對 NULL 唔生效 → 用 "" sentinel）
+  metrics     Json
+  text        String                     // 人類可讀報表（俾 ALERT_CHANNEL 推送；metadata only）
+  createdAt   DateTime @db.Timestamptz @default(now())
+  @@unique([periodStart, clinicId])
+  @@index([periodStart])
 }

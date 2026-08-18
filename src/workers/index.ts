@@ -26,7 +26,23 @@ async function registerSchedulers() {
     name: "bookings-expire",
     data: {},
   });
-  log.info({}, "cron: schedulers registered (sync-availability */15m, apricot-keepalive 3d, bookings-expire */5m)");
+  // Phase 4（MD §9.3）：5 分鐘健康自檢 + 每日 quality_rating + 每星期一週報
+  await cronQueue.upsertJobScheduler("sched-health-check", { pattern: "*/5 * * * *" }, {
+    name: "health-check",
+    data: {},
+  });
+  await cronQueue.upsertJobScheduler("sched-quality-check", { pattern: "30 6 * * *" }, {
+    name: "quality-check",
+    data: {},
+  });
+  await cronQueue.upsertJobScheduler("sched-weekly-report", { pattern: "0 7 * * 1" }, {
+    name: "weekly-report",
+    data: {},
+  });
+  log.info(
+    {},
+    "cron: schedulers registered (sync-availability */15m, apricot-keepalive 3d, bookings-expire */5m, health-check */5m, quality-check daily 06:30, weekly-report Mon 07:00)"
+  );
 }
 
 async function main() {

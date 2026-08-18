@@ -1,4 +1,6 @@
 import { getAiStatusSnapshot } from "@/lib/ai/status";
+import prisma from "@/lib/prisma";
+import { AlertsPanel, type AlertItem } from "./alerts-panel";
 
 /**
  * /admin — 總覽 + AI 狀態卡（Phase 2）。
@@ -6,8 +8,15 @@ import { getAiStatusSnapshot } from "@/lib/ai/status";
  * AI 狀態 = 真數據（mode/model/breaker/probe/call 統計）— healthz 同源。
  * Phase 2b：加最近一次 call 實測 latency/tokens + 各舖 AI 模式（DRAFT/AUTO）
  * 同近 24h 自動發數量/成功率。
+ * Phase 4：加 警報（alerts）區塊 + 各號 quality_rating 健康表。
  */
 export const metadata = { title: "總覽 — WA Clinic Inbox" };
+
+const QUALITY_CLS: Record<string, string> = {
+  GREEN: "bg-green-100 text-green-800 border-green-300",
+  YELLOW: "bg-amber-100 text-amber-800 border-amber-300",
+  RED: "bg-red-100 text-red-800 border-red-300",
+};
 
 function Row({ label, value, tone }: { label: string; value: string; tone?: "ok" | "warn" | "bad" }) {
   const toneCls =
@@ -27,7 +36,30 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: "ok"
 }
 
 export default async function AdminOverviewPage() {
-  const ai = await getAiStatusSnapshot();
+  const [ai, alerts, clinics] = await Promise.all([
+    getAiStatusSnapshot(),
+    prisma.alert.findMany({ where: { resolvedAt: null }, orderBy: { createdAt: "desc" }, take: 50 }),
+    prisma.clinic.findMany({
+      orderBy: { code: "asc" },
+      select: {
+        code: true,
+        name: true,
+        waDisplayNumber: true,
+        qualityRating: true,
+        qualityCheckedAt: true,
+        lastWebhookEventAt: true,
+      },
+    }),
+  ]);
+  const alertItems: AlertItem[] = alerts.map((a) => ({
+    id: a.id,
+    type: a.type,
+    severity: a.severity,
+    clinicCode: a.clinicCode,
+    detail: a.detail,
+    createdAt: a.createdAt.toISOString(),
+    resolvedAt: a.resolvedAt ? a.resolvedAt.toISOString() : null,
+  }));
 
   const probeTone = ai.probe === "ok" ? "ok" : ai.probe === "degraded" ? "warn" : "bad";
   const degraded = ai.probe === "down" || ai.breaker.state === "open";
@@ -161,6 +193,60 @@ export default async function AdminOverviewPage() {
         </p>
       </section>
 
+      {/* ── Phase 4：警報（未解決；health-check 每 5 分鐘 / quality-check 每日） ── */}
+      <section className="bg-white rounded-lg border border-neutral-200 p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-medium text-neutral-900">警報（未解決）</h2>
+          <span className="text-xs text-neutral-500">health-check 每 5 分鐘 · quality-check 每日 · 恢復自動 resolve</span>
+        </div>
+        <AlertsPanel alerts={alertItems} />
+      </section>
+
+      {/* ── Phase 4：各號 quality_rating（被 ban 前哨指標 — MD §9.3） ── */}
+      <section className="bg-white rounded-lg border border-neutral-200 p-5">
+        <h2 className="font-medium text-neutral-900 mb-3">WhatsApp 號健康（quality_rating）</h2>
+        <table className="w-full text-sm">
+          <thead className="text-left text-neutral-500 border-b border-neutral-200">
+            <tr>
+              <th className="py-2 font-medium">店舖</th>
+              <th className="py-2 font-medium">號</th>
+              <th className="py-2 font-medium">quality_rating</th>
+              <th className="py-2 font-medium">上次檢查</th>
+              <th className="py-2 font-medium">最後 webhook 事件</th>
+            </tr>
+          </thead>
+          <tbody>
+            {clinics.map((c) => (
+              <tr key={c.code} className="border-b border-neutral-100 last:border-0">
+                <td className="py-2">
+                  {c.code}
+                  <span className="text-neutral-400 ml-2 text-xs">{c.name}</span>
+                </td>
+                <td className="py-2 font-mono text-neutral-700">{c.waDisplayNumber ?? "—"}</td>
+                <td className="py-2">
+                  {c.qualityRating ? (
+                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold ${QUALITY_CLS[c.qualityRating] ?? "bg-neutral-100 text-neutral-700 border-neutral-300"}`}>
+                      {c.qualityRating}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-neutral-400">未檢查</span>
+                  )}
+                </td>
+                <td className="py-2 text-neutral-500">
+                  {c.qualityCheckedAt ? new Date(c.qualityCheckedAt).toLocaleString("zh-HK") : "—"}
+                </td>
+                <td className="py-2 text-neutral-500">
+                  {c.lastWebhookEventAt ? new Date(c.lastWebhookEventAt).toLocaleString("zh-HK") : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="mt-3 text-xs text-neutral-500">
+          YELLOW/RED = 被 ban 前哨（每日 06:30 自動拉；跌落即 HIGH alert + 通知）。
+        </p>
+      </section>
+
       {/* ── 管理入口 ── */}
       <section className="grid grid-cols-2 gap-4">
         <a
@@ -176,6 +262,13 @@ export default async function AdminOverviewPage() {
         >
           <div className="font-medium text-neutral-900">員工</div>
           <div className="text-sm text-neutral-500 mt-1">帳號 / 角色（ADMIN / STAFF）</div>
+        </a>
+        <a
+          href="/ops"
+          className="bg-white rounded-lg border border-neutral-200 p-4 hover:border-blue-300 transition-colors"
+        >
+          <div className="font-medium text-neutral-900">營運週報</div>
+          <div className="text-sm text-neutral-500 mt-1">最近 8 週趨勢 + 本期指標（FRT / 採用率 / 轉化率）</div>
         </a>
       </section>
     </div>

@@ -121,6 +121,47 @@ export async function getMediaInfo(mediaId: string): Promise<MediaInfo> {
   return { url: data.url, mimeType: data.mime_type, fileSize: data.file_size ?? null, mocked: false };
 }
 
+// ── quality_rating（MD §9.3：每日拉各號 — 被 ban 前哨指標） ───────────────
+
+export type WaQualityRating = "GREEN" | "YELLOW" | "RED";
+
+/**
+ * 攞電話號 quality_rating（`GET /v23.0/{phone_number_id}?fields=quality_rating`）。
+ * - WA_MOCK=1：決定性 GREEN；env `WA_MOCK_QUALITY` 可 inject YELLOW/RED（E2E T36 用）。
+ * - 真 mode：200 + 已知值 → 回傳；其他（4xx/5xx/未知值/超時）→ throw（由 caller 決定降級）。
+ * ★ PII：只涉及 phone_number_id（metadata）。
+ */
+export async function getPhoneQualityRating(phoneNumberId: string, timeoutMs = 10000): Promise<WaQualityRating> {
+  if (waMock()) {
+    const injected = (process.env.WA_MOCK_QUALITY ?? "GREEN").toUpperCase();
+    const rating = ["GREEN", "YELLOW", "RED"].includes(injected) ? (injected as WaQualityRating) : "GREEN";
+    log.debug({ phoneNumberId, rating, mock: true }, "graph: quality rating (MOCK)");
+    return rating;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}?fields=quality_rating`, {
+      headers: { Authorization: `Bearer ${accessToken()}` },
+      signal: controller.signal,
+    });
+    const data = (await res.json().catch(() => null)) as
+      | { quality_rating?: string; error?: { message?: string } }
+      | null;
+    if (!res.ok || !data?.quality_rating) {
+      throw new Error(`quality_rating HTTP ${res.status} code=${data?.error?.message ?? "unknown"}`);
+    }
+    const rating = data.quality_rating.toUpperCase();
+    if (!["GREEN", "YELLOW", "RED"].includes(rating)) {
+      throw new Error(`quality_rating unknown value (metadata: len=${data.quality_rating.length})`);
+    }
+    return rating as WaQualityRating;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── WhatsApp Flow（interactive flow message — Phase 3） ────────────────────
 
 export interface FlowMessageConfig {
