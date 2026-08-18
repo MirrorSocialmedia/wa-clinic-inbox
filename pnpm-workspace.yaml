@@ -1,0 +1,8 @@
+allowBuilds:
+  sharp: true
+  unrs-resolver: true
+  argon2: true
+  esbuild: true
+  msgpackr-extract: true
+  '@prisma/engines': true
+  prisma: true

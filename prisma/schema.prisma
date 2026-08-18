@@ -1,0 +1,183 @@
+// WA Clinic Inbox — 資料模型（照框架 MD §4 全文）
+// 注意：本地無 DB — 只 `prisma validate` / `prisma generate`，唔跑 migrate dev。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  STAFF
+}
+
+enum Direction {
+  IN
+  OUT
+}
+
+enum Channel {
+  API        // 系統發
+  APP_ECHO   // 店員手機 App 發嘅回音
+  HISTORY    // 舊 chat 匯入
+}
+
+enum ConvStatus {
+  OPEN
+  PENDING
+  RESOLVED
+}
+
+enum MsgStatus {
+  RECEIVED
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum DraftStatus {
+  PROPOSED
+  SENT_AS_IS
+  SENT_EDITED
+  DISCARDED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  EXPIRED
+}
+
+model Clinic {
+  id               String  @id @default(cuid())
+  code             String  @unique            // TKW / MF ...（同 clinic-workforce 用同一套 code，方便對照）
+  name             String
+  waPhoneNumberId  String  @unique            // Meta phone_number_id — 分流嘅 key
+  waDisplayNumber  String
+  apricotClinicId  String?                    // 對照 provider-roster 已有實值
+  greetingConfig   Json?                      // 營業時間/地址/常見 FAQ，餵畀 AI 草稿用
+}
+
+model StaffUser {
+  id           String  @id @default(cuid())
+  email        String  @unique
+  passwordHash String
+  name         String
+  role         Role
+  clinicId     String?                        // STAFF 必填；ADMIN 留空 = 跨店
+  active       Boolean @default(true)
+}
+
+model Contact {
+  id          String @id @default(cuid())
+  clinicId    String
+  waId        String                          // 852XXXXXXXX
+  profileName String?
+  labels      String[]
+  @@unique([clinicId, waId])                  // 同一病人喺兩間店 = 兩條 Contact（隔離）
+}
+
+model Conversation {
+  id               String     @id @default(cuid())
+  clinicId         String
+  contactId        String
+  status           ConvStatus @default(OPEN)
+  assigneeId       String?
+  intent           String?                    // 最近一次分類結果
+  intentConfidence Float?
+  lastInboundAt    DateTime?                  // ★ 24h 窗口由呢個欄計
+  lastMessageAt    DateTime
+  unreadCount      Int        @default(0)
+  @@unique([clinicId, contactId])
+  @@index([clinicId, status, lastMessageAt])
+}
+
+model Message {
+  id             String    @id @default(cuid())
+  conversationId String
+  waMessageId    String    @unique            // ★ 冪等 key（webhook 會重發）
+  direction      Direction
+  channel        Channel
+  type           String                       // text/image/audio/document/interactive/nfm_reply...
+  body           String?                      // 文字內容（DB 有 at-rest 加密；log 絕不出現）
+  mediaPath      String?                      // 落地 /srv/wa-media/<id>，唔存 Meta URL（會過期）
+  status         MsgStatus
+  errorCode      String?
+  sentByStaffId  String?
+  aiDraftId      String?
+  waTimestamp    DateTime
+  createdAt      DateTime  @default(now())
+  @@index([conversationId, waTimestamp])
+}
+
+model AiDraft {
+  id                 String      @id @default(cuid())
+  conversationId     String
+  inReplyToMessageId String
+  draftText          String
+  model              String
+  latencyMs          Int
+  status             DraftStatus @default(PROPOSED)
+  finalText          String?                  // 員工改完實際發出嘅版本 → 攞嚟計採用率+做微調數據
+  createdAt          DateTime    @default(now())
+}
+
+model BookingRequest {
+  id                String        @id @default(cuid())
+  conversationId    String
+  clinicId          String
+  flowToken         String        @unique     // 發 Flow 時生成，nfm_reply 對返
+  providerApricotId String
+  providerName      String                    // 快照，唔 join
+  requestedDate     String                    // YYYY-MM-DD（跟 Apricot 用 HK 日界）
+  requestedTime     String                    // HH:mm
+  precheckPassed    Boolean                   // 發卡嗰刻對照空檔 cache 嘅結果
+  status            BookingStatus @default(PENDING)
+  handledByStaffId  String?
+  handledAt         DateTime?
+  createdAt         DateTime      @default(now())
+}
+
+model AvailabilitySlot {                       // Apricot 讀返嚟嘅空檔 cache — ★ 只存時段佔用，零病人資料
+  id                String   @id @default(cuid())
+  clinicId          String
+  providerApricotId String
+  date              String
+  startTime         String
+  endTime           String
+  bookedCount       Int
+  isOpen            Boolean                    // practitionerOpenSchs 開診 = true
+  syncedAt          DateTime
+  @@unique([clinicId, providerApricotId, date, startTime])
+}
+
+model ApricotSession {                         // 三件套（加密存），機制照搬 provider-roster
+  id              Int      @id @default(1)
+  accessTokenEnc  String
+  refreshTokenEnc String
+  iatEnc          String
+  updatedAt       DateTime @updatedAt
+}
+
+model WebhookEvent {                           // 冪等 + 除錯（★ 唔存 payload 原文，只存 metadata）
+  id          String   @id                     // wamid / event id
+  field       String
+  receivedAt  DateTime @default(now())
+  processedAt DateTime?
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  staffId   String?
+  action    String                             // SEND / CONFIRM_BOOKING / LOGIN / EXPORT ...
+  entity    String?
+  entityId  String?
+  createdAt DateTime @default(now())
+}
