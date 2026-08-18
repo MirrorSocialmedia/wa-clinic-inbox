@@ -82,7 +82,21 @@ MF STAFF:  staff-mf@wa-clinic.local  / <隨機>
 | `PUT` / `PATCH /api/admin/clinics/[id]`（Phase 2b 更新） | 更新店設定（含 `aiMode`: `DRAFT`/`AUTO`，逐舖 AI 模式開關） | **ADMIN** |
 | `GET /admin`（頁面，Phase 2b 更新） | 總覽 + AI 狀態卡（真 model 名 + 實測 latency/tokens + 各舖 AUTO 24h 統計表） | **ADMIN** |
 
-> ★ RBAC 鐵律：所有 `/api/*`（除 auth/webhook/healthz）都過 `clinicScope` — STAFF 砌 URL 攞別店資料一律 403（e2e 實測）。
+### API routes（Phase 3 — Apricot + Flow）
+
+| Route | 說明 | 權限 |
+|-------|------|------|
+| `POST /api/flows/endpoint` | WhatsApp Flow data_exchange（RSA+AES 加密；flow_token 驗證；3 屏） | 外部（WA 簽名不適用 — 加密+token 即身份） |
+| `POST /api/conversations/[id]/flows` | staff 發預約 Flow（24h 窗口檢查；冪等重用 SENT session；回 flowToken） | session（clinicScope） |
+| `GET /api/bookings?status=` | 本店 BookingRequest 隊列（PENDING 卡） | session（clinicScope） |
+| `POST /api/bookings/[id]/confirm` | 〔已喺 Apricot 落單〕→ CONFIRMED + AuditLog + 自動確認訊息（過窗 → 200 + hint） | session（clinicScope） |
+| `POST /api/bookings/[id]/reschedule` | 〔改期〕→ 重出 Flow（PENDING only；過窗 422） | session（clinicScope） |
+| `POST /api/apricot/refresh` | 手動觸發本店 slot sync（經 apricot queue 序列化） | session（clinicScope） |
+| `GET /api/admin/apricot-status` | Apricot session 狀態 + 各店 slot 新鮮度（14 日 token 監控） | **ADMIN** |
+| `POST /api/admin/apricot/session` | 真 mode bootstrap：首次貼入 cookie 三件套（加密落 DB） | **ADMIN** |
+| `GET /bookings`（頁面） | 預約隊列頁（PENDING/ALL 分頁 + confirm/reschedule 掣） | session |
+
+> ★ RBAC 鐵律：所有 `/api/*`（除 auth/webhook/healthz/**flows/endpoint**）都過 `clinicScope` — STAFF 砌 URL 攞別店資料一律 403（e2e 實測）。
 
 ## 架構重點
 
@@ -202,7 +216,7 @@ AI_MOCK=                         # 清走 = 真 AI
 
 ### E2E（mock）
 
-`pnpm mock-e2e` — 50 條斷言（Phase 1 的 22 + Phase 2 的 6 + Phase 2b 的 T19-T26 8 條 AUTO 模式實測）：
+`pnpm mock-e2e` — 79 條斷言（Phase 1 的 22 + Phase 2 的 6 + Phase 2b 的 8 + Phase 3 的 T27-T34 8 條 Apricot+Flow 實測）：
 
 | # | 斷言 |
 |---|------|
@@ -220,6 +234,14 @@ AI_MOCK=                         # 清走 = 真 AI
 | T24 | (2b) STAFF 攞別店 aiMode / PATCH 別店 aiMode → 403（RBAC） |
 | T25 | (2b) AUTO 冪等：重 enqueue AI job → 唔重發（OUT 訊息 count 不變） |
 | T26 | (2b) AUTO 發送 log PII 抽查（鐵律 1 擴展） |
+| T27 | (3) Apricot mock sync（slot 落庫 + heartbeat）+ Flow endpoint 3 步加密 round-trip（provider 列表 / date 只回有空日 / time 只回空 slot / 壞 token 401） |
+| T28 | (3) 病人 Complete → BookingRequest PENDING + 綠色卡 + /bookings 見到 |
+| T29 | (3) 〔已喺 Apricot 落單〕→ CONFIRMED + AuditLog + 自動確認訊息（內容含日期時間醫生名） |
+| T30 | (3) **race**：兩病人同 slot 同時 Complete → 第二個被擋（precheck）+ 自動覆「滿咗」+ 重出 Flow |
+| T31 | (3) flow 中途棄 → 0 BookingRequest（無殭屍） |
+| T32 | (3) 48h 冇處理 → cron EXPIRED + AuditLog（DB 時移 49h） |
+| T33 | (3) PII：mock raw（含 clinicPatient/visitReasons/diagnosis 餌字串）經 adapter → DB + log 全 0 hit + pii-scan 0 violation |
+| T34 | (3) 別店 flow_token 被拒 + STAFF 撳別店 booking confirm → 403 |
 
 ### E2E（真 AI — sglang 實測）
 
@@ -233,13 +255,110 @@ AI_MOCK=                         # 清走 = 真 AI
 
 ---
 
+## Phase 3 — Apricot 空檔讀取 + WhatsApp Flow 預約收集
+
+> 沙箱現狀：`WA_MOCK=1`（無真 WA token）+ `APRICOT_MOCK=1`（無真 Apricot bot 帳號）。
+> **真碼全部寫完整**（HTTP client / RSA+AES 加密 / rotation / 序列化），E2E 用 mock 行全流程；
+> 真機對接只係改 env + bootstrap token，code 零改動。
+
+### Apricot adapter（`src/lib/apricot/`）
+
+移植 clinic-workforce-mvp 實測核心邏輯（只讀參考，未改嗰邊 repo）：
+
+| 檔案 | 職責 |
+|------|------|
+| `session.ts` | cookie 三件套（access_token JWT / refresh_token rotating / iat）AES-256-GCM 加密存 `ApricotSession`（singleton id=1）；`APRICOT_ENC_KEY`（32-byte base64） |
+| `client.ts` | `apricotCall()`：cookie 三件套 header + `redirect:"manual"` 防 302 登入頁；**每次 response 用 `res.headers.getSetCookie()` 攞全部 Set-Cookie**（`get('set-cookie')` 只回第一隻 = 炒車，MD §8.1）；攞到新 cookie → `saveCreds`（寫入失敗 throw）；401/403/3xx → `APRICOT_AUTH_EXPIRED` 唔重試；429 → `APRICOT_RATE_LIMITED` |
+| `sanitize.ts` | **PII 白名單**：`sanitizeOverview()` 只准留 slot 時間 / 醫生 id / 預約數；`clinicPatient` / `visitReasons[].des` / `diagnosis` / `createdBy` 全部 drop；`assertNoPii()` 落地前再斷言。★ raw response 永不入 log 永不落 disk（鐵律 2） |
+| `slots.ts` | `syncClinic()`：`getOverviewAppointments?startDate=&endDate=&doctorIds=<一個>&openSchClinicId=<單數>`。★兩陷阱：① doctorIds 逐個列（先 `syncDoctorRoster` 同步醫生名單再逐醫生拉）② openSchClinicId 單數逐店 loop。`APRICOT_MOCK=1` 用決定性 fixture（3 店 × 醫生 × 未來 30 日，djb2 hash 決定閉诊日 ~1/7 + 滿位 ~1/4；`.dev/apricot-mock-fill.json` 可指定 slot 強制變滿俾 race 測試） |
+| `mock.ts` | mock fixture — appointments 刻意帶 PII 餌字串（`MOCK_PII_*` / clinicPatient / visitReasons / diagnosis）俾 pii-scan 驗 0 hit |
+
+**序列化**：所有 Apricot request 一律經 BullMQ `apricot` queue（worker concurrency=1）— token rotation 互斥，任何地方都唔可以直接 `apricotCall`。
+
+**cron**（`workers/index.ts` upsertJobScheduler）：
+- `sync-availability` 每 15 分鐘 — 各店 slot 重 sync（heartbeat 寫 `ApricotSession.lastSyncAt`）
+- `apricot-keepalive` 每 3 日 03:00 — 輕量 request 推 token sliding window（14 日唔死靠呢個 + rotation）
+- `bookings-expire` 每 5 分鐘 — PENDING 48h → EXPIRED；SENT flow 48h → ABANDONED
+
+**監控**：
+- `GET /api/admin/apricot-status`（ADMIN-only）：session 狀態（上次 sync / 上次 keepalive / 上次錯誤 / rotation 次數 / token 有效期估算）+ 各店 slot 新鮮度（min/max syncedAt + slot 數 + 20 分鐘內 = fresh）。14 日 token 驗收 = 每日查 `lastSyncAt` 有更新 + `lastError` null。
+- `POST /api/apricot/refresh`（ADMIN / STAFF 本店）：手動觸發本店 sync（經 apricot queue）。
+- `POST /api/admin/apricot/session`（ADMIN-only）：**真 mode bootstrap** — 首次貼入 cookie 三件套（見下方步驟）。
+
+### WhatsApp Flow（`src/lib/flows/` + `src/app/api/flows/endpoint`）
+
+**加密**（MD §8.2 樣板）：
+- RSA-2048 keypair 首次生成存 `FLOW_KEYS_DIR`（預設 `.dev/flow-keys/`，gitignored）；真 mode 另需 `POST /{phone_number_id}/whatsapp_business_encryption` 上傳公鑰（`uploadPublicKey()`，mock mode 跳過）
+- request：`wrapped_key` → RSA-OAEP(SHA-256) 私鑰解 → AES-128-GCM 解 body
+- response：**同一把 AES key + 反轉 IV**（`reversedIv()`）加密 — mock client 用反轉 IV 解密驗證 round-trip
+- `flow_token` = HS256 JWT（`FLOW_JWT_SECRET` 32-byte hex），payload = `{convId, clinicId}` — 防別店/別對話用；驗不過 → 401/400（唔 crash）
+
+**data_exchange 三屏**（每次 call 查最新 `AvailabilitySlot` — precheck 原則：病人揀親 = 真有空）：
+1. `SCREEN_PROVIDER` — 該店 active 醫生（`Provider`/`ProviderClinic` 對照；mock 期由 seed 派生，真期由 `syncDoctorRoster` 同步）
+2. `SCREEN_DATE` — 聽日 ~ +30 日，只回該醫生有 open slot 嘅日期
+3. `SCREEN_TIME` — 該日該醫生 `bookedCount=0` 嘅 30 分鐘 slot
+
+**發送**：inbound BOOKING_REQUEST 對話頂部出「📅 預約」掣（或 `/bookings` 卡「改期」）→ staff 撳 → `POST /api/conversations/[id]/flows` → 24h 窗口檢查（過窗 → 422 提示用 template）→ 冪等（已有 SENT FlowSession 重用）→ 創 `FlowSession(SENT)` + interactive flow message（mock Graph 記假 wamid）+ AuditLog(SEND_FLOW)。
+
+**mock client**：`pnpm flow-client step|complete ...` 模擬病人端 — 加密 request（同 WhatsApp 真實格式）→ 3 步行完 → 產生 `nfm_reply` webhook payload（加密 response_json，含 wrapped_key round-trip）打去本地 webhook。
+
+### BookingRequest 生命周期（MD §8.3 D9）
+
+```
+nfm_reply.webhook → 解密 response_json → 驗證 flow_token/對話/店 → FlowSession SENT?
+  → 對 AvailabilitySlot（$transaction + FOR UPDATE 串行化）
+     ├ 過：BookingRequest(PENDING) + FlowSession(COMPLETED) + 對話綠色卡 + /bookings 隊列 + socket 通知
+     └ 唔過（slot 滿咗/已有 PENDING 撞同 slot）：FlowSession(FAILED) + 自動覆「滿咗」+ 重出 Flow
+staff 撳〔已喺 Apricot 落單〕→ CONFIRMED + AuditLog + 自動確認訊息（窗口內 free-form：「已為你預約 X 月 X 日 HH:mm 醫生名，到時見 🙂」）
+staff 撳〔改期〕→ 重出 Flow（PENDING only）
+48h 冇處理 → EXPIRED（cron）+ AuditLog(BOOKING_EXPIRED)
+```
+
+**冪等**：同一 flow_token 重複 Complete → 第二條 no-op（FlowSession 已 COMPLETED/FAILED 就 skip）；flow 中途棄（冇 Complete）→ 零 BookingRequest，session 留 SENT 等 48h ABANDONED（無殭屍）。
+
+**`/bookings` 頁**（staff 本店 scope）：PENDING/ALL 分頁、PENDING 卡（病人/醫生/日期/時間/對話連結 `/inbox?conv=…`/窗口倒數）+ 兩個掣（confirm / reschedule）。
+
+### 真機對接步驟（俾指揮大神）
+
+#### 1. Apricot 真 bot 帳號
+
+1. 開一個**專用 bot 帳號**登入 Apricot（同 provider-roster 帳號分開 — 只讀用途，权限只要 appointment 查閱）
+2. 浏览器登入 `https://apricotvita.com`（或真 baseURL）後，DevTools → Application → Cookies 攞三件套：`access_token`（JWT）、`refresh_token`、`iat`
+3. `.env` 改：`APRICOT_MOCK=0`、`APRICOT_BASE_URL=https://apricotvita.com`（如唔同）、各店 `apricotClinicId` 改真值（DB `Clinic.apricotClinicId` 或重新 seed）
+4. Admin 登入後：`curl -X POST $BASE/api/admin/apricot/session -H "Authorization: Bearer <admin>" -d '{"accessToken":"...","refreshToken":"...","iat":"..."}'`
+5. 攞醫生名錄 API path：`APRICOT_DOCTORS_PATH`（真 code 先有 roster endpoint；如果真 API 格式同 mock 唔同，只需改 `syncDoctorRoster` 入面嗰個白名單映射）
+6. 驗：`GET /api/admin/apricot-status` → `lastSyncAt` 有值、`lastError=null`、各店 `fresh=true`；`pnpm e2e:cron sync-availability` 手動觸發一次
+
+#### 2. WhatsApp Flow 真機
+
+1. WhatsApp Manager 建立 Flow（3 個 screen：provider list / date picker / time list + complete）→ publish 攞 `flow_id` + CDN URL
+2. `.env`：`WA_MOCK=0` + 真 token、`FLOW_ID=<publish 後 id>`、`FLOW_CDN_URL=<flow.json CDN>`；`uploadPublicKey()` 會喺首發 flow 前自動上傳公鑰（`POST /{phone_number_id}/whatsapp_business_encryption`）
+3. 真手機 3 步：收到「📅 預約」掣訊息 → 撳入 Flow → 揀醫生 → 揀日期 → 揀時間 → Complete → 對話出現綠色卡 + `/bookings` 有 PENDING
+
+#### 3. 空檔對數（3 店 × 3 日逐格對）
+
+1. 開瀏覽器登入真 Apricot，逐店（3 店）逐醫生拉 3 日 schedule
+2. 同系統 `AvailabilitySlot` 對：每一格（醫生 × 日 × 30 分鐘）— Apricot 有開門 + 冇預約 = slot row `bookedCount=0`；有預約 = `bookedCount≥1`（UI 唔顯示呢啲 slot）；冇開門 = 冇 row
+3. 注意時區：slot 全部 HK 時區（UTC+8），DatePicker 範圍 = 聽日 ~ +30 日
+
+### 同 MD 唔同嘅位（偏差）
+
+- **confirm 過 24h 窗口**：MD 寫 422 提示 staff 用 template。實作：booking 本身照標 `CONFIRMED` + AuditLog（人已經喺 Apricot 落單，狀態要反映現實），HTTP 200 但 `autoMessage:{sent:false, reason:"window_closed"}` + hint 提示 staff 用 template 覆病人。422 保留俾「free-form 發送」同「reschedule 重出 Flow」兩個會真正發訊息嘅操作。
+- **doctor roster**：MD 寫「cron 先 sync 醫生名單再拉」— 真 Apricot roster endpoint 未實測（無真 bot 帳號）；`syncDoctorRoster` 真 mode 讀 `APRICOT_DOCTORS_PATH` env 指定嘅 API，白名單 mapping 集中喺嗰一個 function（真機對接時如格式唔同只改呢度）。Mock 期 roster 由 seed 派生（`mock-pract-<clinic>-<n>`）。
+- **keypair 存檔**：MD 寫「存 DB/keypair file」— 用 keypair file（`FLOW_KEYS_DIR`，gitignored 0600）；私鑰唔入 DB。
+- **ApricotSession**：MD 只提 token 三件套 — 加咗 4 個監控欄（lastSyncAt / lastKeepaliveAt / lastError / rotationCount）俾 `/api/admin/apricot-status`（MD 任務 D 要求）。
+
+---
+
+指揮大神未做 Meta App 設定之前，全部用 **mock 測試** 行 E2E（`WA_MOCK=1`）：
+
 ## 本地開發（無 Meta token — mock 模式）
 
 指揮大神未做 Meta App 設定之前，全部用 **mock 測試** 行 E2E（`WA_MOCK=1`）：
 
 - `WA_MOCK=1`：`graph.ts` 唔打真 API，回假 wamid；inbound worker 跳過媒體下載
 - `scripts/mock-inbound.ts`：造真係 Meta format 嘅 webhook payload（messages/echoes/statuses/history/unknown）→ HMAC 簽名 → POST 本地 webhook
-- `scripts/mock-e2e.sh`：一鍵完整 E2E（seed → 起 server+worker → 50 條斷言 T1-T26；Phase 2 加 T13-T18 AI triage + log PII 抽查，Phase 2b 加 T19-T26 AUTO 模式實測；AI 用 `AI_MOCK=1`）
+- `scripts/mock-e2e.sh`：一鍵完整 E2E（seed → 起 server+worker → 79 條斷言 T1-T34；Phase 2 加 T13-T18 AI triage + log PII 抽查，Phase 2b 加 T19-T26 AUTO 模式實測，Phase 3 加 T27-T34 Apricot+Flow 實測；AI 用 `AI_MOCK=1`）
 - `scripts/e2e-real-ai.sh` + `e2e-real-ai.ts`：一鍵真 AI 實測（AI 用真 sglang，WhatsApp 照 mock；3 類 intent + 鐵律 + latency/tokens）
 
 ### 本地 DB（沙箱冇 docker 用 embedded-postgres）

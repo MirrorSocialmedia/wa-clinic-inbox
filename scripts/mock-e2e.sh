@@ -33,6 +33,15 @@
 #   T24 (Phase 2b) STAFF 攞別店/自家店 aiMode / PATCH 別店 aiMode → 403（RBAC）
 #   T25 (Phase 2b) AUTO 發送冪等：re-delivery（重 enqueue AI job）唔重發
 #   T26 (Phase 2b) AUTO 發送 log PII 抽查（鐵律 1 擴展）
+#   T27 (Phase 3) Apricot mock sync（slot 落庫 + heartbeat）+ Flow endpoint 3 步加密 round-trip
+#       （provider 列表 / date 只回有空日 / time 只回空 slot / 壞 token 401）
+#   T28 (Phase 3) 病人 Complete → BookingRequest PENDING + 綠色卡 + /bookings 見到
+#   T29 (Phase 3) 〔已喺 Apricot 落單〕→ CONFIRMED + AuditLog + 自動確認訊息（含日期時間）
+#   T30 (Phase 3) race：兩病人同 slot 同時 Complete → 第二個被擋（precheck）+ 自動覆「滿咗」+ 重出 Flow
+#   T31 (Phase 3) flow 中途棄 → 0 BookingRequest（無殭屍）
+#   T32 (Phase 3) 48h 冇處理 → cron EXPIRED + AuditLog
+#   T33 (Phase 3) PII：Apricot mock raw（含 clinicPatient/visitReasons/diagnosis）經 adapter → DB+log 0 hit + pii-scan 0 violation
+#   T34 (Phase 3) 別店 flow_token 被拒 + STAFF 撳別店 booking confirm → 403
 #
 set -u
 cd "$(dirname "$0")/.."
@@ -559,6 +568,239 @@ for kw in "想預約下週有冇位" "牙痛到瞓唔著" "想搵人工" "想預
   fi
 done
 check "T26 AUTO 發送 log 無訊息原文（metadata only 鐵律）" "$LOGPII2" "0"
+
+# ══════════════ Phase 3：Apricot 空檔 + WhatsApp Flow 預約收集 ══════════════
+
+echo "[11/11] T27: Apricot sync + Flow endpoint 3 步 round-trip..."
+rm -rf .dev/flow-keys
+rm -f .dev/apricot-mock-fill.json
+
+# 0) 觸發 Apricot sync（cron 路徑：cronQueue → apricot queue concurrency=1）
+pnpm -s e2e:cron sync-availability >/dev/null 2>&1 || fail "T27 e2e:cron enqueue"
+T27=0
+if ! wait_for "SELECT (count(*) > 0)::text c FROM \"AvailabilitySlot\"" '[{"c":"true"}]' 90; then
+  echo "    ❌ T27 AvailabilitySlot 冇 row"
+  T27=1
+fi
+SSESYNC=$(q "SELECT (\"lastSyncAt\" IS NOT NULL)::text s FROM \"ApricotSession\" WHERE id=1" | jf s)
+[ "$SSESYNC" = "true" ] || { echo "    ❌ T27 ApricotSession.lastSyncAt 冇 heartbeat"; T27=1; }
+
+# 1) 新病人（BOOKING_REQUEST intent — 真實 flow 起點）+ staff 發 Flow
+PATIENT_P3="8526031${EPOCH}"
+WAMID_P3="wamid.E2E_P3_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_P3" --text "你好，我想預約下週" --wamid "$WAMID_P3" --name "E2E Flow 病人" >/dev/null || T27=1
+CONV_P3=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_P3'" | jf id)
+[ -n "$CONV_P3" ] || { echo "    ❌ T27 conv 未建立"; T27=1; }
+curl -s -o /tmp/e2e-flow-send.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST \
+  "$BASE/api/conversations/$CONV_P3/flows" -H 'Content-Type: application/json' > /tmp/e2e-flow-code.txt
+[ "$(cat /tmp/e2e-flow-code.txt)" = "200" ] || { echo "    ❌ T27 發 Flow != 200"; T27=1; }
+TOKEN_P3=$(jf flowToken < /tmp/e2e-flow-send.json)
+[ -n "$TOKEN_P3" ] || { echo "    ❌ T27 flowToken 空"; T27=1; }
+if ! wait_for "SELECT (count(*) > 0)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_P3' AND direction='OUT' AND type='interactive' AND status='SENT'" '[{"c":"true"}]' 30; then
+  echo "    ❌ T27 interactive flow message 未 SENT（mock Graph）"
+  T27=1
+fi
+
+# 2) data_exchange 3 步（加密真實格式：RSA-OAEP wrap AES key → AES-128-GCM；response 反轉 IV 由 client 驗證）
+# ★ 斷言用 grep 抽 HTTP=/DATA=（pnpm 會喺 stderr echo command line — 唔好靠整串 case）
+DOC_A="mock-pract-tkw-1"
+NAME_A="陳明軒（主理）"
+# ★ slot 揀取排除已有 PENDING/CONFIRMED booking 嘅 slot（E2E 多次 run 共用 DB — 防舊 run 殘留 PENDING 污染 precheck）
+slot_query() {
+  q "SELECT s.\"date\" d, s.\"startTime\" t FROM \"AvailabilitySlot\" s WHERE s.\"clinicId\"='$TKW_CLINIC_ID' AND s.\"providerApricotId\"='$DOC_A' AND s.\"bookedCount\"=0 AND s.\"isOpen\" AND NOT EXISTS (SELECT 1 FROM \"BookingRequest\" b WHERE b.\"providerApricotId\"=s.\"providerApricotId\" AND b.\"requestedDate\"=s.\"date\" AND b.\"requestedTime\"=s.\"startTime\" AND b.\"status\" IN ('PENDING','CONFIRMED')) $1 ORDER BY s.\"date\", s.\"startTime\" LIMIT 1"
+}
+step_flow() { # step_flow <desc> <args...> → 設 F_HTTP / F_DATA；回 0/1
+  local desc="$1"; shift
+  local out; out=$(pnpm -s flow-client step "$@" 2>&1 || true)
+  F_HTTP=$(printf '%s' "$out" | grep -oE 'HTTP=[0-9]+' | head -1 | cut -d= -f2)
+  F_DATA=$(printf '%s' "$out" | grep -oE 'DATA=\{.*' | head -1 | sed 's/^DATA=//')
+  echo "  [T27] $desc → HTTP=${F_HTTP:-?} ${F_DATA:0:120}"
+  if [ -z "$F_HTTP" ]; then echo "    ❌ $desc 無 HTTP= 輸出（client crash？）: ${out:0:300}"; return 1; fi
+  return 0
+}
+step_flow "provider" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCREEN_PROVIDER
+case "${F_DATA:-}" in *'"data_count":3'*) : ;; *) echo "    ❌ T27 SCREEN_PROVIDER 未回 3 個醫生"; T27=1 ;; esac
+[ "$F_HTTP" = "200" ] || { echo "    ❌ T27 SCREEN_PROVIDER HTTP=$F_HTTP"; T27=1; }
+ROW=$(slot_query "")
+DATE_A=$(echo "$ROW" | jf d); TIME_A=$(echo "$ROW" | jf t)
+[ -n "$DATE_A" ] && [ -n "$TIME_A" ] || { echo "    ❌ T27 搵唔到空 slot"; T27=1; }
+step_flow "date" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCREEN_DATE --provider "$DOC_A"
+case "${F_DATA:-}" in *"$DATE_A"*) : ;; *) echo "    ❌ T27 SCREEN_DATE 冇包含 $DATE_A（data=${F_DATA:0:200}）"; T27=1 ;; esac
+DC_DATE=$(printf '%s' "${F_DATA:-}" | grep -oE '"data_count":[0-9]+' | cut -d: -f2)
+DBDATES=$(q "SELECT count(DISTINCT \"date\")::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A'" | jf c)
+[ -n "$DC_DATE" ] && [ "$DC_DATE" = "$DBDATES" ] || { echo "    ❌ T27 date 列表唔等於 DB 有空日集合（endpoint=$DC_DATE DB=$DBDATES）"; T27=1; }
+step_flow "time" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCREEN_TIME --provider "$DOC_A" --date "$DATE_A"
+case "${F_DATA:-}" in *"$TIME_A"*) : ;; *) echo "    ❌ T27 SCREEN_TIME 冇包含 $TIME_A（data=${F_DATA:0:200}）"; T27=1 ;; esac
+step_flow "bad-token" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCREEN_PROVIDER --bad-token
+case "$F_HTTP" in 401|400) : ;; *) echo "    ❌ T27 壞 token 唔係 401/400（HTTP=$F_HTTP）"; T27=1 ;; esac
+[ "$T27" = 0 ] && pass "T27 Apricot sync（slot 落庫 + heartbeat）+ Flow 3 步加密 round-trip（provider 3 人/date 過濾閉诊日/time 只空 slot/壞 token 401）" \
+  || fail "T27 Flow endpoint round-trip（見上 ❌）"
+
+# ── T28. 病人 Complete → BookingRequest PENDING + 綠色卡 + /bookings ──────────
+echo "[11/11] T28: patient Complete → PENDING + green card..."
+T28=0
+pnpm -s flow-client complete --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" \
+  --provider "$DOC_A" --providerName "$NAME_A" --date "$DATE_A" --time "$TIME_A" \
+  --wamid "wamid.E2E_FLOW_DONE_${EPOCH}a" >/dev/null 2>&1 || { echo "    ❌ T28 complete webhook"; T28=1; }
+if wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$CONV_P3'" '[{"s":"PENDING"}]' 30; then
+  :; else echo "    ❌ T28 BookingRequest 未 PENDING"; T28=1; fi
+BOOK_ID=$(q "SELECT id FROM \"BookingRequest\" WHERE \"conversationId\"='$CONV_P3'" | jf id)
+FS=$(q "SELECT \"status\"::text s FROM \"FlowSession\" WHERE \"flowToken\"='$TOKEN_P3'" | jf s)
+[ "$FS" = "COMPLETED" ] || { echo "    ❌ T28 FlowSession 未 COMPLETED（=$FS）"; T28=1; }
+curl -s -b "$COOKIE_TKW" "$BASE/api/conversations" -o /tmp/e2e-conv-list.json
+grep -qF "\"pendingBooking\":{\"id\":\"$BOOK_ID\"" /tmp/e2e-conv-list.json || { echo "    ❌ T28 綠色卡（pendingBooking）冇喺 conversations API"; T28=1; }
+curl -s -b "$COOKIE_TKW" "$BASE/api/bookings?status=PENDING" -o /tmp/e2e-book-list.json
+grep -qF "\"id\":\"$BOOK_ID\"" /tmp/e2e-book-list.json || { echo "    ❌ T28 /bookings 冇呢張卡"; T28=1; }
+[ "$T28" = 0 ] && pass "T28 Complete → BookingRequest PENDING + FlowSession COMPLETED + 綠色卡 + /bookings 見到" \
+  || fail "T28 Complete → PENDING 鏈（見上 ❌）"
+
+# ── T29. 〔已喺 Apricot 落單〕→ CONFIRMED + AuditLog + 自動確認訊息 ─────────
+echo "[11/11] T29: confirm → CONFIRMED + auto message..."
+T29=0
+CODE=$(curl -s -o /tmp/e2e-confirm.json -w '%{http_code}' -b "$COOKIE_TKW" \
+  -X POST "$BASE/api/bookings/$BOOK_ID/confirm" -H 'Content-Type: application/json')
+[ "$CODE" = "200" ] || { echo "    ❌ T29 confirm != 200（=$CODE）"; T29=1; }
+grep -q '"sent":true' /tmp/e2e-confirm.json || { echo "    ❌ T29 autoMessage.sent != true"; T29=1; }
+if wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$BOOK_ID'" '[{"s":"CONFIRMED"}]' 15; then
+  :; else echo "    ❌ T29 未 CONFIRMED"; T29=1; fi
+AUDC=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='CONFIRM_BOOKING' AND \"entityId\"='$BOOK_ID'" | jf c)
+[ "$AUDC" = "1" ] || { echo "    ❌ T29 AuditLog CONFIRM_BOOKING != 1"; T29=1; }
+# 自動確認訊息：內容含「已為你預約 + X月X日 + 時間 + 醫生名」（mock Graph 收到 = SENT + wamid）
+DL_NAT=$(date -d "$DATE_A" '+%-m月%-d日')
+if wait_for "SELECT (count(*) > 0)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_P3' AND direction='OUT' AND type='text' AND status='SENT' AND \"body\" LIKE '%已為你預約%' AND \"body\" LIKE '%$DL_NAT%' AND \"body\" LIKE '%$TIME_A%' AND \"body\" LIKE '%$NAME_A%'" '[{"c":"true"}]' 30; then
+  :; else echo "    ❌ T29 自動確認訊息（含 $DL_NAT $TIME_A $NAME_A）未 SENT"; T29=1; fi
+[ "$T29" = 0 ] && pass "T29 confirm → CONFIRMED + AuditLog + 自動確認訊息（內容含 $DL_NAT $TIME_A $NAME_A，mock Graph 已收）" \
+  || fail "T29 confirm 鏈（見上 ❌）"
+
+# ── T30. race：兩病人同一 slot 同時 Complete → 第二個被擋 ────────────────────
+echo "[11/11] T30: race on same slot..."
+T30=0
+ROW=$(slot_query "AND NOT (s.\"date\"='$DATE_A' AND s.\"startTime\"='$TIME_A')")
+DATE_B=$(echo "$ROW" | jf d); TIME_B=$(echo "$ROW" | jf t)
+[ -n "$DATE_B" ] || { echo "    ❌ T30 搵唔到第二個空 slot"; T30=1; }
+# 病人 B（新對話）+ 兩個 flow（A 重用 T28 對話之新 session / B 新對話）
+PATIENT_RACE="8526032${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_RACE" --text "想預約" --wamid "wamid.E2E_RACE_${EPOCH}" --name "E2E race B" >/dev/null || T30=1
+CONV_RACE=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_RACE'" | jf id)
+curl -s -o /tmp/e2e-flow-a2.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_P3/flows" -H 'Content-Type: application/json'
+TOKEN_A2=$(jf flowToken < /tmp/e2e-flow-a2.json)
+curl -s -o /tmp/e2e-flow-b.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_RACE/flows" -H 'Content-Type: application/json'
+TOKEN_B=$(jf flowToken < /tmp/e2e-flow-b.json)
+[ -n "$TOKEN_A2" ] && [ -n "$TOKEN_B" ] || { echo "    ❌ T30 flow token 空"; T30=1; }
+# 同時 Complete（同一 slot）— ★ 只 wait 呢兩個 PID（裸 wait 會等住 server/worker 唔會出）
+(pnpm -s flow-client complete --clinic TKW --conv "$CONV_P3" --token "$TOKEN_A2" \
+  --provider "$DOC_A" --providerName "$NAME_A" --date "$DATE_B" --time "$TIME_B" \
+  --wamid "wamid.E2E_RACE_A_${EPOCH}" >/dev/null 2>&1) &
+RACE_A=$!
+(pnpm -s flow-client complete --clinic TKW --conv "$CONV_RACE" --token "$TOKEN_B" \
+  --provider "$DOC_A" --providerName "$NAME_A" --date "$DATE_B" --time "$TIME_B" \
+  --wamid "wamid.E2E_RACE_B_${EPOCH}" >/dev/null 2>&1) &
+RACE_B=$!
+wait "$RACE_A" "$RACE_B"
+# 等終態：恰好一個 FAILED session（輸家）— 之後先斷言其餘
+if ! wait_for "SELECT count(*)::text c FROM \"FlowSession\" WHERE \"flowToken\" IN ('$TOKEN_A2','$TOKEN_B') AND \"status\"='FAILED'" '[{"c":"1"}]' 45; then
+  echo "    ❌ T30 冇 FAILED session（race 未產生輸家？）"
+  T30=1
+fi
+sleep 3
+WC=$(q "SELECT count(*)::text c FROM \"BookingRequest\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"requestedDate\"='$DATE_B' AND \"requestedTime\"='$TIME_B'" | jf c)
+[ "$WC" = "1" ] || { echo "    ❌ T30 該 slot BookingRequest != 1（=$WC）"; T30=1; }
+FS_FAILED=$(q "SELECT count(*)::text c FROM \"FlowSession\" WHERE \"flowToken\" IN ('$TOKEN_A2','$TOKEN_B') AND \"status\"='FAILED'" | jf c)
+FS_DONE=$(q "SELECT count(*)::text c FROM \"FlowSession\" WHERE \"flowToken\" IN ('$TOKEN_A2','$TOKEN_B') AND \"status\"='COMPLETED'" | jf c)
+[ "$FS_FAILED" = "1" ] && [ "$FS_DONE" = "1" ] || { echo "    ❌ T30 session FAILED/COMPLETED 唔係 1/1（=$FS_FAILED/$FS_DONE）"; T30=1; }
+# ★ scope 返呢 run 嘅兩個 race 對話（shared DB 有舊 run 嘅「滿咗」訊息）
+REPLY=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\" IN ('$CONV_P3','$CONV_RACE') AND direction='OUT' AND type='text' AND \"body\" LIKE '%滿咗%'" | jf c)
+[ "$REPLY" = "1" ] || { echo "    ❌ T30 自動覆「滿咗」!= 1 條（=$REPLY）"; T30=1; }
+# 輸咗嗰個對話要有新 SENT FlowSession（重出 Flow）
+RESENT=$(q "SELECT count(*)::text c FROM \"FlowSession\" s WHERE s.\"status\"='SENT' AND s.\"conversationId\" IN ('$CONV_P3','$CONV_RACE') AND s.\"flowToken\" NOT IN ('$TOKEN_A2','$TOKEN_B')" | jf c)
+[ "$RESENT" -ge 1 ] 2>/dev/null || { echo "    ❌ T30 輸家冇重出 Flow"; T30=1; }
+BOOK_WINNER=$(q "SELECT id FROM \"BookingRequest\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"requestedDate\"='$DATE_B' AND \"requestedTime\"='$TIME_B'" | jf id)
+[ -n "$BOOK_WINNER" ] || T30=1
+[ "$T30" = 0 ] && pass "T30 race：同 slot 同時 Complete → 1 贏（PENDING）+ 1 被擋（FAILED + 自動覆「滿咗」+ 重出 Flow）" \
+  || fail "T30 race 防護（見上 ❌）"
+
+# ── T34. 別店 flow_token 拒絕 + STAFF 別店 booking 403 ───────────────────────
+echo "[11/11] T34: cross-clinic isolation..."
+T34=0
+# (a) MF 對話嘅 token 喺 TKW 嘅 WA number 上用 → 拒絕
+pnpm -s mock-inbound message --clinic MF --from "$PATIENT_MF" --text "預約" --wamid "wamid.E2E_MF_FLOW_${EPOCH}" --name "E2E MF flow" >/dev/null || T34=1
+sleep 1
+curl -s -o /tmp/e2e-flow-mf.json -b "$COOKIE_MF" -X POST "$BASE/api/conversations/$MF_CONV_ID/flows" -H 'Content-Type: application/json'
+TOKEN_MF=$(jf flowToken < /tmp/e2e-flow-mf.json)
+[ -n "$TOKEN_MF" ] || { echo "    ❌ T34 MF flow token 空"; T34=1; }
+OUT=$(pnpm -s flow-client step --clinic TKW --conv "$MF_CONV_ID" --token "$TOKEN_MF" --action SCREEN_PROVIDER 2>&1 || true)
+F_HTTP=$(printf '%s' "$OUT" | grep -oE 'HTTP=[0-9]+' | head -1 | cut -d= -f2)
+echo "  [T34] cross-clinic token: HTTP=${F_HTTP:-?}"
+case "$F_HTTP" in 403|401) : ;; *) echo "    ❌ T34 別店 token 未被拒（raw=${OUT:0:300}）"; T34=1 ;; esac
+# (b) STAFF(MF) 撳 TKW booking confirm → 403
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" \
+  -X POST "$BASE/api/bookings/$BOOK_WINNER/confirm" -H 'Content-Type: application/json')
+[ "$CODE" = "403" ] || { echo "    ❌ T34 STAFF(MF) 別店 confirm != 403（=$CODE）"; T34=1; }
+BS=$(q "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$BOOK_WINNER'" | jf s)
+[ "$BS" = "PENDING" ] || { echo "    ❌ T34 被拒 confirm 改了 DB（=$BS）"; T34=1; }
+[ "$T34" = 0 ] && pass "T34 別店 flow_token 被拒（403/401）+ STAFF(MF) 撳 TKW booking confirm → 403（DB 無改動）" \
+  || fail "T34 cross-clinic 隔離（見上 ❌）"
+
+# ── T31. flow 中途棄（冇 Complete）→ 零 BookingRequest ──────────────────────
+echo "[11/11] T31: mid-flow abandon..."
+T31=0
+PATIENT_DROP="8526033${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_DROP" --text "想預約" --wamid "wamid.E2E_DROP_${EPOCH}" --name "E2E drop" >/dev/null || T31=1
+CONV_DROP=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_DROP'" | jf id)
+curl -s -o /tmp/e2e-flow-drop.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_DROP/flows" -H 'Content-Type: application/json'
+TOKEN_DROP=$(jf flowToken < /tmp/e2e-flow-drop.json)
+[ -n "$TOKEN_DROP" ] || { echo "    ❌ T31 flow token 空"; T31=1; }
+pnpm -s flow-client step --clinic TKW --conv "$CONV_DROP" --token "$TOKEN_DROP" --action SCREEN_PROVIDER >/dev/null 2>&1 || T31=1
+pnpm -s flow-client step --clinic TKW --conv "$CONV_DROP" --token "$TOKEN_DROP" --action SCREEN_DATE --provider "$DOC_A" >/dev/null 2>&1 || T31=1
+sleep 3
+DC=$(q "SELECT count(*)::text c FROM \"BookingRequest\" WHERE \"conversationId\"='$CONV_DROP'" | jf c)
+[ "$DC" = "0" ] || { echo "    ❌ T31 棄單對話有 BookingRequest（=$DC）"; T31=1; }
+DS=$(q "SELECT \"status\"::text s FROM \"FlowSession\" WHERE \"flowToken\"='$TOKEN_DROP'" | jf s)
+[ "$DS" = "SENT" ] || { echo "    ❌ T31 FlowSession 唔係 SENT（=$DS）"; T31=1; }
+[ "$T31" = 0 ] && pass "T31 flow 行咗 2 步冇 Complete → 0 BookingRequest（無殭屍；session 留 SENT 等 48h ABANDONED）" \
+  || fail "T31 棄單零 BookingRequest（見上 ❌）"
+
+# ── T32. 48h 冇處理 → EXPIRED（cron） ────────────────────────────────────────
+echo "[11/11] T32: 48h expiry..."
+T32=0
+ROW=$(slot_query "AND NOT (s.\"date\"='$DATE_A' AND s.\"startTime\"='$TIME_A') AND NOT (s.\"date\"='$DATE_B' AND s.\"startTime\"='$TIME_B')")
+DATE_C=$(echo "$ROW" | jf d); TIME_C=$(echo "$ROW" | jf t)
+[ -n "$DATE_C" ] || { echo "    ❌ T32 搵唔到第三個空 slot"; T32=1; }
+PATIENT_EXP="8526034${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_EXP" --text "想預約" --wamid "wamid.E2E_EXP_${EPOCH}" --name "E2E expire" >/dev/null || T32=1
+CONV_EXP=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_EXP'" | jf id)
+curl -s -o /tmp/e2e-flow-exp.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_EXP/flows" -H 'Content-Type: application/json'
+TOKEN_EXP=$(jf flowToken < /tmp/e2e-flow-exp.json)
+pnpm -s flow-client complete --clinic TKW --conv "$CONV_EXP" --token "$TOKEN_EXP" \
+  --provider "$DOC_A" --providerName "$NAME_A" --date "$DATE_C" --time "$TIME_C" \
+  --wamid "wamid.E2E_EXP_DONE_${EPOCH}" >/dev/null 2>&1 || T32=1
+BOOK_EXP=$(q "SELECT id FROM \"BookingRequest\" WHERE \"conversationId\"='$CONV_EXP'" | jf id)
+[ -n "$BOOK_EXP" ] || { echo "    ❌ T32 BookingRequest 未建立"; T32=1; }
+q "UPDATE \"BookingRequest\" SET \"createdAt\" = now() - interval '49 hours' WHERE id='$BOOK_EXP'" >/dev/null
+pnpm -s e2e:cron bookings-expire >/dev/null 2>&1 || T32=1
+if wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$BOOK_EXP'" '[{"s":"EXPIRED"}]' 30; then
+  :; else echo "    ❌ T32 未 EXPIRED"; T32=1; fi
+AUX=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='BOOKING_EXPIRED' AND (meta->>'bookingId')='$BOOK_EXP'" | jf c)
+[ "$AUX" = "1" ] || { echo "    ❌ T32 AuditLog BOOKING_EXPIRED != 1"; T32=1; }
+[ "$T32" = 0 ] && pass "T32 48h 未處理 → cron EXPIRED + AuditLog（DB 時移 49h 實測）" \
+  || fail "T32 48h expiry（見上 ❌）"
+
+# ── T33. PII：Apricot mock raw（含 clinicPatient/visitReasons/diagnosis）經 adapter → DB + log 0 hit ──
+echo "[11/11] T33: PII scan..."
+T33=0
+SCAN_OUT=$(pnpm -s pii-scan 2>&1)
+echo "$SCAN_OUT" | tail -5
+echo "$SCAN_OUT" | grep -q "PII-SCAN OK: 0 violations" || { echo "    ❌ T33 pii-scan 有 violation"; T33=1; }
+LOGPII3=0
+for kw in "MOCK_PII_PATIENT" "MOCK_PII_DIAGNOSIS" "MOCK_PII_REASON" "MOCK_PII_CREATOR" "85200000000" "clinicPatient" "visitReasons"; do
+  if grep -qF "$kw" /tmp/e2e-server.log /tmp/e2e-worker.log /tmp/e2e-worker-fail.log /tmp/e2e-worker2.log 2>/dev/null; then
+    echo "    ❌ PII bait in log: $kw"
+    LOGPII3=1
+  fi
+done
+[ "$LOGPII3" = 0 ] || T33=1
+[ "$T33" = 0 ] && pass "T33 PII：mock raw 含 clinicPatient/visitReasons/diagnosis 經 adapter → DB + log 全 0 hit；pii-scan 0 violation" \
+  || fail "T33 PII 鐵律（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
