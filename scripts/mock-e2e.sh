@@ -42,6 +42,17 @@
 #   T32 (Phase 3) 48h 冇處理 → cron EXPIRED + AuditLog
 #   T33 (Phase 3) PII：Apricot mock raw（含 clinicPatient/visitReasons/diagnosis）經 adapter → DB+log 0 hit + pii-scan 0 violation
 #   T34 (Phase 3) 別店 flow_token 被拒 + STAFF 撳別店 booking confirm → 403
+#   T35 (Phase 4) 健康自檢：inject 異常（webhook stale / queue depth / AI breaker）→ 3 條 Alert
+#       + ALERT_CHANNEL=log 見到 metadata-only 警報（0 PII）；恢復 → auto-resolved；
+#       /api/admin/alerts（STAFF 403 / ADMIN 200）+ POST resolve（手動 resolved）
+#   T36 (Phase 4) quality_rating：mock GREEN 無警報 + Clinic.qualityRating/qualityCheckedAt 落庫；
+#       WA_MOCK_QUALITY=RED inject → severity=HIGH 警報（被 ban 前哨）；恢復 → auto-resolved
+#   T37 (Phase 4) 週報：fixture（4 conv/7 msg/4 draft/3 flow/3 booking）→ weekly-report script
+#       → OpsReport 斷言（FRT 中位數 240s / 採用率 0.75 / Flow 2/3 / 預約 2/3 中位 60min）+ 冪等
+#   T38 (Phase 4) duty-roster：mock fixture 3 人（HTTP 200 + /inbox 側欄「今日當值」卡）；
+#       別店 scope 403；欄位白名單；DUTY_MOCK=0 + 無/壞 URL → 200 {duty:null} 唔 crash
+#   T39 (Phase 4) backup/restore：backup-wa.sh 出 dump 檔（sandbox 無 age → 明文 + 響亮 warning）；
+#       restore-wa-test.sh restore 落 scratch DB + 5 表 row count 全對
 #
 set -u
 cd "$(dirname "$0")/.."
@@ -801,6 +812,153 @@ done
 [ "$LOGPII3" = 0 ] || T33=1
 [ "$T33" = 0 ] && pass "T33 PII：mock raw 含 clinicPatient/visitReasons/diagnosis 經 adapter → DB + log 全 0 hit；pii-scan 0 violation" \
   || fail "T33 PII 鐵律（見上 ❌）"
+
+# ══════════════ Phase 4：監控 + 營運硬化 ══════════════
+
+# ── T35. 健康自檢：inject 異常 → Alert + metadata-only 通知；恢復 → auto-resolved ──
+echo "[P4] T35: health-check..."
+T35=0
+# pre-clean：清舊 health alerts + 統一 webhook 時鐘（TKW = stale，其餘 fresh）+ Apricot fresh
+q "UPDATE \"Alert\" SET \"resolvedAt\" = now() WHERE \"resolvedAt\" IS NULL AND type IN ('webhook_stale','queue_depth','ai_breaker_open','apricot_sync_stale','disk_low')" >/dev/null
+q "UPDATE \"ApricotSession\" SET \"lastSyncAt\" = now() WHERE id=1" >/dev/null
+q "UPDATE \"Clinic\" SET \"lastWebhookEventAt\" = CASE WHEN id='$TKW_CLINIC_ID' THEN now() - interval '40 minutes' ELSE now() END WHERE \"lastWebhookEventAt\" IS NOT NULL" >/dev/null
+
+# (1) inject：webhook stale（TKW -40min）+ queue depth 假高（ai=150）+ AI breaker open
+pnpm -s e2e:cron health-check '{"overrides":{"queueDepth":{"ai":{"waiting":150,"failed":0}},"breakerState":"open"}}' >/dev/null 2>&1 || T35=1
+if wait_for "SELECT (SELECT count(*) FROM \"Alert\" WHERE \"resolvedAt\" IS NULL AND type IN ('webhook_stale','queue_depth','ai_breaker_open'))::text c" '[{"c":"3"}]' 30; then
+  pass "T35 inject 3 種異常 → 3 條未解決 Alert"
+else
+  fail "T35 3 條 Alert 未齊"
+fi
+WSC=$(q "SELECT \"clinicCode\"::text cc FROM \"Alert\" WHERE type='webhook_stale' AND \"resolvedAt\" IS NULL" | jf cc)
+check "T35 webhook_stale 指咗 TKW（有 traffic 先計 stale）" "$WSC" "TKW"
+QSS=$(q "SELECT \"severity\"::text s FROM \"Alert\" WHERE type='queue_depth' AND \"resolvedAt\" IS NULL" | jf s)
+check "T35 queue_depth severity=MEDIUM" "$QSS" "MEDIUM"
+BSS=$(q "SELECT \"severity\"::text s FROM \"Alert\" WHERE type='ai_breaker_open' AND \"resolvedAt\" IS NULL" | jf s)
+check "T35 ai_breaker_open severity=HIGH" "$BSS" "HIGH"
+
+# (2) 通知（ALERT_CHANNEL=log 預設）：worker log 見到 metadata-only 警報行，0 PII
+ALERTLINE=$(grep -h "ALERT (channel=log): webhook_stale" /tmp/e2e-worker.log /tmp/e2e-worker-fail.log /tmp/e2e-worker2.log 2>/dev/null | tail -1)
+[ -n "$ALERTLINE" ] || { echo "    ❌ T35 worker log 搵唔到 ALERT (channel=log) 行"; T35=1; }
+echo "$ALERTLINE" | grep -qF "e2e 第一則" && { echo "    ❌ T35 警報 log 含訊息原文（PII 洩露）"; T35=1; }
+echo "$ALERTLINE" | grep -qF "minutesSince" || { echo "    ❌ T35 警報 log 冇 metadata"; T35=1; }
+
+# (3) 恢復 → auto-resolved
+q "UPDATE \"Clinic\" SET \"lastWebhookEventAt\" = now() WHERE id='$TKW_CLINIC_ID'" >/dev/null
+pnpm -s e2e:cron health-check >/dev/null 2>&1 || T35=1
+if wait_for "SELECT (SELECT count(*) FROM \"Alert\" WHERE \"resolvedAt\" IS NULL AND type IN ('webhook_stale','queue_depth','ai_breaker_open'))::text c" '[{"c":"0"}]' 30; then
+  pass "T35 恢復後 3 條 Alert 全部 auto-resolved"
+else
+  fail "T35 auto-resolve 失敗"
+fi
+
+# (4) /admin alerts API：STAFF 403（RBAC fail-closed）+ ADMIN 200 + POST resolve（手動）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/admin/alerts")
+check "T35 STAFF GET /api/admin/alerts → 403" "$CODE" "403"
+q "UPDATE \"Clinic\" SET \"lastWebhookEventAt\" = now() - interval '40 minutes' WHERE id='$TKW_CLINIC_ID'" >/dev/null
+pnpm -s e2e:cron health-check >/dev/null 2>&1 || T35=1
+ALERT_ID=$(q "SELECT id FROM \"Alert\" WHERE type='webhook_stale' AND \"resolvedAt\" IS NULL" | grep -oE '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+[ -n "$ALERT_ID" ] || { echo "    ❌ T35 重開 webhook_stale alert 失敗"; T35=1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/api/admin/alerts")
+check "T35 ADMIN GET /api/admin/alerts → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/alerts/$ALERT_ID/resolve")
+check "T35 ADMIN POST resolve → 200" "$CODE" "200"
+if wait_for "SELECT (\"resolvedAt\" IS NOT NULL)::text r FROM \"Alert\" WHERE id='$ALERT_ID'" '[{"r":"true"}]' 10; then
+  pass "T35 手動 resolve 生效（resolvedAt set）"
+else
+  fail "T35 手動 resolve"
+fi
+
+# ── T36. quality_rating 每日監控（GREEN 無警報 / RED → HIGH） ─────────────
+echo "[P4] T36: quality_rating..."
+T36=0
+q "UPDATE \"Alert\" SET \"resolvedAt\" = now() WHERE \"resolvedAt\" IS NULL AND type='quality_rating'" >/dev/null
+pnpm -s e2e:quality >/dev/null 2>&1 || T36=1
+QR=$(q "SELECT \"qualityRating\"::text r FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf r)
+check "T36 mock GREEN → Clinic.qualityRating=GREEN" "$QR" "GREEN"
+QC=$(q "SELECT (\"qualityCheckedAt\" IS NOT NULL)::text t FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf t)
+check "T36 qualityCheckedAt 已設" "$QC" "true"
+QA=$(q "SELECT count(*)::text c FROM \"Alert\" WHERE type='quality_rating' AND \"resolvedAt\" IS NULL" | jf c)
+check "T36 GREEN 無 quality_rating 警報" "$QA" "0"
+
+# RED inject（獨立 process 讀 env — server/worker 唔受影響）
+WA_MOCK_QUALITY=RED pnpm -s e2e:quality >/dev/null 2>&1 || T36=1
+if wait_for "SELECT (SELECT count(*) FROM \"Alert\" WHERE type='quality_rating' AND \"resolvedAt\" IS NULL AND \"clinicId\"='$TKW_CLINIC_ID')::text c" '[{"c":"1"}]' 15; then
+  pass "T36 inject RED → TKW HIGH 警報（被 ban 前哨）"
+else
+  fail "T36 RED 警報未開"
+fi
+QS=$(q "SELECT \"severity\"::text s FROM \"Alert\" WHERE type='quality_rating' AND \"resolvedAt\" IS NULL AND \"clinicId\"='$TKW_CLINIC_ID'" | jf s)
+check "T36 RED severity=HIGH" "$QS" "HIGH"
+QD=$(q "SELECT (detail->>'rating')::text r FROM \"Alert\" WHERE type='quality_rating' AND \"resolvedAt\" IS NULL AND \"clinicId\"='$TKW_CLINIC_ID'" | jf r)
+[ "$QD" = "RED" ] || { echo "    ❌ T36 alert detail 冇 rating metadata（raw=$QD）"; T36=1; }
+
+# 恢復 → auto-resolved
+pnpm -s e2e:quality >/dev/null 2>&1 || T36=1
+if wait_for "SELECT (SELECT count(*) FROM \"Alert\" WHERE type='quality_rating' AND \"resolvedAt\" IS NULL)::text c" '[{"c":"0"}]' 15; then
+  pass "T36 恢復 GREEN 後 quality_rating 警報全部 auto-resolved"
+else
+  fail "T36 quality auto-resolve"
+fi
+
+# ── T37. 週報：fixture → script → 數字斷言 + OpsReport 冪等 ───────────────
+echo "[P4] T37: weekly report..."
+T37=0
+pnpm -s e2e:weekly seed >/dev/null 2>&1 || { echo "    ❌ T37 seed 失敗"; T37=1; }
+pnpm -s weekly-report --start 2026-01-05 --end 2026-01-12 --clinic TKW >/dev/null 2>&1 || T37=1
+pnpm -s weekly-report --start 2026-01-05 --end 2026-01-12 >/dev/null 2>&1 || T37=1
+WC_OUT=$(pnpm -s e2e:weekly check 2>&1)
+if echo "$WC_OUT" | grep -q "WEEKLY-ASSERT OK"; then
+  pass "T37 週報數字全對（FRT 中位數 240s / 採用率 0.75 / Flow 2/3 / 預約 2/3 中位 60min）"
+else
+  echo "$WC_OUT" | grep -vE '^\{|ELIFECYCLE' | tail -10
+  fail "T37 週報數字斷言"
+fi
+# 冪等：重跑同一 period → OpsReport row 數不變
+OC1=$(q "SELECT count(*)::text c FROM \"OpsReport\" WHERE \"clinicId\"='$TKW_CLINIC_ID'" | jf c)
+pnpm -s weekly-report --start 2026-01-05 --end 2026-01-12 --clinic TKW >/dev/null 2>&1 || true
+OC2=$(q "SELECT count(*)::text c FROM \"OpsReport\" WHERE \"clinicId\"='$TKW_CLINIC_ID'" | jf c)
+check "T37 OpsReport upsert 冪等（row 數不變）" "$OC2" "$OC1"
+pnpm -s e2e:weekly clean >/dev/null 2>&1 || fail "T37 fixture clean"
+
+# ── T38. duty-roster 消費端（mock fixture / RBAC / 白名單 / down 唔 crash） ─
+echo "[P4] T38: duty-roster..."
+T38=0
+CODE=$(curl -s -o /tmp/e2e-duty.json -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/duty-roster?clinicId=TKW")
+check "T38 /api/duty-roster?clinicId=TKW（STAFF 本店）→ 200" "$CODE" "200"
+DC=$(grep -oE '"staffName":"[^"]*"' /tmp/e2e-duty.json | wc -l | tr -d ' ')
+check "T38 DUTY_MOCK fixture = 3 人" "$DC" "3"
+INBOX_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_TKW'" | jf id)
+curl -s -b "$COOKIE_TKW" "$BASE/inbox?conv=$INBOX_CONV" -o /tmp/e2e-inbox.html 2>/dev/null
+grep -q "今日當值" /tmp/e2e-inbox.html || { echo "    ❌ T38 /inbox 側欄冇「今日當值」卡"; T38=1; }
+grep -q "林小曼" /tmp/e2e-inbox.html || { echo "    ❌ T38 側欄卡冇 fixture 人員"; T38=1; }
+DE_OUT=$(pnpm -s e2e:duty --cookie "$COOKIE_TKW" 2>&1)
+echo "$DE_OUT" | grep -q "DUTY-403-OK" || { echo "    ❌ T38 別店 scope 未 403"; T38=1; }
+echo "$DE_OUT" | grep -q "DUTY-WHITELIST-OK" || { echo "    ❌ T38 欄位白名單有漏"; T38=1; }
+DD_OUT=$(pnpm -s e2e:duty --cookie "$COOKIE_TKW" --down 2>&1)
+NOK=$(echo "$DD_OUT" | grep -c "DUTY-DOWN-OK")
+check "T38 mock API down（DUTY_MOCK=0 + 無/壞 URL）→ 200 {duty:null} 唔 crash（×2）" "$NOK" "2"
+[ "$T38" = 0 ] && pass "T38 duty-roster 消費端全鏈（fixture/卡/403/白名單/down fail-soft）" \
+  || fail "T38 duty-roster（見上 ❌）"
+
+# ── T39. backup / restore 驗證 ──────────────────────────────────────────
+echo "[P4] T39: backup/restore..."
+T39=0
+BDIR="${BACKUP_DIR:-.dev/backups}"
+BOUT=$(bash scripts/backup-wa.sh 2>&1)
+echo "$BOUT" | tail -3
+echo "$BOUT" | grep -q "\[backup\] DONE" || { echo "    ❌ T39 backup-wa.sh 冇 DONE"; T39=1; }
+DUMP=$(ls -1t "$BDIR"/wa-inbox-*.dump.age "$BDIR"/wa-inbox-*.dump 2>/dev/null | head -1)
+[ -n "$DUMP" ] && [ -f "$DUMP" ] || { echo "    ❌ T39 dump 檔唔存在"; T39=1; }
+if ! command -v age >/dev/null 2>&1; then
+  echo "$BOUT" | grep -qi "age 未安裝" || { echo "    ❌ T39 無 age 但冇明文 warning"; T39=1; }
+  case "$DUMP" in *.age) echo "    ❌ T39 無 age 却產出 .age 檔"; T39=1 ;; esac
+fi
+ROUT=$(bash scripts/restore-wa-test.sh 2>&1)
+echo "$ROUT" | tail -7
+echo "$ROUT" | grep -q "RESTORE-TEST OK" || { echo "    ❌ T39 restore 驗證失敗"; T39=1; }
+[ "$T39" = 0 ] && pass "T39 backup（dump + 兩軌加密 + retention）+ restore 落 scratch DB 5 表 row count 全對" \
+  || fail "T39 backup/restore（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

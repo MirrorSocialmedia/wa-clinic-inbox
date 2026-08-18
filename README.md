@@ -348,6 +348,87 @@ staff 撳〔改期〕→ 重出 Flow（PENDING only）
 - **keypair 存檔**：MD 寫「存 DB/keypair file」— 用 keypair file（`FLOW_KEYS_DIR`，gitignored 0600）；私鑰唔入 DB。
 - **ApricotSession**：MD 只提 token 三件套 — 加咗 4 個監控欄（lastSyncAt / lastKeepaliveAt / lastError / rotationCount）俾 `/api/admin/apricot-status`（MD 任務 D 要求）。
 
+## Phase 4 — 監控 + 營運硬化 + duty-roster 消費端
+
+### 監控（cron 排程 — `workers/index.ts`）
+
+| Job | 排程 | 行為 |
+|-----|------|------|
+| `health-check` | 每 5 分鐘 | 5 項自檢：① webhook stale（有 traffic 但 >30 分鐘無事件 → MEDIUM）② queue depth（ai/outbound/apricot waiting+failed >100 → MEDIUM）③ AI breaker OPEN（HIGH）④ Apricot 上次成功 sync >90 分鐘（MEDIUM）⑤ disk 餘量 <10%（HIGH）。異常寫 `Alert` 表 + 經 `ALERT_CHANNEL` 通知（**metadata only，零訊息原文**）；恢復後**自動 resolve**。冪等：breach 中唔重覆開 alert。 |
+| `quality-check` | 每日 06:30 | 逐號 `GET /{phone_number_id}?fields=quality_rating`（mock → 決定性 GREEN；`WA_MOCK_QUALITY=YELLOW\|RED` 可 inject 俾 E2E）。跌 YELLOW/RED → **HIGH** 警報（被 ban 前哨）；`Clinic.qualityRating/qualityCheckedAt` 落庫，`/admin` 顯示。 |
+| `weekly-report` | 每星期一 07:00 | 上一週（週一→下週一，HK 本地日界）營運報表 → `OpsReport` 表（ALL + 逐店，upsert 冪等）+ `ALERT_CHANNEL` 推送報表 text。 |
+
+**警報通知渠道（`ALERT_CHANNEL`）**：`log`（預設 — 入 log，sandbox）/ `telegram`（`TELEGRAM_ALERT_WEBHOOK_URL` 內部 relay，或 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` 標準 Bot API）/ `whatsapp`（`WA_ALERT_TO` 自己個號，真 mode 經 Graph API；`WA_MOCK=1` 時只 log）。通知失敗唔會 crash cron worker。
+
+**`/admin` alerts 區塊**：未解決 alert 列表（type/severity/clinic/detail/時間，metadata only）+ 標記 resolved（`POST /api/admin/alerts/:id/resolve`，冪等；ADMIN-only，STAFF 403）。
+
+### 週報指標定義（`/ops` 頁 + `scripts/weekly-report.ts`）
+
+| 指標 | 定義 |
+|------|------|
+| 訊息量/店 | period 內 `Message` 總數 + 逐店分佈 |
+| FRT 中位數 | 每則 inbound（channel=API）→ 該對話**第一條** OUT（API/APP_ECHO）嘅秒數；**未覆嘅 inbound 唔計入中位數**（只計 answered/total） |
+| 草稿採用率 | `(SENT_AS_IS + SENT_EDITED) / 全部 AiDraft`（period 內建立；分母 = 所有 draft，含棄用） |
+| Flow 完成率 | `FlowSession.status=COMPLETED / 全部 FlowSession`（period 內建立） |
+| 預約卡→確認 | `BookingRequest.status=CONFIRMED / 全部 BookingRequest` + CONFIRMED 嘅 `handledAt - createdAt` 中位數（分鐘） |
+
+- `/ops` 頁：最近 8 週趨勢 + 本期完整報表 text（**STAFF = 本店 scope；ADMIN = ALL** — 見下方偏差）。
+- 手動：`pnpm weekly-report [--start YYYY-MM-DD --end YYYY-MM-DD] [--clinic CODE]`（補跑/E2E；同 cron 同一核心）。
+
+### duty-roster 消費端（同 clinic-workforce 唯一接口）
+
+契約（workforce 邊提供，本 repo 只係 consumer）：
+```
+GET {DUTY_API_URL}/api/external/duty-roster?clinicId=<code>&date=YYYY-MM-DD
+Header: X-Api-Key: {DUTY_API_KEY}
+→ [{ "staffName": str, "role": str, "shiftStart": "HH:mm", "shiftEnd": "HH:mm" }]
+```
+- **欄位白名單**：只 4 欄入到 inbox（server-side sanitize：多餘欄位/壞 shape 整 row 丟；`staffName/role` 長度上限；`HH:mm` regex）。log 只記 `duty fetched, count=N`。
+- `/api/duty-roster?clinicId=`：STAFF 本店（別店 403）；3s timeout；**任何失敗 → 200 `{duty:null}`（fail-soft，唔 crash inbox）**；5 分鐘 TTL cache（失敗亦 cache，唔重覆打壞 API）。
+- Inbox 側欄「今日當值」卡（staff 名+職位+更時；`null` → 隱藏）。
+- **AI 草稿 context**：`ai.worker` 每次 job 前 fetch 該店當值名單 → 注入 system prompt「今日當值員工」段（AI 可以答「今日邊個喺度」；mock AI 唔受影響）。fetch fail-soft → 無咁段。
+- env：`DUTY_API_URL` / `DUTY_API_KEY` / `DUTY_MOCK=1`（**預設 1** — 無設定時 mock 回固定 fixture 3 人；上線改 0）。
+
+### Backup + Restore（MD §9.3）
+
+- `bash scripts/backup-wa.sh`（VPS crontab 每晚）：
+  - `pg_dump -Fc`（來源 `$DATABASE_URL`；**pg_dump client 比 server 舊時自動 fallback CSV logical dump** — sandbox embedded PG18 vs 系統 pg_dump 16；生產 VPS 裝同版本 client 就係標準軌）
+  - 加密兩軌：**有 `age`** → `age -r <pubkey>`（keypair `.dev/age.key` gitignored，首次自動生成 + 響亮提示要另行備份）；**冇 `age`**（sandbox）→ 明文 + 響亮 WARNING（script 唔 fail）
+  - 30 日 retention（`BACKUP_RETENTION_DAYS`）
+  - `$WA_MEDIA_DIR`（預設 `/srv/wa-media`）rsync/cp snapshot，同 30 日 retention
+- `bash scripts/restore-wa-test.sh [dump]`：自動偵測格式（PGDMP → `pg_restore`；CSV fallback → `prisma migrate deploy` + 逐表 COPY）restore 落 **scratch DB** `wa_inbox_restore_test`（唔郁生產）→ 抽 5 表（Message/Conversation/Contact/AiDraft/BookingRequest）row count 對 → `RESTORE-TEST OK`。
+
+### 故障演習（實測 2026-08-19）
+
+三個故障各實測一次，完整記錄（症狀/恢復步驟/RTO 實測）見 **`docs/runbook.md`**。摘要：
+
+| 故障 | 影響 | 恢復 | RTO 實測 |
+|------|------|------|----------|
+| AI 死 | 冇草稿冇標籤；inbox 收發照舊 | 起返 AI 服務 → breaker 自己 CLOSED | 30.6s（drill 控制）；恢復 2.6s |
+| Redis 停 | webhook 1.5s 內 500（Meta 重發）；訊息唔會永久丟（冪等 + 自動補發） | 起返 Redis → 重啟 worker → drain | 停機 11.2s；全處理 14.7s |
+| kill worker | queue 堆積（>100 彈警報）；inbox 照 200 | 重啟 worker → drain | worker 死 6.3s；drain 完 7.3s |
+
+### Phase 4 新增 env（全清單）
+
+| Env | 預設 | 用途 |
+|-----|------|------|
+| `ALERT_CHANNEL` | `log` | 警報渠道：`log` / `telegram` / `whatsapp` |
+| `TELEGRAM_ALERT_WEBHOOK_URL` | — | telegram 渠道（relay webhook） |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | — | telegram 渠道（標準 Bot API，同上一個二揀一） |
+| `WA_ALERT_TO` | — | whatsapp 渠道：自己個號（852...） |
+| `DUTY_MOCK` | `1` | 1 = duty mock fixture（sandbox 預設） |
+| `DUTY_API_URL` / `DUTY_API_KEY` | — | 真 mode workforce API |
+| `BACKUP_DIR` | `.dev/backups` | backup 落盤 |
+| `BACKUP_RETENTION_DAYS` | `30` | retention |
+| `AGE_KEY_FILE` | `.dev/age.key` | age keypair（gitignored） |
+| `WA_MOCK_QUALITY` | — | E2E 用：mock quality_rating 值（GREEN/YELLOW/RED） |
+
+### 同 MD 唔同嘅位（偏差）
+
+- **`/admin/ops` → `/ops`**：`(admin)` layout 係 ADMIN-only（STAFF 入 `/admin` 會 redirect `/inbox`），MD 要求 staff 本店 scope 睇自己店趨勢 → 獨立 `/ops` 頁（RBAC：STAFF 本店 / ADMIN ALL），`/admin` 加咗入口連結。
+- **OpsReport.clinicId `""` sentinel**：ALL scope 用空字串（唔係 NULL）— Postgres 唯一索引入面 NULL 唔會互撞，會破 upsert 冪等。
+- **sandbox backup = CSV fallback**：embedded PG 18 server vs 系統 pg_dump 16 → version mismatch；`backup-wa.sh` 自動 fallback CSV logical dump（data-only，restore 驗證用 migrate 重建 schema）。生產 VPS（PG16 server + 同版本 client）行標準 `pg_dump -Fc` 軌。
+
 ---
 
 指揮大神未做 Meta App 設定之前，全部用 **mock 測試** 行 E2E（`WA_MOCK=1`）：

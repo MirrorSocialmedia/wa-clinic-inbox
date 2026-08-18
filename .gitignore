@@ -53,3 +53,7 @@ next-env.d.ts
 # Phase 3: Flow RSA keypair + mock fill flag（沙箱狀態，唔入 repo）
 /.dev/flow-keys/
 /.dev/apricot-mock-fill.json
+
+# Phase 4 backup artifacts（本地，唔入 git）
+.dev/backups/
+.dev/age.key
