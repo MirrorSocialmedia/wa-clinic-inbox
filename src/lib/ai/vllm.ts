@@ -1,5 +1,5 @@
 /**
- * vLLM client — OpenAI-compatible chat.completions（框架 MD §7.1）。
+ * vLLM / sglang client — OpenAI-compatible chat.completions（框架 MD §7.1）。
  *
  * 降級係一等公民（D6）：
  * - 每個 model：超時 AI_TIMEOUT_MS（預設 8000ms）+ 重試 1 次（共 2 次）
@@ -7,14 +7,23 @@
  * - circuit breaker：連續 3 次 fail → OPEN 60s（期間直接 skip，唔打 GPU 唔排隊）→ half-open 試一次
  *
  * 環境變數：
- * - VLLM_BASE_URL   OpenAI-compatible base（e.g. http://<tailscale-ip>:8000/v1）
- * - VLLM_API_KEY    可選（vLLM 預設唔使 key；有就帶 Bearer）
- * - VLLM_MODEL      primary（預設 Qwen/Qwen2.5-32B-Instruct-AWQ）
- * - VLLM_FALLBACK_MODEL  fallback（預設 Qwen3-30B-A3B）
+ * - VLLM_BASE_URL   OpenAI-compatible base（e.g. http://127.0.0.1:30000/v1 sglang / Tailscale vLLM）
+ * - VLLM_API_KEY    可選（本地 sglang 預設唔使 key；有就帶 Bearer）
+ * - VLLM_MODEL      primary（model id 可以含 `/`，e.g. /models/Qwen3.8-27B-FP8 — 照字面傳，
+ *                   OpenAI-compatible API 入面 model 只係 request body 字串，斜線冇影響）
+ * - VLLM_FALLBACK_MODEL  fallback（同 primary 相同或空 = 只用 primary）
  * - AI_TIMEOUT_MS   單次 call 超時（預設 8000）
+ * - AI_DISABLE_THINKING  1（預設）= 送 chat_template_kwargs.enable_thinking=false。
+ *                   Qwen3.x thinking model（sglang 部署）要係呢個先會把答案放返 `content`
+ *                   （否則答案喺 reasoning_content、content=null → 我哋解析失敗）。
+ *                   非 thinking model 嘅 template 會忽略呢個 kwarg，唔會有害。
  *
- * ★ AI 永遠本地（D4）：base URL 應該係 Tailscale 私網地址；呢度唔做白名單
- *   （部署層用 Tailscale ACL 限死），但 baseUrl 唔准係 empty（fail-closed）。
+ * 結構化輸出（defense in depth，唔依賴單一後端）：
+ * - `guided_json`：vLLM 強制（guidance/xgrammar）；sglang OpenAI-compat 層會忽略 — 所以要：
+ * - `response_format: {type:"json_object"}`：sglang 強制合法 JSON（vLLM 都支持）；
+ *   prompt 本身寫死 enum/格式（見 prompts.ts），parse 端再驗證（見 index.ts parseAndValidate）。
+ *
+ * ★ AI 永遠本地（D4）：base URL 應該係本機 / Tailscale 私網地址；baseUrl 唔准 empty（fail-closed）。
  */
 import log from "@/lib/log";
 import { AiCallError } from "./types";
@@ -25,6 +34,7 @@ export interface AiConfig {
   primaryModel: string;
   fallbackModel: string;
   timeoutMs: number;
+  disableThinking: boolean;
 }
 
 export function getAiConfig(): AiConfig {
@@ -33,8 +43,9 @@ export function getAiConfig(): AiConfig {
     baseUrl: rawBase.replace(/\/+$/, ""),
     apiKey: process.env.VLLM_API_KEY?.trim() || null,
     primaryModel: process.env.VLLM_MODEL?.trim() || "Qwen/Qwen2.5-32B-Instruct-AWQ",
-    fallbackModel: process.env.VLLM_FALLBACK_MODEL?.trim() || "Qwen3-30B-A3B",
+    fallbackModel: process.env.VLLM_FALLBACK_MODEL?.trim() || "",
     timeoutMs: Math.max(1000, Number(process.env.AI_TIMEOUT_MS ?? 8000) || 8000),
+    disableThinking: process.env.AI_DISABLE_THINKING !== "0",
   };
 }
 
@@ -104,7 +115,7 @@ export interface AiChatResult {
 }
 
 interface ChatCompletionResponse {
-  choices?: { message?: { content?: string | null } }[];
+  choices?: { message?: { content?: string | null; reasoning_content?: string | null } }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   error?: { message?: string };
 }
@@ -116,29 +127,40 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
   try {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+    const payload: Record<string, unknown> = {
+      model,
+      messages: opts.messages,
+      temperature: 0,
+      max_tokens: 600,
+    };
+    // 結構化輸出（雙後端兼容 — 見文件頭）：
+    if (opts.guidedJson) {
+      payload.guided_json = opts.guidedJson; // vLLM 強制結構（sglang 忽略）
+      payload.response_format = { type: "json_object" }; // sglang 強制合法 JSON
+    }
+    // Qwen3.x thinking model：關咗先會答返入 content（sglang 實測）
+    if (cfg.disableThinking) {
+      payload.chat_template_kwargs = { enable_thinking: false };
+    }
     const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
       method: "POST",
       headers,
       signal: controller.signal,
-      body: JSON.stringify({
-        model,
-        messages: opts.messages,
-        temperature: 0,
-        max_tokens: 600,
-        // vLLM 拓展（guidance）：強制合法 JSON 結構
-        guided_json: opts.guidedJson,
-      }),
+      body: JSON.stringify(payload),
     });
     const latencyMs = Date.now() - t0;
     const json = (await res.json().catch(() => null)) as ChatCompletionResponse | null;
     if (!res.ok) {
       // ★ 錯訊只係 server 端錯誤描述（e.g. 404 model not found）— 唔含 prompt 內容，可以入 error
       const msg = json?.error?.message ? ` : ${json.error.message.slice(0, 160)}` : "";
-      throw new AiCallError(`vllm ${res.status}${msg} (model=${model}, ${latencyMs}ms)`);
+      throw new AiCallError(`ai ${res.status}${msg} (model=${model}, ${latencyMs}ms)`);
     }
-    const content = json?.choices?.[0]?.message?.content;
+    const choice = json?.choices?.[0];
+    const content = choice?.message?.content;
     if (typeof content !== "string" || content.length === 0) {
-      throw new AiCallError(`vllm empty content (model=${model}, ${latencyMs}ms)`);
+      // metadata only：提示係 thinking token 食晒 budget（reasoning_content 有值）定係真空
+      const inThinking = typeof choice?.message?.reasoning_content === "string" && choice.message.reasoning_content.length > 0;
+      throw new AiCallError(`ai empty content (model=${model}, ${latencyMs}ms${inThinking ? ", content-in-reasoning" : ""})`);
     }
     return {
       content,
@@ -150,7 +172,7 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
     if (err instanceof AiCallError) throw err;
     const name = err instanceof Error ? err.name : "unknown";
     const reason = name === "AbortError" ? `timeout ${cfg.timeoutMs}ms` : "network error";
-    throw new AiCallError(`vllm ${reason} (model=${model})`);
+    throw new AiCallError(`ai ${reason} (model=${model})`);
   } finally {
     clearTimeout(timer);
   }
