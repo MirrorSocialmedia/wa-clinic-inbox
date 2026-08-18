@@ -1,9 +1,10 @@
 import { Worker, type Job } from "bullmq";
-import { aiQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { aiQueue, outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import { publishNotify } from "@/lib/notify";
+import { getWindowState } from "@/lib/wa/window";
 import {
   classifyAndDraft,
   getAiConfig,
@@ -25,9 +26,19 @@ import { PROMPT_CONTEXT_MESSAGES } from "@/lib/ai/prompts";
  *   2. 組上下文（最近 10 條 in/out）→ classifyAndDraft（mock / vLLM 統一入口）
  *   3. 分類落 Conversation：intent / intentConfidence / urgency / aiSummary
  *      + 鐵律：urgency=HIGH 或 intent=URGENT_PAIN → urgent=true + urgent:escalation
- *   4. 草稿（intent≠URGENT_PAIN 且 urgency≠HIGH 且 needsHuman=false 且 model 畀咗 draft）：
+ *   4. 草稿（intent≠URGENT_PAIN 且 urgency≠HIGH 且 model 畀咗 draft）：
  *      AiDraft(PROPOSED)，冪等 — 同一 Message 只可有一條（unique constraint）
- *   5. Socket 推 ai:classified（每次成功）/ draft:ready（有 draft）/ urgent:escalation（急症）
+ *      （Phase 2b：needsHuman=true 都可以出 draft — 只係永遠唔會自動發）
+ *   4.5 AUTO 模式（Phase 2b 逐舖設定 clinic.aiMode，default DRAFT）：
+ *      全部滿足先自動發：aiMode=AUTO + intent≠URGENT_PAIN + urgency≠HIGH
+ *      + needsHuman=false + 有 draft + 24h 窗口內。任何一個唔滿足 → 退回 DRAFT 行為。
+ *      自動發 = 寫 Message(OUT, aiAutoSent=true, sentByStaffId=null) + draft 標 SENT_AUTO
+ *      + AuditLog(AI_AUTO_SEND) + 入既有 outbound chain（mock/real Graph、retries、rate limit）。
+ *      冪等：同一 draft 只可有一條 OUT 訊息（re-delivery / retry 重跑唔會重發）。
+ *      鐵律：URGENT_PAIN / HIGH 任何模式永遠唔自動發（prompt + code 雙重擋）。
+ *   5. Socket 推 ai:classified（每次成功）/ draft:ready（draft 仍係 PROPOSED）/
+ *      urgent:escalation（急症）；自動發出嘅 OUT 訊息由 outbound worker 推 message:new
+ *      （帶 aiAutoSent 標記，UI 顯示「AI 自動覆」）
  *
  * 降級（鐵律 4：AI 失敗 = 降級唔係中斷）：
  * - call 失敗/超時 → recordAiCall(false) + log metadata only + throw（BullMQ retry，
@@ -123,7 +134,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     );
     throw err;
   }
-  await recordAiCall(true);
+  await recordAiCall(true, undefined, result.latencyMs, result.tokens);
 
   // ── 3. 分類落 Conversation ───────────────────────────────────────────
   const urgent = result.intent === "URGENT_PAIN" || result.urgency === "HIGH";
@@ -139,16 +150,20 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     },
   });
 
-  // ── 4. AI 草稿（鐵律 3：URGENT_PAIN / HIGH / needsHuman 永不生成） ─────
-  let draftId: string | null = null;
+  // ── 4. AI 草稿（鐵律：URGENT_PAIN / HIGH 永不生成 — code 層第一重擋） ─────
+  // Phase 2b：needsHuman=true 都可以出 draft（staff 審批；AUTO 模式永遠唔會自動發）
+  let draft: {
+    id: string;
+    draftText: string;
+    status: string;
+  } | null = null;
   const canDraft =
     result.intent !== "URGENT_PAIN" &&
     result.urgency !== "HIGH" &&
-    !result.needsHuman &&
     result.draft !== null;
   if (canDraft) {
     // 冪等：unique(conversationId, inReplyToMessageId) + 前置查（retry 重跑唔會重複 draft）
-    let draft = await prisma.aiDraft.findUnique({
+    let existing = await prisma.aiDraft.findUnique({
       where: {
         conversationId_inReplyToMessageId: {
           conversationId: conv.id,
@@ -156,9 +171,9 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
         },
       },
     });
-    if (!draft) {
+    if (!existing) {
       try {
-        draft = await prisma.aiDraft.create({
+        existing = await prisma.aiDraft.create({
           data: {
             conversationId: conv.id,
             inReplyToMessageId: msg.id,
@@ -170,7 +185,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
           // 競態（並行 retry 撞 unique）→ 取已存在嗰條
-          draft = await prisma.aiDraft.findUnique({
+          existing = await prisma.aiDraft.findUnique({
             where: {
               conversationId_inReplyToMessageId: {
                 conversationId: conv.id,
@@ -183,20 +198,53 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
         }
       }
     }
-    draftId = draft!.id;
+    draft = existing;
     // 連結 message ↔ draft（send route 用嚟判採用狀態；UI 顯示上下文）
-    if (msg.aiDraftId !== draftId) {
-      await prisma.message.update({ where: { id: msg.id }, data: { aiDraftId: draftId } });
+    if (msg.aiDraftId !== draft!.id) {
+      await prisma.message.update({ where: { id: msg.id }, data: { aiDraftId: draft!.id } });
     }
+  }
+
+  // ── 4.5 AUTO 模式（Phase 2b 逐舖設定；default DRAFT = 舊行為完全唔變） ─────
+  // 全部滿足先自動發；任何一個唔滿足 → 退回 DRAFT（pending draft 俾 staff 處理）
+  const win = getWindowState(updatedConv.lastInboundAt);
+  let autoSent = false;
+  if (clinic.aiMode === "AUTO") {
+    const blocks: string[] = [];
+    if (result.intent === "URGENT_PAIN") blocks.push("URGENT_PAIN"); // 鐵律：code 第二重擋
+    if (result.urgency === "HIGH") blocks.push("HIGH");             // 鐵律：code 第二重擋
+    if (result.needsHuman) blocks.push("needsHuman");               // 鐵律：人工永遠唔自動發
+    if (draft === null) blocks.push("no-draft");
+    if (!win.open) blocks.push("window-closed");
+    if (blocks.length > 0) {
+      // metadata only（唔含 draft/summary 內容）
+      log.info(
+        { clinic: clinic.code, wamid: msg.waMessageId, reasons: blocks.join("+") },
+        "ai: AUTO mode — not eligible, fallback to DRAFT (pending draft for staff)"
+      );
+    } else {
+      autoSent = await attemptAutoSend({ conv: updatedConv, clinic, draft: draft!, msg, result });
+      // 重讀 draft status（可能已標 SENT_AUTO；enqueue 失敗會回退 PROPOSED）
+      if (draft) {
+        const fresh = await prisma.aiDraft.findUnique({ where: { id: draft.id }, select: { status: true } });
+        if (fresh) draft = { ...draft, status: fresh.status };
+      }
+    }
+  }
+
+  // draft:ready 只喺 draft 仍然 PROPOSED（即 staff 仲要審批）時推 —
+  // 已自動發出（SENT_AUTO）唔好再彈「AI 建議」卡俾 staff
+  if (draft && draft.status === "PROPOSED" && !autoSent) {
     publishNotify(conv.clinicId, "draft:ready", {
       conversationId: conv.id,
-      draftId,
+      draftId: draft.id,
       inReplyToMessageId: msg.id,
-      draftText: draft!.draftText,
+      draftText: draft.draftText,
       model: result.model,
       latencyMs: result.latencyMs,
     });
   }
+  const draftId = draft?.id ?? null;
 
   // ── 5. Socket 推 ─────────────────────────────────────────────────────
   const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
@@ -208,6 +256,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     urgent: updatedConv.urgent,
     aiSummary: result.summary,
     hasDraft: draftId !== null,
+    aiMode: clinic.aiMode,
+    autoSent,
   });
   if (urgent) {
     // 鐵律：急症 = 實時升級通知（staff 側 toast + 隊列頂部紅標）
@@ -233,12 +283,148 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       model: result.model,
       latencyMs: result.latencyMs,
       tokens: result.tokens,
+      aiMode: clinic.aiMode,
       draft: draftId !== null,
+      autoSent,
     },
     "ai: classified"
   );
 
-  return { ok: true, intent: result.intent, urgent: updatedConv.urgent, draft: draftId !== null };
+  return { ok: true, intent: result.intent, urgent: updatedConv.urgent, draft: draftId !== null, autoSent };
+}
+
+/**
+ * AUTO 模式自動發送（Phase 2b）— 行既有 outbound chain，唔另開路徑。
+ *
+ * 冪等：同一 draft 只可對應一條 OUT 訊息（re-delivery / BullMQ retry 重跑唔會重發）。
+ * 失敗降級：enqueue 失敗 → message 標 FAILED + draft 回退 PROPOSED（staff 可手動處理）。
+ * AuditLog 必登（AI_AUTO_SEND）— metadata only，永不存訊息原文。
+ *
+ * @returns true = 已（或已經）自動發送；false = 降級（draft 仍 PROPOSED，staff 處理）
+ */
+async function attemptAutoSend(args: {
+  conv: {
+    id: string;
+    clinicId: string;
+    contactId: string;
+    status: string;
+    lastInboundAt: Date | null;
+  };
+  clinic: { id: string; code: string };
+  draft: { id: string; draftText: string; status: string };
+  msg: { id: string; waMessageId: string | null };
+  result: ClassifyAndDraftResult;
+}): Promise<boolean> {
+  const { conv, clinic, draft, msg, result } = args;
+  const now = new Date();
+
+  // 冪等 guard：呢個 draft 已經發過 → skip
+  const existing = await prisma.message.findFirst({
+    where: { conversationId: conv.id, direction: "OUT", aiDraftId: draft.id },
+    select: { id: true },
+  });
+  if (existing) {
+    log.info(
+      { clinic: clinic.code, conversationId: conv.id, draftId: draft.id, messageId: existing.id },
+      "ai: AUTO send already exists — idempotent skip (no re-send)"
+    );
+    return true;
+  }
+
+  // 寫 OUT 訊息（QUEUED）— 完全跟 staff 發送同一條 outbound 鏈
+  const outMsg = await prisma.message.create({
+    data: {
+      conversationId: conv.id,
+      direction: "OUT",
+      channel: "API",
+      type: "text",
+      body: draft.draftText,
+      status: "QUEUED",
+      sentByStaffId: null,
+      aiAutoSent: true,
+      aiDraftId: draft.id,
+      waTimestamp: now,
+    },
+  });
+
+  // 入 outbound queue（mock/real Graph、retries、rate limit 全部沿用）
+  try {
+    await Promise.race([
+      outboundQueue.add("send", { messageId: outMsg.id }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("enqueue timeout")), 1500)
+      ),
+    ]);
+  } catch (err) {
+    // queue 寫入失敗（Redis 問題）→ 降級：message FAILED + draft 回退 PROPOSED（staff 可審批發送）
+    await prisma.message
+      .update({ where: { id: outMsg.id }, data: { status: "FAILED", errorCode: "ENQUEUE_FAILED" } })
+      .catch(() => undefined);
+    await prisma.auditLog
+      .create({
+        data: {
+          staffId: null,
+          action: "AI_AUTO_SEND_FAILED",
+          entity: "Message",
+          entityId: outMsg.id,
+          meta: {
+            conversationId: conv.id,
+            messageId: outMsg.id,
+            draftId: draft.id,
+            intent: result.intent,
+            urgency: result.urgency,
+          } as Prisma.InputJsonValue,
+        },
+      })
+      .catch(() => undefined);
+    log.error(
+      { clinic: clinic.code, conversationId: conv.id, messageId: outMsg.id, err: err instanceof Error ? err.message : String(err) },
+      "ai: AUTO send enqueue failed — message FAILED, draft back to PROPOSED (staff manual)"
+    );
+    return false;
+  }
+
+  // enqueue 成功 → 留底 draft（SENT_AUTO，staff 之後可審計）+ AuditLog 必登（metadata only）
+  await prisma.aiDraft.update({
+    where: { id: draft.id },
+    data: { status: "SENT_AUTO", finalText: draft.draftText },
+  });
+  await prisma.auditLog
+    .create({
+      data: {
+        staffId: null,
+        action: "AI_AUTO_SEND",
+        entity: "Message",
+        entityId: outMsg.id,
+        meta: {
+          conversationId: conv.id,
+          messageId: outMsg.id,
+          draftId: draft.id,
+          intent: result.intent,
+          urgency: result.urgency,
+        } as Prisma.InputJsonValue,
+      },
+    })
+    .catch(() => undefined);
+
+  await prisma.$executeRaw`
+    UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
+
+  // ★ metadata only — 冇 body / draftText / summary
+  log.info(
+    {
+      clinic: clinic.code,
+      clinicId: clinic.id,
+      conversationId: conv.id,
+      messageId: outMsg.id,
+      draftId: draft.id,
+      intent: result.intent,
+      urgency: result.urgency,
+      replyWamid: msg.waMessageId,
+    },
+    "ai: AUTO send queued (outbound chain; draft=SENT_AUTO)"
+  );
+  return true;
 }
 
 export function startAiWorker(): Worker {

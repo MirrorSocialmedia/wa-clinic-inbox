@@ -24,6 +24,15 @@
 #   T16 AI_MOCK_FAIL=1 降級：舊 intent 保留 + 無新 draft + inbox 200 + stats 記 fail
 #   T17 HISTORY/APP_ECHO 唔觸發 AI queue（job key count 斷言）
 #   T18 log PII 抽查：server/worker log 無訊息原文（metadata only 鐵律）
+#   T19 (Phase 2b) AUTO 模式 BOOKING_REQUEST → 自動發送（mock Graph 收到）+ Message aiAutoSent=true
+#       + sentByStaffId=null + AuditLog(AI_AUTO_SEND) + draft SENT_AUTO
+#   T20 (Phase 2b) AUTO + URGENT_PAIN → 唔自動發 + urgent flag + escalation（鐵律實測）+ fallback log
+#   T21 (Phase 2b) AUTO + needsHuman=true（「想搵人工」）→ 出 pending draft 唔自動發
+#   T22 (Phase 2b) DRAFT 舖（MF 預設）行為唔變（有 draft、冇自動發）
+#   T23 (Phase 2b) AUTO 舖過 24h window → 唔自動發 + fallback log（window-closed）
+#   T24 (Phase 2b) STAFF 攞別店/自家店 aiMode / PATCH 別店 aiMode → 403（RBAC）
+#   T25 (Phase 2b) AUTO 發送冪等：re-delivery（重 enqueue AI job）唔重發
+#   T26 (Phase 2b) AUTO 發送 log PII 抽查（鐵律 1 擴展）
 #
 set -u
 cd "$(dirname "$0")/.."
@@ -106,7 +115,9 @@ TKW_EMAIL=$(awk '/^TKW STAFF:/{print $3}' .dev/credentials.txt)
 TKW_PASS=$(awk '/^TKW STAFF:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
 MF_EMAIL=$(awk '/^MF STAFF:/{print $3}' .dev/credentials.txt)
 MF_PASS=$(awk '/^MF STAFF:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
-[ -n "$TKW_EMAIL" ] && [ -n "$TKW_PASS" ] || { echo "FATAL: 讀唔到 credentials"; exit 1; }
+ADMIN_EMAIL=$(awk '/^ADMIN:/{print $2}' .dev/credentials.txt)
+ADMIN_PASS=$(awk '/^ADMIN:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
+[ -n "$TKW_EMAIL" ] && [ -n "$TKW_PASS" ] && [ -n "$ADMIN_EMAIL" ] && [ -n "$ADMIN_PASS" ] || { echo "FATAL: 讀唔到 credentials"; exit 1; }
 
 # clinic ids
 TKW_CLINIC_ID=$(q "SELECT id FROM \"Clinic\" WHERE code='TKW'" | jf id)
@@ -156,6 +167,18 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_MF" \
   -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$MF_EMAIL\",\"password\":\"$MF_PASS\"}")
 check "T1b login staff-mf → 200" "$CODE" "200"
+
+# Phase 2b：ADMIN login + 重置所有 clinic 回 DRAFT（冪等起點 — 上輪 e2e 可能留低 AUTO）
+COOKIE_ADMIN=/tmp/e2e-cookie-admin.txt
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_ADMIN" \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\"}")
+check "T1c login admin → 200" "$CODE" "200"
+for cid in "$TKW_CLINIC_ID" "$MF_CLINIC_ID"; do
+  curl -s -o /dev/null -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$cid" \
+    -H 'Content-Type: application/json' -d '{"aiMode":"DRAFT"}'
+done
+echo "  aiMode reset → DRAFT (deterministic start)"
 
 # ── T2. 跨店 403（列表） ───────────────────────────────────────────────
 echo "[4/9] T2: cross-clinic 403..."
@@ -387,6 +410,155 @@ for kw in "e2e 第一則" "医生我牙好痛" "我想預約下週" "想問下�
   fi
 done
 check "T18 log 抽查：server/worker log 無訊息原文（metadata only）" "$LOGPII" "0"
+
+# ══════════════ Phase 2b：逐舖 AI 模式（DRAFT / AUTO） ══════════════
+
+# ── T19. AUTO 模式 BOOKING_REQUEST → 自動發送（全鏈實測） ─────────────────
+echo "[10/10] T19: AUTO mode auto-send (BOOKING_REQUEST)..."
+CODE=$(curl -s -o /tmp/e2e-t19-a.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH \
+  "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"AUTO"}')
+check "T19 PATCH aiMode=AUTO → 200" "$CODE" "200"
+MODE_T19=$(grep -oE '"aiMode":"[A-Z]*"' /tmp/e2e-t19-a.json | head -1 | cut -d'"' -f4)
+check "T19 clinic.aiMode=AUTO 已持久化" "$MODE_T19" "AUTO"
+
+PATIENT_AUTO1="8526011${EPOCH}"
+WAMID_AUTO1="wamid.E2E_AUTO1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AUTO1" --text "想預約下週有冇位" --wamid "$WAMID_AUTO1" --name "E2E AUTO booking" >/dev/null || fail "T19 mock-inbound POST"
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$WAMID_AUTO1'" '[{"c":"1"}]' 15
+AUTO1_MSG_ID=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_AUTO1'" | jf id)
+AUTO1_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AUTO1'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$AUTO1_MSG_ID'" '[{"s":"SENT_AUTO"}]' 30; then
+  pass "T19 draft 記錄 SENT_AUTO（留底俾審計）"
+else
+  fail "T19 draft SENT_AUTO"
+fi
+# OUT 訊息：aiAutoSent=true + sentByStaffId=null + SENT（mock Graph 收到）+ 有 waMessageId
+if wait_for "SELECT (m.\"aiAutoSent\")::text a, (m.\"sentByStaffId\" IS NULL)::text n, m.\"status\"::text s, (m.\"waMessageId\" IS NOT NULL)::text w FROM \"Message\" m WHERE m.\"conversationId\"='$AUTO1_CONV' AND m.direction='OUT'" \
+  '[{"a":"true","n":"true","s":"SENT","w":"true"}]' 30; then
+  pass "T19 自動發送：Message(OUT, aiAutoSent=true, sentByStaffId=null) + mock Graph 已收（SENT + wamid）"
+else
+  fail "T19 自動發送 Message"
+fi
+AUTO1_OUT_ID=$(q "SELECT m.id FROM \"Message\" m WHERE m.\"conversationId\"='$AUTO1_CONV' AND m.direction='OUT' AND m.\"aiAutoSent\"=true" | jf id)
+AUDIT_T19=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='AI_AUTO_SEND' AND \"entityId\"='$AUTO1_OUT_ID'" | jf c)
+check "T19 AuditLog 登記 AI_AUTO_SEND（可審計）" "$AUDIT_T19" "1"
+AUDIT_NO_PII=$(q "SELECT (meta->>'conversationId')::text c FROM \"AuditLog\" WHERE action='AI_AUTO_SEND' AND \"entityId\"='$AUTO1_OUT_ID'" | jf c)
+check "T19 AuditLog meta 帶 conversationId（metadata only，無原文）" "$AUDIT_NO_PII" "$AUTO1_CONV"
+
+# ── T20. AUTO + URGENT_PAIN → 鐵律：永不自動發 ──────────────────────────
+echo "[10/10] T20: AUTO + URGENT_PAIN (iron rule)..."
+PATIENT_AUTO2="8526012${EPOCH}"
+WAMID_AUTO2="wamid.E2E_AUTO2_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AUTO2" --text "牙痛到瞓唔著" --wamid "$WAMID_AUTO2" --name "E2E AUTO urgent" >/dev/null || fail "T20 mock-inbound POST"
+if wait_for "SELECT c.\"intent\" i, c.\"urgent\"::text u FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AUTO2'" \
+  '[{"i":"URGENT_PAIN","u":"true"}]' 30; then
+  pass "T20 URGENT_PAIN + urgent=true（escalation 觸發）"
+else
+  fail "T20 URGENT_PAIN + urgent"
+fi
+sleep 3
+AUTO2_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AUTO2'" | jf id)
+OUT2=$(q "SELECT count(*)::text c FROM \"Message\" m WHERE m.\"conversationId\"='$AUTO2_CONV' AND m.direction='OUT'" | jf c)
+check "T20 AUTO 舖 URGENT_PAIN 唔自動發（0 OUT 訊息 — 鐵律實測）" "$OUT2" "0"
+DR2=$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$AUTO2_CONV'" | jf c)
+check "T20 URGENT_PAIN 無 draft（code + prompt 雙重擋）" "$DR2" "0"
+if grep -F "wamid.E2E_AUTO2_${EPOCH}" /tmp/e2e-worker*.log 2>/dev/null | grep -q "not eligible"; then
+  pass "T20 fallback log（AUTO not eligible，metadata only）"
+else
+  fail "T20 fallback log"
+fi
+
+# ── T21. AUTO + needsHuman=true → 出 pending draft，唔自動發 ─────────────
+echo "[10/10] T21: AUTO + needsHuman..."
+PATIENT_AUTO3="8526013${EPOCH}"
+WAMID_AUTO3="wamid.E2E_AUTO3_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AUTO3" --text "想搵人工" --wamid "$WAMID_AUTO3" --name "E2E AUTO human" >/dev/null || fail "T21 mock-inbound POST"
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$WAMID_AUTO3'" '[{"c":"1"}]' 15
+AUTO3_MSG_ID=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_AUTO3'" | jf id)
+AUTO3_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AUTO3'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$AUTO3_MSG_ID'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T21 needsHuman 出 pending draft（PROPOSED，staff 審批）"
+else
+  fail "T21 needsHuman draft"
+fi
+sleep 2
+OUT3=$(q "SELECT count(*)::text c FROM \"Message\" m WHERE m.\"conversationId\"='$AUTO3_CONV' AND m.direction='OUT'" | jf c)
+check "T21 needsHuman 永不自動發（0 OUT 訊息 — 鐵律）" "$OUT3" "0"
+INT3=$(q "SELECT \"intent\" i FROM \"Conversation\" WHERE id='$AUTO3_CONV'" | jf i)
+check "T21 intent=QUESTION（非急症，needsHuman mock trigger）" "$INT3" "QUESTION"
+
+# ── T22. DRAFT 舖（MF 預設）行為唔變 ──────────────────────────────────────
+echo "[10/10] T22: DRAFT clinic unchanged..."
+MODE_MF=$(q "SELECT \"aiMode\"::text m FROM \"Clinic\" WHERE id='$MF_CLINIC_ID'" | jf m)
+check "T22 MF clinic 預設 DRAFT" "$MODE_MF" "DRAFT"
+PATIENT_DRAFT1="8526021${EPOCH}"
+WAMID_DRAFT1="wamid.E2E_DRAFT1_${EPOCH}"
+pnpm -s mock-inbound message --clinic MF --from "$PATIENT_DRAFT1" --text "想預約下週" --wamid "$WAMID_DRAFT1" --name "E2E DRAFT booking" >/dev/null || fail "T22 mock-inbound POST"
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$WAMID_DRAFT1'" '[{"c":"1"}]' 15
+DRAFT1_MSG_ID=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_DRAFT1'" | jf id)
+DRAFT1_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_DRAFT1'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$DRAFT1_MSG_ID'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T22 DRAFT 舖：draft PROPOSED pending（舊行為）"
+else
+  fail "T22 draft PROPOSED"
+fi
+OUT4=$(q "SELECT count(*)::text c FROM \"Message\" m WHERE m.\"conversationId\"='$DRAFT1_CONV' AND m.direction='OUT'" | jf c)
+check "T22 DRAFT 舖：冇自動發（0 OUT 訊息）" "$OUT4" "0"
+
+# ── T23. AUTO 舖過 24h window → 唔自動發 + log ──────────────────────────
+echo "[10/10] T23: AUTO + window closed..."
+PATIENT_OLD="8526014${EPOCH}"
+OLD_OUT=$(pnpm -s e2e:ai-job old-inbound --clinic TKW --from "$PATIENT_OLD" --text "想預約下週" 2>/dev/null)
+T23_CONV=$(echo "$OLD_OUT" | grep -oE 'CONV=[^ ]*' | cut -d= -f2)
+[ -n "$T23_CONV" ] || fail "T23 e2e-ai-job old-inbound"
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"conversationId\"='$T23_CONV'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T23 過窗 → fallback DRAFT（draft PROPOSED 俾 staff）"
+else
+  fail "T23 fallback draft"
+fi
+sleep 2
+OUT5=$(q "SELECT count(*)::text c FROM \"Message\" m WHERE m.\"conversationId\"='$T23_CONV' AND m.direction='OUT'" | jf c)
+check "T23 過 24h window 唔自動發（0 OUT 訊息）" "$OUT5" "0"
+if grep -q "window-closed" /tmp/e2e-worker*.log 2>/dev/null; then
+  pass "T23 fallback log（reason=window-closed，行為同 staff 422 一樣：唔發）"
+else
+  fail "T23 window-closed log"
+fi
+
+# ── T24. STAFF RBAC：aiMode 攞/改 → 403 ──────────────────────────────────
+echo "[10/10] T24: STAFF RBAC on aiMode..."
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/admin/clinics/$TKW_CLINIC_ID")
+check "T24 STAFF GET 別店（aiMode）→ 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X PATCH \
+  "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"AUTO"}')
+check "T24 STAFF PATCH 別店 aiMode → 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/admin/clinics/$MF_CLINIC_ID")
+check "T24 STAFF GET 自家店（admin endpoint）→ 403（fail-closed）" "$CODE" "403"
+# 驗證 TKW 仲係 AUTO（403 PATCH 冇生效）
+MODE_STILL=$(q "SELECT \"aiMode\"::text m FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf m)
+check "T24 被拒 PATCH 冇改動 DB（仍 AUTO）" "$MODE_STILL" "AUTO"
+
+# ── T25. AUTO 發送冪等：re-delivery 唔重發 ──────────────────────────────────
+echo "[10/10] T25: AUTO idempotency (re-delivery)..."
+pnpm -s e2e:ai-job requeue --conversation "$AUTO1_CONV" --message "$AUTO1_MSG_ID" --clinic "$TKW_CLINIC_ID" >/dev/null 2>&1 || fail "T25 requeue"
+sleep 8
+OUT6=$(q "SELECT count(*)::text c FROM \"Message\" m WHERE m.\"conversationId\"='$AUTO1_CONV' AND m.direction='OUT'" | jf c)
+check "T25 re-delivery 唔重發（OUT 訊息仍 =1，冪等）" "$OUT6" "1"
+if grep -q "idempotent skip" /tmp/e2e-worker*.log 2>/dev/null; then
+  pass "T25 idempotent skip log"
+else
+  fail "T25 idempotent skip log"
+fi
+
+# ── T26. AUTO 發送 log PII 抽查（鐵律 1 擴展：含 Phase 2b 新 text） ────────
+LOGPII2=0
+for kw in "想預約下週有冇位" "牙痛到瞓唔著" "想搵人工" "想預約下週"; do
+  if grep -qF "$kw" /tmp/e2e-server.log /tmp/e2e-worker.log /tmp/e2e-worker-fail.log /tmp/e2e-worker2.log 2>/dev/null; then
+    echo "    ❌ PII leak in log (Phase 2b): $kw"
+    LOGPII2=1
+  fi
+done
+check "T26 AUTO 發送 log 無訊息原文（metadata only 鐵律）" "$LOGPII2" "0"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

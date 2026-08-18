@@ -57,6 +57,8 @@ export interface MessageItem {
   status: string;
   errorCode: string | null;
   sentByStaffId: string | null;
+  /** Phase 2b：AI 自動發送標記（AUTO 模式）— UI 顯示「AI 自動覆」，staff 可審計 */
+  aiAutoSent?: boolean;
   waTimestamp: string;
   createdAt: string;
 }

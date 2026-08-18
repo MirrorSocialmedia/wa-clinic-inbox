@@ -14,6 +14,7 @@ interface Clinic {
   waDisplayNumber: string;
   apricotClinicId: string | null;
   greetingConfig: Record<string, unknown> | null;
+  aiMode: "DRAFT" | "AUTO";
   conversationCount: number;
   contactCount: number;
 }
@@ -158,6 +159,44 @@ export default function ClinicsAdmin() {
     await load();
   }
 
+  // Phase 2b：逐舖 AI 模式切換（DRAFT ↔ AUTO）。AUTO 要有醒目提示 + 二次確認。
+  async function setAiMode(c: Clinic) {
+    const next: "DRAFT" | "AUTO" = c.aiMode === "DRAFT" ? "AUTO" : "DRAFT";
+    const ok =
+      next === "AUTO"
+        ? confirm(
+            `⚠️ 即將為 ${c.code} 開啟 AUTO 模式
+
+開啟後：AI 回覆會直接覆病人（唔經 staff 人手確認）。
+例外（永遠唔會自動發，退回 staff 處理）：
+・急症（URGENT_PAIN / HIGH）
+・要求人工（needsHuman）
+・超出 24 小時客服窗口
+
+確定為 ${c.code} 開啟 AUTO？`
+          )
+        : confirm(`確定將 ${c.code} 轉回 DRAFT 模式？（AI 只出建議，staff 採用先發）`);
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/admin/clinics/${c.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ aiMode: next }),
+      });
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        alert(`${body?.error ?? `HTTP ${res.status}`}`);
+        return;
+      }
+      await load();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "切換失敗");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const input =
     "mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
   const label = "block text-sm text-neutral-700";
@@ -185,6 +224,7 @@ export default function ClinicsAdmin() {
               <th className="px-4 py-2">Phone Number ID</th>
               <th className="px-4 py-2">顯示號碼</th>
               <th className="px-4 py-2">對話 / 聯絡人</th>
+              <th className="px-4 py-2">AI 模式</th>
               <th className="px-4 py-2 text-right">操作</th>
             </tr>
           </thead>
@@ -198,6 +238,27 @@ export default function ClinicsAdmin() {
                 <td className="px-4 py-2">
                   {c.conversationCount} / {c.contactCount}
                 </td>
+                <td className="px-4 py-2">
+                  {c.aiMode === "AUTO" ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 border border-amber-300 px-2.5 py-0.5 text-xs font-semibold text-amber-900">
+                      ⚡ AUTO
+                      <span className="font-normal text-amber-700">AI 會直接覆病人</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center rounded-full bg-neutral-100 border border-neutral-300 px-2.5 py-0.5 text-xs font-medium text-neutral-700">
+                      ✏️ DRAFT（預設）
+                    </span>
+                  )}
+                  <button
+                    onClick={() => void setAiMode(c)}
+                    disabled={busy}
+                    className={`ml-2 text-xs hover:underline disabled:opacity-50 ${
+                      c.aiMode === "DRAFT" ? "text-amber-700" : "text-neutral-600"
+                    }`}
+                  >
+                    {c.aiMode === "DRAFT" ? "開 AUTO →" : "轉 DRAFT"}
+                  </button>
+                </td>
                 <td className="px-4 py-2 text-right space-x-3">
                   <button onClick={() => openEdit(c)} className="text-blue-600 hover:underline">
                     編輯
@@ -210,7 +271,7 @@ export default function ClinicsAdmin() {
             ))}
             {clinics.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-6 text-center text-neutral-500">
+                <td colSpan={7} className="px-4 py-6 text-center text-neutral-500">
                   未設診所
                 </td>
               </tr>

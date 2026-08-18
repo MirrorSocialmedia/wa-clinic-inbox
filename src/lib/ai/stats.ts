@@ -13,27 +13,39 @@ export interface AiCallStatsRow {
   okCalls: number;
   lastOkAt: Date | null;
   lastError: string | null;
+  lastLatencyMs: number | null;
+  lastTokens: number | null;
   updatedAt: Date;
 }
 
 /**
  * 記一次 AI call（ok 或 fail）。atomic single-statement upsert。
- * `errMsg` 只准係 server 端錯訊短句（e.g. "vllm 404 : model not found"）—
+ * `errMsg` 只准係 server 端錯訊短句（e.g. "ai 404 : model not found"）—
  * 唔可以包含 prompt / 訊息原文。
+ * `latencyMs`/`tokens` 只喺 ok 時提供 — 記錄最近一次成功 call 嘅實測數據（admin 狀態卡用）。
  */
-export async function recordAiCall(ok: boolean, errMsg?: string): Promise<void> {
+export async function recordAiCall(
+  ok: boolean,
+  errMsg?: string,
+  latencyMs?: number,
+  tokens?: number
+): Promise<void> {
   const okInc = ok ? 1 : 0;
   const lastOk = ok ? new Date() : null;
   const errText = ok ? null : (errMsg ?? "unknown error").slice(0, 200);
+  const lat = ok && typeof latencyMs === "number" ? latencyMs : null;
+  const tok = ok && typeof tokens === "number" ? tokens : null;
   try {
     await prisma.$executeRaw`
-      INSERT INTO "AiCallStats" (id, "totalCalls", "okCalls", "lastOkAt", "lastError", "updatedAt")
-      VALUES (1, 1, ${okInc}, ${lastOk}, ${errText}, now())
+      INSERT INTO "AiCallStats" (id, "totalCalls", "okCalls", "lastOkAt", "lastError", "lastLatencyMs", "lastTokens", "updatedAt")
+      VALUES (1, 1, ${okInc}, ${lastOk}, ${errText}, ${lat}, ${tok}, now())
       ON CONFLICT (id) DO UPDATE SET
         "totalCalls" = "AiCallStats"."totalCalls" + 1,
         "okCalls" = "AiCallStats"."okCalls" + ${okInc},
         "lastOkAt" = COALESCE(${lastOk}, "AiCallStats"."lastOkAt"),
         "lastError" = COALESCE(${errText}, "AiCallStats"."lastError"),
+        "lastLatencyMs" = COALESCE(${lat}, "AiCallStats"."lastLatencyMs"),
+        "lastTokens" = COALESCE(${tok}, "AiCallStats"."lastTokens"),
         "updatedAt" = now()
     `;
   } catch (err) {

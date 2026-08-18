@@ -4,9 +4,11 @@
  * 同真 client 同一 interface（classifyAndDraft → ClassifyAndDraftResult）。
  * 規則決定性：按最新消息內容匹配固定分類/草稿 — 重跑結果一樣（冪等測試友好）。
  *
- * 規則（先急症、後預約、後離題、兜底 QUESTION）：
+ * 規則（先急症、後要求人工、後預約、後離題、兜底 QUESTION）：
  * - 含「痛 / 流血 / 腫 / pain / bleed / swollen…」→ URGENT_PAIN + HIGH + needsHuman=true
  *   → **永不生成 draft**（鐵律 3）
+ * - 含「人工 / 真人 / human」（非急症）→ QUESTION + LOW + needsHuman=true + draft
+ *   （Phase 2b T21：AUTO 模式下 needsHuman 永遠唔自動發，staff 人手審批）
  * - 含「預約 / 想約 / book / appointment / 改期…」→ BOOKING_REQUEST + LOW
  * - 含明顯離題（股票 / 天氣 / 足球…）→ OUT_OF_SCOPE + LOW
  * - 其餘 → QUESTION + LOW（= 任務規格嘅「其餘 GENERAL」歸入 QUESTION）
@@ -33,6 +35,8 @@ export function isAiMockFailEnabled(): boolean {
 export const MOCK_MODEL_NAME = "mock-qwen-v1";
 
 const RE_URGENT = /痛|流血|出血|腫|外傷|感染|止唔到血|severe pain|pain|bleed|swollen|infection/i;
+// Phase 2b：病人明確要求真人（T21 mock trigger）— 急症先判，所以「牙痛，想搵人工」會命中 URGENT
+const RE_NEEDS_HUMAN = /人工|真人|human agent|talk to a human/i;
 const RE_BOOKING = /預約|想約|book|appointment|reschedul|改期|改約|取消預約|有冇位|冇位/i;
 const RE_OUT_OF_SCOPE = /股票|期貨|基金|crypto|加密貨幣|足球|天氣|weather|代寫|寫文/i;
 
@@ -77,6 +81,11 @@ function questionDraft(input: ClassifyAndDraftInput): string {
   );
 }
 
+/** needsHuman 草稿（Phase 2b）— 可以出 draft，但系統永遠唔會自動發。 */
+function needsHumanDraft(input: ClassifyAndDraftInput): string {
+  return `收到！${clinicName(input)}會安排專人盡快同你聯絡，請稍候。如有急事請即刻致電診所。`;
+}
+
 export async function mockClassifyAndDraft(
   input: ClassifyAndDraftInput
 ): Promise<ClassifyAndDraftResult> {
@@ -100,6 +109,16 @@ export async function mockClassifyAndDraft(
       confidence: 0.99,
       summary: "病人主訴劇痛/出血等急性不適（mock）",
       draft: null,
+    };
+  } else if (RE_NEEDS_HUMAN.test(body)) {
+    // Phase 2b：明确要求人工 — 出 pending draft（staff 審批），AUTO 模式亦唔會自動發
+    result = {
+      intent: "QUESTION",
+      urgency: "LOW",
+      needsHuman: true,
+      confidence: 0.9,
+      summary: "病人要求真人處理（mock）",
+      draft: needsHumanDraft(input),
     };
   } else if (RE_BOOKING.test(body)) {
     result = {

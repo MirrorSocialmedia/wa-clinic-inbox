@@ -45,7 +45,17 @@ enum DraftStatus {
   PROPOSED
   SENT_AS_IS
   SENT_EDITED
+  // Phase 2b：AUTO 模式 AI 直接發出（staff 之後可審計；sentByStaffId=null + aiAutoSent=true）
+  SENT_AUTO
   DISCARDED
+}
+
+// Phase 2b：逐舖 AI 模式（指揮大神 2026-08-18 決定，覆蓋 MD D5「AI 永不發送」）
+// DRAFT = 預設：AI 只出建議，staff 採用先發；AUTO = AI 回覆直接自動發出
+// （URGENT_PAIN / HIGH / needsHuman / 過 24h 窗口 永遠例外 — 退回 DRAFT 行為）
+enum AiMode {
+  DRAFT
+  AUTO
 }
 
 enum BookingStatus {
@@ -63,6 +73,8 @@ model Clinic {
   waDisplayNumber  String
   apricotClinicId  String?                    // 對照 provider-roster 已有實值
   greetingConfig   Json?                      // 營業時間/地址/常見 FAQ，餵畀 AI 草稿用
+  // Phase 2b：逐舖 AI 模式（default DRAFT = 舊行為；AUTO = AI 可直接自動發）
+  aiMode           AiMode  @default(DRAFT)
 }
 
 model StaffUser {
@@ -127,6 +139,11 @@ model Message {
   errorCode      String?
   sentByStaffId  String?
   aiDraftId      String?
+  // Phase 2b：AI 自動發送標記（AUTO 模式）。設計決策：唔加獨立 `source` enum —
+  // 現有 channel(API/APP_ECHO/HISTORY) + sentByStaffId(null) + aiDraftId 已足夠
+  // 識別「系統 AI 自動發」；再加 source 會同 channel 雙重事實來源（drift 風險）。
+  // AUTO 訊息 = direction=OUT + channel=API + sentByStaffId=null + aiAutoSent=true。
+  aiAutoSent     Boolean  @default(false)
   waTimestamp    DateTime @db.Timestamptz
   createdAt      DateTime @db.Timestamptz  @default(now())
   @@index([conversationId, waTimestamp])
@@ -157,6 +174,9 @@ model AiCallStats {
   okCalls    Int       @default(0)
   lastOkAt   DateTime? @db.Timestamptz
   lastError  String?
+  // Phase 2b：最近一次成功 call 嘅 latency/tokens（admin AI 狀態卡實測數據；metadata only）
+  lastLatencyMs Int?
+  lastTokens    Int?
   updatedAt  DateTime  @db.Timestamptz @default(now()) @updatedAt
 }
 
@@ -206,9 +226,12 @@ model WebhookEvent {                           // 冪等 + 除錯（★ 唔存 p
 
 model AuditLog {
   id        String   @id @default(cuid())
-  staffId   String?
-  action    String                             // SEND / CONFIRM_BOOKING / LOGIN / EXPORT ...
+  staffId   String?                              // AI 自動發送 = null（無 staff 參與）
+  action    String                             // SEND / AI_AUTO_SEND / CONFIRM_BOOKING / LOGIN / EXPORT ...
   entity    String?
   entityId  String?
+  // Phase 2b：附加 metadata（metadata only — 永不存訊息原文 PII）。
+  // AI_AUTO_SEND 用：{ conversationId, draftId, intent, urgency }
+  meta      Json?
   createdAt DateTime @db.Timestamptz @default(now())
 }

@@ -153,6 +153,8 @@ export function ChatPane(p: Props) {
           const isOut = m.direction === "OUT";
           const isEcho = m.channel === "APP_ECHO";
           const isHistory = m.channel === "HISTORY";
+          // Phase 2b：AI 自動發送（AUTO 模式）— 視覺標記俾 staff 審計
+          const isAuto = isOut && m.aiAutoSent === true;
           const prev = p.messages[i - 1];
           const media = mediaSrc(m.mediaPath);
           return (
@@ -166,6 +168,9 @@ export function ChatPane(p: Props) {
                     : "bg-white text-neutral-800 border border-neutral-200"
                 } ${isHistory ? "opacity-70" : ""}`}
               >
+                {isAuto && (
+                  <div className="text-[10px] text-violet-700 font-medium mb-0.5">🤖 AI 自動覆</div>
+                )}
                 {isEcho && (
                   <div className="text-[10px] text-teal-700 font-medium mb-0.5">📱 App 發出</div>
                 )}

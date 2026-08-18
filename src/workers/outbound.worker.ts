@@ -167,6 +167,7 @@ function publicMsg(msg: {
   status: string;
   errorCode: string | null;
   sentByStaffId: string | null;
+  aiAutoSent: boolean;
   waTimestamp: Date;
   createdAt: Date;
 }) {
@@ -182,6 +183,8 @@ function publicMsg(msg: {
     status: msg.status,
     errorCode: msg.errorCode,
     sentByStaffId: msg.sentByStaffId,
+    // Phase 2b：UI 用呢個顯示「AI 自動覆」標記（staff 可審計）
+    aiAutoSent: msg.aiAutoSent,
     waTimestamp: msg.waTimestamp,
     createdAt: msg.createdAt,
   };

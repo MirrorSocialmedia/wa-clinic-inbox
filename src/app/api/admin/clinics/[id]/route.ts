@@ -6,38 +6,29 @@ import { requireAdmin } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 
 /**
- * /api/admin/clinics/[id] — ADMIN-only。
+ * /api/admin/clinics/[id] — ADMIN-only（RBAC fail-closed：STAFF 一律 403，E2E T24 實測）。
  *
- * GET   : 單店詳情
- * PUT   : 更新（code/name/waPhoneNumberId/waDisplayNumber/greetingConfig）
+ * GET   : 單店詳情（含 aiMode）
+ * PUT   : 更新（code/name/waPhoneNumberId/waDisplayNumber/greetingConfig/aiMode）
+ * PATCH : 部分更新（同 PUT — Phase 2b UI 用 PATCH 切 aiMode）
  * DELETE: 刪除 — 有對話/聯絡人/員工掛住 → 409（fail-closed，唔做 cascade 刪病人資料）
  */
 export const dynamic = "force-dynamic";
-
-const greetingConfigSchema = z
-  .union([z.record(z.string(), z.unknown()), z.null()])
-  .optional()
-  .default(null);
 
 const updateSchema = z.object({
   code: z.string().min(1).max(16).optional(),
   name: z.string().min(1).max(100).optional(),
   waPhoneNumberId: z.string().min(1).max(64).optional(),
   waDisplayNumber: z.string().min(1).max(32).optional(),
-  greetingConfig: greetingConfigSchema,
+  // 注意：冇 default — PATCH 部分更新時，未傳嘅字段唔好被 default 覆蓋（e.g. 淨系改 aiMode 唔可清掉 greetingConfig）
+  greetingConfig: z.union([z.record(z.string(), z.unknown()), z.null()]).optional(),
+  // Phase 2b：逐舖 AI 模式（DRAFT=預設只出建議 / AUTO=AI 可直接自動發）
+  aiMode: z.enum(["DRAFT", "AUTO"]).optional(),
 });
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
-  await requireAdmin(req);
-  const { id } = await ctx.params;
-  const clinic = await prisma.clinic.findUnique({ where: { id } });
-  if (!clinic) return NextResponse.json({ error: "not found" }, { status: 404 });
-  return NextResponse.json(clinic);
-});
-
-export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
+async function updateClinic(req: NextRequest, ctx: Ctx) {
   await requireAdmin(req);
   const { id } = await ctx.params;
   const parsed = updateSchema.safeParse(await req.json().catch(() => null));
@@ -51,6 +42,17 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
     }
   }
   const clinic = await prisma.clinic.update({ where: { id }, data });
+  return NextResponse.json(clinic);
+}
+
+export const PUT = handle(updateClinic);
+export const PATCH = handle(updateClinic);
+
+export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
+  await requireAdmin(req);
+  const { id } = await ctx.params;
+  const clinic = await prisma.clinic.findUnique({ where: { id } });
+  if (!clinic) return NextResponse.json({ error: "not found" }, { status: 404 });
   return NextResponse.json(clinic);
 });
 

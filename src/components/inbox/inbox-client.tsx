@@ -437,6 +437,7 @@ export function InboxClient({
           status: "QUEUED",
           errorCode: null,
           sentByStaffId: user.staffId,
+          aiAutoSent: false,
           waTimestamp: new Date().toISOString(),
           createdAt: new Date().toISOString(),
         };

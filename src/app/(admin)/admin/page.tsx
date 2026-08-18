@@ -4,6 +4,8 @@ import { getAiStatusSnapshot } from "@/lib/ai/status";
  * /admin — 總覽 + AI 狀態卡（Phase 2）。
  * ADMIN-only 由 layout 把關（未登入 → /login；STAFF → /inbox）。
  * AI 狀態 = 真數據（mode/model/breaker/probe/call 統計）— healthz 同源。
+ * Phase 2b：加最近一次 call 實測 latency/tokens + 各舖 AI 模式（DRAFT/AUTO）
+ * 同近 24h 自動發數量/成功率。
  */
 export const metadata = { title: "總覽 — WA Clinic Inbox" };
 
@@ -81,6 +83,14 @@ export default async function AdminOverviewPage() {
               value={rate === null ? "—" : `${rate}%（${ai.stats!.okCalls}/${ai.stats!.totalCalls}）`}
               tone={rate === null ? undefined : rate >= 90 ? "ok" : rate >= 70 ? "warn" : "bad"}
             />
+            <Row
+              label="最近 latency"
+              value={ai.stats?.lastLatencyMs !== null && ai.stats?.lastLatencyMs !== undefined ? `${ai.stats.lastLatencyMs}ms` : "—"}
+            />
+            <Row
+              label="最近 tokens"
+              value={ai.stats?.lastTokens !== null && ai.stats?.lastTokens !== undefined ? String(ai.stats.lastTokens) : "—"}
+            />
             <Row label="最近成功" value={ai.stats?.lastOkAt ? new Date(ai.stats.lastOkAt).toLocaleString("zh-HK") : "—"} />
             <Row
               label="最近錯誤"
@@ -95,6 +105,60 @@ export default async function AdminOverviewPage() {
             ⚠ AI_MOCK_FAIL=1 生效中 — mock 模擬 AI 斷線（E2E T16 用；上線前必須移除）。
           </p>
         )}
+      </section>
+
+      {/* ── 各舖 AI 模式（Phase 2b：DRAFT/AUTO + 近 24h 自動發統計） ── */}
+      <section className="bg-white rounded-lg border border-neutral-200 p-5">
+        <h2 className="font-medium text-neutral-900 mb-3">各舖 AI 模式（近 24h）</h2>
+        <table className="w-full text-sm">
+          <thead className="text-left text-neutral-500 border-b border-neutral-200">
+            <tr>
+              <th className="py-2 font-medium">店舖</th>
+              <th className="py-2 font-medium">模式</th>
+              <th className="py-2 font-medium">24h 自動發</th>
+              <th className="py-2 font-medium">成功率</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ai.clinics.map((c) => {
+              const rate24 =
+                c.successRate24h === null ? null : Math.round(c.successRate24h * 100);
+              return (
+                <tr key={c.id} className="border-b border-neutral-100 last:border-0">
+                  <td className="py-2">
+                    {c.code}
+                    <span className="text-neutral-400 ml-2 text-xs">{c.name}</span>
+                  </td>
+                  <td className="py-2">
+                    {c.aiMode === "AUTO" ? (
+                      <span className="inline-flex items-center rounded-full bg-amber-100 border border-amber-300 px-2 py-0.5 text-xs font-semibold text-amber-900">
+                        ⚡ AUTO — AI 直接覆病人
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center rounded-full bg-neutral-100 border border-neutral-300 px-2 py-0.5 text-xs text-neutral-700">
+                        ✏️ DRAFT（預設）
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2">{c.autoSent24h === 0 ? "—" : `${c.autoSentOk24h}/${c.autoSent24h} 則`}</td>
+                  <td className="py-2">
+                    {rate24 === null ? (
+                      "—"
+                    ) : (
+                      <span className={rate24 >= 90 ? "text-green-700" : rate24 >= 70 ? "text-amber-600" : "text-red-600"}>
+                        {rate24}%
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <p className="mt-3 text-xs text-neutral-500">
+          AUTO 鐵律：URGENT_PAIN / HIGH / needsHuman / 超出 24h 窗口 永遠唔自動發（退回 staff 處理）；
+          切換見「診所」頁。
+        </p>
       </section>
 
       {/* ── 管理入口 ── */}
