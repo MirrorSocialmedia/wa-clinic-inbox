@@ -35,10 +35,21 @@ export interface AiClinicInfo {
   greetingConfig: Record<string, unknown> | null;
 }
 
+/**
+ * Phase 4：當日當值名單（clinic-workforce 窄 API，4 欄白名單 — MD §9.2）。
+ * AI 可以答「今日邊個喺度」；fetch 失敗 = null（prompt 唔注入呢段，mock AI 唔影響）。
+ */
+export interface AiDutyRoster {
+  date: string; // YYYY-MM-DD (HK)
+  entries: { staffName: string; role: string; shiftStart: string; shiftEnd: string }[];
+}
+
 export interface ClassifyAndDraftInput {
   /** 按 waTimestamp 升序（舊 → 新），最後一條通常係觸發嘅 inbound */
   messages: AiContextMessage[];
   clinic: AiClinicInfo;
+  /** Phase 4：當日當值（可選；null/空 = 唔注入） */
+  dutyRoster?: AiDutyRoster | null;
 }
 
 /**

@@ -17,7 +17,7 @@
  * - prompt 含訊息原文係必要嘅（AI 要讀先分類得）— 但 AI 100% 本地 vLLM（D4）。
  * - prompt 本身永不入 log。log 只准 intent/urgency/latency/model/tokens metadata。
  */
-import type { AiClinicInfo, AiContextMessage, ClassifyAndDraftInput } from "./types";
+import type { AiClinicInfo, AiContextMessage, AiDutyRoster, ClassifyAndDraftInput } from "./types";
 import { AI_INTENTS, AI_URGENCIES } from "./types";
 
 /** 餵入 prompt 嘅最近對話條數（MD §7.3：近 10 條） */
@@ -54,7 +54,8 @@ export function buildSystemPrompt(): string {
     "draft（建議覆 reply；若診所係 AUTO 模式且非緊急，呢段會直接自動發畀病人）：",
     "- intent=URGENT_PAIN 或 urgency=HIGH 時必須為 null（緊急鐵律：永不出草稿，更唔會自動發）",
     "- needsHuman=true 時可以出草稿（staff 會人手審批，系統永遠唔會自動發）；也可以為 null",
-    "- 只可以用「診所基本資料」入面有提供嘅事實（地址 / 營業時間 / 醫生 / FAQ）。",
+    "- 只可以用「診所基本資料」入面有提供嘅事實（地址 / 營業時間 / 醫生 / FAQ / 今日當值）。",
+    "- 病人問「今日邊個喺度 / 邊個姑娘當值 / 邊個醫生今日有冇時間（只限當值層面）」→ 可以照「今日當值員工」列表答名同更時；唔好答列表之外嘅人。",
     "- 鐵律：唔准提供任何醫療建議、診斷、用藥建議；病人問痛楚 / 症狀一律寫「建議盡快返嚟俾醫生檢查」級別嘅回應，唔准開藥、唔准斷症。",
     "- 唔知就話唔知，唔准作價錢（收費問題一律說「具體費用請到店同前台確認」）。",
     "- 語氣：禮貌廣東話書面混合，跟診所前台口吻；簡短（2-4 句）；必須係可以直接發畀病人嘅完整回覆。",
@@ -100,10 +101,20 @@ function msgLine(m: AiContextMessage): string {
   return `[${who}] ${ts} ${body}`.trimEnd();
 }
 
+function dutyBlock(duty: AiDutyRoster | null | undefined): string {
+  if (!duty || duty.entries.length === 0) return "";
+  const lines = duty.entries
+    .map((e) => `${e.staffName}（${e.role}，${e.shiftStart}-${e.shiftEnd}）`)
+    .join("、");
+  return `今日（${duty.date}）當值員工：${lines}`;
+}
+
 export function buildUserPrompt(input: ClassifyAndDraftInput): string {
   const msgs = input.messages.slice(-PROMPT_CONTEXT_MESSAGES);
+  const duty = dutyBlock(input.dutyRoster);
   return [
     clinicBlock(input.clinic),
+    duty ? `\n${duty}` : "",
     "",
     "最近對話（由舊到新）：",
     ...msgs.map(msgLine),

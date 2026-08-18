@@ -57,6 +57,12 @@ export interface BookingInfo {
   createdAt: string;
 }
 
+/** Phase 4：今日當值（clinic-workforce 窄 API，4 欄白名單 — MD §9.2） */
+export interface DutyInfo {
+  date: string; // YYYY-MM-DD (HK)
+  entries: { staffName: string; role: string; shiftStart: string; shiftEnd: string }[];
+}
+
 export interface MessageItem {
   id: string;
   conversationId: string;

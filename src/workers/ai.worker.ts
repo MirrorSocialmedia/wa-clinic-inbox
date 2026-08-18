@@ -14,6 +14,7 @@ import {
   type ClassifyAndDraftResult,
 } from "@/lib/ai";
 import { PROMPT_CONTEXT_MESSAGES } from "@/lib/ai/prompts";
+import { fetchDutyRoster, hkToday } from "@/lib/duty/client";
 
 /**
  * ai worker — Phase 2 triage pipeline（框架 MD §7）。
@@ -106,6 +107,10 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   }));
 
   // ── 2. AI call（失敗 = 降級：record + log metadata + throw 俾 BullMQ retry） ──
+  // Phase 4：當日當值名單注入 prompt（AI 可以答「今日邊個喺度」）—
+  // fetchDutyRoster 永遠唔 throw（3s timeout / 404 / 壞 shape → null）；5 分鐘 TTL cache。
+  const dutyToday = hkToday();
+  const dutyEntries = await fetchDutyRoster(clinic.code, dutyToday).catch(() => null);
   let result: ClassifyAndDraftResult;
   try {
     result = await classifyAndDraft({
@@ -114,6 +119,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
         name: clinic.name,
         greetingConfig: (clinic.greetingConfig as Record<string, unknown> | null) ?? null,
       },
+      dutyRoster: dutyEntries && dutyEntries.length > 0 ? { date: dutyToday, entries: dutyEntries } : null,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -11,6 +11,7 @@ import type {
   ConvUpdatedEvent,
   DraftInfo,
   DraftReadyEvent,
+  DutyInfo,
   MessageItem,
   MessageStatusEvent,
   NewMessageEvent,
@@ -48,17 +49,21 @@ export function InboxClient({
   initialClinics,
   initialConversations,
   initialStaff,
+  initialDuty,
   initialSelectedConvId,
 }: {
   user: UserCtx;
   initialClinics: ClinicInfo[];
   initialConversations: ConversationItem[];
   initialStaff: StaffInfo[];
+  /** Phase 4：今日當值（per clinicId；null/缺 = 隱藏卡） */
+  initialDuty?: Record<string, DutyInfo | null>;
   /** Phase 3：?conv=<id> 深連結（/bookings 卡「開對話」） */
   initialSelectedConvId?: string | null;
 }) {
   const clinics = initialClinics;
   const staff = initialStaff;
+  const duty = initialDuty ?? {};
   const [conversations, setConversations] = useState<ConversationItem[]>(initialConversations);
   const [activeClinicId, setActiveClinicId] = useState<string | "all">(
     user.role === "STAFF" ? (user.clinicId ?? "all") : "all"
@@ -655,7 +660,7 @@ export function InboxClient({
         flowBusy={flowBusy}
       />
 
-      <DetailPane conversation={selectedConv} staff={staff} onPatch={patchConversation} />
+      <DetailPane conversation={selectedConv} staff={staff} onPatch={patchConversation} duty={selectedConv ? duty[selectedConv.clinicId] ?? null : null} />
 
       {/* Phase 2：急症升級 toast（socket urgent:escalation） */}
       {urgentToast && (

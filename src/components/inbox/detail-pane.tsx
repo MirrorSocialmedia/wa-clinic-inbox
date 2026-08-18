@@ -1,13 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ConversationItem, ConvStatus, StaffInfo } from "./types";
+import type { ConversationItem, ConvStatus, DutyInfo, StaffInfo } from "./types";
 import { relTime } from "./time";
 
 interface Props {
   conversation: ConversationItem | null;
   staff: StaffInfo[];
   onPatch: (body: { status?: ConvStatus; assigneeId?: string | null; urgent?: boolean }) => Promise<void>;
+  /** Phase 4：今日當值（該對話嘅 clinic；null/空 → 隱藏卡） */
+  duty?: DutyInfo | null;
 }
 
 const STATUS_META: Record<ConvStatus, { label: string; cls: string }> = {
@@ -37,7 +39,7 @@ const URGENCY_LABEL: Record<string, { label: string; cls: string }> = {
  * - assignee 選擇（自己店 staff）
  * - 狀態轉換 OPEN ↔ PENDING ↔ RESOLVED
  */
-export function DetailPane({ conversation, staff, onPatch }: Props) {
+export function DetailPane({ conversation, staff, onPatch, duty }: Props) {
   const [name, setName] = useState("");
   const [labels, setLabels] = useState<string[]>([]);
   const [newLabel, setNewLabel] = useState("");
@@ -188,6 +190,28 @@ export function DetailPane({ conversation, staff, onPatch }: Props) {
             )}
           </div>
         </div>
+
+        {/* Phase 4：今日當值（clinic-workforce 窄 API；null → 隱藏） */}
+        {duty && duty.entries.length > 0 && (
+          <div>
+            <h3 className="text-[11px] uppercase tracking-wide text-neutral-400 font-semibold mb-2">
+              今日當值（{duty.date}）
+            </h3>
+            <div className="rounded border border-neutral-200 bg-neutral-50 p-2.5 text-xs space-y-1">
+              {duty.entries.map((e) => (
+                <div key={`${e.staffName}-${e.shiftStart}`} className="flex justify-between gap-2">
+                  <span className="text-neutral-700">
+                    {e.staffName}
+                    {e.role ? <span className="text-neutral-400 ml-1">（{e.role}）</span> : null}
+                  </span>
+                  <span className="text-neutral-500 font-mono">
+                    {e.shiftStart}–{e.shiftEnd}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* status */}
         <div>
