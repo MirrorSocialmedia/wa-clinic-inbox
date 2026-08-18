@@ -1,12 +1,18 @@
 /**
- * Seed script — 2 間 clinic（TKW/MF，假 waPhoneNumberId）+ 1 ADMIN + 各 1 STAFF。
+ * Seed script — 3 間 clinic（TKW/MF/WTC，假 waPhoneNumberId）+ 1 ADMIN + 各 1 STAFF
+ * + 醫生名錄（Provider/ProviderClinic — Phase 3 SCREEN_PROVIDER 來源）。
  *
  * 用法：pnpm db:seed（= prisma db seed）
- * 冪等：clinic 按 code upsert、staff 按 email upsert。
+ * 冪等：clinic 按 code upsert、staff 按 email upsert、provider 按 apricotId upsert。
  * 密碼只喺「首次建立」時打 log 一次（iron rule：唔存明文，重跑唔會再顯示）。
+ *
+ * Phase 3 補充：
+ * - 醫生名錄由 greetingConfig.doctors 派生，決定性 apricotId（mock-pract-<clinic>-<n>）—
+ *   mock fixture（APRICOT_MOCK=1）同 seed 同一套 id，E2E slot 斷言先可以決定性。
+ * - apricotClinicId 用 MOCK_APRICOT_<code>（真 bot 帳號開通後由 admin 改真值）。
  */
 import { randomBytes } from "node:crypto";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
@@ -16,10 +22,24 @@ const prisma = new PrismaClient();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CRED_FILE = path.join(__dirname, "../.dev/credentials.txt");
 
-function writeCredLine(label: string, email: string, password: string): void {
+/** 讀舊 credential lines（email → line）— 重跑時保留之前創號嘅密碼行。 */
+function readPrevCreds(): Map<string, string> {
+  const map = new Map<string, string>();
+  try {
+    for (const line of readFileSync(CRED_FILE, "utf8").split("\n")) {
+      const m = line.match(/^([A-Z0-9 ]+): (\S+) \/ (.+)$/);
+      if (m) map.set(m[2], line);
+    }
+  } catch {
+    /* 首次運行冇檔 */
+  }
+  return map;
+}
+
+function writeCreds(lines: string[]): void {
   try {
     mkdirSync(path.dirname(CRED_FILE), { recursive: true });
-    writeFileSync(CRED_FILE, `# Local dev credentials (seed output — gitignored)\n${label}: ${email} / ${password}\n`);
+    writeFileSync(CRED_FILE, `# Local dev credentials (seed output — gitignored)\n${lines.join("\n")}\n`);
   } catch {
     /* 寫唔到檔唔阻 seed（密碼已打 log） */
   }
@@ -31,6 +51,7 @@ const CLINICS = [
     name: "TKW 診所（試點店）",
     waPhoneNumberId: "109990000000001",
     waDisplayNumber: "+852 3001 0001",
+    apricotClinicId: "MOCK_APRICOT_TKW",
     greetingConfig: {
       address: "香港旺角彌敦道 100 號 TKW 大廈 3 樓",
       openingHours: "一、二、四、五 10:00-19:00；三、六 10:00-14:00；日公假",
@@ -46,10 +67,25 @@ const CLINICS = [
     name: "MF 診所",
     waPhoneNumberId: "109990000000002",
     waDisplayNumber: "+852 3001 0002",
+    apricotClinicId: "MOCK_APRICOT_MF",
     greetingConfig: {
       address: "香港灣仔軒尼詩道 200 號 MF 中心 5 樓",
       openingHours: "一至五 09:30-18:30；六 09:30-13:00；日公假",
       doctors: ["張家俊", "黃詩韻"],
+      faq: [],
+    },
+  },
+  // Phase 3：第三間試點店（mock fixture 要求 3 店 × 醫生 × 未來 7 日 slot）
+  {
+    code: "WTC",
+    name: "WTC 診所（第三試點店）",
+    waPhoneNumberId: "109990000000003",
+    waDisplayNumber: "+852 3001 0003",
+    apricotClinicId: "MOCK_APRICOT_WTC",
+    greetingConfig: {
+      address: "香港中環德輔道中 300 號 WTC 大廈 8 樓",
+      openingHours: "一至六 10:00-18:00；日公假",
+      doctors: ["劉嘉欣", "沈浩然"],
       faq: [],
     },
   },
@@ -59,6 +95,7 @@ const USERS = [
   { email: "admin@wa-clinic.local", name: "指揮大神", role: "ADMIN" as const, clinicCode: null },
   { email: "staff-tkw@wa-clinic.local", name: "TKW 前台", role: "STAFF" as const, clinicCode: "TKW" },
   { email: "staff-mf@wa-clinic.local", name: "MF 前台", role: "STAFF" as const, clinicCode: "MF" },
+  { email: "staff-wtc@wa-clinic.local", name: "WTC 前台", role: "STAFF" as const, clinicCode: "WTC" },
 ];
 
 function randomPassword(prefix: string): string {
@@ -67,6 +104,7 @@ function randomPassword(prefix: string): string {
 
 async function main(): Promise<void> {
   const clinicIds = new Map<string, string>();
+  const prevCreds = readPrevCreds();
 
   for (const c of CLINICS) {
     const clinic = await prisma.clinic.upsert({
@@ -75,13 +113,37 @@ async function main(): Promise<void> {
         name: c.name,
         waPhoneNumberId: c.waPhoneNumberId,
         waDisplayNumber: c.waDisplayNumber,
+        apricotClinicId: c.apricotClinicId,
         greetingConfig: c.greetingConfig as object,
       },
       create: c,
     });
     clinicIds.set(c.code, clinic.id);
-    console.log(`[seed] clinic ${c.code} (${clinic.id}) waPhoneNumberId=${c.waPhoneNumberId}`);
+    console.log(`[seed] clinic ${c.code} (${clinic.id}) waPhoneNumberId=${c.waPhoneNumberId} apricotClinicId=${c.apricotClinicId}`);
   }
+
+  // Phase 3：醫生名錄（Provider/ProviderClinic）— 決定性 apricotId（mock fixture 對照用）
+  for (const c of CLINICS) {
+    const clinicId = clinicIds.get(c.code)!;
+    const doctors: string[] = (c.greetingConfig.doctors as string[]) ?? [];
+    for (let i = 0; i < doctors.length; i++) {
+      const apricotId = `mock-pract-${c.code.toLowerCase()}-${i + 1}`;
+      const name = doctors[i];
+      const provider = await prisma.provider.upsert({
+        where: { apricotId },
+        update: { name, active: true },
+        create: { name, apricotId, active: true },
+      });
+      await prisma.providerClinic.upsert({
+        where: { providerId_clinicId: { providerId: provider.id, clinicId } },
+        update: {},
+        create: { providerId: provider.id, clinicId },
+      });
+    }
+    console.log(`[seed] ${c.code} doctors: ${doctors.join(", ")}`);
+  }
+
+  const credLines: string[] = [];
 
   for (const u of USERS) {
     const existing = await prisma.staffUser.findUnique({ where: { email: u.email } });
@@ -112,10 +174,22 @@ async function main(): Promise<void> {
         active: true,
       },
     });
-    // ★ 密碼只打 log 一次（創號嗰陣）+ 寫入 gitignored .dev/credentials.txt（本地 E2E 用）
-    writeCredLine(u.role === "ADMIN" ? "ADMIN" : `${u.clinicCode} STAFF`, user.email, password);
+    const label = u.role === "ADMIN" ? "ADMIN" : `${u.clinicCode} STAFF`;
+    credLines.push(`${label}: ${user.email} / ${password}`);
     console.log(`[seed] created ${u.role} ${user.email}  password=${password}  (only shown ONCE; saved to .dev/credentials.txt)`);
   }
+
+  // credentials 檔：舊行（existing 用戶）+ 今次新建行 — 一次寫定（冪等）
+  const ordered: string[] = [];
+  for (const u of USERS) {
+    if (credLines.some((l) => l.includes(u.email))) {
+      ordered.push(credLines.find((l) => l.includes(u.email))!);
+    } else {
+      const prev = prevCreds.get(u.email);
+      if (prev) ordered.push(prev);
+    }
+  }
+  if (ordered.length > 0) writeCreds(ordered);
 
   console.log("[seed] done");
 }

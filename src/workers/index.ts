@@ -1,43 +1,45 @@
-import log from "@/lib/log";
-import { closeRedis } from "@/lib/queue";
+/**
+ * worker process 入口 — `node --import tsx dist/workers/index.js` 或直接 tsx
+ *
+ * 一個 process 行晒 5 個 worker（inbound/outbound/ai/cron/apricot）。
+ * mock E2E 同 dev 都咁跑；production 先拆 process。
+ */
 import { startInboundWorker } from "./inbound.worker";
 import { startOutboundWorker } from "./outbound.worker";
 import { startAiWorker } from "./ai.worker";
 import { startCronWorker } from "./cron.worker";
+import { startApricotWorker } from "./apricot.worker";
+import { cronQueue } from "@/lib/queue";
+import log from "@/lib/log";
 
-/**
- * WA Clinic Inbox — worker process 入口（PM2 `wa-worker`）。
- *
- * 一行起晒 4 個 BullMQ worker（inbound / outbound / ai / cron）。
- * 同 web server（wa-inbox）分離 process：worker 掛咗唔影響收 webhook 秒回 200。
- */
-async function main(): Promise<void> {
-  const workers = [
-    startInboundWorker(),
-    startOutboundWorker(),
-    startAiWorker(),
-    startCronWorker(),
-  ];
-  log.info(
-    { workers: workers.map((w) => w.name) },
-    "all workers started"
-  );
+async function registerSchedulers() {
+  // Phase 3 排程（BullMQ v6 upsertJobScheduler — id 冪等，重啟唔會重覆）
+  await cronQueue.upsertJobScheduler("sched-sync-availability", { pattern: "*/15 * * * *" }, {
+    name: "sync-availability",
+    data: {},
+  });
+  await cronQueue.upsertJobScheduler("sched-apricot-keepalive", { pattern: "0 3 */3 * *" }, {
+    name: "apricot-keepalive",
+    data: {},
+  });
+  await cronQueue.upsertJobScheduler("sched-bookings-expire", { pattern: "*/5 * * * *" }, {
+    name: "bookings-expire",
+    data: {},
+  });
+  log.info({}, "cron: schedulers registered (sync-availability */15m, apricot-keepalive 3d, bookings-expire */5m)");
+}
 
-  let shuttingDown = false;
-  const shutdown = async (signal: string): Promise<void> => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    log.info({ signal }, "shutting down workers");
-    await Promise.all(workers.map((w) => w.close().catch(() => undefined)));
-    await closeRedis().catch(() => undefined);
-    process.exit(0);
-  };
-
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+async function main() {
+  await startInboundWorker();
+  await startOutboundWorker();
+  await startAiWorker();
+  await startCronWorker();
+  await startApricotWorker();
+  await registerSchedulers();
+  log.info({}, "all workers running — waiting for jobs");
 }
 
 main().catch((err) => {
-  log.error({ err: err instanceof Error ? err.message : String(err) }, "worker bootstrap failed");
+  console.error("worker fatal", err);
   process.exit(1);
 });

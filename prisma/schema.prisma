@@ -75,6 +75,8 @@ model Clinic {
   greetingConfig   Json?                      // 營業時間/地址/常見 FAQ，餵畀 AI 草稿用
   // Phase 2b：逐舖 AI 模式（default DRAFT = 舊行為；AUTO = AI 可直接自動發）
   aiMode           AiMode  @default(DRAFT)
+  // Phase 3：該店醫生名錄（SCREEN_PROVIDER 來源；sync 表 — 多對多，醫生可以跨店）
+  providers        ProviderClinic[]
 }
 
 model StaffUser {
@@ -194,6 +196,46 @@ model BookingRequest {
   handledByStaffId  String?
   handledAt         DateTime? @db.Timestamptz
   createdAt         DateTime @db.Timestamptz      @default(now())
+  // Phase 3：/bookings 隊列查詢（本店 + 狀態 + 時間）
+  @@index([clinicId, status, createdAt])
+}
+
+// Phase 3：醫生名錄（sync 表）— SCREEN_PROVIDER 嘅數據源。
+// 名錄由 seed（mock 期：由 greetingConfig.doctors 派生決定性 apricotId）或
+// Apricot 醫生 sync（real 期，APRICOT_DOCTORS_PATH 設定時）維護。
+// ★ PII：只存醫生名 + Apricot ext id — 零病人資料。
+model Provider {
+  id        String   @id @default(cuid())
+  name      String                    // 醫生名（顯示用）
+  apricotId String?  @unique          // Apricot practitioner ext id（mock = mock-pract-<clinic>-<n>）
+  active    Boolean  @default(true)
+  createdAt DateTime @db.Timestamptz @default(now())
+  clinics   ProviderClinic[]
+}
+
+model ProviderClinic {
+  providerId String
+  clinicId   String
+  createdAt  DateTime @db.Timestamptz @default(now())
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  clinic     Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  @@id([providerId, clinicId])
+}
+
+// Phase 3：發出咗嘅 WhatsApp Flow 狀態（📅 掣冪等 / 48h 棄單 / nfm_reply 對 token 用）。
+// status: SENT（流緊）/ COMPLETED（病人撳 Complete）/ FAILED（precheck 失敗，已重出）/ ABANDONED（48h 棄單）
+// ★ 只存 token + 關聯 id — 零病人選擇內容（選擇喺 BookingRequest）。
+model FlowSession {
+  id               String    @id @default(cuid())
+  conversationId   String
+  clinicId         String
+  flowToken        String    @unique        // 簽咗 conversationId+clinicId 嘅 JWT
+  flowMessageWamid String?                   // 發出嘅 interactive flow 訊息 wamid（metadata）
+  status           String    @default("SENT")
+  createdAt        DateTime  @db.Timestamptz @default(now())
+  completedAt      DateTime? @db.Timestamptz
+  @@index([conversationId, status])
+  @@index([status, createdAt])
 }
 
 model AvailabilitySlot {                       // Apricot 讀返嚟嘅空檔 cache — ★ 只存時段佔用，零病人資料
@@ -215,6 +257,11 @@ model ApricotSession {                         // 三件套（加密存），機
   refreshTokenEnc String
   iatEnc          String
   updatedAt       DateTime @db.Timestamptz @updatedAt
+  // Phase 3：監控 metadata（/api/admin/apricot-status 用；零 token 原文）
+  lastSyncAt      DateTime? @db.Timestamptz   // 最近一次空檔 sync 成功（heartbeat）
+  lastKeepaliveAt DateTime? @db.Timestamptz   // 最近一次 keepalive 輕量 request
+  lastError       String?                     // 最近一次失敗（metadata 短句）
+  rotationCount   Int      @default(0)        // Set-Cookie rotation 累計次數
 }
 
 model WebhookEvent {                           // 冪等 + 除錯（★ 唔存 payload 原文，只存 metadata）

@@ -49,3 +49,7 @@ next-env.d.ts
 /.dev/pg.log
 /.dev/*.log
 /.dev/credentials.txt
+
+# Phase 3: Flow RSA keypair + mock fill flag（沙箱狀態，唔入 repo）
+/.dev/flow-keys/
+/.dev/apricot-mock-fill.json
