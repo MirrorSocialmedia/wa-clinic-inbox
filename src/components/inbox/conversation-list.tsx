@@ -26,6 +26,15 @@ const STATUS_META: Record<ConvStatus, { label: string; dot: string }> = {
   RESOLVED: { label: "RESOLVED", dot: "bg-neutral-400" },
 };
 
+// Phase 2：intent 標籤（AI 分類；未分類 = 不顯示）
+const INTENT_META: Record<string, { label: string; cls: string }> = {
+  BOOKING_REQUEST: { label: "預約", cls: "bg-sky-100 text-sky-700" },
+  URGENT_PAIN: { label: "急症", cls: "bg-red-100 text-red-700" },
+  OUT_OF_SCOPE: { label: "離題", cls: "bg-neutral-100 text-neutral-500" },
+  QUESTION: { label: "查詢", cls: "bg-emerald-100 text-emerald-700" },
+  OTHER: { label: "其他", cls: "bg-neutral-100 text-neutral-500" },
+};
+
 const TONE_DOT: Record<string, string> = {
   green: "bg-emerald-500",
   yellow: "bg-amber-400",
@@ -46,17 +55,19 @@ function previewOf(c: ConversationItem): string {
  * - clinic tab（ADMIN 見全部；STAFF 無 tab — 只自己店）
  * - 狀態 filter（ALL/OPEN/PENDING/RESOLVED）
  * - contact 搜尋（頂部）
- * - 列表：unread badge / 窗口色點 / 排序 lastMessageAt desc
+ * - 列表：unread badge / 窗口色點 / AI intent 標籤 / urgent 紅標
+ * - 排序（Phase 2）：urgent（非 RESOLVED）排頂 → 其餘 → RESOLVED 沉底；同级 lastMessageAt desc
  */
 export function ConversationList(p: Props) {
   const items = useMemo(() => {
     if (p.searchResults) return p.searchResults;
     let list = p.conversations;
     if (p.statusFilter !== "ALL") list = list.filter((c) => c.status === p.statusFilter);
-    // 預設：RESOLVED 沉底，唔隱藏（診所要搵返舊 chat）
+    // 預設：urgent（非 RESOLVED）排頂（Phase 2 鐵律：急症優先），RESOLVED 沉底，唔隱藏（診所要搵返舊 chat）
     return [...list].sort((a, b) => {
-      const ar = a.status === "RESOLVED" ? 1 : 0;
-      const br = b.status === "RESOLVED" ? 1 : 0;
+      const rank = (c: ConversationItem) => (c.urgent && c.status !== "RESOLVED" ? 0 : c.status === "RESOLVED" ? 2 : 1);
+      const ar = rank(a);
+      const br = rank(b);
       if (ar !== br) return ar - br;
       return new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime();
     });
@@ -122,12 +133,14 @@ export function ConversationList(p: Props) {
             {p.search ? "冇搜到相關病人" : "冇對話"}
           </div>
         )}
-        {items.map((c) => (
+        {items.map((c) => {
+          const intentMeta = c.intent ? INTENT_META[c.intent] : null;
+          return (
           <button
             key={c.id}
             onClick={() => p.onSelect(c.id)}
             className={`w-full text-left px-3 py-2.5 border-b border-neutral-100 hover:bg-neutral-50 ${
-              p.selectedId === c.id ? "bg-sky-50 hover:bg-sky-50" : ""
+              p.selectedId === c.id ? "bg-sky-50 hover:bg-sky-50" : c.urgent ? "bg-red-50/60 hover:bg-red-50" : ""
             }`}
           >
             <div className="flex items-center gap-2">
@@ -135,6 +148,16 @@ export function ConversationList(p: Props) {
               <span className={`text-sm truncate ${c.unreadCount > 0 ? "font-semibold text-neutral-900" : "text-neutral-700"}`}>
                 {c.contact?.profileName || c.contact?.waId || "（未知聯絡人）"}
               </span>
+              {c.urgent && (
+                <span className="text-[10px] px-1 py-0.5 rounded shrink-0 bg-red-600 text-white font-semibold" title="AI 標記急症（urgency=HIGH 或 URGENT_PAIN）">
+                  急
+                </span>
+              )}
+              {intentMeta && (
+                <span className={`text-[10px] px-1 py-0.5 rounded shrink-0 ${intentMeta.cls}`} title={`AI intent: ${c.intent}`}>
+                  {intentMeta.label}
+                </span>
+              )}
               {c.status !== "OPEN" && (
                 <span
                   className={`text-[10px] px-1 py-0.5 rounded shrink-0 ${
@@ -161,7 +184,8 @@ export function ConversationList(p: Props) {
               )}
             </div>
           </button>
-        ))}
+          );
+        })}
       </div>
     </aside>
   );

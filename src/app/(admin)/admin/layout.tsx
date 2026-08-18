@@ -25,7 +25,10 @@ export default async function AdminLayout({
               <a href="/inbox" className="text-neutral-600 hover:text-neutral-900">
                 Inbox
               </a>
-              <a href="/admin/clinics" className="text-blue-600 font-medium">
+              <a href="/admin" className="text-blue-600 font-medium">
+                總覽
+              </a>
+              <a href="/admin/clinics" className="text-neutral-600 hover:text-neutral-900">
                 診所
               </a>
               <a href="/admin/staff" className="text-neutral-600 hover:text-neutral-900">

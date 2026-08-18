@@ -24,7 +24,7 @@ export default async function InboxPage() {
     session.role === "STAFF"
       ? prisma.clinic.findUnique({ where: { id: session.clinicId! } }).then((c) => (c ? [c] : []))
       : prisma.clinic.findMany({ orderBy: { code: "asc" } }),
-    prisma.conversation.findMany({ where: scope, orderBy: { lastMessageAt: "desc" }, take: 200 }),
+    prisma.conversation.findMany({ where: scope, orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }], take: 200 }),
     prisma.contact.findMany({ where: scope, select: { id: true, waId: true, profileName: true, labels: true } }),
     prisma.staffUser.findMany({ where: { active: true, ...scope }, select: { id: true, name: true, role: true, clinicId: true } }),
   ]);
@@ -47,6 +47,10 @@ export default async function InboxPage() {
       lastInboundAt: cv.lastInboundAt ? cv.lastInboundAt.toISOString() : null,
       lastMessageAt: cv.lastMessageAt.toISOString(),
       intent: cv.intent,
+      intentConfidence: cv.intentConfidence,
+      urgency: cv.urgency,
+      urgent: cv.urgent,
+      aiSummary: cv.aiSummary,
       contact: contactMap.get(cv.contactId) ?? null,
       window: {
         open: remainingMs > 0,

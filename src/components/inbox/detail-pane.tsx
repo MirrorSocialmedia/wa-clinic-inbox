@@ -7,7 +7,7 @@ import { relTime } from "./time";
 interface Props {
   conversation: ConversationItem | null;
   staff: StaffInfo[];
-  onPatch: (body: { status?: ConvStatus; assigneeId?: string | null }) => Promise<void>;
+  onPatch: (body: { status?: ConvStatus; assigneeId?: string | null; urgent?: boolean }) => Promise<void>;
 }
 
 const STATUS_META: Record<ConvStatus, { label: string; cls: string }> = {
@@ -16,9 +16,24 @@ const STATUS_META: Record<ConvStatus, { label: string; cls: string }> = {
   RESOLVED: { label: "RESOLVED（已解決）", cls: "bg-neutral-500 text-white" },
 };
 
+// Phase 2：AI 欄位顯示（未分類 = 「—」；degraded 時 AI 欄位自然全部「—」）
+const INTENT_LABEL: Record<string, string> = {
+  BOOKING_REQUEST: "預約",
+  QUESTION: "查詢",
+  URGENT_PAIN: "急症",
+  OUT_OF_SCOPE: "離題",
+  OTHER: "其他",
+};
+const URGENCY_LABEL: Record<string, { label: string; cls: string }> = {
+  LOW: { label: "LOW", cls: "text-neutral-600" },
+  MED: { label: "MED", cls: "text-amber-600" },
+  HIGH: { label: "HIGH", cls: "text-red-600 font-semibold" },
+};
+
 /**
  * 側欄（MD §6.4）：
  * - Contact 資料：waId / profileName（可編輯）/ labels（可編輯）
+ * - AI 分析（Phase 2）：摘要 + intent + urgency（未分類 = 「—」）
  * - assignee 選擇（自己店 staff）
  * - 狀態轉換 OPEN ↔ PENDING ↔ RESOLVED
  */
@@ -141,6 +156,37 @@ export function DetailPane({ conversation, staff, onPatch }: Props) {
               {saving ? "儲存中…" : "儲存聯絡人"}
             </button>
           )}
+        </div>
+
+        {/* AI 分析（Phase 2） */}
+        <div>
+          <h3 className="text-[11px] uppercase tracking-wide text-neutral-400 font-semibold mb-2">AI 分析</h3>
+          <div className="rounded border border-neutral-200 bg-neutral-50 p-2.5 text-xs space-y-1.5">
+            <div>
+              <span className="text-neutral-400">摘要：</span>
+              <span className="text-neutral-700">{c.aiSummary ?? "—"}</span>
+            </div>
+            <div className="flex gap-3">
+              <span>
+                <span className="text-neutral-400">意圖：</span>
+                <span className="text-neutral-700">{c.intent ? INTENT_LABEL[c.intent] ?? c.intent : "—"}</span>
+              </span>
+              <span>
+                <span className="text-neutral-400">緊急度：</span>
+                <span className={c.urgency ? URGENCY_LABEL[c.urgency]?.cls ?? "text-neutral-700" : "text-neutral-700"}>
+                  {c.urgency ? URGENCY_LABEL[c.urgency]?.label ?? c.urgency : "—"}
+                </span>
+              </span>
+            </div>
+            {c.urgent && (
+              <button
+                onClick={() => void onPatch({ urgent: false })}
+                className="w-full text-xs px-2 py-1 rounded bg-red-600 hover:bg-red-700 text-white font-medium"
+              >
+                🔴 急症中 — 點擊清紅標（處理完後）
+              </button>
+            )}
+          </div>
         </div>
 
         {/* status */}

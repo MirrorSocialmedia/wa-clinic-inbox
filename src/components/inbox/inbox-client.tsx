@@ -3,14 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import type {
+  AiClassifiedEvent,
   ClinicInfo,
   ConversationItem,
   ConvStatus,
   ConvUpdatedEvent,
+  DraftInfo,
+  DraftReadyEvent,
   MessageItem,
   MessageStatusEvent,
   NewMessageEvent,
   StaffInfo,
+  UrgentEscalationEvent,
   UserCtx,
 } from "./types";
 import { ConversationList } from "./conversation-list";
@@ -34,6 +38,8 @@ interface ContactSearchHit {
  * Socket.IO：
  * - login 後即連（iron-session cookie 自動帶，server hub 驗 session 先 join room）
  * - message:new / message:status / conv:updated 實時更新
+ * - Phase 2：ai:classified（intent/urgency/urgent/summary）/ draft:ready（pending 草稿卡）
+ *   / urgent:escalation（急症 toast + 隊列頂紅標）
  * - 斷線重連 → 用 lastMessageAt 拉 backlog 補漏（GET /api/conversations/[id]/messages?after=...）
  */
 export function InboxClient({
@@ -57,6 +63,11 @@ export function InboxClient({
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<ConversationItem[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // Phase 2：pending AI 草稿（per conversationId）+ 急症 toast
+  const [pendingDrafts, setPendingDrafts] = useState<Record<string, DraftInfo>>({});
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [urgentToast, setUrgentToast] = useState<{ conversationId: string; contactName: string | null } | null>(null);
 
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageItem[]>([]);
@@ -100,6 +111,10 @@ export function InboxClient({
             : (e.conversation.lastInboundAt ?? null),
           lastMessageAt: msg.waTimestamp,
           intent: existing?.intent ?? null,
+          intentConfidence: existing?.intentConfidence ?? null,
+          urgency: existing?.urgency ?? null,
+          urgent: existing?.urgent ?? false,
+          aiSummary: existing?.aiSummary ?? null,
           contact: e.contact ?? existing?.contact ?? null,
           window: windowFromLastInbound(
             isOut ? (existing?.lastInboundAt ?? null) : (e.conversation.lastInboundAt ?? null)
@@ -143,10 +158,50 @@ export function InboxClient({
                 assigneeId: e.assigneeId,
                 assigneeName: e.assigneeId ? staffRef.current.find((s) => s.id === e.assigneeId)?.name ?? null : null,
                 unreadCount: e.unreadCount,
+                // RESOLVED 自動清急症紅標（同 API PATCH 語義一致）
+                urgent: e.status === "RESOLVED" ? false : c.urgent,
               }
             : c
         )
       );
+    });
+
+    // ── Phase 2：AI triage 事件 ────────────────────────────────
+
+    // 分類成功 → 更新 intent/urgency/urgent/summary（metadata + summary 係聊天內容）
+    socket.on("ai:classified", (e: AiClassifiedEvent) => {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === e.conversationId
+            ? { ...c, intent: e.intent, urgency: e.urgency, urgent: e.urgent, aiSummary: e.aiSummary }
+            : c
+        )
+      );
+    });
+
+    // 新 pending draft → 入 card（對話欄上方）
+    socket.on("draft:ready", (e: DraftReadyEvent) => {
+      setPendingDrafts((prev) => ({
+        ...prev,
+        [e.conversationId]: {
+          id: e.draftId,
+          conversationId: e.conversationId,
+          inReplyToMessageId: e.inReplyToMessageId,
+          draftText: e.draftText,
+          model: e.model,
+          latencyMs: e.latencyMs,
+          status: "PROPOSED",
+          createdAt: new Date().toISOString(),
+        },
+      }));
+    });
+
+    // 急症升級 → 隊列頂紅標 + toast（12s 自動消）
+    socket.on("urgent:escalation", (e: UrgentEscalationEvent) => {
+      setConversations((prev) =>
+        prev.map((c) => (c.id === e.conversationId ? { ...c, urgent: true, intent: e.intent, urgency: e.urgency } : c))
+      );
+      setUrgentToast({ conversationId: e.conversationId, contactName: e.contactName });
     });
 
     // 斷線重連 → backlog 補漏
@@ -176,6 +231,58 @@ export function InboxClient({
   // staffRef：socket handler 要最新 staff 名（assigneeName 顯示）
   const staffRef = useRef<StaffInfo[]>(initialStaff);
   staffRef.current = staff;
+
+  // 急症 toast 12s 自動消
+  useEffect(() => {
+    if (!urgentToast) return;
+    const t = setTimeout(() => setUrgentToast(null), 12000);
+    return () => clearTimeout(t);
+  }, [urgentToast]);
+
+  // ── Phase 2：pending drafts ────────────────────────────────────────
+  const fetchPendingDrafts = useCallback(async (convId: string) => {
+    try {
+      const res = await fetch(`/api/conversations/${convId}/drafts`);
+      if (!res.ok) return;
+      const data = (await res.json()) as { drafts: DraftInfo[] };
+      setPendingDrafts((prev) => {
+        const next = { ...prev };
+        if (data.drafts.length > 0) next[convId] = data.drafts[0];
+        else delete next[convId];
+        return next;
+      });
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const adoptDraft = useCallback(async (draftId: string) => {
+    const convId = selectedIdRef.current;
+    if (!convId) return;
+    setDraftBusy(true);
+    try {
+      // 採用 = audit + 前端填 composer（ChatPane 按鈕已 fill）；發送仍係人手
+      await fetch(`/api/conversations/${convId}/drafts/${draftId}`, { method: "PATCH" });
+    } finally {
+      setDraftBusy(false);
+    }
+  }, []);
+
+  const discardDraft = useCallback(async (draftId: string) => {
+    const convId = selectedIdRef.current;
+    if (!convId) return;
+    setDraftBusy(true);
+    try {
+      await fetch(`/api/conversations/${convId}/drafts/${draftId}`, { method: "DELETE" });
+      setPendingDrafts((prev) => {
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
+    } finally {
+      setDraftBusy(false);
+    }
+  }, []);
 
   // ── data fetchers ─────────────────────────────────────────────────────
   const fetchConversations = useCallback(async (clinicId: string | "all") => {
@@ -259,6 +366,7 @@ export function InboxClient({
             if (match) {
               setSelectedConvId(match.id);
               void fetchMessagesLatest(match.id);
+              void fetchPendingDrafts(match.id);
               void markRead(match.id);
               setSearchResults(null);
               setSearch("");
@@ -274,9 +382,10 @@ export function InboxClient({
       setSelectedConvId(id);
       setNotice(null);
       void fetchMessagesLatest(id);
+      void fetchPendingDrafts(id);
       void markRead(id);
     },
-    [fetchMessagesLatest]
+    [fetchMessagesLatest, fetchPendingDrafts]
   );
 
   async function markRead(id: string) {
@@ -339,17 +448,19 @@ export function InboxClient({
               : c
           )
         );
+        // Phase 2：發送後重查 pending drafts（若 draft 被採用發出 → 狀態變 SENT_*，卡片應消失）
+        void fetchPendingDrafts(convId);
         return { ok: true };
       } catch {
         return { ok: false, error: "網絡錯誤" };
       }
     },
-    [user.staffId]
+    [user.staffId, fetchPendingDrafts]
   );
 
   // ── 側欄 patch ────────────────────────────────────────────────────────
   const patchConversation = useCallback(
-    async (body: { status?: ConvStatus; assigneeId?: string | null }) => {
+    async (body: { status?: ConvStatus; assigneeId?: string | null; urgent?: boolean }) => {
       const convId = selectedIdRef.current;
       if (!convId) return;
       try {
@@ -363,7 +474,12 @@ export function InboxClient({
           setConversations((prev) =>
             prev.map((c) =>
               c.id === convId
-                ? { ...c, status: (data.status as ConvStatus) ?? c.status, assigneeId: data.assigneeId ?? c.assigneeId }
+                ? {
+                    ...c,
+                    status: (data.status as ConvStatus) ?? c.status,
+                    assigneeId: data.assigneeId ?? c.assigneeId,
+                    urgent: typeof data.urgent === "boolean" ? data.urgent : c.urgent,
+                  }
                 : c
             )
           );
@@ -405,6 +521,10 @@ export function InboxClient({
             lastInboundAt: null,
             lastMessageAt: new Date(0).toISOString(),
             intent: null,
+            intentConfidence: null,
+            urgency: null,
+            urgent: false,
+            aiSummary: null,
             contact: { id: hit.id, waId: hit.waId, profileName: hit.profileName, labels: hit.labels },
             window: { open: false, remainingMs: 0, remainingHours: 0, tone: "red" },
             preview: "（未開始對話）",
@@ -467,9 +587,36 @@ export function InboxClient({
         window={selectedConv?.window ?? null}
         onSend={sendMessage}
         staffName={user.name}
+        pendingDraft={selectedConv ? (pendingDrafts[selectedConv.id] ?? null) : null}
+        onAdopt={adoptDraft}
+        onDiscard={discardDraft}
+        draftBusy={draftBusy}
       />
 
       <DetailPane conversation={selectedConv} staff={staff} onPatch={patchConversation} />
+
+      {/* Phase 2：急症升級 toast（socket urgent:escalation） */}
+      {urgentToast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-red-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-lg z-50 flex items-center gap-3">
+          <span className="font-medium">🚨 急症升級：{urgentToast.contactName ?? "病人"} 主訴緊急不適 — 請即刻處理</span>
+          <button
+            onClick={() => {
+              const cid = urgentToast.conversationId;
+              setUrgentToast(null);
+              setSelectedConvId(cid);
+              void fetchMessagesLatest(cid);
+              void fetchPendingDrafts(cid);
+              void markRead(cid);
+            }}
+            className="text-xs underline underline-offset-2 shrink-0"
+          >
+            查看
+          </button>
+          <button onClick={() => setUrgentToast(null)} className="text-red-200 hover:text-white shrink-0">
+            ✕
+          </button>
+        </div>
+      )}
 
       {notice && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-neutral-900 text-white text-sm px-4 py-2 rounded-lg shadow-lg z-50">

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ConversationItem, MessageItem } from "./types";
+import type { ConversationItem, DraftInfo, MessageItem } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
 interface Props {
@@ -13,6 +13,14 @@ interface Props {
   window: { open: boolean; remainingMs: number; tone: string } | null;
   onSend: (body: string) => Promise<{ ok: boolean; error?: string }>;
   staffName: string;
+  /** Phase 2：該對話最新嘅 pending AI 草稿（PROPOSED）；null = 無 */
+  pendingDraft: DraftInfo | null;
+  /** 採用：寫 audit + （前端）填 composer；返回後 draft 卡保留到發送/棄 */
+  onAdopt: (draftId: string) => Promise<void>;
+  /** 棄：DELETE draft（→ DISCARDED） */
+  onDiscard: (draftId: string) => Promise<void>;
+  /** 採用/棄 進行中（disable 掣） */
+  draftBusy: boolean;
 }
 
 /** status tick（OUT API 訊息） */
@@ -41,6 +49,8 @@ function mediaSrc(mediaPath: string | null): string | null {
  * - 24h 窗口倒數 chip（綠 <6h、黃、紅 過窗）
  * - 向上捲載入舊訊息（含 HISTORY 段，分頁 50/頁）
  * - Composer：過窗 disabled + 提示
+ * - Phase 2：AI draft 卡（對話欄上方）— 採用（入 composer，可改）/ 棄（DELETE）
+ *   鐵律 2：採用 ≠ 發送；發送仍係人手（sentByStaffId）
  */
 export function ChatPane(p: Props) {
   const [draft, setDraft] = useState("");
@@ -48,6 +58,8 @@ export function ChatPane(p: Props) {
   const [sendError, setSendError] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(false);
+  // 已自動填入過嘅 draft id（避免重複覆蓋；staff 改咗 composer 後唔會再被蓋）
+  const autoFilledDraftRef = useRef<string | null>(null);
 
   // 新訊息時自動捲底（只係貼住底先自動捲，用戶向上看舊嘢時唔跳）
   useEffect(() => {
@@ -59,7 +71,21 @@ export function ChatPane(p: Props) {
     setDraft("");
     setSendError(null);
     pinnedRef.current = true;
+    autoFilledDraftRef.current = null;
   }, [p.conversation?.id]);
+
+  // Phase 2：新 draft 到达時，composer 空就先自動填入（staff 開始打字後唔再蓋）
+  useEffect(() => {
+    if (!p.pendingDraft) {
+      autoFilledDraftRef.current = null;
+      return;
+    }
+    if (autoFilledDraftRef.current === p.pendingDraft.id) return;
+    if (draft.trim() === "") {
+      setDraft(p.pendingDraft.draftText);
+      autoFilledDraftRef.current = p.pendingDraft.id;
+    }
+  }, [p.pendingDraft, draft]);
 
   if (!p.conversation) {
     return (
@@ -177,6 +203,37 @@ export function ChatPane(p: Props) {
 
       {/* composer */}
       <div className="shrink-0 bg-white border-t border-neutral-200 p-3">
+        {/* Phase 2：pending AI draft 卡 — 只係建議，staff 一鍵採用先入 composer */}
+        {p.pendingDraft && (
+          <div className="mb-2 rounded border border-sky-200 bg-sky-50 p-2.5">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xs font-medium text-sky-800">🤖 AI 建議覆</span>
+              <span className="text-[10px] text-sky-600">只係建議 — 未發送，需你確認</span>
+              <span className="ml-auto flex gap-1.5">
+                <button
+                  onClick={() => {
+                    setDraft(p.pendingDraft!.draftText);
+                    void p.onAdopt(p.pendingDraft!.id);
+                  }}
+                  disabled={p.draftBusy}
+                  className="text-xs px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-40"
+                >
+                  採用
+                </button>
+                <button
+                  onClick={() => void p.onDiscard(p.pendingDraft!.id)}
+                  disabled={p.draftBusy}
+                  className="text-xs px-2.5 py-1 rounded border border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-50 disabled:opacity-40"
+                >
+                  棄
+                </button>
+              </span>
+            </div>
+            <div className="text-sm text-neutral-700 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
+              {p.pendingDraft.draftText}
+            </div>
+          </div>
+        )}
         {sendError && <div className="text-xs text-red-600 mb-1.5">{sendError}</div>}
         {c.window.open ? (
           <div className="flex gap-2">

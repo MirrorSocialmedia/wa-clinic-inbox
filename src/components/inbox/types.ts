@@ -35,6 +35,10 @@ export interface ConversationItem {
   lastInboundAt: string | null;
   lastMessageAt: string;
   intent: string | null;
+  intentConfidence: number | null;
+  urgency: string | null;
+  urgent: boolean;
+  aiSummary: string | null;
   contact: ContactInfo | null;
   window: WindowState;
   /** client-only：最後一則訊息 preview */
@@ -100,4 +104,52 @@ export interface ConvUpdatedEvent {
   status: ConvStatus;
   assigneeId: string | null;
   unreadCount: number;
+}
+
+/** Phase 2：AI triage 相關 type（同 ai.worker notify payload 對齊） */
+
+export type AiIntent = "BOOKING_REQUEST" | "QUESTION" | "URGENT_PAIN" | "OUT_OF_SCOPE" | "OTHER";
+export type AiUrgency = "LOW" | "MED" | "HIGH";
+
+/** pending AI 草稿（AiDraft PROPOSED 的 UI shape） */
+export interface DraftInfo {
+  id: string;
+  conversationId: string;
+  inReplyToMessageId: string;
+  draftText: string;
+  model: string;
+  latencyMs: number;
+  status: "PROPOSED" | "SENT_AS_IS" | "SENT_EDITED" | "DISCARDED";
+  createdAt: string;
+}
+
+/** socket ai:classified — 每次 AI 分類成功（metadata only，summary 係聊天內容） */
+export interface AiClassifiedEvent {
+  conversationId: string;
+  intent: AiIntent;
+  urgency: AiUrgency;
+  needsHuman: boolean;
+  urgent: boolean;
+  aiSummary: string;
+  hasDraft: boolean;
+}
+
+/** socket draft:ready — 有新 pending draft（含 draftText：自己 VPS 內傳，staff 要睇） */
+export interface DraftReadyEvent {
+  conversationId: string;
+  draftId: string;
+  inReplyToMessageId: string;
+  draftText: string;
+  model: string;
+  latencyMs: number;
+}
+
+/** socket urgent:escalation — 急症實時升級（toast + 隊列頂紅） */
+export interface UrgentEscalationEvent {
+  conversationId: string;
+  intent: AiIntent;
+  urgency: AiUrgency;
+  contactId: string;
+  contactName: string | null;
+  waMessageId: string | null;
 }

@@ -18,6 +18,12 @@
 #   T10 跨店 403（單對話）：STAFF(TKW) 撳 MF 嘅 conversation → 403
 #   T11 未登入 401
 #   T12 unknown field → webhook 200 + worker 存活
+#   T13 AI URGENT_PAIN：「好痛」→ URGENT_PAIN + urgent=true + 無 draft + escalation log（DB+log 斷言）
+#   T14 AI BOOKING_REQUEST：「想預約」→ draft 生成（PROPOSED）
+#   T15 draft 採用 PATCH（回 draftText）+ 棄用 DELETE（→ DISCARDED）+ 別店 403
+#   T16 AI_MOCK_FAIL=1 降級：舊 intent 保留 + 無新 draft + inbox 200 + stats 記 fail
+#   T17 HISTORY/APP_ECHO 唔觸發 AI queue（job key count 斷言）
+#   T18 log PII 抽查：server/worker log 無訊息原文（metadata only 鐵律）
 #
 set -u
 cd "$(dirname "$0")/.."
@@ -260,6 +266,127 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/wa/webhook" \
 check "T12 unknown/empty payload → webhook 200" "$CODE" "200"
 sleep 2
 curl -sf "$BASE/healthz" >/dev/null 2>&1 && pass "T12 worker/server 存活" || fail "T12 存活檢查"
+
+# ── T13. AI triage：URGENT_PAIN（鐵律 3：永不生成 draft） ───────────────
+echo "[10/10] T13-T17: AI triage..."
+PATIENT_AI1="8526003${EPOCH}"
+WAMID_AI1="wamid.E2E_AI_URGENT_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI1" --text "医生我牙好痛" --wamid "$WAMID_AI1" --name "E2E 急症病人" >/dev/null || fail "T13 mock-inbound POST"
+if wait_for "SELECT \"intent\" i, \"urgency\" u, (\"urgent\")::text ug FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" \
+  '[{"i":"URGENT_PAIN","u":"HIGH","ug":"true"}]' 30; then
+  pass "T13 URGENT_PAIN + urgency HIGH + urgent=true（DB）"
+else
+  fail "T13 URGENT_PAIN triage"
+fi
+SUM1=$(q "SELECT (\"aiSummary\" IS NOT NULL)::text s FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" | jf s)
+check "T13 aiSummary 已設（側欄顯示用）" "$SUM1" "true"
+DRAFT1=$(q "SELECT count(*)::text c FROM \"AiDraft\" d JOIN \"Conversation\" cv ON cv.id=d.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" | jf c)
+check "T13 URGENT_PAIN 唔生成 draft（鐵律 3）" "$DRAFT1" "0"
+AI1_MSG_ID=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_AI1'" | jf id)
+JOB1=$(redis-cli EXISTS "wa-inbox:ai:ai-$AI1_MSG_ID" 2>/dev/null)
+check "T13 aiQueue job 存在（jobId=ai:<messageId>）" "$JOB1" "1"
+URG_LOG=$(grep -F "\"$WAMID_AI1\"" /tmp/e2e-worker.log 2>/dev/null | grep -c '"urgent":true')
+[ "$URG_LOG" -ge 1 ] 2>/dev/null && pass "T13 worker log 見 urgent:classified（socket escalation 同源，metadata only）" || fail "T13 worker log urgent 分類記錄"
+
+# ── T14. AI triage：BOOKING_REQUEST → draft 生成（pending） ─────────────
+PATIENT_AI2="8526004${EPOCH}"
+WAMID_AI2="wamid.E2E_AI_BOOK_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI2" --text "你好，我想預約下週" --wamid "$WAMID_AI2" --name "E2E 預約病人" >/dev/null || fail "T14 mock-inbound POST"
+if wait_for "SELECT \"intent\" i, \"urgency\" u FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI2'" \
+  '[{"i":"BOOKING_REQUEST","u":"LOW"}]' 30; then
+  pass "T14 BOOKING_REQUEST + urgency LOW"
+else
+  fail "T14 BOOKING_REQUEST triage"
+fi
+URG2=$(q "SELECT (\"urgent\")::text u FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI2'" | jf u)
+check "T14 非急症 urgent=false" "$URG2" "false"
+AI2_MSG_ID=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_AI2'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$AI2_MSG_ID'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T14 AI draft 生成（PROPOSED pending）"
+else
+  fail "T14 draft 生成"
+fi
+DRAFT2_ID=$(q "SELECT id FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$AI2_MSG_ID'" | jf id)
+[ -n "$DRAFT2_ID" ] && pass "T14 draft id 存在" || fail "T14 draft id"
+
+# ── T15. draft 採用 / 棄用 API ────────────────────────────────────────────
+CONV_AI2=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI2'" | jf id)
+CODE=$(curl -s -o /tmp/e2e-adopt.json -w '%{http_code}' -b "$COOKIE_TKW" -X PATCH \
+  "$BASE/api/conversations/$CONV_AI2/drafts/$DRAFT2_ID")
+check "T15 採用 draft（PATCH）→ 200" "$CODE" "200"
+ADOPT_TXT=$(grep -c '"draftText"' /tmp/e2e-adopt.json)
+check "T15 採用回傳 draftText（俾 composer 填）" "$ADOPT_TXT" "1"
+# 採用後 DB 狀態仍 PROPOSED（採用 ≠ 發送；最終狀態由 send 決定）
+ST_NOW=$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE id='$DRAFT2_ID'" | jf s)
+check "T15 採用後仍 PROPOSED（發送先變 SENT_*）" "$ST_NOW" "PROPOSED"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X DELETE \
+  "$BASE/api/conversations/$CONV_AI2/drafts/$DRAFT2_ID")
+check "T15 棄用 draft（DELETE）→ 200" "$CODE" "200"
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE id='$DRAFT2_ID'" '[{"s":"DISCARDED"}]' 5; then
+  pass "T15 DB status → DISCARDED"
+else
+  fail "T15 DISCARDED"
+fi
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X DELETE \
+  "$BASE/api/conversations/$CONV_AI2/drafts/$DRAFT2_ID")
+check "T15b 別店 staff 棄用 → 403（RBAC）" "$CODE" "403"
+
+# ── T16. AI 失敗降級（AI_MOCK_FAIL=1） ────────────────────────────────────
+# step 1：正常 AI 先跑一條（建立舊 intent）
+PATIENT_AI3="8526005${EPOCH}"
+WAMID_AI3A="wamid.E2E_AI_FAILA_${EPOCH}"
+WAMID_AI3B="wamid.E2E_AI_FAILB_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI3" --text "你好，想問下埋門時間" --wamid "$WAMID_AI3A" --name "E2E 降級病人" >/dev/null || fail "T16a mock-inbound POST"
+if wait_for "SELECT \"intent\" i FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI3'" '[{"i":"QUESTION"}]' 30; then
+  pass "T16a 正常 AI 分類 QUESTION（舊 intent 建立）"
+else
+  fail "T16a QUESTION"
+fi
+OLD_INTENT=$(q "SELECT \"intent\" i FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI3'" | jf i)
+
+# step 2：重啟 worker（AI_MOCK_FAIL=1 模擬 AI 斷線）
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+AI_MOCK_FAIL=1 nohup pnpm worker >/tmp/e2e-worker-fail.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 30); do grep -q "all workers started" /tmp/e2e-worker-fail.log 2>&1 && break; sleep 1; done
+
+# step 3：新 inbound → AI fail（attempts 3，backoff 2s/4s）
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI3" --text "再問一次時間" --wamid "$WAMID_AI3B" --name "E2E 降級病人" >/dev/null || fail "T16b mock-inbound POST"
+sleep 15
+CUR_INTENT=$(q "SELECT \"intent\" i FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI3'" | jf i)
+check "T16 AI 失敗後舊 intent 保留（降級唔抹走）" "$CUR_INTENT" "$OLD_INTENT"
+DRAFT3=$(q "SELECT count(*)::text c FROM \"AiDraft\" d JOIN \"Conversation\" cv ON cv.id=d.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI3'" | jf c)
+check "T16 AI 失敗唔生成新 draft（仍=1，來自 T16a）" "$DRAFT3" "1"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/conversations")
+check "T16 degraded 時 inbox list 仍 200（降級唔係中斷）" "$CODE" "200"
+STATS_ERR=$(q "SELECT (\"lastError\" IS NOT NULL)::text e FROM \"AiCallStats\" WHERE id=1" | jf e)
+check "T16 AiCallStats 記到失敗（admin 卡真數據）" "$STATS_ERR" "true"
+
+# step 4：還原正常 worker
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker2.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 30); do grep -q "all workers started" /tmp/e2e-worker2.log 2>&1 && break; sleep 1; done
+
+# ── T17. HISTORY / APP_ECHO 唔觸發 AI queue（job key 斷言） ────────────────
+HIST_JOB_HIT=0
+for mid in $(q "SELECT id FROM \"Message\" WHERE channel IN ('HISTORY','APP_ECHO')" | grep -oE '"id":"[^"]*"' | cut -d'"' -f4); do
+  R=$(redis-cli EXISTS "wa-inbox:ai:ai-$mid" 2>/dev/null)
+  if [ "$R" = "1" ]; then HIST_JOB_HIT=1; break; fi
+done
+check "T17 HISTORY/APP_ECHO 訊息全部無 aiQueue job" "$HIST_JOB_HIT" "0"
+
+# ── T18. log PII 抽查（鐵律 1：訊息原文永不入 log） ────────────────────────
+LOGPII=0
+for kw in "e2e 第一則" "医生我牙好痛" "我想預約下週" "想問下埋門時間" "再問一次時間" "mf msg" "e2e 店員 App 覆" "e2e 發送測試"; do
+  if grep -qF "$kw" /tmp/e2e-server.log /tmp/e2e-worker.log /tmp/e2e-worker-fail.log /tmp/e2e-worker2.log 2>/dev/null; then
+    echo "    ❌ PII leak in log: $kw"
+    LOGPII=1
+  fi
+done
+check "T18 log 抽查：server/worker log 無訊息原文（metadata only）" "$LOGPII" "0"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
