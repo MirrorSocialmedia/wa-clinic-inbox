@@ -62,6 +62,8 @@
 #   T41 (P0-2) multi-patient history 批次逐條歸戶：2 病人各 3 條入各 conversation
 #       + 1 條無法歸戶 → skip + Alert(history_skip) + log 警報行
 #   T42 (P0-3) 停用即時生效：WTC 登入 + socket 已連 → admin 停用 → 下一 API request 即刻 401
+#   T48 (C-3 尾批) password reset 踢 session：admin reset WTC password → 舊 cookie 下一 request 即刻 401
+#       （session invalidated）+ 新密碼可登入 + 恢復原密碼俾下次 run
 #       "account disabled" + 已連 socket 被斷；重啟 → 恢復 200
 #   T43 (P1-1) media clinic scope：店 A staff 攞店 B 媒體 → 403；本店 → 200；無主檔 → 404
 #   T44 (C-1b) media per-file AES-256-GCM：碟上密文（WA1|）/ serve 解密 roundtrip / dev 無 key 明文軌
@@ -93,6 +95,10 @@ set +a
 #（mock mode 本來唔下載媒體；T43 喺度手放 fixture 檔驗證 clinic scope）
 export WA_MEDIA_DIR=/tmp/wa-media-e2e
 mkdir -p "$WA_MEDIA_DIR"
+# ★ C-1b e2e：server/worker 用同一把 key 寫/讀媒體（dev-only 固定值，唔係生產 secret）—
+#   T43b 驗證「碟上密文（WA1|）/ serve 解密回原文」全 HTTP 環。
+#   （若無 key，dev server 會 fallback 明文 + warning — 但 T43b 要斷言密文，所以必須有 key）
+export MEDIA_ENC_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 TSX=./node_modules/.bin/tsx
 PORT="${PORT:-3100}"
@@ -1137,6 +1143,37 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conver
 check "T42 重啟後 WTC API → 200（恢復）" "$CODE" "200"
 kill "$SOCK_PID" 2>/dev/null || true
 
+# ── T48. C-3 尾批：password reset 踢 session（舊 cookie 即刻 401） ──────────────
+echo "[P5] T48: password reset session kick..."
+T48=0
+# 重用 T42 嘅 WTC 登入狀態（COOKIE_WTC / WTC_ID / WTC_EMAIL / WTC_PASS）
+NEW_PASS="E2E-Reset-${EPOCH}-pw"
+CODE=$(curl -s -o /tmp/e2e-t48-reset.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT \
+  "$BASE/api/admin/staff/$WTC_ID" -H 'Content-Type: application/json' -d "{\"newPassword\":\"$NEW_PASS\"}")
+check "T48 admin reset WTC password → 200" "$CODE" "200"
+grep -q '"passwordReset":true' /tmp/e2e-t48-reset.json 2>/dev/null || { echo "    ❌ T48 response 冇 passwordReset:true"; T48=1; }
+sleep 1
+CODE=$(curl -s -o /tmp/e2e-t48-old.json -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+check "T48 舊 session（舊 cookie）→ 即刻 401" "$CODE" "401"
+ERR48=$(grep -oE '"error":"[^"]*"' /tmp/e2e-t48-old.json | head -1)
+check "T48 401 reason = session invalidated" "$ERR48" '"error":"session invalidated"'
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_WTC" \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$WTC_EMAIL\",\"password\":\"$NEW_PASS\"}")
+check "T48 新密碼登入 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+check "T48 新 session → 200" "$CODE" "200"
+# 恢復原密碼（persistent sandbox DB — 下次 run T42 要用原密碼登入）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT \
+  "$BASE/api/admin/staff/$WTC_ID" -H 'Content-Type: application/json' -d "{\"newPassword\":\"$WTC_PASS\"}")
+check "T48 恢復原密碼 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_WTC" \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$WTC_EMAIL\",\"password\":\"$WTC_PASS\"}")
+check "T48 恢復驗證：原密碼可登入" "$CODE" "200"
+[ "$T48" = 0 ] && pass "T48 password reset 踢 session（舊 cookie 401 + 新密碼登入 + 已恢復原狀）" \
+  || fail "T48 password reset kick（見上 ❌）"
+
 # ── T43. media clinic scope（P1-1） ──────────────────────────────────────────────
 echo "[P5] T43: media clinic scope..."
 T43=0
@@ -1158,6 +1195,24 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/w
 check "T43 無主檔（無 Message 持有）→ 404" "$CODE" "404"
 rm -f "$WA_MEDIA_DIR/$MEDIA_FILE"
 [ "$T43" = 0 ] && pass "T43 media clinic scope 全鏈（跨店 403 / 本店 200 / 無主 404）" || fail "T43 media scope（見上 ❌）"
+
+# ── T43b. C-1b 碟上密文 roundtrip（saveMediaFile 帶 key 寫 → 碟上 WA1| 密文 → serve 解密回原文） ──
+echo "[P5] T43b: media on-disk ciphertext roundtrip..."
+CT_PAT="8526045${EPOCH}"
+CT_WAMID="wamid.E2E_MEDIA_ENC_${EPOCH}"
+CT_FILE="${CT_WAMID}.jpg"
+printf 'enc-secret-bytes-1234' > /tmp/e2e-enc-src.bin
+pnpm -s e2e:media-write "$WA_MEDIA_DIR/$CT_FILE" /tmp/e2e-enc-src.bin >/dev/null || { echo "    ❌ T43b saveMediaFile 寫入失敗"; T43=1; }
+MAGIC=$(head -c 3 "$WA_MEDIA_DIR/$CT_FILE" 2>/dev/null)
+check "T43b 碟上係密文（WA1 magic prefix）" "$MAGIC" "WA1"
+pnpm -s mock-inbound message --clinic MF --from "$CT_PAT" --text "e2e media enc" --wamid "$CT_WAMID" --name "E2E-A-MEDIA" >/dev/null || T43=1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$CT_WAMID'" '[{"c":"1"}]' 30 || { echo "    ❌ T43b media message 未入庫"; T43=1; }
+q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$CT_FILE' WHERE \"waMessageId\"='$CT_WAMID'" >/dev/null
+CODE=$(curl -s -o /tmp/e2e-t43b-body -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/$CT_FILE")
+check "T43b 攞自家加密媒體 → 200" "$CODE" "200"
+check "T43b 碟上密文 / serve 原文（解密 roundtrip）" "$(cat /tmp/e2e-t43b-body 2>/dev/null)" "enc-secret-bytes-1234"
+rm -f "$WA_MEDIA_DIR/$CT_FILE" /tmp/e2e-enc-src.bin
+[ "$T43" = 0 ] && pass "T43b media 碟上密文 roundtrip（C-1b HTTP 層）" || fail "T43b media 密文 roundtrip（見上 ❌）"
 
 # ── T44. media per-file AES-256-GCM（C-1b：碟上密文 / serve 透明解密 / fail-fast） ────────────────────
 echo "[P5] T44: media per-file encryption..."

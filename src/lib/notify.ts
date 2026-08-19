@@ -35,11 +35,10 @@ export interface NotifyMessage {
 //   process（dev）或者另一個 PM2 cluster node（socket 喺邊個 node 就由邊個斷）都 work。
 export const CONTROL_CHANNEL = "wa-inbox:control";
 
-export interface ControlMessage {
-  cmd: "staff:changed";
-  staffId: string;
-  active: boolean;
-}
+export type ControlMessage =
+  | { cmd: "staff:changed"; staffId: string; active: boolean }
+  // C-3 尾批：password reset → 踢晒該 staff 所有 session（hub 側設 cutoff + 斷已連 socket）
+  | { cmd: "staff:sessions-invalidated"; staffId: string };
 
 /**
  * 發控制指令（fire-and-forget）：Redis 故障時 log — API 側嘅 cache 失效已經做咗，

@@ -34,7 +34,8 @@
     "e2e:ai-job": "tsx scripts/e2e-ai-job.ts",
   "e2e:media-enc": "tsx scripts/e2e-media-enc.ts",
   "e2e:ai-scrub": "tsx scripts/e2e-ai-scrub.ts",
-  "e2e:alert-gate": "tsx scripts/e2e-alert-gate.ts"
+  "e2e:alert-gate": "tsx scripts/e2e-alert-gate.ts",
+  "e2e:media-write": "tsx scripts/e2e-media-write.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

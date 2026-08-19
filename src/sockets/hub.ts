@@ -2,7 +2,7 @@ import type { Server as SocketIOServer, Socket } from "socket.io";
 import type { Redis } from "ioredis";
 import prisma from "@/lib/prisma";
 import { getSocketSession, type SessionData } from "@/lib/session";
-import { isStaffActive, invalidateActiveCache } from "@/lib/rbac";
+import { isStaffActive, invalidateActiveCache, invalidateStaffSessions, isStaffSessionCurrent } from "@/lib/rbac";
 import { CONTROL_CHANNEL, type ControlMessage } from "@/lib/notify";
 import log from "@/lib/log";
 
@@ -53,6 +53,11 @@ export function initHub(io: SocketIOServer): void {
       if (!(await isStaffActive(session.staffId))) {
         log.warn({ staffId: session.staffId }, "socket: connect rejected (account disabled)");
         return next(new Error("account disabled"));
+      }
+      // ★ C-3 尾批：password reset 後嘅舊 session → 拒絕新連（同 web API 401 同水位）
+      if (!isStaffSessionCurrent(session)) {
+        log.warn({ staffId: session.staffId }, "socket: connect rejected (session invalidated)");
+        return next(new Error("session invalidated"));
       }
       socket.data.session = session;
       next();
@@ -137,12 +142,18 @@ export function initControlBridge(sub: Redis): void {
   sub.on("message", (_channel, msg) => {
     try {
       const data = JSON.parse(msg) as ControlMessage;
-      if (data.cmd !== "staff:changed" || !data.staffId) return;
-      // 本 instance（socket middleware 用嘅嗰份）cache 即時失效
-      invalidateActiveCache(data.staffId);
-      if (!data.active) {
+      if (data.cmd === "staff:changed") {
+        // 本 instance（socket middleware 用嘅嗰份）cache 即時失效
+        invalidateActiveCache(data.staffId);
+        if (!data.active) {
+          const n = disconnectStaff(data.staffId);
+          log.info({ staffId: data.staffId, sockets: n }, "control: staff:changed(disabled) applied");
+        }
+      } else if (data.cmd === "staff:sessions-invalidated") {
+        // ★ C-3 尾批：password reset — 本 instance 設 cutoff（新連被擋）+ 斷晒已連 socket
+        invalidateStaffSessions(data.staffId);
         const n = disconnectStaff(data.staffId);
-        log.info({ staffId: data.staffId, sockets: n }, "control: staff:changed(disabled) applied");
+        log.info({ staffId: data.staffId, sockets: n }, "control: staff:sessions-invalidated applied (password reset)");
       }
     } catch (err) {
       log.warn(

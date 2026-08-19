@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import argon2 from "argon2";
 import prisma from "@/lib/prisma";
-import { requireAdmin, invalidateActiveCache } from "@/lib/rbac";
+import { requireAdmin, invalidateActiveCache, invalidateStaffSessions } from "@/lib/rbac";
 import { publishControl } from "@/lib/notify";
 import log from "@/lib/log";
 import { handle, toResponse } from "@/lib/api-error";
@@ -16,6 +16,8 @@ import { handle, toResponse } from "@/lib/api-error";
  *       - 唔可以 DELETE 自己；自己停用 → 擋（自鎖死保護）
  *       - ★ P0-3：停用（active true→false）→ 即時失效 requireAuth cache + 強制斷該 staff
  *         所有已連 socket（disconnectSockets）— 離職員工即刻失去存取，唔使等 session 到期
+ *       - ★ C-3 尾批：password reset → 踢晒該 staff 所有舊 session（loginAt cutoff —
+ *         本地 401 + control broadcast 斷已連 socket）— 舊 cookie 唔可以繼續用
  * DELETE: 硬刪 — 有 Message.sentByStaffId / Conversation.assigneeId 引用 → 409
  *         （改用 active=false 停用）
  */
@@ -101,6 +103,15 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
     } else {
       log.info({ staffId: id }, "staff: account re-enabled — active cache invalidated + control broadcast");
     }
+  }
+
+  // ★ C-3 尾批：password reset → 舊 session 全部失效（同停用同水位）：
+  //   1) 本 instance（API route 世界）cutoff → 舊 cookie 下一 request 即刻 401
+  //   2) control broadcast → 持 io 嗰份 instance 設自己 cutoff + 斷已連 socket
+  if (newPassword) {
+    invalidateStaffSessions(id);
+    publishControl({ cmd: "staff:sessions-invalidated", staffId: id });
+    log.info({ staffId: id }, "staff: password reset — all sessions invalidated (cutoff + control broadcast)");
   }
 
   const { passwordHash: _ph, ...safe } = user;

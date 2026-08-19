@@ -91,6 +91,36 @@ export function invalidateActiveCache(staffId: string): void {
   activeCache.delete(staffId);
 }
 
+// ── C-3 尾批：reset password 踢 session（loginAt cutoff） ─────────────────────────
+// iron-session 係 stateless sealed cookie — 冇 server-side session store 可以刪。
+// 做法：per-staff cutoff 時間戳；loginAt < cutoff 嘅 session 一律當失效：
+//   - web API：requireAuth 下一 request 即刻 401（同停用同水位）
+//   - socket：hub connect 擋新連 + 已連 socket 由 control bridge kick（disconnectStaff）
+// 多 instance：route 世界設本地 cutoff + publishControl → hub 世界收 staff:sessions-invalidated
+// 設自己份 cutoff 同斷線（同 P0-3 停用同一套跨 instance 橋）。
+const sessionCutoffs = new Map<string, number>(); // staffId → cutoff epoch ms
+
+/** reset password 時叫 — 該 staff 所有舊 session 即刻失效（本地 instance）。 */
+export function invalidateStaffSessions(staffId: string): void {
+  sessionCutoffs.set(staffId, Date.now());
+  // 順手清舊 entry（cutoff 只係短暫安全網：staff 重新 login 後新 session loginAt > cutoff 就冇用，24h 後清）
+  if (sessionCutoffs.size > 1000) {
+    const now = Date.now();
+    for (const [k, v] of sessionCutoffs) if (now - v >= 86_400_000) sessionCutoffs.delete(k);
+  }
+}
+
+/**
+ * session 有冇被 cutoff 咗（requireAuth + hub connect 共用）。
+ * fail-closed：session 冇 loginAt（舊格式 / 偽造）→ 當失效。
+ */
+export function isStaffSessionCurrent(data: Pick<SessionData, "staffId" | "loginAt">): boolean {
+  if (typeof data.loginAt !== "number") return false;
+  const cutoff = sessionCutoffs.get(data.staffId);
+  if (cutoff !== undefined && data.loginAt < cutoff) return false;
+  return true;
+}
+
 /**
  * 要求已登入（ADMIN 或 STAFF 都過）。
  * 未登入 / session 无效 → 401；帳號停用 → 401 "account disabled"（P0-3 即時生效）。
@@ -102,6 +132,10 @@ export async function requireAuth(req: NextRequest): Promise<AuthContext> {
   }
   if (!(await isStaffActive(data.staffId))) {
     throw new RbacError(401, "account disabled");
+  }
+  // ★ C-3 尾批：password reset 後嘅舊 session → 401（同停用同水位）
+  if (!isStaffSessionCurrent(data)) {
+    throw new RbacError(401, "session invalidated");
   }
   return toContext(data, res);
 }

@@ -8,6 +8,10 @@
  *    — mock fixture 故意帶 PII bait（MOCK_PII_* 字串）經 adapter 落庫，
  *    呢度斷 0 hit（bait 只可存活喺 raw response 內存，落地即消失）
  * 3. LOG：/tmp/e2e-*.log grep 同樣 marker（log 只准 metadata 鐵律）
+ * 4. SUMMARY（安全審計 M-5）：抽 ≤50 條最新 Conversation.aiSummary，對照該 conversation
+ *    嘅 contact.profileName（完整 + ≥2 字連續子串）同 waId 後 8 位 — 子串 hit = violation
+ *    （H-3 deterministic scrub 生效驗證；E2E bait：mock summary 含 E2E-BAIT-SUM-7f3a，
+ *    同名 contact 落庫後必須 0 hit）
  *
  * 用法（repo root）：pnpm pii-scan
  * 退出碼：0 = 乾淨；1 = 有 violation（E2E 最後一步跑）
@@ -26,6 +30,7 @@ try {
 }
 
 import { PrismaClient } from "@prisma/client";
+import { nameSubstrings } from "../src/lib/ai/scrub";
 
 const prisma = new PrismaClient();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -34,7 +39,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 1) 鐵桿 marker：Apricot 病人資料欄位名 + 值格式（SSN/身份證/email）— 定義喺 ./pii-markers.ts
 // 2) 決定性 bait（mock fixture 故意埋入 — 落地必須 0 hit）— 同上
 
-type Violation = { layer: "schema" | "data" | "log"; detail: string };
+type Violation = { layer: "schema" | "data" | "log" | "summary"; detail: string };
 const violations: Violation[] = [];
 
 function add(layer: Violation["layer"], detail: string): void {
@@ -135,12 +140,56 @@ function scanLogs(): void {
   console.log(`[pii-scan] log: ${checked} log files scanned`);
 }
 
+// ── 4) SUMMARY scan（M-5：aiSummary × profileName 子串 — scrub 生效驗證） ──
+
+const SUMMARY_SAMPLE_LIMIT = 50;
+
+async function scanSummaries(): Promise<void> {
+  // Conversation 係 loose contactId（無 Prisma relation）→ 兩步查詢手動 join
+  const convs = await prisma.conversation.findMany({
+    where: { aiSummary: { not: null } },
+    orderBy: { lastMessageAt: "desc" },
+    take: SUMMARY_SAMPLE_LIMIT,
+    select: { aiSummary: true, contactId: true },
+  });
+  const contactIds = [...new Set(convs.map((c) => c.contactId))];
+  const contacts = contactIds.length
+    ? await prisma.contact.findMany({
+        where: { id: { in: contactIds } },
+        select: { id: true, profileName: true, waId: true },
+      })
+    : [];
+  const contactById = new Map(contacts.map((c) => [c.id, c]));
+  let checked = 0;
+  for (const c of convs) {
+    const contact = contactById.get(c.contactId);
+    const summary = c.aiSummary ?? "";
+    const name = (contact?.profileName ?? "").trim();
+    if (name.length >= 2) {
+      checked++;
+      for (const sub of nameSubstrings(name)) {
+        if (summary.includes(sub)) {
+          // ★ 唔 print 子串本身（病人名字 = PII，CI 輸出要 metadata only）
+          add("summary", `Conversation.aiSummary 含 contact.profileName 嘅 ≥2 字連續子串（sub_len=${sub.length}, name_len=${name.length}）— H-3 scrub 失效`);
+          break;
+        }
+      }
+    }
+    const wa = (contact?.waId ?? "").trim();
+    if (wa.length >= 8 && summary.includes(wa.slice(-8))) {
+      add("summary", `Conversation.aiSummary 含 contact.waId 後 8 位 — H-3 scrub 失效`);
+    }
+  }
+  console.log(`[pii-scan] summary: ${convs.length} aiSummary rows sampled, ${checked} × profileName substring-checked`);
+}
+
 // ── main ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   scanSchema();
   await scanData();
   scanLogs();
+  await scanSummaries();
 
   if (violations.length === 0) {
     console.log("PII-SCAN OK: 0 violations");
