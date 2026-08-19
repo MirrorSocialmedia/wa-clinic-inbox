@@ -1,9 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import prisma from "@/lib/prisma";
 import { requireAuth, assertClinicAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
+import { readMediaFile } from "@/lib/wa/media";
+import log from "@/lib/log";
 
 /**
  * GET /api/media/[file] — 本地落地媒體檔案（{wamid}.{ext}）。
@@ -14,6 +15,7 @@ import { handle } from "@/lib/api-error";
  * - ★ P1-1 clinic scope：由 mediaPath 反查 Message → Conversation.clinicId →
  *   assertClinicAccess（店 A staff 唔可以攞店 B 嘅媒體 — wamid 唔係秘密）；
  *   查唔到任何 Message 持有呢個檔 → 404（唔洩露檔案存在性）
+ * - ★ C-1b per-file 加密：readMediaFile 透明解密（碟上密文 / 冇 key 時 legacy 明文）
  */
 export const dynamic = "force-dynamic";
 
@@ -30,10 +32,6 @@ const MIME: Record<string, string> = {
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 };
-
-function mediaDir(): string {
-  return process.env.WA_MEDIA_DIR || "/srv/wa-media";
-}
 
 export const GET = handle(
   async (req: NextRequest, ctx: { params: Promise<{ file: string }> }) => {
@@ -68,14 +66,21 @@ export const GET = handle(
     assertClinicAccess(auth, conv.clinicId); // STAFF 跨店 → RbacError(403)
 
     const ext = (file.split(".").pop() ?? "").toLowerCase();
-    const dir = mediaDir();
-    const filePath = path.join(dir, file);
 
+    // ★ C-1b：透明解密（碟上 WA1| 密文 → 明文；dev 冇 key 時 legacy 明文照讀）
     let buf: Buffer;
     try {
-      buf = await readFile(filePath);
-    } catch {
-      return NextResponse.json({ error: "not found" }, { status: 404 });
+      buf = await readMediaFile(file);
+    } catch (err) {
+      // 讀唔到（檔案消失）→ 404 唔洩露存在性；密文但解唔到（鍵錯/檔損）→ 500 + ERROR log
+      if (err instanceof Error && err.message.includes("read failed")) {
+        return NextResponse.json({ error: "not found" }, { status: 404 });
+      }
+      log.error(
+        { file, err: err instanceof Error ? err.message : String(err) },
+        "media: decrypt/read failed（key 錯或檔案損 — 唔洩漏細節）"
+      );
+      return NextResponse.json({ error: "media unreadable" }, { status: 500 });
     }
 
     return new NextResponse(new Uint8Array(buf), {

@@ -62,6 +62,8 @@
 #   T42 (P0-3) 停用即時生效：WTC 登入 + socket 已連 → admin 停用 → 下一 API request 即刻 401
 #       "account disabled" + 已連 socket 被斷；重啟 → 恢復 200
 #   T43 (P1-1) media clinic scope：店 A staff 攞店 B 媒體 → 403；本店 → 200；無主檔 → 404
+#   T44 (C-1b) media per-file AES-256-GCM：碟上密文（WA1|）/ serve 解密 roundtrip / dev 無 key 明文軌
+#       / legacy 明文偵測 / production fail-fast（不可寫目錄 throw）/ production 無 key throw / 0700+0600 / tamper auth
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -1119,6 +1121,16 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/w
 check "T43 無主檔（無 Message 持有）→ 404" "$CODE" "404"
 rm -f "$WA_MEDIA_DIR/$MEDIA_FILE"
 [ "$T43" = 0 ] && pass "T43 media clinic scope 全鏈（跨店 403 / 本店 200 / 無主 404）" || fail "T43 media scope（見上 ❌）"
+
+# ── T44. media per-file AES-256-GCM（C-1b：碟上密文 / serve 透明解密 / fail-fast） ────────────────────
+echo "[P5] T44: media per-file encryption..."
+T44_OUT=$(pnpm -s e2e:media-enc 2>&1)
+if echo "$T44_OUT" | grep -q "MEDIA-ENC OK"; then
+  pass "T44 media 加密全鏈（碟上 WA1| 密文 + serve 解密 roundtrip + dev 明文軌 + legacy 偵測 + prod fail-fast + prod 無 key throw + 0700/0600 + tamper auth）"
+else
+  echo "$T44_OUT" | tail -20
+  fail "T44 media 加密（見上）"
+fi
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

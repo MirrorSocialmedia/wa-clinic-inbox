@@ -31,7 +31,8 @@
     "test:pii": "tsx scripts/pii-markers.test.ts",
     "mock-e2e": "bash scripts/mock-e2e.sh",
     "e2e-real-ai": "bash scripts/e2e-real-ai.sh",
-    "e2e:ai-job": "tsx scripts/e2e-ai-job.ts"
+    "e2e:ai-job": "tsx scripts/e2e-ai-job.ts",
+  "e2e:media-enc": "tsx scripts/e2e-media-enc.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

@@ -5,6 +5,7 @@ import { Server } from "socket.io";
 import { initHub, initControlBridge, notifyClinic } from "@/sockets/hub";
 import { getRedis, closeRedis } from "@/lib/queue";
 import { NOTIFY_CHANNEL, type NotifyMessage } from "@/lib/notify";
+import { bootMediaSecurityCheck } from "@/lib/wa/media";
 import log from "@/lib/log";
 
 /**
@@ -38,6 +39,12 @@ app.prepare().then(() => {
     transports: ["websocket", "polling"],
   });
   initHub(io);
+
+  // 安全審計 C-1 boot assertion：production 未設 DISK_ENCRYPTED / media dir 唔可用 →
+  // 開機即 log ERROR（唔准「未加密碟」靜默上線）；dev 明文 media 亦會響亮提示。
+  void bootMediaSecurityCheck().catch((err) => {
+    log.error({ err: err instanceof Error ? err.message : String(err) }, "boot: media security check failed");
+  });
 
   // Redis pub/sub 橋：worker process 處理完 webhook 後 publish 通知，
   // 呢度 subscribe 並 emit 去對應 clinic room（見 lib/notify.ts）。
