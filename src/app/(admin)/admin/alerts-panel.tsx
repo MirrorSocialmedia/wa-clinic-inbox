@@ -17,10 +17,10 @@ export interface AlertItem {
 }
 
 const SEV_CLS: Record<string, string> = {
-  HIGH: "bg-red-100 text-red-800 border-red-300",
-  MEDIUM: "bg-amber-100 text-amber-800 border-amber-300",
-  LOW: "bg-neutral-100 text-neutral-700 border-neutral-300",
-  INFO: "bg-sky-100 text-sky-800 border-sky-300",
+  HIGH: "bg-danger-soft text-danger-text border-danger/40",
+  MEDIUM: "bg-warn-soft text-warn-text border-warn/40",
+  LOW: "bg-panel-2 text-t2 border-line-strong",
+  INFO: "bg-brand-soft text-brand-text border-brand/40",
 };
 
 function fmtTime(iso: string | null): string {
@@ -48,7 +48,7 @@ export function AlertsPanel({ alerts }: { alerts: AlertItem[] }) {
 
   if (list.length === 0) {
     return (
-      <p className="text-sm text-neutral-500">
+      <p className="text-sm text-t2">
         ✅ 冇未解決警報（health-check 每 5 分鐘、quality-check 每日自動檢查）
       </p>
     );
@@ -57,21 +57,21 @@ export function AlertsPanel({ alerts }: { alerts: AlertItem[] }) {
   return (
     <ul className="space-y-2">
       {list.map((a) => (
-        <li key={a.id} className="flex items-start justify-between gap-3 border border-neutral-200 rounded p-3 bg-white">
+        <li key={a.id} className="flex items-start justify-between gap-3 border border-line rounded p-3 bg-panel">
           <div className="min-w-0 text-sm">
             <div className="flex items-center gap-2 flex-wrap">
               <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded border ${SEV_CLS[a.severity] ?? SEV_CLS.LOW}`}>
                 {a.severity}
               </span>
-              <span className="font-mono text-neutral-800">{a.type}</span>
-              {a.clinicCode && <span className="text-xs text-neutral-500">clinic={a.clinicCode}</span>}
-              <span className="text-xs text-neutral-400">{fmtTime(a.createdAt)}</span>
+              <span className="font-mono text-t1">{a.type}</span>
+              {a.clinicCode && <span className="text-xs text-t2">clinic={a.clinicCode}</span>}
+              <span className="text-xs text-t3">{fmtTime(a.createdAt)}</span>
               {a.resolvedAt && (
-                <span className="text-[11px] text-green-700">✓ 已處理 {fmtTime(a.resolvedAt)}</span>
+                <span className="text-[11px] text-ok-text">✓ 已處理 {fmtTime(a.resolvedAt)}</span>
               )}
             </div>
             {a.detail !== null && a.detail !== undefined && (
-              <pre className="mt-1 text-[11px] text-neutral-500 whitespace-pre-wrap break-all font-mono max-h-24 overflow-y-auto">
+              <pre className="mt-1 text-[11px] text-t2 whitespace-pre-wrap break-all font-mono max-h-24 overflow-y-auto">
                 {typeof a.detail === "string" ? a.detail : JSON.stringify(a.detail, null, 1)}
               </pre>
             )}
@@ -80,7 +80,7 @@ export function AlertsPanel({ alerts }: { alerts: AlertItem[] }) {
             <button
               onClick={() => void resolve(a.id)}
               disabled={busy === a.id}
-              className="shrink-0 text-xs px-2.5 py-1 rounded bg-neutral-900 text-white disabled:opacity-50"
+              className="shrink-0 text-xs px-2.5 py-1 rounded bg-t1 text-canvas disabled:opacity-50"
             >
               {busy === a.id ? "處理中…" : "標記已處理"}
             </button>

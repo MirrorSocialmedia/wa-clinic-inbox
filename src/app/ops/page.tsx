@@ -81,24 +81,24 @@ export default async function OpsPage() {
   const latest = reports[0] ?? null;
 
   return (
-    <div className="min-h-screen bg-neutral-50">
-      <header className="bg-white border-b border-neutral-200">
+    <div className="min-h-screen bg-canvas">
+      <header className="bg-panel border-b border-line">
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <span className="font-semibold text-neutral-900">WA Clinic Inbox</span>
+            <span className="font-semibold text-t1">WA Clinic Inbox</span>
             <nav className="flex gap-4 text-sm">
-              <a href="/inbox" className="text-neutral-600 hover:text-neutral-900">
+              <a href="/inbox" className="text-t2 hover:text-t1">
                 Inbox
               </a>
               {session.role === "ADMIN" && (
-                <a href="/admin" className="text-neutral-600 hover:text-neutral-900">
+                <a href="/admin" className="text-t2 hover:text-t1">
                   總覽
                 </a>
               )}
-              <span className="text-blue-600 font-medium">營運週報</span>
+              <span className="text-brand-text font-medium">營運週報</span>
             </nav>
           </div>
-          <span className="text-xs text-neutral-500">
+          <span className="text-xs text-t3">
             {session.name}（{session.role} · scope={clinicCode}）
           </span>
         </div>
@@ -106,8 +106,8 @@ export default async function OpsPage() {
 
       <main className="max-w-5xl mx-auto px-6 py-8 space-y-6">
         <div>
-          <h1 className="text-xl font-semibold text-neutral-900">營運週報</h1>
-          <p className="text-sm text-neutral-500 mt-1">
+          <h1 className="text-xl font-semibold text-t1">營運週報</h1>
+          <p className="text-sm text-t2 mt-1">
             每星期一 07:00 自動生成上一週報表（OpsReport 表 + ALERT_CHANNEL 推送）。
             指標：訊息量 / FRT 中位數（inbound→首條 staff/AUTO outbound）/ 草稿採用率 / Flow 完成率 / 預約卡→確認轉化率。
           </p>
@@ -115,30 +115,30 @@ export default async function OpsPage() {
 
         {/* 最新一期 */}
         {latest ? (
-          <section className="bg-white rounded-lg border border-neutral-200 p-5">
-            <h2 className="font-medium text-neutral-900 mb-3">
+          <section className="bg-panel rounded-lg border border-line p-5">
+            <h2 className="font-medium text-t1 mb-3">
               最新一期（{latest.periodStart.toISOString().slice(0, 10)} → {latest.periodEnd.toISOString().slice(0, 10)}）
-              <span className="text-xs text-neutral-400 ml-2">scope={clinicCode}</span>
+              <span className="text-xs text-t3 ml-2">scope={clinicCode}</span>
             </h2>
-            <pre className="text-sm text-neutral-800 whitespace-pre-wrap font-mono bg-neutral-50 border border-neutral-100 rounded p-4">
+            <pre className="text-sm text-t1 whitespace-pre-wrap font-mono bg-panel-2 border border-line rounded p-4">
               {latest.text}
             </pre>
           </section>
         ) : (
-          <section className="bg-white rounded-lg border border-neutral-200 p-5 text-sm text-neutral-500">
+          <section className="bg-panel rounded-lg border border-line p-5 text-sm text-t2">
             仲未有週報 — 每星期一 07:00 自動生成；可手動補跑：
-            <code className="ml-1 text-xs bg-neutral-100 px-1.5 py-0.5 rounded">pnpm weekly-report</code>
+            <code className="ml-1 text-xs bg-panel-2 px-1.5 py-0.5 rounded">pnpm weekly-report</code>
           </section>
         )}
 
         {/* 8 週趨勢 */}
-        <section className="bg-white rounded-lg border border-neutral-200 p-5">
-          <h2 className="font-medium text-neutral-900 mb-3">最近 {trend.length} 週趨勢</h2>
+        <section className="bg-panel rounded-lg border border-line p-5">
+          <h2 className="font-medium text-t1 mb-3">最近 {trend.length} 週趨勢</h2>
           {trend.length === 0 ? (
-            <p className="text-sm text-neutral-500">暫無數據。</p>
+            <p className="text-sm text-t2">暫無數據。</p>
           ) : (
             <table className="w-full text-sm">
-              <thead className="text-left text-neutral-500 border-b border-neutral-200">
+              <thead className="text-left text-t2 border-b border-line">
                 <tr>
                   <th className="py-2 font-medium">週（週一）</th>
                   <th className="py-2 font-medium">訊息量</th>
@@ -150,8 +150,8 @@ export default async function OpsPage() {
               </thead>
               <tbody>
                 {trend.map((t) => (
-                  <tr key={t.periodStart} className="border-b border-neutral-100 last:border-0">
-                    <td className="py-2 font-mono text-neutral-700">{t.periodStart}</td>
+                  <tr key={t.periodStart} className="border-b border-line last:border-0">
+                    <td className="py-2 font-mono text-t2">{t.periodStart}</td>
                     <td className="py-2">{t.messages}</td>
                     <td className="py-2">{minHm(t.frtMedianSec)}</td>
                     <td className="py-2">{pct(t.draftRate)}</td>
@@ -162,7 +162,7 @@ export default async function OpsPage() {
               </tbody>
             </table>
           )}
-          <p className="mt-3 text-xs text-neutral-500">
+          <p className="mt-3 text-xs text-t2">
             FRT = 首次回覆時間（病人 inbound → 該對話第一條 staff/AUTO outbound，秒；unanswered 唔計入中位數）。
             草稿採用率 = (SENT_AS_IS+SENT_EDITED)/全部 draft。Flow 完成率 = COMPLETED/SENT。
             預約→確認 = CONFIRMED/全部 BookingRequest。

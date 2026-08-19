@@ -198,26 +198,26 @@ export default function ClinicsAdmin() {
   }
 
   const input =
-    "mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
-  const label = "block text-sm text-neutral-700";
+    "mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand";
+  const label = "block text-sm text-t2";
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-neutral-900">診所管理</h1>
+        <h1 className="text-lg font-semibold text-t1">診所管理</h1>
         <button
           onClick={openCreate}
-          className="rounded-md bg-blue-600 text-white text-sm px-4 py-2 hover:bg-blue-700"
+          className="rounded-md bg-brand text-white text-sm px-4 py-2 hover:bg-brand-hover"
         >
           + 新增診所
         </button>
       </div>
 
       {loading ? (
-        <p className="text-sm text-neutral-500">載入中…</p>
+        <p className="text-sm text-t2">載入中…</p>
       ) : (
-        <table className="w-full text-sm bg-white rounded-lg border border-neutral-200 overflow-hidden">
-          <thead className="bg-neutral-100 text-left text-neutral-600">
+        <table className="w-full text-sm bg-panel rounded-lg border border-line overflow-hidden">
+          <thead className="bg-panel-2 text-left text-t2">
             <tr>
               <th className="px-4 py-2">Code</th>
               <th className="px-4 py-2">名稱</th>
@@ -230,7 +230,7 @@ export default function ClinicsAdmin() {
           </thead>
           <tbody>
             {clinics.map((c) => (
-              <tr key={c.id} className="border-t border-neutral-100">
+              <tr key={c.id} className="border-t border-line">
                 <td className="px-4 py-2 font-mono">{c.code}</td>
                 <td className="px-4 py-2">{c.name}</td>
                 <td className="px-4 py-2 font-mono text-xs">{c.waPhoneNumberId}</td>
@@ -240,12 +240,12 @@ export default function ClinicsAdmin() {
                 </td>
                 <td className="px-4 py-2">
                   {c.aiMode === "AUTO" ? (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 border border-amber-300 px-2.5 py-0.5 text-xs font-semibold text-amber-900">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-warn-soft border border-warn/40 px-2.5 py-0.5 text-xs font-semibold text-warn-text">
                       ⚡ AUTO
-                      <span className="font-normal text-amber-700">AI 會直接覆病人</span>
+                      <span className="font-normal text-warn-text">AI 會直接覆病人</span>
                     </span>
                   ) : (
-                    <span className="inline-flex items-center rounded-full bg-neutral-100 border border-neutral-300 px-2.5 py-0.5 text-xs font-medium text-neutral-700">
+                    <span className="inline-flex items-center rounded-full bg-panel-2 border border-line-strong px-2.5 py-0.5 text-xs font-medium text-t2">
                       ✏️ DRAFT（預設）
                     </span>
                   )}
@@ -253,17 +253,17 @@ export default function ClinicsAdmin() {
                     onClick={() => void setAiMode(c)}
                     disabled={busy}
                     className={`ml-2 text-xs hover:underline disabled:opacity-50 ${
-                      c.aiMode === "DRAFT" ? "text-amber-700" : "text-neutral-600"
+                      c.aiMode === "DRAFT" ? "text-warn-text" : "text-t2"
                     }`}
                   >
                     {c.aiMode === "DRAFT" ? "開 AUTO →" : "轉 DRAFT"}
                   </button>
                 </td>
                 <td className="px-4 py-2 text-right space-x-3">
-                  <button onClick={() => openEdit(c)} className="text-blue-600 hover:underline">
+                  <button onClick={() => openEdit(c)} className="text-brand-text hover:underline">
                     編輯
                   </button>
-                  <button onClick={() => remove(c)} className="text-red-600 hover:underline">
+                  <button onClick={() => remove(c)} className="text-danger-text hover:underline">
                     刪除
                   </button>
                 </td>
@@ -271,7 +271,7 @@ export default function ClinicsAdmin() {
             ))}
             {clinics.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-6 text-center text-neutral-500">
+                <td colSpan={7} className="px-4 py-6 text-center text-t2">
                   未設診所
                 </td>
               </tr>
@@ -281,8 +281,8 @@ export default function ClinicsAdmin() {
       )}
 
       {(creating || editing) && (
-        <div className="bg-white rounded-lg border border-neutral-200 p-6 space-y-4 max-w-2xl">
-          <h2 className="font-medium text-neutral-900">{creating ? "新增診所" : `編輯 ${editing?.code}`}</h2>
+        <div className="bg-panel rounded-lg border border-line p-6 space-y-4 max-w-2xl">
+          <h2 className="font-medium text-t1">{creating ? "新增診所" : `編輯 ${editing?.code}`}</h2>
           <div className="grid grid-cols-2 gap-4">
             <label className={label}>
               Code（同 clinic-workforce 一致）
@@ -309,7 +309,7 @@ export default function ClinicsAdmin() {
               />
             </label>
           </div>
-          <label className="block text-sm text-neutral-700">
+          <label className="block text-sm text-t2">
             greetingConfig（JSON — 地址/營業時間/醫生/FAQ，餵 AI 草稿用）
             <textarea
               className={`${input} font-mono text-xs h-40 mt-1`}
@@ -318,17 +318,17 @@ export default function ClinicsAdmin() {
               placeholder='{"address": "...", "openingHours": "...", "doctors": [...], "faq": [...]}'
             />
           </label>
-          {jsonError && <p className="text-sm text-red-600">{jsonError}</p>}
-          {error && <p className="text-sm text-red-600">{error}</p>}
+          {jsonError && <p className="text-sm text-danger-text">{jsonError}</p>}
+          {error && <p className="text-sm text-danger-text">{error}</p>}
           <div className="flex gap-3">
             <button
               onClick={() => void save()}
               disabled={busy}
-              className="rounded-md bg-blue-600 text-white text-sm px-4 py-2 hover:bg-blue-700 disabled:opacity-50"
+              className="rounded-md bg-brand text-white text-sm px-4 py-2 hover:bg-brand-hover disabled:opacity-50"
             >
               {busy ? "保存中…" : "保存"}
             </button>
-            <button onClick={closeForm} className="rounded-md border border-neutral-300 text-sm px-4 py-2">
+            <button onClick={closeForm} className="rounded-md border border-line-strong text-sm px-4 py-2">
               取消
             </button>
           </div>

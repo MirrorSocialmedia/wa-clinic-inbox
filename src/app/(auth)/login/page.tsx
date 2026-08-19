@@ -40,45 +40,45 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-neutral-50">
+    <div className="min-h-screen flex items-center justify-center bg-canvas">
       <form
         onSubmit={submit}
-        className="w-full max-w-sm bg-white rounded-lg border border-neutral-200 p-8 shadow-sm space-y-5"
+        className="w-full max-w-sm bg-panel rounded-lg border border-line p-8 shadow-sm space-y-5"
       >
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold text-neutral-900">WA Clinic Inbox</h1>
-          <p className="text-sm text-neutral-500">請用員工帳號登入</p>
+          <h1 className="text-xl font-semibold text-t1">WA Clinic Inbox</h1>
+          <p className="text-sm text-t2">請用員工帳號登入</p>
         </div>
 
         <div className="space-y-3">
           <label className="block">
-            <span className="text-sm text-neutral-700">Email</span>
+            <span className="text-sm text-t2">Email</span>
             <input
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
               autoComplete="username"
-              className="mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm text-t1 focus:outline-none focus:ring-2 focus:ring-brand"
               placeholder="name@wa-clinic.local"
             />
           </label>
           <label className="block">
-            <span className="text-sm text-neutral-700">密碼</span>
+            <span className="text-sm text-t2">密碼</span>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
               autoComplete="current-password"
-              className="mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm text-t1 focus:outline-none focus:ring-2 focus:ring-brand"
               placeholder="••••••••"
             />
           </label>
         </div>
 
         {error && (
-          <p role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
+          <p role="alert" className="text-sm text-danger-text bg-danger-soft border border-danger/40 rounded px-3 py-2">
             {error}
           </p>
         )}
@@ -86,7 +86,7 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={busy}
-          className="w-full rounded-md bg-blue-600 text-white text-sm font-medium py-2 hover:bg-blue-700 disabled:opacity-50"
+          className="w-full rounded-md bg-brand text-white text-sm font-medium py-2 hover:bg-brand-hover disabled:opacity-50"
         >
           {busy ? "登入中…" : "登入"}
         </button>

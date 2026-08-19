@@ -152,26 +152,26 @@ export default function StaffAdmin() {
   }
 
   const input =
-    "mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
-  const label = "block text-sm text-neutral-700";
+    "mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand";
+  const label = "block text-sm text-t2";
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-neutral-900">員工管理</h1>
+        <h1 className="text-lg font-semibold text-t1">員工管理</h1>
         <button
           onClick={openCreate}
-          className="rounded-md bg-blue-600 text-white text-sm px-4 py-2 hover:bg-blue-700"
+          className="rounded-md bg-brand text-white text-sm px-4 py-2 hover:bg-brand-hover"
         >
           + 新增員工
         </button>
       </div>
 
       {loading ? (
-        <p className="text-sm text-neutral-500">載入中…</p>
+        <p className="text-sm text-t2">載入中…</p>
       ) : (
-        <table className="w-full text-sm bg-white rounded-lg border border-neutral-200 overflow-hidden">
-          <thead className="bg-neutral-100 text-left text-neutral-600">
+        <table className="w-full text-sm bg-panel rounded-lg border border-line overflow-hidden">
+          <thead className="bg-panel-2 text-left text-t2">
             <tr>
               <th className="px-4 py-2">Email</th>
               <th className="px-4 py-2">姓名</th>
@@ -183,15 +183,15 @@ export default function StaffAdmin() {
           </thead>
           <tbody>
             {staff.map((u) => (
-              <tr key={u.id} className="border-t border-neutral-100">
+              <tr key={u.id} className="border-t border-line">
                 <td className="px-4 py-2">{u.email}</td>
                 <td className="px-4 py-2">{u.name}</td>
                 <td className="px-4 py-2">
                   <span
                     className={
                       u.role === "ADMIN"
-                        ? "px-2 py-0.5 rounded text-xs bg-purple-100 text-purple-700"
-                        : "px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700"
+                        ? "px-2 py-0.5 rounded text-xs bg-brand-soft text-brand-text"
+                        : "px-2 py-0.5 rounded text-xs bg-panel-2 text-t2"
                     }
                   >
                     {u.role}
@@ -200,19 +200,19 @@ export default function StaffAdmin() {
                 <td className="px-4 py-2 font-mono text-xs">{u.clinicCode ?? "—（跨店）"}</td>
                 <td className="px-4 py-2">
                   {u.active ? (
-                    <span className="text-green-700">active</span>
+                    <span className="text-ok-text">active</span>
                   ) : (
-                    <span className="text-neutral-400">停用</span>
+                    <span className="text-t3">停用</span>
                   )}
                 </td>
                 <td className="px-4 py-2 text-right space-x-3">
-                  <button onClick={() => openEdit(u)} className="text-blue-600 hover:underline">
+                  <button onClick={() => openEdit(u)} className="text-brand-text hover:underline">
                     編輯
                   </button>
-                  <button onClick={() => void toggleActive(u)} className="text-amber-600 hover:underline">
+                  <button onClick={() => void toggleActive(u)} className="text-warn-text hover:underline">
                     {u.active ? "停用" : "啟用"}
                   </button>
-                  <button onClick={() => void remove(u)} className="text-red-600 hover:underline">
+                  <button onClick={() => void remove(u)} className="text-danger-text hover:underline">
                     刪除
                   </button>
                 </td>
@@ -223,8 +223,8 @@ export default function StaffAdmin() {
       )}
 
       {(creating || editing) && (
-        <div className="bg-white rounded-lg border border-neutral-200 p-6 space-y-4 max-w-2xl">
-          <h2 className="font-medium text-neutral-900">
+        <div className="bg-panel rounded-lg border border-line p-6 space-y-4 max-w-2xl">
+          <h2 className="font-medium text-t1">
             {creating ? "新增員工" : `編輯 ${editing?.email}`}
           </h2>
           <div className="grid grid-cols-2 gap-4">
@@ -279,7 +279,7 @@ export default function StaffAdmin() {
                 autoComplete="new-password"
               />
             </label>
-            <label className="flex items-center gap-2 text-sm text-neutral-700 mt-6">
+            <label className="flex items-center gap-2 text-sm text-t2 mt-6">
               <input
                 type="checkbox"
                 checked={form.active}
@@ -288,16 +288,16 @@ export default function StaffAdmin() {
               active（啟用）
             </label>
           </div>
-          {error && <p className="text-sm text-red-600">{error}</p>}
+          {error && <p className="text-sm text-danger-text">{error}</p>}
           <div className="flex gap-3">
             <button
               onClick={() => void save()}
               disabled={busy}
-              className="rounded-md bg-blue-600 text-white text-sm px-4 py-2 hover:bg-blue-700 disabled:opacity-50"
+              className="rounded-md bg-brand text-white text-sm px-4 py-2 hover:bg-brand-hover disabled:opacity-50"
             >
               {busy ? "保存中…" : "保存"}
             </button>
-            <button onClick={closeForm} className="rounded-md border border-neutral-300 text-sm px-4 py-2">
+            <button onClick={closeForm} className="rounded-md border border-line-strong text-sm px-4 py-2">
               取消
             </button>
           </div>

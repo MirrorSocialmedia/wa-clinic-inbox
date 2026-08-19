@@ -16,27 +16,27 @@ export default async function AdminLayout({
   if (session.role !== "ADMIN") redirect("/inbox");
 
   return (
-    <div className="min-h-screen bg-neutral-50">
-      <header className="bg-white border-b border-neutral-200">
+    <div className="min-h-screen bg-canvas">
+      <header className="bg-panel border-b border-line">
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <span className="font-semibold text-neutral-900">WA Clinic Inbox</span>
+            <span className="font-semibold text-t1">WA Clinic Inbox</span>
             <nav className="flex gap-4 text-sm">
-              <a href="/inbox" className="text-neutral-600 hover:text-neutral-900">
+              <a href="/inbox" className="text-t2 hover:text-t1">
                 Inbox
               </a>
-              <a href="/admin" className="text-blue-600 font-medium">
+              <a href="/admin" className="text-brand-text font-medium">
                 總覽
               </a>
-              <a href="/admin/clinics" className="text-neutral-600 hover:text-neutral-900">
+              <a href="/admin/clinics" className="text-t2 hover:text-t1">
                 診所
               </a>
-              <a href="/admin/staff" className="text-neutral-600 hover:text-neutral-900">
+              <a href="/admin/staff" className="text-t2 hover:text-t1">
                 員工
               </a>
             </nav>
           </div>
-          <span className="text-xs text-neutral-500">
+          <span className="text-xs text-t3">
             {session.name}（ADMIN）
           </span>
         </div>
