@@ -2,6 +2,7 @@ import { type NextRequest } from "next/server";
 import { getSession, type SessionData } from "@/lib/session";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
+import { getRedis } from "@/lib/queue";
 
 /**
  * WA Clinic Inbox — RBAC 基礎（框架 MD D10 / §6.4）
@@ -96,28 +97,49 @@ export function invalidateActiveCache(staffId: string): void {
 // 做法：per-staff cutoff 時間戳；loginAt < cutoff 嘅 session 一律當失效：
 //   - web API：requireAuth 下一 request 即刻 401（同停用同水位）
 //   - socket：hub connect 擋新連 + 已連 socket 由 control bridge kick（disconnectStaff）
-// 多 instance：route 世界設本地 cutoff + publishControl → hub 世界收 staff:sessions-invalidated
-// 設自己份 cutoff 同斷線（同 P0-3 停用同一套跨 instance 橋）。
+// 雙層持久化（Batch B M4 加固）：
+//   1) in-memory Map — 同 process 快路徑（即刻生效）
+//   2) Redis sess-cutoff:{staffId}（TTL 86400s = session TTL 上限）— 補住純 memory Map 三個缺口：
+//      dev 模式 module 多副本（Next dev 每個 route 各編譯一份 lib → Map 唔共享）、
+//      多 instance、process 重啟（reset 完 PM2 restart → 舊 session 即刻復活）。
 const sessionCutoffs = new Map<string, number>(); // staffId → cutoff epoch ms
+const SESS_CUTOFF_PREFIX = "sess-cutoff:";
+const SESS_CUTOFF_TTL_SEC = 86_400; // = M-4 session TTL 上限 — 覆蓋所有可能存在嘅 session
 
-/** reset password 時叫 — 該 staff 所有舊 session 即刻失效（本地 instance）。 */
-export function invalidateStaffSessions(staffId: string): void {
-  sessionCutoffs.set(staffId, Date.now());
+/** reset password 時叫 — 該 staff 所有舊 session 即刻失效（本地 + Redis 持久化）。 */
+export async function invalidateStaffSessions(staffId: string): Promise<void> {
+  const now = Date.now();
+  sessionCutoffs.set(staffId, now);
   // 順手清舊 entry（cutoff 只係短暫安全網：staff 重新 login 後新 session loginAt > cutoff 就冇用，24h 後清）
   if (sessionCutoffs.size > 1000) {
-    const now = Date.now();
     for (const [k, v] of sessionCutoffs) if (now - v >= 86_400_000) sessionCutoffs.delete(k);
+  }
+  // Redis 持久化 — 寫失敗降級 local-only + warn（Redis 落咗個 app 都已經降级，queue 要佢）
+  try {
+    await getRedis().set(`${SESS_CUTOFF_PREFIX}${staffId}`, String(now), "EX", SESS_CUTOFF_TTL_SEC);
+  } catch (err) {
+    log.warn({ staffId, err: err instanceof Error ? err.message : String(err) }, "rbac: cutoff Redis 寫入失敗（降級 local-only）");
   }
 }
 
 /**
  * session 有冇被 cutoff 咗（requireAuth + hub connect 共用）。
  * fail-closed：session 冇 loginAt（舊格式 / 偽造）→ 當失效。
+ * Redis 讀取失敗 → 降級 local Map（log warn；Redis 落咗個 app 已經降级）。
  */
-export function isStaffSessionCurrent(data: Pick<SessionData, "staffId" | "loginAt">): boolean {
+export async function isStaffSessionCurrent(data: Pick<SessionData, "staffId" | "loginAt">): Promise<boolean> {
   if (typeof data.loginAt !== "number") return false;
-  const cutoff = sessionCutoffs.get(data.staffId);
-  if (cutoff !== undefined && data.loginAt < cutoff) return false;
+  const local = sessionCutoffs.get(data.staffId);
+  if (local !== undefined && data.loginAt < local) return false;
+  try {
+    const raw = await getRedis().get(`${SESS_CUTOFF_PREFIX}${data.staffId}`);
+    if (raw) {
+      const cutoff = Number(raw);
+      if (Number.isFinite(cutoff) && data.loginAt < cutoff) return false;
+    }
+  } catch (err) {
+    log.warn({ staffId: data.staffId, err: err instanceof Error ? err.message : String(err) }, "rbac: cutoff Redis 讀取失敗（local-only）");
+  }
   return true;
 }
 
@@ -134,7 +156,7 @@ export async function requireAuth(req: NextRequest): Promise<AuthContext> {
     throw new RbacError(401, "account disabled");
   }
   // ★ C-3 尾批：password reset 後嘅舊 session → 401（同停用同水位）
-  if (!isStaffSessionCurrent(data)) {
+  if (!(await isStaffSessionCurrent(data))) {
     throw new RbacError(401, "session invalidated");
   }
   return toContext(data, res);

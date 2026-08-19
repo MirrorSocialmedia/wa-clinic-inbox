@@ -55,7 +55,7 @@ export function initHub(io: SocketIOServer): void {
         return next(new Error("account disabled"));
       }
       // ★ C-3 尾批：password reset 後嘅舊 session → 拒絕新連（同 web API 401 同水位）
-      if (!isStaffSessionCurrent(session)) {
+      if (!(await isStaffSessionCurrent(session))) {
         log.warn({ staffId: session.staffId }, "socket: connect rejected (session invalidated)");
         return next(new Error("session invalidated"));
       }
@@ -151,7 +151,13 @@ export function initControlBridge(sub: Redis): void {
         }
       } else if (data.cmd === "staff:sessions-invalidated") {
         // ★ C-3 尾批：password reset — 本 instance 設 cutoff（新連被擋）+ 斷晒已連 socket
-        invalidateStaffSessions(data.staffId);
+        // （async — local 先設，Redis 持久化失敗只 warn 唔阻斷線）
+        void invalidateStaffSessions(data.staffId).catch((err) => {
+          log.warn(
+            { staffId: data.staffId, err: err instanceof Error ? err.message : String(err) },
+            "control: cutoff 持久化失敗（local 已設）"
+          );
+        });
         const n = disconnectStaff(data.staffId);
         log.info({ staffId: data.staffId, sockets: n }, "control: staff:sessions-invalidated applied (password reset)");
       }

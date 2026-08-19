@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { getIronSession } from "iron-session";
-import { sessionOptions, type SessionData } from "@/lib/session";
+import { sessionOptions, isSessionFresh, type SessionData } from "@/lib/session";
 
 /**
  * Server component / server route 讀 session（iron-session v8 cookie-store overload）。
@@ -12,7 +12,10 @@ export async function getServerSession(): Promise<SessionData | null> {
   try {
     const cookieStore = await cookies();
     const session = await getIronSession<SessionData>(cookieStore, sessionOptions());
-    return session.staffId ? (session as unknown as SessionData) : null;
+    if (!session.staffId) return null;
+    // M-4：role 有效期（loginAt 起算）— server component 路徑同 web/socket 同水位
+    if (!isSessionFresh(session)) return null;
+    return session as unknown as SessionData;
   } catch {
     return null;
   }

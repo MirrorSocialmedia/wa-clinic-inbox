@@ -10,3 +10,13 @@ allowBuilds:
   embedded-postgres: true
   '@embedded-postgres/linux-x64': true
   '@prisma/client': true
+
+# 安全審計 M-7：transitive 高危漏洞修（pnpm audit --prod --audit-level=high = 0）
+# 2026-08-19：postcss 8.4.31→8.5.26（GHSA-6g55-p6wh-862q / GHSA-r28c-9q8g-f849，next 鎖 8.4.31）
+#            sharp ^0.34→0.35.3（GHSA-f88m-g3jw-g9cj；app 無用 next/image，實為零風險）
+#            deepmerge-ts 7.1.5→8.0.1（GHSA-ggr8-5vv4-36mx，@prisma/config build-time）
+# gate: pnpm audit:gate（--audit-level=high — 有 high 即非零 exit）
+overrides:
+  postcss: 8.5.26
+  sharp: 0.35.3
+  deepmerge-ts: 8.0.1

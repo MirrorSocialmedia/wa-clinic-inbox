@@ -29,7 +29,27 @@ export interface SessionData {
 
 export const SESSION_COOKIE_NAME = "wa_inbox_session";
 
-const TTL_SECONDS = 60 * 60 * 24 * 7; // 7 日
+/**
+ * ★ M-4：role-based session 有效期（由登入起算，不 sliding）：
+ * - STAFF 7d → **24h**
+ * - ADMIN → **12h**（高權限 session 先過期）
+ *
+ * 實現：iron-session 層用兩者最大值（24h）做 unseal — role 要解密密文先知道，
+ * 無法喺 unseal 前用 per-role ttl；精確檢查喺 unseal 之後用 loginAt（isSessionFresh，
+ * 所有讀路徑都過：getSession / getSocketSession / getServerSession）。
+ * 舊 7d session（loginAt > 24h）喺下一次讀取即失效 = 一次性強制重登（預期行為）。
+ */
+export const SESSION_TTL_SECONDS: Record<SessionRole, number> = {
+  STAFF: 24 * 3600, // 24h（M-4：原 7d）
+  ADMIN: 12 * 3600, // 12h
+};
+const UNSEAL_TTL_SECONDS = Math.max(SESSION_TTL_SECONDS.STAFF, SESSION_TTL_SECONDS.ADMIN);
+
+/** session 有冇喺該 role 嘅有效期内（loginAt 起算；fail-closed：無 loginAt = 失效）。 */
+export function isSessionFresh(data: Pick<SessionData, "role" | "loginAt">): boolean {
+  if (typeof data.loginAt !== "number") return false;
+  return Date.now() - data.loginAt <= SESSION_TTL_SECONDS[data.role] * 1000;
+}
 
 function assertSecret(): string {
   const secret = process.env.SESSION_SECRET ?? "";
@@ -46,13 +66,14 @@ export function sessionOptions(): SessionOptions {
   return {
     cookieName: SESSION_COOKIE_NAME,
     password: assertSecret(),
-    ttl: TTL_SECONDS,
+    // unseal/maxAge 用最大值 — 精確 role TTL 喺 isSessionFresh（loginAt 檢查）
+    ttl: UNSEAL_TTL_SECONDS,
     cookieOptions: {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
-      maxAge: TTL_SECONDS,
+      maxAge: UNSEAL_TTL_SECONDS,
     },
   };
 }
@@ -78,6 +99,11 @@ export async function getSession(req: NextRequest): Promise<SessionResult> {
   try {
     const session = await getIronSession<SessionData>(req, res, sessionOptions());
     const data = session.staffId ? (session as unknown as SessionData) : null;
+    if (data && !isSessionFresh(data)) {
+      // M-4：超出 role 有效期 → 清 cookie（瀏覽器唔會再送呢個舊 session）
+      session.destroy();
+      return { data: null, res };
+    }
     return { data, res };
   } catch (err) {
     // 只 log 錯誤 metadata — cookie 內容可能係客戶 PII，絕對唔可以入 log
@@ -136,8 +162,10 @@ export async function getSocketSession(req: { headers: { cookie?: string } }): P
     if (!value) return null;
     const data = await unsealData<SessionData>(value, {
       password: assertSecret(),
-      ttl: TTL_SECONDS,
+      ttl: UNSEAL_TTL_SECONDS,
     });
+    // M-4：role 有效期（loginAt 檢查）— socket 路徑同 web 同水位
+    if (data && !isSessionFresh(data)) return null;
     return data && data.staffId ? data : null;
   } catch {
     return null;

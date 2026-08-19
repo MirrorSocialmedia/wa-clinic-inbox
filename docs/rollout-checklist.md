@@ -16,6 +16,7 @@
 - [ ] history payload 形狀驗證（P0-2）：onboarding 當日 `LOG_LEVEL=debug` 開一輪，對 `history: payload structure` 呢行 log 嘅 keys/計數（spans/messages/distinctFroms/contacts）驗證逐條歸戶假設（worker 只 log 結構，唔 log 內文/電話 — PII 鐵律）。若 `history_skip` 警報彈 → 查 skip 計數，必要時人工補錄
 - [ ] `Clinic.waPhoneNumberId` 寫入 DB（admin 頁或 seed）
 - [ ] 該店醫生名單入 `greetingConfig`（地址/營業時間/醫生/常見 FAQ）
+- [ ] 依賴漏洞門（安全審計 M-7）：`pnpm audit:gate`（= `pnpm audit --prod --audit-level=high`）→ 0 個 high 漏洞先上線
 - [ ] 前台帳號開通（email + 密碼，role=STAFF 綁定該店）
 
 ### B. 前台 15 分鐘教學（重點口徑）

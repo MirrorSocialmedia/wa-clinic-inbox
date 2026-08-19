@@ -713,7 +713,13 @@ DATE_A=$(echo "$ROW" | jf d); TIME_A=$(echo "$ROW" | jf t)
 step_flow "date" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCREEN_DATE --provider "$DOC_A"
 case "${F_DATA:-}" in *"$DATE_A"*) : ;; *) echo "    ❌ T27 SCREEN_DATE 冇包含 $DATE_A（data=${F_DATA:0:200}）"; T27=1 ;; esac
 DC_DATE=$(printf '%s' "${F_DATA:-}" | grep -oE '"data_count":[0-9]+' | cut -d: -f2)
-DBDATES=$(q "SELECT count(DISTINCT \"date\")::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A'" | jf c)
+# ★ 斷言 predicate 跟 endpoint 同義（isOpen + bookedCount=0 + syncWindow 窗口）— 舊喺
+#   DB 嘅 PENDING/CONFIRMED booking（persistent DB 多輪累積）會令無過濾嘅 count 多计，
+#   造成 26≠27 假 fail（2026-08-19 午夜邊界實遇；Batch B 修復）
+HK_TODAY=$(TZ=Asia/Hong_Kong date +%F)
+WIN_START=$(TZ=Asia/Hong_Kong date -d "$HK_TODAY + 1 day" +%F)
+WIN_END=$(TZ=Asia/Hong_Kong date -d "$HK_TODAY + 30 day" +%F)
+DBDATES=$(q "SELECT count(DISTINCT \"date\")::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 AND \"date\">='$WIN_START' AND \"date\"<='$WIN_END'" | jf c)
 [ -n "$DC_DATE" ] && [ "$DC_DATE" = "$DBDATES" ] || { echo "    ❌ T27 date 列表唔等於 DB 有空日集合（endpoint=$DC_DATE DB=$DBDATES）"; T27=1; }
 step_flow "time" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCREEN_TIME --provider "$DOC_A" --date "$DATE_A"
 case "${F_DATA:-}" in *"$TIME_A"*) : ;; *) echo "    ❌ T27 SCREEN_TIME 冇包含 $TIME_A（data=${F_DATA:0:200}）"; T27=1 ;; esac
@@ -1193,10 +1199,33 @@ printf 'e2e-media-bytes' > "$WA_MEDIA_DIR/$MEDIA_FILE"
 q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$MEDIA_FILE' WHERE \"waMessageId\"='$MEDIA_WAMID'" >/dev/null
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/media/$MEDIA_FILE")
 check "T43 店 A(TKW) staff 攞店 B(MF) 媒體 → 403" "$CODE" "403"
-CODE=$(curl -s -o /tmp/e2e-t43-body -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/$MEDIA_FILE")
+CODE=$(curl -s -D /tmp/e2e-t43-headers -o /tmp/e2e-t43-body -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/$MEDIA_FILE")
 check "T43 店 B(MF) staff 攞自家媒體 → 200" "$CODE" "200"
 BODY43=$(cat /tmp/e2e-t43-body 2>/dev/null)
 check "T43 內容正確（mediaPath 反查 + 檔案讀取）" "$BODY43" "e2e-media-bytes"
+# AS-4：nosniff + image/* → inline
+grep -qi '^x-content-type-options: nosniff' /tmp/e2e-t43-headers && pass "T43 AS-4: nosniff header 存在" || fail "T43 AS-4: 無 X-Content-Type-Options: nosniff"
+grep -qi '^content-disposition: inline;' /tmp/e2e-t43-headers && pass "T43 AS-4: image/* → inline" || fail "T43 AS-4: image 唔係 inline（$(grep -i '^content-disposition' /tmp/e2e-t43-headers | head -1)）"
+# AS-4：.bin（application/octet-stream）→ attachment
+BIN_WAMID="wamid.E2E_MEDIA_BIN_${EPOCH}"
+BIN_FILE="${BIN_WAMID}.bin"
+printf 'e2e-bin-bytes' > "$WA_MEDIA_DIR/$BIN_FILE"
+pnpm -s mock-inbound message --clinic MF --from "$MEDIA_PAT" --text "e2e media bin" --wamid "$BIN_WAMID" --name "E2E-A-MEDIA" >/dev/null || T43=1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$BIN_WAMID'" '[{"c":"1"}]' 30 || { echo "    ❌ T43 .bin message 未入庫"; T43=1; }
+q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$BIN_FILE' WHERE \"waMessageId\"='$BIN_WAMID'" >/dev/null
+# dev server manifest race（同 T43b — webhook POST 觸發 recompile，首發可能 500）：重試 ×3
+T43BIN_CODE=000
+for i in 1 2 3; do
+  T43BIN_CODE=$(curl -s -D /tmp/e2e-t43-bin-headers -o /tmp/e2e-t43-bin-body -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/$BIN_FILE")
+  [ "$T43BIN_CODE" = "200" ] && break
+  sleep 2
+done
+check "T43 .bin 本店 staff → 200（dev manifest race retry ×3）" "$T43BIN_CODE" "200"
+grep -qi '^content-disposition: attachment;' /tmp/e2e-t43-bin-headers && pass "T43 AS-4: .bin（octet-stream）→ attachment" || fail "T43 AS-4: .bin 唔係 attachment（$(grep -i '^content-disposition' /tmp/e2e-t43-bin-headers | head -1)）"
+grep -qi '^x-content-type-options: nosniff' /tmp/e2e-t43-bin-headers && pass "T43 AS-4: .bin 都有 nosniff" || fail "T43 AS-4: .bin 無 nosniff"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/media/$BIN_FILE")
+check "T43 .bin 跨店（TKW）→ 403（H-4 scope 對非 image 類型一樣生效）" "$CODE" "403"
+rm -f "$WA_MEDIA_DIR/$MEDIA_FILE" "$WA_MEDIA_DIR/$BIN_FILE" /tmp/e2e-t43-headers /tmp/e2e-t43-bin-headers
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/wamid.E2E_NOOWNER_${EPOCH}.jpg")
 check "T43 無主檔（無 Message 持有）→ 404" "$CODE" "404"
 rm -f "$WA_MEDIA_DIR/$MEDIA_FILE"
@@ -1347,6 +1376,100 @@ S4N=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=contact&q=E2E-A" | grep -o
 #（TOTP / change-password）行，避免佢哋撞到殘留計數返 429。
 sleep 61
 
+# ── T50. H-2 ADMIN TOTP 全鏈（enroll → 2FA 登入 → STAFF 零影響 → 新 IP Alert）──────────────
+echo "[BB-M3] T50: ADMIN TOTP..."
+T50=0
+ADMIN_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$ADMIN_EMAIL'" | jf id)
+[ -n "$ADMIN_ID" ] || { echo "    ❌ T50 admin id 搵唔到"; T50=1; }
+# hermetic：清上一 run 殘留（persistent DB — 留低 totpSecretEnc 會鎖死下輪 T1c 登入；舊 alert 污染計數）
+q "UPDATE \"StaffUser\" SET \"totpSecretEnc\" = NULL WHERE id='$ADMIN_ID'" >/dev/null
+q "DELETE FROM \"Alert\" WHERE type='admin_new_ip_login'" >/dev/null 2>&1 || true
+# (1) enroll（ADMIN cookie；secret 加密落 DB；response 只此一次）
+ENR=$(curl -s -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/totp/enroll")
+T50_SECRET=$(echo "$ENR" | grep -oE '"secret":"[^"]*"' | head -1 | cut -d'"' -f4)
+[ -n "$T50_SECRET" ] || { echo "    ❌ T50 enroll response 冇 secret：$(echo "$ENR" | head -c 120)"; T50=1; }
+DBENC=$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE id='$ADMIN_ID' AND \"totpSecretEnc\" IS NOT NULL" | jf c)
+check "T50 enroll → DB totpSecretEnc 非 NULL（AES-256-GCM 密文落庫）" "$DBENC" "1"
+if grep -qF "$T50_SECRET" /tmp/e2e-server.log 2>/dev/null; then
+  echo "    ❌ T50 secret 出現在 server log（PII 鐵律違反）"; T50=1
+else
+  pass "T50 secret 未入 server log（只呈給 ADMIN 自己 DOM）"
+fi
+# (2) 啟用後登入唔帶 code → 401 + totpRequired（UI 第二步；唔計 lockout）
+CODE=$(curl -s -o /tmp/e2e-t50-noc.txt -w '%{http_code}' -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\"}")
+check "T50 啟用後登入唔帶 code → 401" "$CODE" "401"
+grep -q '"totpRequired":true' /tmp/e2e-t50-noc.txt && pass "T50 401 帶 totpRequired:true（UI 第二步訊號）" || { echo "    ❌ T50 401 冇 totpRequired flag"; T50=1; }
+# (3) 錯 code → 統一 401（唔洩露係錯定過期）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\",\"totp\":\"000000\"}")
+check "T50 錯 code → 401（統一，唔洩露細節）" "$CODE" "401"
+# (4) 正確 code（同一部機同時脈 — totp-code.ts 現算，±1 window 必然 hit）→ 200
+T50_CODE=$(pnpm -s e2e:totp-code "$T50_SECRET")
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_ADMIN" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\",\"totp\":\"$T50_CODE\"}")
+check "T50 正確 code → 200（2FA 通過）" "$CODE" "200"
+# (5) STAFF 零影響（totpSecretEnc 恆 NULL → 登入流程完全唔變）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_MF" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$MF_EMAIL\",\"password\":\"$MF_PASS\"}")
+check "T50 STAFF 登入零影響（唔使第二步）→ 200" "$CODE" "200"
+# (6) 新 IP 登入 → Alert(admin_new_ip_login)（7 日窗口比較；metadata only 行 notifyAlert hard-gate）
+#     ★ dev 環境註：Next 會將 socket IP 注入 XFF → clientIp 恆解析去本地 socket IP，
+#       XFF header 模擬「新 IP」唔生效；改用清走 admin 7 日 LOGIN baseline →
+#       本次登入嘅 IP 就係「從未見過」。生產（nginx $remote_addr 覆蓋）邏輯同一，只係 IP 源唔同。
+q "DELETE FROM \"AuditLog\" WHERE staffId='$ADMIN_ID' AND action='LOGIN'" >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_ADMIN" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\",\"totp\":\"$(pnpm -s e2e:totp-code "$T50_SECRET")\"}")
+check "T50 新 IP 登入 → 200" "$CODE" "200"
+if wait_for "SELECT count(*)::text c FROM \"Alert\" WHERE type='admin_new_ip_login' AND \"resolvedAt\" IS NULL" '[{\"c\":\"1\"}]' 15; then
+  pass "T50 ADMIN 新 IP 登入 → Alert(admin_new_ip_login) 開咗"
+else
+  fail "T50 新 IP Alert 未開"
+fi
+LOGIN_IP=$(q "SELECT (\"meta\"->>'ip')::text ip FROM \"AuditLog\" WHERE staffId='$ADMIN_ID' AND action='LOGIN' ORDER BY \"createdAt\" DESC LIMIT 1" | jf ip)
+AL_IP=$(q "SELECT (\"detail\"->>'ip')::text ip FROM \"Alert\" WHERE type='admin_new_ip_login' AND \"resolvedAt\" IS NULL ORDER BY \"createdAt\" DESC LIMIT 1" | jf ip)
+check "T50 alert detail.ip = LOGIN audit ip（metadata only，無其他 PII）" "$AL_IP" "$LOGIN_IP"
+# (7) 清理：unset totp + 清 alert（persistent DB 衛生 — 下輪 T1c 要純登入）
+q "UPDATE \"StaffUser\" SET \"totpSecretEnc\" = NULL WHERE id='$ADMIN_ID'" >/dev/null
+q "DELETE FROM \"Alert\" WHERE type='admin_new_ip_login'" >/dev/null 2>&1 || true
+[ "$T50" = 0 ] && pass "T50 H-2 ADMIN TOTP 全鏈（enroll/2FA/錯 code/STAFF 零影響/新 IP alert/secret 零 log）" \
+  || fail "T50 TOTP（見上 ❌）"
+
+# ── T51. M-4 change-password 踢全 session（C-3 loginAt cutoff 重用）+ TTL 單元 ──────────────────
+echo "[BB-M4] T51: change-password + session TTL..."
+T51=0
+# IP 限流窗口（5/60s）：T50 已用咗 4 個 local login 計數 — 等窗口清晒，避免 T51 兩個 login 撞 429
+sleep 61
+# 重用 T42 嘅 WTC 狀態（COOKIE_WTC / WTC_ID / WTC_EMAIL / WTC_PASS — T48 尾已還原原密碼）
+# (1) 舊密碼錯 → 401（統一，唔洩露邊個欄位）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" -X POST "$BASE/api/auth/change-password" -H 'Content-Type: application/json' -d '{"oldPassword":"wrong-old-pw","newPassword":"NewPass-123!xyz"}')
+check "T51 舊密碼錯 → 401" "$CODE" "401"
+# (2) 正確 → 200 + relogin:true
+T51_NEW="E2E-CP-${EPOCH}-pw"
+CODE=$(curl -s -o /tmp/e2e-t51-cp.json -w '%{http_code}' -b "$COOKIE_WTC" -X POST "$BASE/api/auth/change-password" -H 'Content-Type: application/json' -d "{\"oldPassword\":\"$WTC_PASS\",\"newPassword\":\"$T51_NEW\"}")
+check "T51 change-password → 200" "$CODE" "200"
+grep -q '"relogin":true' /tmp/e2e-t51-cp.json && pass "T51 response 帶 relogin:true（前端提示重登）" || { echo "    ❌ T51 冇 relogin flag"; T51=1; }
+sleep 1
+# (3) 舊 session（同一 cookie）→ 即刻 401 session invalidated（C-3 cutoff 踢晒，包括當前）
+CODE=$(curl -s -o /tmp/e2e-t51-old.json -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+check "T51 舊 session（同 cookie）→ 即刻 401" "$CODE" "401"
+ERR51=$(grep -oE '"error":"[^"]*"' /tmp/e2e-t51-old.json | head -1)
+check "T51 401 reason = session invalidated" "$ERR51" '"error":"session invalidated"'
+# (4) 新密碼登入 → 200 + 新 session 可用
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_WTC" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$WTC_EMAIL\",\"password\":\"$T51_NEW\"}")
+check "T51 新密碼登入 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+check "T51 新 session → 200" "$CODE" "200"
+# (5) 還原原密碼（persistent sandbox DB — 下輪 run 嘅 T42 要原密碼登入）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT "$BASE/api/admin/staff/$WTC_ID" -H 'Content-Type: application/json' -d "{\"newPassword\":\"$WTC_PASS\"}")
+check "T51 還原原密碼 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_WTC" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$WTC_EMAIL\",\"password\":\"$WTC_PASS\"}")
+check "T51 還原驗證：原密碼可登入" "$CODE" "200"
+# (6) TTL 單元（hermetic：monkey-patch Date.now — STAFF 24h / ADMIN 12h / fail-closed）
+TTL_OUT=$(pnpm -s e2e:session-ttl 2>&1)
+if echo "$TTL_OUT" | grep -q "SESSION-TTL OK"; then
+  pass "T51 TTL 單元（STAFF 24h / ADMIN 12h 邊界 + fail-closed）"
+else
+  echo "$TTL_OUT" | tail -10
+  fail "T51 TTL 單元（見上）"
+fi
+[ "$T51" = 0 ] && pass "T51 M-4 change-password 踢全 session（C-3 重用）+ TTL 邊界" \
+  || fail "T51 change-password（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

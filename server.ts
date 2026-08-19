@@ -6,6 +6,7 @@ import { initHub, initControlBridge, notifyClinic } from "@/sockets/hub";
 import { getRedis, closeRedis } from "@/lib/queue";
 import { NOTIFY_CHANNEL, type NotifyMessage } from "@/lib/notify";
 import { bootMediaSecurityCheck } from "@/lib/wa/media";
+import { bootKeyPathCheck } from "@/lib/boot-key-paths";
 import log from "@/lib/log";
 
 /**
@@ -45,6 +46,13 @@ app.prepare().then(() => {
   void bootMediaSecurityCheck().catch((err) => {
     log.error({ err: err instanceof Error ? err.message : String(err) }, "boot: media security check failed");
   });
+
+  // 安全審計 M-6：production 金鑰路徑 boot 警報（私匙路徑喺 repo working dir 內 → 醒目 WARN）
+  try {
+    bootKeyPathCheck();
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "boot: key path check failed");
+  }
 
   // Redis pub/sub 橋：worker process 處理完 webhook 後 publish 通知，
   // 呢度 subscribe 並 emit 去對應 clinic room（見 lib/notify.ts）。
