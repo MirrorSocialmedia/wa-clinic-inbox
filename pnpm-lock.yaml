@@ -23,6 +23,9 @@ importers:
       iron-session:
         specifier: ^8.0.4
         version: 8.0.4
+      lucide-react:
+        specifier: ^1.31.0
+        version: 1.31.0(react@19.1.0)
       next:
         specifier: 15.5.23
         version: 15.5.23(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
@@ -1912,6 +1915,11 @@ packages:
   loose-envify@1.4.0:
     resolution: {integrity: sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q==}
     hasBin: true
+
+  lucide-react@1.31.0:
+    resolution: {integrity: sha512-G8u2eEtoHUnUa9f8lbvqDhCiORMnYLdUEo06EEG9MQvHQrInKcX3Pa2TH39MM5qyzRcWETxB0+aOwAPI1g1kEg==}
+    peerDependencies:
+      react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
   luxon@3.7.2:
     resolution: {integrity: sha512-vtEhXh/gNjI9Yg1u4jX/0YVPMvxzHuGgCm6tC5kZyb08yjGWGnqAjGJvcXbqQR2P3MyMEFnRbpcdFS6PBcLqew==}
@@ -4386,6 +4394,10 @@ snapshots:
   loose-envify@1.4.0:
     dependencies:
       js-tokens: 4.0.0
+
+  lucide-react@1.31.0(react@19.1.0):
+    dependencies:
+      react: 19.1.0
 
   luxon@3.7.2: {}
 

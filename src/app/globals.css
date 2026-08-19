@@ -1,26 +1,110 @@
 @import "tailwindcss";
 
+/* ── 手動 dark variant（如果個別位真係要 per-theme 微調先用；一般用 semantic token 就夠） */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ── Light（default） ─────────────────────────────────── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --canvas: #F6F7FB;
+  --panel: #FFFFFF;
+  --panel-2: #F1F3F9;
+  --line: #E6E8F0;
+  --line-strong: #D3D7E3;
+  --t1: #171A26;
+  --t2: #5A6072;
+  --t3: #9AA1B2;
+
+  --brand: #4F46E5;
+  --brand-hover: #4338CA;
+  --brand-soft: #EEF2FF;
+  --brand-text: #4338CA;
+
+  --wa: #25D366;
+  --ok: #059669;
+  --ok-soft: #D8F5E7;
+  --ok-text: #047857;
+  --warn: #D97706;
+  --warn-soft: #FEF3C7;
+  --warn-text: #B45309;
+  --danger: #DC2626;
+  --danger-soft: #FEE2E2;
+  --danger-text: #B91C1C;
+
+  --bubble-in: #FFFFFF;
+  --bubble-out: #DCF5E4;
 }
 
+/* ── Dark ─────────────────────────────────────────────── */
+[data-theme="dark"] {
+  --canvas: #0E1015;
+  --panel: #171A21;
+  --panel-2: #1F232D;
+  --line: #262B36;
+  --line-strong: #333A48;
+  --t1: #E8EAF0;
+  --t2: #A0A7B8;
+  --t3: #6B7284;
+
+  --brand: #6D6AF2;
+  --brand-hover: #8583F5;
+  --brand-soft: #262653;
+  --brand-text: #A5B4FC;
+
+  --wa: #25D366;
+  --ok: #34D399;
+  --ok-soft: #123B2C;
+  --ok-text: #6EE7B7;
+  --warn: #F59E0B;
+  --warn-soft: #3A2A0E;
+  --warn-text: #FCD34D;
+  --danger: #EF4444;
+  --danger-soft: #411B1B;
+  --danger-text: #FCA5A5;
+
+  --bubble-in: #1F232D;
+  --bubble-out: #134534;
+}
+
+/* ── 映射成 Tailwind utility（bg-panel / text-t1 / border-line …） */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-t1: var(--t1);
+  --color-t2: var(--t2);
+  --color-t3: var(--t3);
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-text: var(--brand-text);
+  --color-wa: var(--wa);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-ok-text: var(--ok-text);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-text: var(--warn-text);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-text: var(--danger-text);
+  --color-bubble-in: var(--bubble-in);
+  --color-bubble-out: var(--bubble-out);
+  --font-sans: var(--font-geist-sans), var(--font-noto-tc), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), monospace;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--canvas);
+  color: var(--t1);
+  font-family: var(--font-geist-sans), var(--font-noto-tc), system-ui, -apple-system,
+    "PingFang HK", "Microsoft JhengHei", sans-serif;
+}
+
+/* theme 切換時全局顏色過渡（respect reduced motion） */
+@media (prefers-reduced-motion: no-preference) {
+  body, .theme-transition * {
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+  }
 }
