@@ -57,3 +57,4 @@ next-env.d.ts
 # Phase 4 backup artifacts（本地，唔入 git）
 .dev/backups/
 .dev/age.key
+/.dev/bt/
