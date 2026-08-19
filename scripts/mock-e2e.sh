@@ -73,6 +73,11 @@
 #   T46 (H-3) summary deterministic scrub：完整名/部分名/waId 後 8 位/bait token → 病人/***
 #   T47 (M-2) alert 出境 hard-gate：白名單（number/boolean/短字串）保留；超長/object/array drop；
 #       weekly_report.text 特例 ≤4000
+#
+# 安全審計 Batch B（M1 小修組）：
+#   T49 (AS-3③) mock mode 禁用 per-account lockout：5 次 fail 無 lockout/loginfail Redis key；
+#       非 mock 路徑單元測（WA_MOCK=0 獨立 process）：第 5 次觸發 / TTL≤900 / NX 唔刷新 / email 變體 / 成功重計
+#   T49b (L-2) search ILIKE escape：q=% 同 q=_ 當字面（0 hit）；control 正常 query 照中
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -1301,6 +1306,47 @@ else
   echo "$T47_OUT" | tail -10
   fail "T47 alert gate（見上）"
 fi
+
+# ── T49. AS-3③ mock mode 禁用 per-account lockout ─────────────────────────
+echo "[BB-M1] T49: lockout disabled in mock mode..."
+T49=0
+NLOCK="e2e-nolock-${EPOCH}@wa-clinic.local"
+for i in 1 2 3 4 5; do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" \
+    -H 'Content-Type: application/json' -d "{\"email\":\"$NLOCK\",\"password\":\"wrong-$i\"}")
+  # 401 = 正常認證失敗；429 = IP 限流（mock 下唯一 429 來源 — lockout 禁用）。兩者都唔係 lockout。
+  case "$CODE" in 401|429) : ;; *) echo "    ❌ T49 mock mode: fail #$i HTTP=$CODE（預期 401/429）"; T49=1 ;; esac
+done
+LKEY=$(redis-cli EXISTS "lockout:$NLOCK" 2>/dev/null)
+check "T49 mock mode: 5 次 fail 後無 lockout key（機制禁用）" "$LKEY" "0"
+FKEY=$(redis-cli EXISTS "loginfail:$NLOCK" 2>/dev/null)
+check "T49 mock mode: 無 loginfail 計數器" "$FKEY" "0"
+[ "$T49" = 0 ] && pass "T49 mock mode lockout 禁用（5 fail 無 lockout 行為）" || fail "T49 mock no-lockout（見上 ❌）"
+# 非 mock 路徑（獨立 process、WA_MOCK=0、真 Redis）— 閾值/NX/變體/重計 全鏈
+LOCKOUT_OUT=$(WA_MOCK=0 pnpm -s e2e:lockout 2>&1)
+if echo "$LOCKOUT_OUT" | grep -q "LOCKOUT OK"; then
+  pass "T49b lockout 機制（非 mock 單元）：第 5 次觸發 + TTL≤900 + NX 唔刷新 + email 變體 + 成功重計"
+else
+  echo "$LOCKOUT_OUT" | tail -15
+  fail "T49b lockout 機制（非 mock，見上）"
+fi
+
+# ── T49c. L-2 search ILIKE 通配符 escape ─────────────────────────────────
+# q=% 同 q=_ 未 escape 會當 LIKE 通配符（% = 匹配全部）→ 全中；
+# escape 後按字面匹配 — persistent sandbox DB 现况无 %/_ 字元入名稱/訊息體 → 0 hit。
+S1N=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=contact&q=%25" | grep -o '"waId":"[^"]*"' | wc -l | tr -d ' ')
+check "T49c contact q=%（通配符）→ 0 hit（字面匹配生效）" "$S1N" "0"
+S2N=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=message&q=%25" | grep -o '"conversationId":"[^"]*"' | wc -l | tr -d ' ')
+check "T49c message q=% → 0 hit" "$S2N" "0"
+S3N=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=contact&q=%5F" | grep -o '"waId":"[^"]*"' | wc -l | tr -d ' ')
+check "T49c contact q=_（單字元通配）→ 0 hit" "$S3N" "0"
+S4N=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=contact&q=E2E-A" | grep -o '"waId":"[^"]*"' | wc -l | tr -d ' ')
+[ "$S4N" -ge 1 ] && pass "T49c control：正常 query（E2E-A）照樣 hit（escape 唔誤傷）" || fail "T49c control query 無 hit"
+
+# T49 嘅 5 連發 login 打满咗 IP 限流窗口（5/60s）— 等窗口清晒先俾後續 login-heavy 測試
+#（TOTP / change-password）行，避免佢哋撞到殘留計數返 429。
+sleep 61
+
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

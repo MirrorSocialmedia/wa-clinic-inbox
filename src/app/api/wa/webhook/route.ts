@@ -1,4 +1,5 @@
 import { type NextRequest } from "next/server";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { inboundQueue } from "@/lib/queue";
 import { verifyWaSignature } from "@/lib/wa-signature";
 import log from "@/lib/log";
@@ -67,14 +68,27 @@ async function readCappedBody(req: NextRequest): Promise<string> {
   return new TextDecoder().decode(out);
 }
 
-/** Meta 驗證握手 */
+/**
+ * Meta 驗證握手
+ *
+ * ★ L-1：verify_token 比較改 timing-safe — `===` 會喺第一組唔同字節就 return，
+ *   攻擊價值雖極低（token 隨機 + 只係握手），但 hash-then-compare 零成本消除邊界。
+ *   兩邊先 SHA-256（等長 digest）先 timingSafeEqual。
+ */
+function safeTokenEquals(provided: string, expected: string | undefined): boolean {
+  if (!expected) return false;
+  const a = createHash("sha256").update(provided).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
+}
+
 export async function GET(req: NextRequest) {
   const p = req.nextUrl.searchParams;
   const verifyToken = p.get("hub.verify_token");
   if (
     p.get("hub.mode") === "subscribe" &&
     verifyToken &&
-    verifyToken === process.env.WA_VERIFY_TOKEN
+    safeTokenEquals(verifyToken, process.env.WA_VERIFY_TOKEN)
   ) {
     return new Response(p.get("hub.challenge"), { status: 200 });
   }

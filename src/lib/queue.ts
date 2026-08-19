@@ -61,8 +61,13 @@ function queueOptions(): QueueOptions {
     defaultJobOptions: {
       attempts: 3,
       backoff: { type: "exponential", delay: 2000 },
-      removeOnComplete: { count: 1000 },
-      removeOnFail: { count: 5000 },
+      // ★ AS-1（AppSec 審計）：queue 記錄保留收細 — inbound job 嘅 data 係 raw webhook
+      //   payload（含病人訊息原文），完成/失敗 job 會留喺 Redis（RDB/AOF 仲會明文落碟）。
+      //   冪等靠 DB 層（WebhookEvent claim + Message.waMessageId unique），唔靠 queue 記錄 —
+      //   所以保留多 job 冇任何功能價值，只係擴大大原文滯留面：
+      //   完成 job 留 20 條、失敗 job 留 24h / 上限 200 條（debug 夠用）。
+      removeOnComplete: { count: 20 },
+      removeOnFail: { age: 86400, count: 200 },
     },
   };
 }

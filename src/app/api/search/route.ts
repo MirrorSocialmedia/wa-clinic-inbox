@@ -15,6 +15,16 @@ import { handle } from "@/lib/api-error";
  */
 export const dynamic = "force-dynamic";
 
+/**
+ * ★ L-2：LIKE/ILIKE 通配符 escape — q 一直係 bind parameter（唔係注入），
+ * 但 q 入面嘅 `%`/`_` 會當 LIKE 通配符用（`%` = 匹配全部、`_` = 匹配單字元），
+ * 改變搜尋語義。escape 之後按字面匹配。Postgres LIKE 預設 escape 字元係 `\`。
+ * （plainto_tsquery / similarity 唔係 LIKE，唔需要 escape，照用原 q。）
+ */
+function escapeLikeWildcards(q: string): string {
+  return q.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
 interface ContactHit {
   id: string;
   waId: string;
@@ -53,6 +63,8 @@ export const GET = handle(async (req: NextRequest) => {
     whereClinic.clinicId = clinicParam;
   }
   const clinicId = whereClinic.clinicId as string | undefined;
+  // ★ L-2：ILIKE/LIKE 用 escape 後嘅值（bind 照樣）；tsvector/similarity 用原 q
+  const qEsc = escapeLikeWildcards(q);
 
   if (type === "message") {
     const rows = clinicId
@@ -66,7 +78,7 @@ export const GET = handle(async (req: NextRequest) => {
           WHERE cv."clinicId" = ${clinicId}
             AND (
               to_tsvector('english', coalesce(m.body, '')) @@ plainto_tsquery('english', ${q})
-              OR coalesce(m.body, '') ILIKE '%' || ${q} || '%'
+              OR coalesce(m.body, '') ILIKE '%' || ${qEsc} || '%'
             )
           ORDER BY m."waTimestamp" DESC
           LIMIT 20`
@@ -79,7 +91,7 @@ export const GET = handle(async (req: NextRequest) => {
           JOIN "Contact" c ON c.id = cv."contactId"
           WHERE
             to_tsvector('english', coalesce(m.body, '')) @@ plainto_tsquery('english', ${q})
-            OR coalesce(m.body, '') ILIKE '%' || ${q} || '%'
+            OR coalesce(m.body, '') ILIKE '%' || ${qEsc} || '%'
           ORDER BY m."waTimestamp" DESC
           LIMIT 20`;
     return NextResponse.json({ type, results: rows });
@@ -92,8 +104,8 @@ export const GET = handle(async (req: NextRequest) => {
         FROM "Contact"
         WHERE "clinicId" = ${clinicId}
           AND (
-            "waId" LIKE '%' || ${q} || '%'
-            OR coalesce("profileName", '') ILIKE '%' || ${q} || '%'
+            "waId" LIKE '%' || ${qEsc} || '%'
+            OR coalesce("profileName", '') ILIKE '%' || ${qEsc} || '%'
             OR similarity(coalesce("profileName", ''), ${q}) > 0.3
           )
         ORDER BY similarity(coalesce("profileName", ''), ${q}) DESC, id
@@ -102,8 +114,8 @@ export const GET = handle(async (req: NextRequest) => {
         SELECT id, "waId", "profileName", labels, "clinicId"
         FROM "Contact"
         WHERE
-          "waId" LIKE '%' || ${q} || '%'
-          OR coalesce("profileName", '') ILIKE '%' || ${q} || '%'
+          "waId" LIKE '%' || ${qEsc} || '%'
+          OR coalesce("profileName", '') ILIKE '%' || ${qEsc} || '%'
           OR similarity(coalesce("profileName", ''), ${q}) > 0.3
         ORDER BY similarity(coalesce("profileName", ''), ${q}) DESC, id
         LIMIT 20`;
