@@ -193,6 +193,8 @@ cleanup() {
   # ★ kill 要殺到 tsx 嘅 node 子 process（先係真正嘅 worker/server），否則孤兒持續搶食 queue
   pkill -f "src/workers/index.ts" 2>/dev/null || true
   pkill -f " server.ts" 2>/dev/null || true
+  # 清 lock 檔（flock 嘅 lock 隨 process 消失，但檔會留低 — 用「檔在唔在」判斷嘅等待者會卡死）
+  rm -f /tmp/e2e.lock
 }
 trap cleanup EXIT
 

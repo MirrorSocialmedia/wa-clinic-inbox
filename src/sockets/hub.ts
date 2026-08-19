@@ -68,7 +68,7 @@ export function initHub(io: SocketIOServer): void {
 
   io.on("connection", (socket) => {
     const session = socket.data.session as SessionData;
-    // ★ PII 鐵律：只 log metadata（staffId / clinicId / role）
+    // ★ PII 鐵律：只 log metadata（staffId / clinicId / role + socketId 尾段）
     log.info(
       { staffId: session.staffId, clinicId: session.clinicId, role: session.role },
       "socket connected (authenticated)"
@@ -81,6 +81,16 @@ export function initHub(io: SocketIOServer): void {
       staffSockets.set(session.staffId, ids);
     }
     ids.add(socket.id);
+    // ★ 診斷（P0-3 sockets:0 排查）：註冊後 log 實際 map 狀態
+    log.info(
+      {
+        staffId: session.staffId,
+        socketId: socket.id.slice(-8),
+        registered: staffSockets.get(session.staffId)?.size ?? -1,
+        mapStaffs: staffSockets.size,
+      },
+      "socket registered in staffSockets"
+    );
 
     if (session.role === "STAFF") {
       // STAFF 硬性綁自己店
@@ -150,11 +160,24 @@ export function initControlBridge(sub: Redis): void {
 export function disconnectStaff(staffId: string): number {
   const io = state.io;
   const ids = staffSockets.get(staffId);
+  // ★ 診斷（P0-3 sockets:0 排查）：入參 vs 實際 map 狀態（staffId 尾段 only — 無 PII）
+  log.info(
+    {
+      staffIdTail: staffId.slice(-6),
+      hasIo: !!io,
+      registered: ids ? ids.size : -1,
+      mapStaffs: [...staffSockets.keys()].map((k) => k.slice(-6)),
+    },
+    "disconnectStaff called"
+  );
   if (!io || !ids || ids.size === 0) return 0;
+  // ★ 先讀 count 先斷線：socket.io v4 嘅 disconnectSockets(true) 會「同步」觸發各 socket 嘅
+  //   'disconnect' event → 我哋自己嘅 disconnect handler 會即刻清走 staffSockets →
+  //   若喺斷線之後先讀 ids.size，會永遠讀到 0（仲以為冇斷到）。
+  const n = ids.size;
   // socket.io v4：每個 socket 自動 join 一個以自己 socketId 做名嘅 room →
   // io.in([...ids]) 就係精確呢組 socket；disconnectSockets(true) = 強制斷（MD 指定 API）。
   io.in([...ids]).disconnectSockets(true);
-  const n = ids.size;
   staffSockets.delete(staffId);
   if (n > 0) log.info({ staffId, sockets: n }, "socket: staff disconnected (account disabled)");
   return n;
