@@ -93,6 +93,10 @@ model StaffUser {
   role         Role
   clinicId     String?                        // STAFF 必填；ADMIN 留空 = 跨店
   active       Boolean @default(true)
+  // 安全審計 H-2：ADMIN TOTP（RFC 6238）secret — AES-256-GCM 密文（iv|tag|ct base64，
+  // 見 src/lib/totp-enc.ts，key = TOTP_ENC_KEY）。NULL = 未啟用；啟用後 ADMIN 登入
+  // 第二步要 TOTP code；STAFF 永遠 NULL（登入流程完全唔變）。
+  totpSecretEnc String?
 }
 
 model Contact {

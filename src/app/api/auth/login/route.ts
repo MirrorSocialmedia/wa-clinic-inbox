@@ -6,6 +6,9 @@ import log from "@/lib/log";
 import { setSession } from "@/lib/session";
 import { handle, toResponse } from "@/lib/api-error";
 import { isAccountLocked, recordLoginFailure, clearLoginFailures } from "@/lib/auth-lockout";
+import { recordLoginAudit } from "@/lib/auth-audit";
+import { verifyTotp } from "@/lib/totp";
+import { decryptTotpSecret } from "@/lib/totp-enc";
 
 /**
  * POST /api/auth/login — email + argon2 verify（框架 MD §2：自建 auth）。
@@ -14,12 +17,19 @@ import { isAccountLocked, recordLoginFailure, clearLoginFailures } from "@/lib/a
  * - STAFF session 帶 clinicId（RBAC 鐵律）；ADMIN 唔帶（null = 跨店）
  * - per-IP 限流（5 次/分鐘）+ ★ AS-3③ per-account lockout（同 email 連續 5 次
  *   fail → 15min 冷卻，Redis SET NX EX — 換 IP 都繞唔到；mock mode 禁用）
+ * - ★ H-2 ADMIN TOTP 兩步驟：ADMIN 啟用咗 TOTP 之後，password 過 → 要 6 位
+ *   code（30s ±1 window）；未帶 code → 401 { totpRequired: true }（UI 第二步）；
+ *   錯/過期 code → 統一 401（計入 lockout 計數）。STAFF 流程完全唔變。
+ * - ★ H-2 配套：成功登入寫 AuditLog LOGIN（meta.ip）+ ADMIN 新 IP（7 日窗口）
+ *   → notifyAlert（recordLoginAudit — fail-soft）
  */
 export const dynamic = "force-dynamic";
 
 const schema = z.object({
   email: z.string().email().max(200),
   password: z.string().min(1).max(200),
+  // H-2：ADMIN TOTP 第二步（6 位數字）；STAFF / 未啟用 ADMIN 唔使送
+  totp: z.string().trim().regex(/^\d{6}$/, "totp must be 6 digits").optional(),
 });
 
 function unauthorized(): NextResponse {
@@ -94,7 +104,29 @@ export const POST = handle(async (req: NextRequest) => {
     return unauthorized();
   }
 
-  await clearLoginFailures(email); // 成功 → 重計
+  await clearLoginFailures(email); // 密碼階段成功 → 重計
+
+  // ★ H-2：ADMIN TOTP 兩步驟 — 啟用咗（totpSecretEnc 非 NULL）先有第二步；
+  //   STAFF 恆 NULL → 完全唔經過呢段。
+  if (user.role === "ADMIN" && user.totpSecretEnc) {
+    if (!parsed.data.totp) {
+      // 密碼過但未帶 code → 提示 UI 進第二步（唔係認證失敗 → 唔計 lockout）
+      return NextResponse.json({ error: "totp required", totpRequired: true }, { status: 401 });
+    }
+    let ok = false;
+    try {
+      ok = verifyTotp(decryptTotpSecret(user.totpSecretEnc), parsed.data.totp);
+    } catch (err) {
+      // 密文解唔到（TOTP_ENC_KEY 丟/錯）— 配置錯：fail-closed（唔靜默放行）+ ERROR log
+      log.error({ staffId: user.id, err: err instanceof Error ? err.message : String(err) }, "login: totp secret decrypt failed — TOTP_ENC_KEY 丟/錯？");
+      return NextResponse.json({ error: "internal error" }, { status: 500 });
+    }
+    if (!ok) {
+      // 錯/過期 code → 統一 401（唔洩露係錯定過期）+ 計入 lockout 計數（防暴力嘗試）
+      await recordLoginFailure(email);
+      return unauthorized();
+    }
+  }
 
   const res = await setSession(req, {
     staffId: user.id,
@@ -105,9 +137,8 @@ export const POST = handle(async (req: NextRequest) => {
     loginAt: Date.now(),
   });
 
-  await prisma.auditLog.create({
-    data: { staffId: user.id, action: "LOGIN", entity: "StaffUser", entityId: user.id },
-  }).catch(() => undefined);
+  // ★ H-2 配套：AuditLog LOGIN（meta.ip）+ ADMIN 新 IP alert（fail-soft，唔阻登入）
+  await recordLoginAudit(user.id, user.role, ip);
 
   log.info({ staffId: user.id, role: user.role }, "login: success");
   return new Response(JSON.stringify({ ok: true, redirect: "/inbox" }), {

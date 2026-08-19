@@ -1,6 +1,8 @@
 import { getAiStatusSnapshot } from "@/lib/ai/status";
 import prisma from "@/lib/prisma";
+import { getServerSession } from "@/lib/session-server";
 import { AlertsPanel, type AlertItem } from "./alerts-panel";
+import { TotpCard } from "./totp-card";
 
 /**
  * /admin — 總覽 + AI 狀態卡（Phase 2）。
@@ -9,6 +11,7 @@ import { AlertsPanel, type AlertItem } from "./alerts-panel";
  * Phase 2b：加最近一次 call 實測 latency/tokens + 各舖 AI 模式（DRAFT/AUTO）
  * 同近 24h 自動發數量/成功率。
  * Phase 4：加 警報（alerts）區塊 + 各號 quality_rating 健康表。
+ * 安全審計 H-2：加 TOTP 兩步驟卡片（enroll QR/secret + 啟用狀態）。
  */
 export const metadata = { title: "總覽 — WA Clinic Inbox" };
 
@@ -36,6 +39,16 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: "ok"
 }
 
 export default async function AdminOverviewPage() {
+  // 安全審計 H-2：本 ADMIN 嘅 TOTP 啟用狀態（layout 已把關 = 必然 ADMIN）
+  const session = await getServerSession();
+  const adminUser = session
+    ? await prisma.staffUser.findUnique({
+        where: { id: session.staffId },
+        select: { totpSecretEnc: true },
+      })
+    : null;
+  const totpEnabled = adminUser?.totpSecretEnc != null;
+
   const [ai, alerts, clinics] = await Promise.all([
     getAiStatusSnapshot(),
     prisma.alert.findMany({ where: { resolvedAt: null }, orderBy: { createdAt: "desc" }, take: 50 }),
@@ -246,6 +259,9 @@ export default async function AdminOverviewPage() {
           YELLOW/RED = 被 ban 前哨（每日 06:30 自動拉；跌落即 HIGH alert + 通知）。
         </p>
       </section>
+
+      {/* ── 安全審計 H-2：TOTP 兩步驟（最小卡片） ── */}
+      <TotpCard enabled={totpEnabled} />
 
       {/* ── 管理入口 ── */}
       <section className="grid grid-cols-2 gap-4">

@@ -109,7 +109,7 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
   //   1) 本 instance（API route 世界）cutoff → 舊 cookie 下一 request 即刻 401
   //   2) control broadcast → 持 io 嗰份 instance 設自己 cutoff + 斷已連 socket
   if (newPassword) {
-    invalidateStaffSessions(id);
+    await invalidateStaffSessions(id);
     publishControl({ cmd: "staff:sessions-invalidated", staffId: id });
     log.info({ staffId: id }, "staff: password reset — all sessions invalidated (cutoff + control broadcast)");
   }
