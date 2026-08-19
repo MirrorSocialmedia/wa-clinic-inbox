@@ -16,6 +16,9 @@ import log from "@/lib/log";
  *   assertClinicAccess（店 A staff 唔可以攞店 B 嘅媒體 — wamid 唔係秘密）；
  *   查唔到任何 Message 持有呢個檔 → 404（唔洩露檔案存在性）
  * - ★ C-1b per-file 加密：readMediaFile 透明解密（碟上密文 / 冇 key 時 legacy 明文）
+ * - ★ AS-4 下載安全：X-Content-Type-Options: nosniff（防 MIME sniffing）；
+ *   Content-Disposition — image/* + application/pdf → inline（對話內預覽）；
+ *   其餘（doc/xls/bin 等二進制）→ attachment（唔畀瀏覽器直接渲染/執行）
  */
 export const dynamic = "force-dynamic";
 
@@ -66,6 +69,7 @@ export const GET = handle(
     assertClinicAccess(auth, conv.clinicId); // STAFF 跨店 → RbacError(403)
 
     const ext = (file.split(".").pop() ?? "").toLowerCase();
+    const mime = MIME[ext] ?? "application/octet-stream";
 
     // ★ C-1b：透明解密（碟上 WA1| 密文 → 明文；dev 冇 key 時 legacy 明文照讀）
     let buf: Buffer;
@@ -83,10 +87,14 @@ export const GET = handle(
       return NextResponse.json({ error: "media unreadable" }, { status: 500 });
     }
 
+    // ★ AS-4：image/* + pdf → inline（預覽）；其餘 → attachment（防瀏覽器執行/渲染二進制）
+    const isInline = mime.startsWith("image/") || mime === "application/pdf";
     return new NextResponse(new Uint8Array(buf), {
       headers: {
-        "Content-Type": MIME[ext] ?? "application/octet-stream",
-        "Content-Disposition": `inline; filename="${encodeURIComponent(file)}"`,
+        "Content-Type": mime,
+        "Content-Disposition": `${isInline ? "inline" : "attachment"}; filename="${encodeURIComponent(file)}"`,
+        // ★ AS-4：nosniff — Content-Type 由我哋決定，唔畀瀏覽器 sniff
+        "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, max-age=3600",
       },
     });
