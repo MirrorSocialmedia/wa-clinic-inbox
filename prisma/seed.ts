@@ -158,7 +158,8 @@ async function main(): Promise<void> {
           data: { clinicId, active: true },
         });
       }
-      console.log(`[seed] user ${u.email} exists — skipped (password NOT re-shown)`);
+      // ★ email 一樣 mask（log 只准 metadata 鐵律；同 password 同一個 redaction 原則）
+      console.log(`[seed] user ${u.email.split("@")[0]}@<redacted> exists — skipped (password NOT re-shown)`);
       continue;
     }
 
@@ -176,7 +177,8 @@ async function main(): Promise<void> {
     });
     const label = u.role === "ADMIN" ? "ADMIN" : `${u.clinicCode} STAFF`;
     credLines.push(`${label}: ${user.email} / ${password}`);
-    console.log(`[seed] created ${u.role} ${user.email}  password=${password}  (only shown ONCE; saved to .dev/credentials.txt)`);
+    // ★ log 只准 metadata：email mask（密碼只顯示一次係刻意設計，保留）
+    console.log(`[seed] created ${u.role} ${user.email.split("@")[0]}@<redacted>  password=${password}  (only shown ONCE; saved to .dev/credentials.txt)`);
   }
 
   // credentials 檔：舊行（existing 用戶）+ 今次新建行 — 一次寫定（冪等）

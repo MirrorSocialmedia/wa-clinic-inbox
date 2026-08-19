@@ -11,10 +11,13 @@
  *
  * 用法（repo root）：pnpm pii-scan
  * 退出碼：0 = 乾淨；1 = 有 violation（E2E 最後一步跑）
+ *
+ * ★ marker 定義喺 ./pii-markers.ts（T33 flaky 修復：bare substring → word boundary / 精確格式）
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { matchPiiMarkers, PII_FIELD_NAMES_SCHEMA } from "./pii-markers";
 
 try {
   process.loadEnvFile(new URL("../.env", import.meta.url).pathname);
@@ -28,37 +31,8 @@ const prisma = new PrismaClient();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── PII markers ─────────────────────────────────────────────────────────
-// 1) 鐵桿 marker：Apricot 病人資料欄位名（白名單外一切）
-const PII_FIELD_NAMES = [
-  "clinicPatient",
-  "personalIdentifier",
-  "medicalHistory",
-  "drugHistory",
-  "phoneList",
-  "dateOfBirth",
-  "diagnosis",
-  "emergencyContact",
-  "bloodType",
-  "occupation",
-  "visitReasons",
-  "createdBy",
-  "vcard",
-  "ssn",
-  "idCard",
-];
-// ★ phoneNum 要精確匹配（帶引號）— 避免 substring 誤中我哋自己嘅 metadata key `phoneNumberId`
-const PII_FIELD_MARKERS_QUOTED = ['"phoneNum"'];
-// schema scan 用（欄位名 exact/suffix 匹配）
-const PII_FIELD_NAMES_SCHEMA = [...PII_FIELD_NAMES, "phoneNum"];
-// 2) 決定性 bait（mock fixture 故意埋入 — 落地必須 0 hit）
-const PII_BAIT_STRINGS = [
-  "MOCK_PII_PATIENT",
-  "MOCK_PII_REASON",
-  "MOCK_PII_DIAGNOSIS",
-  "MOCK_PII_CREATOR",
-  "85200000000",
-  "1990-01-01",
-];
+// 1) 鐵桿 marker：Apricot 病人資料欄位名 + 值格式（SSN/身份證/email）— 定義喺 ./pii-markers.ts
+// 2) 決定性 bait（mock fixture 故意埋入 — 落地必須 0 hit）— 同上
 
 type Violation = { layer: "schema" | "data" | "log"; detail: string };
 const violations: Violation[] = [];
@@ -104,9 +78,7 @@ function scanSchema(): void {
 // ── 2) DATA scan ────────────────────────────────────────────────────────
 
 function grepMarkers(json: string, where: string): void {
-  for (const s of [...PII_FIELD_NAMES, ...PII_FIELD_MARKERS_QUOTED, ...PII_BAIT_STRINGS]) {
-    if (json.includes(s)) add("data", `${where}: 發現 "${s}"`);
-  }
+  for (const label of matchPiiMarkers(json)) add("data", `${where}: 發現 "${label}"`);
 }
 
 async function scanData(): Promise<void> {
@@ -158,9 +130,7 @@ function scanLogs(): void {
       continue;
     }
     checked++;
-    for (const s of [...PII_FIELD_NAMES, ...PII_FIELD_MARKERS_QUOTED, ...PII_BAIT_STRINGS]) {
-      if (content.includes(s)) add("log", `${f}: 發現 "${s}"`);
-    }
+    for (const label of matchPiiMarkers(content)) add("log", `${f}: 發現 "${label}"`);
   }
   console.log(`[pii-scan] log: ${checked} log files scanned`);
 }
