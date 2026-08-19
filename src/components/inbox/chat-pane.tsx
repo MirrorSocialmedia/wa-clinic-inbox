@@ -1,6 +1,17 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  CalendarDays,
+  Check,
+  CheckCheck,
+  Clock,
+  MessageCircle,
+  Paperclip,
+  Send,
+  Sparkles,
+} from "lucide-react";
 import type { ConversationItem, DraftInfo, MessageItem } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
@@ -27,34 +38,39 @@ interface Props {
   flowBusy: boolean;
 }
 
-/** status tick（OUT API 訊息） */
+/** status tick（OUT API 訊息）— lucide 版 */
 function Ticks({ status, errorCode }: { status: string; errorCode: string | null }) {
   if (status === "FAILED") {
-    return <span title={`發送失敗${errorCode ? `：${errorCode}` : ""}`} className="text-red-500 text-[11px] font-bold">⚠ {errorCode}</span>;
+    return (
+      <span
+        title={`發送失敗${errorCode ? `：${errorCode}` : ""}`}
+        className="text-danger-text text-[11px] font-semibold inline-flex items-center gap-0.5"
+      >
+        <AlertTriangle size={11} /> {errorCode}
+      </span>
+    );
   }
-  if (status === "READ") return <span className="text-sky-500 text-[11px]">✓✓</span>;
-  if (status === "DELIVERED") return <span className="text-neutral-400 text-[11px]">✓✓</span>;
-  if (status === "SENT") return <span className="text-neutral-400 text-[11px]">✓</span>;
-  if (status === "QUEUED") return <span className="text-neutral-300 text-[11px]">…</span>;
+  if (status === "READ") return <CheckCheck size={13} className="text-brand" />;
+  if (status === "DELIVERED") return <CheckCheck size={13} className="text-t3" />;
+  if (status === "SENT") return <Check size={13} className="text-t3" />;
+  if (status === "QUEUED") return <span className="text-t3 text-[11px]">…</span>;
   return null;
 }
 
 function mediaSrc(mediaPath: string | null): string | null {
   if (!mediaPath) return null;
-  // /srv/wa-media/{wamid}.ext → /api/media/{basename}（basename 安全，route 端防 traversal）
   const base = mediaPath.split("/").pop() ?? mediaPath;
   return `/api/media/${encodeURIComponent(base)}`;
 }
 
+function initialOf(c: ConversationItem): string {
+  const n = c.contact?.profileName?.trim();
+  return n ? n.charAt(0) : "?";
+}
+
 /**
- * 對話欄（MD §6.4）：
- * - 氣泡：IN 左 / OUT 右；OUT-APP_ECHO 加「📱 App 發出」標記；HISTORY 淺色 +「歷史」
- * - status tick（SENT ✓ / DELIVERED ✓✓ / READ 藍✓✓ / FAILED 紅⚠）
- * - 24h 窗口倒數 chip（綠 <6h、黃、紅 過窗）
- * - 向上捲載入舊訊息（含 HISTORY 段，分頁 50/頁）
- * - Composer：過窗 disabled + 提示
- * - Phase 2：AI draft 卡（對話欄上方）— 採用（入 composer，可改）/ 棄（DELETE）
- *   鐵律 2：採用 ≠ 發送；發送仍係人手（sentByStaffId）
+ * 對話欄（MD §6.4）v2 — WhatsApp 式氣泡 + brand AI 草稿卡。
+ * 邏輯同 v1 完全一樣（auto-fill draft / scroll pin / 分頁 / flow / booking）。
  */
 export function ChatPane(p: Props) {
   const [draft, setDraft] = useState("");
@@ -63,10 +79,8 @@ export function ChatPane(p: Props) {
   const [flowError, setFlowError] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(false);
-  // 已自動填入過嘅 draft id（避免重複覆蓋；staff 改咗 composer 後唔會再被蓋）
   const autoFilledDraftRef = useRef<string | null>(null);
 
-  // 新訊息時自動捲底（只係貼住底先自動捲，用戶向上看舊嘢時唔跳）
   useEffect(() => {
     const el = listRef.current;
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
@@ -79,7 +93,6 @@ export function ChatPane(p: Props) {
     autoFilledDraftRef.current = null;
   }, [p.conversation?.id]);
 
-  // Phase 2：新 draft 到达時，composer 空就先自動填入（staff 開始打字後唔再蓋）
   useEffect(() => {
     if (!p.pendingDraft) {
       autoFilledDraftRef.current = null;
@@ -94,9 +107,9 @@ export function ChatPane(p: Props) {
 
   if (!p.conversation) {
     return (
-      <section className="flex-1 min-w-0 flex items-center justify-center bg-neutral-50">
-        <div className="text-center text-neutral-400 text-sm space-y-1">
-          <div className="text-4xl">💬</div>
+      <section className="flex-1 min-w-0 flex items-center justify-center bg-canvas">
+        <div className="text-center text-t3 text-sm flex flex-col items-center gap-2">
+          <MessageCircle size={36} strokeWidth={1.25} />
           <div>揀一個對話開始</div>
         </div>
       </section>
@@ -104,12 +117,12 @@ export function ChatPane(p: Props) {
   }
 
   const c = p.conversation;
-  const toneCls =
+  const windowChipCls =
     c.window.tone === "red"
-      ? "bg-red-100 text-red-700 border-red-200"
+      ? "bg-danger-soft text-danger-text"
       : c.window.tone === "yellow"
-        ? "bg-amber-100 text-amber-700 border-amber-200"
-        : "bg-emerald-100 text-emerald-700 border-emerald-200";
+        ? "bg-warn-soft text-warn-text"
+        : "bg-ok-soft text-ok-text";
 
   async function sendFlow() {
     if (flowError) setFlowError(null);
@@ -129,20 +142,24 @@ export function ChatPane(p: Props) {
   }
 
   return (
-    <section className="flex-1 min-w-0 flex flex-col min-h-0 bg-neutral-50">
-      {/* header：contact + 窗口 chip */}
-      <div className="h-12 shrink-0 bg-white border-b border-neutral-200 flex items-center gap-2 px-4">
+    <section className="flex-1 min-w-0 flex flex-col min-h-0 bg-canvas">
+      {/* header：avatar + contact + 窗口 chip */}
+      <div className="h-[52px] shrink-0 bg-panel border-b border-line flex items-center gap-2.5 px-4">
+        <div className="w-8 h-8 rounded-full bg-brand-soft text-brand-text flex items-center justify-center text-[13px] font-medium shrink-0">
+          {initialOf(c)}
+        </div>
         <div className="min-w-0">
-          <div className="text-sm font-medium text-neutral-900 truncate">
+          <div className="text-sm font-medium text-t1 truncate">
             {c.contact?.profileName || "未命名聯絡人"}
           </div>
-          {c.contact?.waId && <div className="text-[11px] text-neutral-400">{c.contact.waId}</div>}
+          {c.contact?.waId && <div className="text-[11px] text-t3">{c.contact.waId}</div>}
         </div>
         <span
-          className={`ml-auto text-[11px] px-2 py-0.5 rounded-full border whitespace-nowrap ${toneCls}`}
+          className={`ml-auto text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${windowChipCls}`}
           title="24 小時客服窗口倒數"
         >
-          {c.window.open ? `窗口 ${windowCountdown(c.window.remainingMs)}` : "窗口已過，只可發 template"}
+          <Clock size={11} />
+          {c.window.open ? `窗口 ${windowCountdown(c.window.remainingMs)}` : "已過窗 · 只可發 template"}
         </span>
       </div>
 
@@ -154,48 +171,42 @@ export function ChatPane(p: Props) {
           pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
           if (el.scrollTop < 40 && p.hasMore && !p.loadingOlder) p.onScrollTop();
         }}
-        className="flex-1 overflow-y-auto min-h-0 px-4 py-3 space-y-1"
+        className="flex-1 overflow-y-auto min-h-0 px-4 py-3 space-y-1.5"
       >
-        {p.loadingOlder && <div className="text-center text-[11px] text-neutral-400">載入舊訊息…</div>}
+        {p.loadingOlder && <div className="text-center text-[11px] text-t3">載入舊訊息…</div>}
         {p.messages.length === 0 && !p.loadingOlder && (
-          <div className="text-center text-neutral-400 text-sm py-8">（呢個對話仲冇訊息）</div>
+          <div className="text-center text-t3 text-sm py-8">（呢個對話仲冇訊息）</div>
         )}
         {p.messages.map((m, i) => {
           const isOut = m.direction === "OUT";
           const isEcho = m.channel === "APP_ECHO";
           const isHistory = m.channel === "HISTORY";
-          const isFlow = m.type === "interactive"; // Phase 3：Flow 訊息（OUT=發 Flow / IN=nfm_reply）
-          // Phase 2b：AI 自動發送（AUTO 模式）— 視覺標記俾 staff 審計
+          const isFlow = m.type === "interactive";
           const isAuto = isOut && m.aiAutoSent === true;
           const prev = p.messages[i - 1];
           const media = mediaSrc(m.mediaPath);
           return (
             <div key={m.id} className={`flex ${isOut ? "justify-end" : "justify-start"}`}>
               <div
-                className={`max-w-[70%] rounded-lg px-3 py-2 text-sm shadow-sm ${
+                className={`max-w-[70%] px-3 py-2 text-sm ${
                   isOut
-                    ? isEcho
-                      ? "bg-teal-100 text-neutral-800"
-                      : isFlow
-                        ? "bg-violet-100 text-neutral-800 border border-violet-200"
-                        : "bg-emerald-100 text-neutral-800"
-                    : isFlow
-                      ? "bg-violet-50 text-neutral-800 border border-violet-200"
-                      : "bg-white text-neutral-800 border border-neutral-200"
-                } ${isHistory ? "opacity-70" : ""}`}
+                    ? "bg-bubble-out text-t1 rounded-xl rounded-br-[4px]"
+                    : "bg-bubble-in text-t1 border border-line rounded-xl rounded-bl-[4px]"
+                } ${isFlow ? "border border-brand/40" : ""} ${isHistory ? "opacity-60" : ""}`}
               >
                 {isAuto && (
-                  <div className="text-[10px] text-violet-700 font-medium mb-0.5">🤖 自動覆（系統）</div>
+                  <div className="text-[10px] text-brand-text font-medium mb-0.5 inline-flex items-center gap-1">
+                    <Sparkles size={10} /> 自動覆（系統）
+                  </div>
                 )}
                 {isEcho && (
-                  <div className="text-[10px] text-teal-700 font-medium mb-0.5">📱 App 發出</div>
+                  <div className="text-[10px] text-ok-text font-medium mb-0.5">📱 App 發出</div>
                 )}
-                {isHistory && (
-                  <div className="text-[10px] text-neutral-400 mb-0.5">歷史訊息</div>
-                )}
+                {isHistory && <div className="text-[10px] text-t3 mb-0.5">歷史訊息</div>}
                 {isFlow ? (
-                  <div className="text-sm">
-                    {isOut ? "📅 預約連結（WhatsApp Flow）已發" : "📅 病人完成預約 Flow（nfm_reply）"}
+                  <div className="text-sm inline-flex items-center gap-1.5">
+                    <CalendarDays size={14} className="text-brand-text shrink-0" />
+                    {isOut ? "預約連結（WhatsApp Flow）已發" : "病人完成預約 Flow（nfm_reply）"}
                   </div>
                 ) : m.type === "text" && m.body ? (
                   <div className="whitespace-pre-wrap break-words">{m.body}</div>
@@ -203,22 +214,31 @@ export function ChatPane(p: Props) {
                   <div className="flex flex-col gap-1">
                     {media ? (
                       m.type === "image" ? (
-                        <img src={media} alt="" className="rounded max-h-64 max-w-full" />
+                        <img src={media} alt="" className="rounded-lg max-h-64 max-w-full" />
                       ) : m.type === "audio" ? (
                         <audio controls src={media} className="max-w-full" />
                       ) : (
-                        <a href={media} target="_blank" rel="noreferrer" className="text-sky-600 underline text-xs">
-                          📎 檔案（{m.type}）
+                        <a
+                          href={media}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-brand-text underline text-xs inline-flex items-center gap-1"
+                        >
+                          <Paperclip size={11} /> 檔案（{m.type}）
                         </a>
                       )
                     ) : (
-                      <span className="text-xs text-neutral-500">📎 {m.type}（媒體未落地）</span>
+                      <span className="text-xs text-t3 inline-flex items-center gap-1">
+                        <Paperclip size={11} /> {m.type}（媒體未落地）
+                      </span>
                     )}
                     {m.body && <div className="whitespace-pre-wrap break-words">{m.body}</div>}
                   </div>
                 )}
                 <div className={`flex items-center gap-1 mt-1 ${isOut ? "justify-end" : ""}`}>
-                  <span className="text-[10px] text-neutral-400">{bubbleTime(m.waTimestamp, prev?.waTimestamp)}</span>
+                  <span className="text-[10px] text-t3">
+                    {bubbleTime(m.waTimestamp, prev?.waTimestamp)}
+                  </span>
                   {isOut && m.channel === "API" && <Ticks status={m.status} errorCode={m.errorCode} />}
                 </div>
               </div>
@@ -227,19 +247,22 @@ export function ChatPane(p: Props) {
         })}
       </div>
 
-      {/* composer */}
-      <div className="shrink-0 bg-white border-t border-neutral-200 p-3">
-        {/* Phase 3：預約卡 — PENDING = 綠色卡（病人撳咗 Complete）；BOOKING_REQUEST intent = 📅 掣 */}
+      {/* composer 區 */}
+      <div className="shrink-0 bg-panel border-t border-line p-3">
+        {/* Phase 3：預約卡 / 發 Flow 提示 */}
         {c.pendingBooking ? (
-          <div className="mb-2 rounded border border-emerald-300 bg-emerald-50 p-2.5">
+          <div className="mb-2 rounded-xl border border-ok/40 bg-ok-soft p-2.5">
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-emerald-800">📅 新預約請求</span>
-              <span className="text-sm text-emerald-900 font-medium">
-                {c.pendingBooking.providerName} · {c.pendingBooking.requestedDate} {c.pendingBooking.requestedTime}
+              <span className="text-xs font-semibold text-ok-text inline-flex items-center gap-1">
+                <CalendarDays size={13} /> 新預約請求
+              </span>
+              <span className="text-sm text-t1 font-medium truncate">
+                {c.pendingBooking.providerName} · {c.pendingBooking.requestedDate}{" "}
+                {c.pendingBooking.requestedTime}
               </span>
               <a
                 href="/bookings"
-                className="ml-auto text-xs px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+                className="ml-auto shrink-0 text-xs px-2.5 py-1 rounded-lg bg-ok text-white font-medium hover:opacity-90"
               >
                 去 /bookings 處理 →
               </a>
@@ -248,25 +271,30 @@ export function ChatPane(p: Props) {
         ) : (
           c.intent === "BOOKING_REQUEST" &&
           c.window.open && (
-            <div className="mb-2 rounded border border-violet-200 bg-violet-50 p-2 flex items-center gap-2">
-              <span className="text-xs text-violet-800">🗓️ 病人想預約 — 發預約 Flow 俾病人揀醫生/日期/時間：</span>
+            <div className="mb-2 rounded-xl border border-brand/30 bg-brand-soft p-2 flex items-center gap-2">
+              <span className="text-xs text-brand-text">
+                病人想預約 — 發預約 Flow 俾病人揀醫生/日期/時間：
+              </span>
               <button
                 onClick={() => void sendFlow()}
                 disabled={p.flowBusy}
-                className="ml-auto text-xs px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white font-medium disabled:opacity-40"
+                className="ml-auto shrink-0 text-xs px-2.5 py-1 rounded-lg bg-brand hover:bg-brand-hover text-white font-medium disabled:opacity-40 inline-flex items-center gap-1"
               >
-                {p.flowBusy ? "發送中…" : "📅 預約"}
+                <CalendarDays size={12} />
+                {p.flowBusy ? "發送中…" : "發預約 Flow"}
               </button>
             </div>
           )
         )}
-        {flowError && <div className="text-xs text-red-600 mb-1.5">{flowError}</div>}
-        {/* Phase 2：pending AI draft 卡 — 只係建議，staff 一鍵採用先入 composer */}
+        {flowError && <div className="text-xs text-danger-text mb-1.5">{flowError}</div>}
+
+        {/* Phase 2：AI 草稿卡 — signature element：全頁唯一 2px brand 邊框 */}
         {p.pendingDraft && (
-          <div className="mb-2 rounded border border-sky-200 bg-sky-50 p-2.5">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-xs font-medium text-sky-800">🤖 AI 建議覆</span>
-              <span className="text-[10px] text-sky-600">只係建議 — 未發送，需你確認</span>
+          <div className="mb-2 rounded-xl border-2 border-brand/50 bg-panel p-3">
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <Sparkles size={14} className="text-brand-text" />
+              <span className="text-xs font-semibold text-brand-text">AI 草稿</span>
+              <span className="text-[10px] text-t3">本地模型 · 你確認先發出</span>
               <span className="ml-auto flex gap-1.5">
                 <button
                   onClick={() => {
@@ -274,27 +302,28 @@ export function ChatPane(p: Props) {
                     void p.onAdopt(p.pendingDraft!.id);
                   }}
                   disabled={p.draftBusy}
-                  className="text-xs px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-40"
+                  className="text-xs px-3 py-1 rounded-lg bg-brand hover:bg-brand-hover text-white font-medium disabled:opacity-40"
                 >
-                  採用
+                  採用並編輯
                 </button>
                 <button
                   onClick={() => void p.onDiscard(p.pendingDraft!.id)}
                   disabled={p.draftBusy}
-                  className="text-xs px-2.5 py-1 rounded border border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-50 disabled:opacity-40"
+                  className="text-xs px-3 py-1 rounded-lg border border-line-strong text-t2 hover:bg-panel-2 disabled:opacity-40"
                 >
-                  棄
+                  棄用
                 </button>
               </span>
             </div>
-            <div className="text-sm text-neutral-700 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
+            <div className="text-sm text-t1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
               {p.pendingDraft.draftText}
             </div>
           </div>
         )}
-        {sendError && <div className="text-xs text-red-600 mb-1.5">{sendError}</div>}
+        {sendError && <div className="text-xs text-danger-text mb-1.5">{sendError}</div>}
+
         {c.window.open ? (
-          <div className="flex gap-2">
+          <div className="flex items-end gap-2">
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -306,18 +335,19 @@ export function ChatPane(p: Props) {
               }}
               rows={1}
               placeholder="輸入訊息…（Enter 發送，Shift+Enter 換行）"
-              className="flex-1 resize-none rounded border border-neutral-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-sky-400"
+              className="flex-1 resize-none rounded-2xl bg-panel-2 border border-transparent px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
             />
             <button
               onClick={() => void send()}
               disabled={sending || !draft.trim()}
-              className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-40"
+              aria-label="發送"
+              className="w-9 h-9 shrink-0 rounded-full bg-brand hover:bg-brand-hover text-white flex items-center justify-center disabled:opacity-40"
             >
-              {sending ? "…" : "發送"}
+              <Send size={15} />
             </button>
           </div>
         ) : (
-          <div className="text-sm text-neutral-500 text-center py-2 bg-neutral-50 rounded">
+          <div className="text-sm text-t2 text-center py-2 bg-panel-2 rounded-xl">
             24 小時客服窗口已過 — 只可以發 template（utility），free-form 已停用
           </div>
         )}

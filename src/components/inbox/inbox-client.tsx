@@ -618,7 +618,7 @@ export function InboxClient({
   );
 
   return (
-    <div className="h-[calc(100vh-3rem)] flex min-h-0">
+    <div className="h-full flex min-h-0">
       <ConversationList
         userRole={user.role}
         clinics={clinics}
@@ -664,7 +664,7 @@ export function InboxClient({
 
       {/* Phase 2：急症升級 toast（socket urgent:escalation） */}
       {urgentToast && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-red-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-lg z-50 flex items-center gap-3">
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-danger text-white text-sm px-4 py-2.5 rounded-xl shadow-lg z-50 flex items-center gap-3">
           <span className="font-medium">🚨 急症升級：{urgentToast.contactName ?? "病人"} 主訴緊急不適 — 請即刻處理</span>
           <button
             onClick={() => {
@@ -686,9 +686,9 @@ export function InboxClient({
       )}
 
       {notice && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-neutral-900 text-white text-sm px-4 py-2 rounded-lg shadow-lg z-50">
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-t1 text-canvas text-sm px-4 py-2 rounded-xl shadow-lg z-50">
           {notice}
-          <button onClick={() => setNotice(null)} className="ml-3 text-neutral-400 hover:text-white">
+          <button onClick={() => setNotice(null)} className="ml-3 text-t3 hover:text-canvas">
             ✕
           </button>
         </div>
