@@ -54,14 +54,36 @@
 #   T39 (Phase 4) backup/restore：backup-wa.sh 出 dump 檔（sandbox 無 age → 明文 + 響亮 warning）；
 #       restore-wa-test.sh restore 落 scratch DB + 5 表 row count 全對
 #
+# 深度審查修補（runway 步驟 1）：
+#   T40 (P0-1) claim 孤兒恢復：WebhookEvent 存在但無 Message（舊 code crash 狀態）→
+#       重跑同一 wamid → 訊息補回唔丟 + 再重發冪等
+#   T41 (P0-2) multi-patient history 批次逐條歸戶：2 病人各 3 條入各 conversation
+#       + 1 條無法歸戶 → skip + Alert(history_skip) + log 警報行
+#   T42 (P0-3) 停用即時生效：WTC 登入 + socket 已連 → admin 停用 → 下一 API request 即刻 401
+#       "account disabled" + 已連 socket 被斷；重啟 → 恢復 200
+#   T43 (P1-1) media clinic scope：店 A staff 攞店 B 媒體 → 403；本店 → 200；無主檔 → 404
+##
 set -u
 cd "$(dirname "$0")/.."
+
+# ★ 平行 e2e 互殺防護：兩個 e2e 同時跑會 pkill 對方 server/worker + 搶同一 port/DB/Redis
+#   → 雙邊失敗（429/500/socket 斷 — 已捉住過一次）。flock 排他：後到者直接退。
+if ! exec 9>/tmp/e2e.lock; then echo "FATAL: 無法開 lock"; exit 1; fi
+if ! flock -n 9; then
+  echo "FATAL: 已有另一個 mock-e2e 行緊（/tmp/e2e.lock 被佔）— 等佢完先跑，唔好並行"
+  exit 1
+fi
 
 # ── env ──────────────────────────────────────────────────────────────────
 set -a
 # shellcheck disable=SC1091
 . ./.env
 set +a
+
+# 媒體目錄：sandbox 寫唔到 /srv/wa-media → 統一指 writable tmp dir
+#（mock mode 本來唔下載媒體；T43 喺度手放 fixture 檔驗證 clinic scope）
+export WA_MEDIA_DIR=/tmp/wa-media-e2e
+mkdir -p "$WA_MEDIA_DIR"
 
 TSX=./node_modules/.bin/tsx
 PORT="${PORT:-3100}"
@@ -124,7 +146,13 @@ echo "  redis + postgres OK"
 echo "[1/9] migrate + seed..."
 pnpm migrate:deploy >/tmp/e2e-migrate.log 2>&1 || { echo "FATAL: migrate failed"; tail -20 /tmp/e2e-migrate.log; exit 1; }
 pnpm db:seed >/tmp/e2e-seed.log 2>&1 || { echo "FATAL: seed failed"; tail -20 /tmp/e2e-seed.log; exit 1; }
+# 清晒上次 run 殘留嘅 BullMQ job — 舊 job 會被新 worker redeliver → 舊 EPOCH 數據
+# 落咗新 run 嘅 DB 污染斷言（T41/T17 事故）
+pnpm e2e:queue-clear >/dev/null 2>&1 || echo "  WARN: queue clear failed（繼續，留意 T17/T41）"
 echo "  OK"
+# ★ E2E sandbox 共享 Redis/DB/port 3100 — 清走上一 run 被 kill 時留低嘅 BullMQ job，
+#   防止舊 EPOCH job redeliver 落新 run 污染斷言（E2E T41 捉住過）
+pnpm e2e:queue-clear >/dev/null 2>&1 || echo "  warn: queue clear 失敗（唔阻 e2e）"
 
 # credentials（seed 寫入 .dev/credentials.txt）
 if [ ! -f .dev/credentials.txt ]; then
@@ -959,6 +987,136 @@ echo "$ROUT" | tail -7
 echo "$ROUT" | grep -q "RESTORE-TEST OK" || { echo "    ❌ T39 restore 驗證失敗"; T39=1; }
 [ "$T39" = 0 ] && pass "T39 backup（dump + 兩軌加密 + retention）+ restore 落 scratch DB 5 表 row count 全對" \
   || fail "T39 backup/restore（見上 ❌）"
+
+# ══════════════ 深度審查修補（runway 步驟 1）：T40-T43 ══════════════
+
+# ── T40. claim 孤兒恢復（P0-1：claim 成功但 create 前 crash → 重跑補回） ─────────
+echo "[P5] T40: claim orphan recovery..."
+T40=0
+ORPHAN_WAMID="wamid.E2E_ORPHAN_${EPOCH}"
+ORPHAN_PAT="8526041${EPOCH}"
+# 模擬舊 code crash 狀態：WebhookEvent（claim）存在，但 Message 從未寫入
+q "INSERT INTO \"WebhookEvent\" (id, field) VALUES ('messages:$ORPHAN_WAMID', 'messages')" >/dev/null || T40=1
+pnpm -s mock-inbound message --clinic TKW --from "$ORPHAN_PAT" --text "e2e orphan recovery" --wamid "$ORPHAN_WAMID" --name "E2E Orphan 病人" >/dev/null || T40=1
+if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$ORPHAN_WAMID' AND direction='IN' AND channel='API'" '[{"c":"1"}]' 30; then
+  pass "T40 claim 孤兒（有 WebhookEvent 無 Message）重跑 → 訊息補回唔丟"
+else
+  echo "    ❌ T40 claim 孤兒未補回（訊息永久丟失！）"
+  T40=1
+fi
+# 冪等：再重發同一 wamid（而家有 Message）→ count 不變
+sleep 1
+pnpm -s mock-inbound message --clinic TKW --from "$ORPHAN_PAT" --text "e2e orphan 重發" --wamid "$ORPHAN_WAMID" --name "E2E Orphan 病人" >/dev/null || true
+sleep 3
+CNT40=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$ORPHAN_WAMID'" | jf c)
+[ "$CNT40" = "1" ] || { echo "    ❌ T40 補回後重發 count != 1（=$CNT40）"; T40=1; }
+[ "$T40" = 0 ] && pass "T40 孤兒補回後重發冪等（count 仍=1）" || fail "T40 孤兒冪等（見上 ❌）"
+
+# ── T41. multi-patient history 逐條歸戶 + skip 警報（P0-2） ──────────────────────
+echo "[P5] T41: multi-patient history attribution..."
+T41=0
+HP1="8526042${EPOCH}"
+HP2="8526043${EPOCH}"
+q "DELETE FROM \"Alert\" WHERE type='history_skip' AND \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null
+pnpm -s mock-inbound history --clinic TKW --from "$HP1" --from2 "$HP2" --name "E2E 歷史A" --name2 "E2E 歷史B" >/dev/null || T41=1
+# 每個病人 3 條（2 IN + 1 OUT）各入各 conversation
+if wait_for "SELECT (SELECT count(*) FROM \"Message\" m JOIN \"Conversation\" cv ON cv.id=m.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$HP1' AND m.channel='HISTORY')::text a, (SELECT count(*) FROM \"Message\" m JOIN \"Conversation\" cv ON cv.id=m.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$HP2' AND m.channel='HISTORY')::text b" '[{"a":"3","b":"3"}]' 60; then
+  pass "T41 multi-patient 批次逐條歸戶（A=3 條 / B=3 條，各入各 conversation）"
+else
+  echo "    ❌ T41 逐條歸戶失敗（應 a=3 b=3）"
+  # 診斷：逐 wamid 列出邊條缺席（metadata only — wamid 本身係 mock 值，無 PII）
+  q "SELECT \"waMessageId\", direction FROM \"Message\" WHERE \"waMessageId\" LIKE 'wamid.HIST2_%' ORDER BY \"waMessageId\"" | head -12
+  T41=1
+fi
+DIR41=$(q "SELECT (SELECT count(*) FROM \"Message\" m JOIN \"Conversation\" cv ON cv.id=m.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$HP1' AND m.channel='HISTORY' AND m.direction='IN')::text i1, (SELECT count(*) FROM \"Message\" m JOIN \"Conversation\" cv ON cv.id=m.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$HP1' AND m.channel='HISTORY' AND m.direction='OUT')::text o1, (SELECT count(*) FROM \"Message\" m JOIN \"Conversation\" cv ON cv.id=m.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$HP2' AND m.channel='HISTORY' AND m.direction='IN')::text i2, (SELECT count(*) FROM \"Message\" m JOIN \"Conversation\" cv ON cv.id=m.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$HP2' AND m.channel='HISTORY' AND m.direction='OUT')::text o2" | tr -d '\n')
+check "T41 方向歸戶（A: 2IN+1OUT / B: 2IN+1OUT）" "$DIR41" '[{"i1":"2","o1":"1","i2":"2","o2":"1"}]'
+U41=$(q "SELECT sum(\"unreadCount\")::text u FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" IN ('$HP1','$HP2')" | jf u)
+check "T41 history 唔觸發 unread（兩對話 total=0）" "$U41" "0"
+# 無法歸戶 1 條 → skip + Alert(type=history_skip) + log 警報行（唔淨係 warn log）
+SA=$(q "SELECT (\"detail\"->>'skipped')::text s FROM \"Alert\" WHERE type='history_skip' AND \"clinicId\"='$TKW_CLINIC_ID'" | jf s)
+check "T41 無法歸戶 → Alert(history_skip) 開咗（detail.skipped=1）" "$SA" "1"
+if grep -q "ALERT (channel=log): history_skip" /tmp/e2e-worker.log /tmp/e2e-worker-fail.log /tmp/e2e-worker2.log 2>/dev/null; then
+  pass "T41 history_skip log 警報行（metadata only）"
+else
+  echo "    ❌ T41 worker log 搵唔到 history_skip 警報行"
+  T41=1
+fi
+
+# ── T42. 停用即時生效（P0-3：API 401 + socket 斷線） ────────────────────────────
+echo "[P5] T42: account disable immediate..."
+T42=0
+WTC_EMAIL=$(awk '/^WTC STAFF:/{print $3}' .dev/credentials.txt)
+WTC_PASS=$(awk '/^WTC STAFF:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
+[ -n "$WTC_EMAIL" ] && [ -n "$WTC_PASS" ] || { echo "    ❌ T42 WTC credentials 讀唔到"; T42=1; }
+COOKIE_WTC=/tmp/e2e-cookie-wtc.txt
+CODE=$(curl -s -o /dev/null -D /tmp/e2e-t42-login-headers.txt -w '%{http_code}' -c "$COOKIE_WTC" \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$WTC_EMAIL\",\"password\":\"$WTC_PASS\"}")
+check "T42 WTC login → 200" "$CODE" "200"
+WTC_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$WTC_EMAIL'" | jf id)
+[ -n "$WTC_ID" ] || { echo "    ❌ T42 WTC staff id 搵唔到"; T42=1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+check "T42 停用前 WTC API → 200" "$CODE" "200"
+# socket 先連住（停用前）
+# 由 login response 嘅 Set-Cookie header 直接提 cookie 值（cookie jar awk 欄位位數唔穩）
+WTC_SESSION=$(grep -i '^set-cookie:' /tmp/e2e-t42-login-headers.txt | grep -oE 'wa_inbox_session=[^;]+' | head -1 | cut -d= -f2-)
+if [ -z "$WTC_SESSION" ]; then
+  echo "    ❌ T42 cookie 提取失敗（login 响应冇 Set-Cookie wa_inbox_session）"
+  T42=1
+fi
+rm -f /tmp/e2e-socket-t42.log
+nohup pnpm -s e2e:socket --cookie "wa_inbox_session=$WTC_SESSION" --wait-ms 25000 >/tmp/e2e-socket-t42.log 2>&1 &
+SOCK_PID=$!
+SOCKUP=0
+for i in $(seq 1 25); do grep -q "SOCKET-CONNECTED" /tmp/e2e-socket-t42.log 2>/dev/null && { SOCKUP=1; break; }; sleep 1; done
+[ "$SOCKUP" = 1 ] || { echo "    ❌ T42 socket 未連上（$(tail -1 /tmp/e2e-socket-t42.log 2>/dev/null)）"; T42=1; }
+# admin 停用
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT \
+  "$BASE/api/admin/staff/$WTC_ID" -H 'Content-Type: application/json' -d '{"active":false}')
+check "T42 admin PUT active=false → 200" "$CODE" "200"
+sleep 1
+CODE=$(curl -s -o /tmp/e2e-t42-401.json -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+check "T42 停用後 WTC 下一 API request → 即時 401" "$CODE" "401"
+ERR42=$(grep -oE '"error":"[^"]*"' /tmp/e2e-t42-401.json | head -1)
+check "T42 401 reason = account disabled" "$ERR42" '"error":"account disabled"'
+SOCKDOWN=0
+for i in $(seq 1 15); do grep -q "SOCKET-DISCONNECTED" /tmp/e2e-socket-t42.log 2>/dev/null && { SOCKDOWN=1; break; }; sleep 1; done
+if [ "$SOCKDOWN" = 1 ]; then
+  pass "T42 已連 socket 被強制斷線（disconnectSockets）"
+else
+  echo "    ❌ T42 socket 未被斷線"
+  T42=1
+fi
+# 重啟 → 恢復（cache 失效双向）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT \
+  "$BASE/api/admin/staff/$WTC_ID" -H 'Content-Type: application/json' -d '{"active":true}')
+check "T42 重啟帳號 → 200" "$CODE" "200"
+sleep 1
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+check "T42 重啟後 WTC API → 200（恢復）" "$CODE" "200"
+kill "$SOCK_PID" 2>/dev/null || true
+
+# ── T43. media clinic scope（P1-1） ──────────────────────────────────────────────
+echo "[P5] T43: media clinic scope..."
+T43=0
+MEDIA_PAT="8526044${EPOCH}"
+MEDIA_WAMID="wamid.E2E_MEDIA_${EPOCH}"
+MEDIA_FILE="${MEDIA_WAMID}.jpg"
+pnpm -s mock-inbound message --clinic MF --from "$MEDIA_PAT" --text "e2e media" --wamid "$MEDIA_WAMID" --media image --name "E2E 媒體病人" >/dev/null || T43=1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$MEDIA_WAMID'" '[{"c":"1"}]' 30 || { echo "    ❌ T43 media message 未入庫"; T43=1; }
+# mock mode 唔下載 → 手放檔案 + 回填 mediaPath（等同真下載完成）
+printf 'e2e-media-bytes' > "$WA_MEDIA_DIR/$MEDIA_FILE"
+q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$MEDIA_FILE' WHERE \"waMessageId\"='$MEDIA_WAMID'" >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/media/$MEDIA_FILE")
+check "T43 店 A(TKW) staff 攞店 B(MF) 媒體 → 403" "$CODE" "403"
+CODE=$(curl -s -o /tmp/e2e-t43-body -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/$MEDIA_FILE")
+check "T43 店 B(MF) staff 攞自家媒體 → 200" "$CODE" "200"
+BODY43=$(cat /tmp/e2e-t43-body 2>/dev/null)
+check "T43 內容正確（mediaPath 反查 + 檔案讀取）" "$BODY43" "e2e-media-bytes"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/wamid.E2E_NOOWNER_${EPOCH}.jpg")
+check "T43 無主檔（無 Message 持有）→ 404" "$CODE" "404"
+rm -f "$WA_MEDIA_DIR/$MEDIA_FILE"
+[ "$T43" = 0 ] && pass "T43 media clinic scope 全鏈（跨店 403 / 本店 200 / 無主 404）" || fail "T43 media scope（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

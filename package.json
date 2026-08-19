@@ -24,6 +24,8 @@
     "e2e:quality": "tsx scripts/e2e-quality.ts",
     "e2e:weekly": "tsx scripts/e2e-weekly-fixtures.ts",
     "e2e:duty": "tsx scripts/e2e-duty.ts",
+    "e2e:socket": "tsx scripts/e2e-socket.ts",
+    "e2e:queue-clear": "tsx scripts/e2e-queue-clear.ts",
     "weekly-report": "tsx scripts/weekly-report.ts",
     "pii-scan": "tsx scripts/pii-scan.ts",
     "test:pii": "tsx scripts/pii-markers.test.ts",

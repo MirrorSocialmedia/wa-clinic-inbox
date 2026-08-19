@@ -508,7 +508,7 @@ pnpm mock-inbound message --clinic TKW --from $PN --text "你好，想問埋約"
 | `WA_MOCK` | `1` = mock mode（假 token 都行）；清走 = 真 API |
 | `WA_ACCESS_TOKEN` / `WA_APP_SECRET` / `WA_VERIFY_TOKEN` | Meta Cloud API |
 | `WA_MEDIA_DIR` | 媒體下載目錄（預設 `/srv/wa-media`，冇權限 fallback `/tmp/wa-media`） |
-| `TOKEN_ENC_KEY` / `SESSION_SECRET` | iron-session 加密（SESSION_SECRET ≥32 chars） |
+| `SESSION_SECRET` | iron-session 加密（≥32 chars random；DB 欄冇應用層加密 — at-rest = 部署層 LUKS/雲碟加密） |
 | `PORT` | 預設 3100 |
 | `VLLM_BASE_URL` | AI OpenAI-compatible endpoint（本地 sglang：`http://127.0.0.1:30000/v1`；兼容 fallback `AI_BASE_URL`） |
 | `VLLM_API_KEY` | 可選（本地 sglang 冇 key — 留空） |

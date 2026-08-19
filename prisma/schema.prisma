@@ -141,7 +141,7 @@ model Message {
   direction      Direction
   channel        Channel
   type           String                       // text/image/audio/document/interactive/nfm_reply...
-  body           String?                      // 文字內容（DB 有 at-rest 加密；log 絕不出現）
+  body           String?                      // 文字內容（at-rest 加密 = 部署層 LUKS/雲碟加密，見 deploy 文件；log 絕不出現）
   mediaPath      String?                      // 落地 /srv/wa-media/<id>，唔存 Meta URL（會過期）
   status         MsgStatus
   errorCode      String?

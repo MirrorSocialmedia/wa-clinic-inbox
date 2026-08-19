@@ -1,5 +1,7 @@
 import { type NextRequest } from "next/server";
 import { getSession, type SessionData } from "@/lib/session";
+import prisma from "@/lib/prisma";
+import log from "@/lib/log";
 
 /**
  * WA Clinic Inbox — RBAC 基礎（框架 MD D10 / §6.4）
@@ -18,8 +20,11 @@ import { getSession, type SessionData } from "@/lib/session";
  * 例外（唔經 RBAC）：/api/wa/webhook（Meta 簽名驗證）、/api/flows/endpoint（RSA 加密驗證）、
  * /healthz（monitoring）。
  *
- * Phase 1 TODO：requireAuth 落 DB 核 StaffUser.active（session 係 snapshot，
- * 停用帳號要即時生效 — 呢度先加 prisma 查詢）。
+ * ★ 即時停用（P0-3）：session 係 iron-session snapshot（TTL 7 日）— 停用帳號後 session 會
+ *   喺 cookie 到期前都有效。requireAuth 喺 getSession 之後核 StaffUser.active（+60s
+ *   in-memory cache 免每 request 打 DB）→ 停用 → 401 "account disabled"。
+ *   Socket 側（hub.ts）connect 前過同一個 check；admin 停用時另加 disconnectSockets
+ *   強制斷已連 socket（見 admin/staff route）。
  */
 
 export interface StaffInfo {
@@ -48,13 +53,55 @@ export class RbacError extends Error {
 }
 
 /**
+ * 即時停用檢查（P0-3）：StaffUser.active，+60s in-memory cache 免每 request 打 DB。
+ * - web API（requireAuth）同 Socket.IO（hub connect）共用同一個 check + 同一份 cache
+ *   （兩者都喺 web server process 內）。
+ * - admin 停用帳號時叫 `invalidateActiveCache(staffId)` 即時失效（唔使等 60s）。
+ * - fail-closed：DB 查唔到 / 查詢失敗 → 當停用（寧錯殺，唔漏放 — 離職員工睇病人對話
+ *   係私隱事故級數）。cache 命中時唔打 DB。
+ */
+const ACTIVE_CACHE_TTL_MS = 60_000;
+const activeCache = new Map<string, { active: boolean; at: number }>();
+
+export async function isStaffActive(staffId: string): Promise<boolean> {
+  const now = Date.now();
+  const hit = activeCache.get(staffId);
+  if (hit && now - hit.at < ACTIVE_CACHE_TTL_MS) return hit.active;
+  let active = false;
+  try {
+    const u = await prisma.staffUser.findUnique({ where: { id: staffId }, select: { active: true } });
+    active = u?.active ?? false;
+  } catch (err) {
+    log.error(
+      { staffId, err: err instanceof Error ? err.message : String(err) },
+      "rbac: active check DB error — fail-closed（當停用）"
+    );
+    active = false;
+  }
+  activeCache.set(staffId, { active, at: now });
+  // 順手清舊 entry（staff 數極少；防 map 無限長）
+  if (activeCache.size > 1000) {
+    for (const [k, v] of activeCache) if (now - v.at >= ACTIVE_CACHE_TTL_MS * 2) activeCache.delete(k);
+  }
+  return active;
+}
+
+/** admin 改咗帳號狀態時叫 — 停用即時生效（唔使等 60s cache 到期）。 */
+export function invalidateActiveCache(staffId: string): void {
+  activeCache.delete(staffId);
+}
+
+/**
  * 要求已登入（ADMIN 或 STAFF 都過）。
- * 未登入 / session 无效 → 401。
+ * 未登入 / session 无效 → 401；帳號停用 → 401 "account disabled"（P0-3 即時生效）。
  */
 export async function requireAuth(req: NextRequest): Promise<AuthContext> {
   const { data, res } = await getSession(req);
   if (!data) {
     throw new RbacError(401, "unauthorized");
+  }
+  if (!(await isStaffActive(data.staffId))) {
+    throw new RbacError(401, "account disabled");
   }
   return toContext(data, res);
 }

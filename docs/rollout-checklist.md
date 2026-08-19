@@ -13,6 +13,7 @@
 - [ ] Embedded Signup scan QR 完成（該號碼 bind 入 Cloud API）
 - [ ] 揀匯入 6 個月歷史（App 內設定）
 - [ ] history import 完成 + 核對（抽 5 條眼對）
+- [ ] history payload 形狀驗證（P0-2）：onboarding 當日 `LOG_LEVEL=debug` 開一輪，對 `history: payload structure` 呢行 log 嘅 keys/計數（spans/messages/distinctFroms/contacts）驗證逐條歸戶假設（worker 只 log 結構，唔 log 內文/電話 — PII 鐵律）。若 `history_skip` 警報彈 → 查 skip 計數，必要時人工補錄
 - [ ] `Clinic.waPhoneNumberId` 寫入 DB（admin 頁或 seed）
 - [ ] 該店醫生名單入 `greetingConfig`（地址/營業時間/醫生/常見 FAQ）
 - [ ] 前台帳號開通（email + 密碼，role=STAFF 綁定該店）
@@ -39,6 +40,16 @@
 - [ ] 每日瞟一眼 quality_rating（全 GREEN）
 - [ ] 前台有冇問題 / 唔習慣（第一週密集跟）
 - [ ] 零事故 7 日 → 該店標記穩定，下一間
+
+---
+
+## AUTO 上線紀律（強制 — 無例外）
+
+> AUTO（Phase 2b）= 系統照 AI 草稿自動發出。自動發出去嘅嘢傷客咗就冇得收返 — 所以 AUTO 上線紀律係紅線，唔係建議：
+
+1. **全部店一律以 DRAFT 模式上線，AUTO 一間都唔開**，直到該店**連續 2 週草稿採用率（`SENT_AS_IS` 比例）≥ 60% 且零投訴**。任何理由（「前台話想試」「急住上線」）都唔係例外。
+2. **開任何一間店 AUTO 前，攞老細書面同意**（WhatsApp/email 得，但要有記錄 — 截圖存該店 rollout 資料夾）。
+3. **開咗 AUTO 嘅店，每週抽查 20 條 `SENT_AUTO`**（數據源：`/admin`），核實內容冇出錯；一發現錯誤模式 → 即刻關閉該店 AUTO 跌返 DRAFT + 記事故。
 
 ---
 

@@ -1,6 +1,9 @@
 import type { Server as SocketIOServer, Socket } from "socket.io";
+import type { Redis } from "ioredis";
 import prisma from "@/lib/prisma";
 import { getSocketSession, type SessionData } from "@/lib/session";
+import { isStaffActive, invalidateActiveCache } from "@/lib/rbac";
+import { CONTROL_CHANNEL, type ControlMessage } from "@/lib/notify";
 import log from "@/lib/log";
 
 /**
@@ -14,8 +17,12 @@ import log from "@/lib/log";
  * - connect 前經 io.use middleware 驗 iron-session cookie（同 web API 同一個
  *   加密 cookie，unsealData 內置 tamper + ttl 檢查）
  * - 驗唔到 session → reject（fail-closed）
+ * - ★ P0-3：session 有效之後再核 StaffUser.active（同 web API 同一個 isStaffActive
+ *   check + 60s cache）→ 停用 → reject
  * - ★ 唔信 client handshake.auth 聲稱嘅任何嘢 — room 成員資格 100% 由
  *   server 端驗證後嘅 session 決定
+ * - ★ 停用即時斷線：disconnectStaff(staffId) 由 admin 停用 route 調用
+ *   （io.disconnectSockets 語義 — 強制斷已連 socket）
  *
  * 事件（由 worker 經 Redis pub/sub 橋轉送，見 lib/notify.ts）：
  * - message:new      新訊息（inbound / echo / outbound 發完）
@@ -29,15 +36,23 @@ interface HubState {
 
 const state: HubState = { io: null };
 
+/** staffId → 而家已連嘅 socketId 集合（停用時精準斷線用）。 */
+const staffSockets = new Map<string, Set<string>>();
+
 export function initHub(io: SocketIOServer): void {
   state.io = io;
 
-  // ── Auth middleware：驗 session 先准 connect ─────────────────────────
+  // ── Auth middleware：驗 session + 核 active 先准 connect ─────────────
   io.use(async (socket: Socket, next) => {
     try {
       const session = await getSocketSession(socket.request);
       if (!session) {
         return next(new Error("unauthorized"));
+      }
+      // ★ P0-3：停用帳號即時擋（同 web API 同一個 isStaffActive check + 60s cache）
+      if (!(await isStaffActive(session.staffId))) {
+        log.warn({ staffId: session.staffId }, "socket: connect rejected (account disabled)");
+        return next(new Error("account disabled"));
       }
       socket.data.session = session;
       next();
@@ -59,6 +74,14 @@ export function initHub(io: SocketIOServer): void {
       "socket connected (authenticated)"
     );
 
+    // 記錄 staffId → socketId（停用時 disconnectStaff 精準斷線）
+    let ids = staffSockets.get(session.staffId);
+    if (!ids) {
+      ids = new Set();
+      staffSockets.set(session.staffId, ids);
+    }
+    ids.add(socket.id);
+
     if (session.role === "STAFF") {
       // STAFF 硬性綁自己店
       void socket.join(`clinic:${session.clinicId}`);
@@ -76,8 +99,65 @@ export function initHub(io: SocketIOServer): void {
 
     socket.on("disconnect", (reason) => {
       log.debug({ staffId: session.staffId, reason }, "socket disconnected");
+      const set = staffSockets.get(session.staffId);
+      if (set) {
+        set.delete(socket.id);
+        if (set.size === 0) staffSockets.delete(session.staffId);
+      }
     });
   });
+}
+
+/**
+ * Control bridge（P0-3）：訂閱 Redis control channel — 由「真正持 io 呢份 module
+ * instance」去執行停用後果（斷 socket + 失效本地 active cache）。
+ *
+ * 點解必須獨立橋：API route handler 同 server.ts 各持一份 hub.ts/rbac.ts module
+ * instance（不同 module graph / require cache）— route 側 invalidate 只影響 route
+ * 世界，socket middleware 世界要經呢度先收得到。PM2 cluster 模式下仲負責跨 node。
+ * @param sub 獨立 Redis connection（subscribe 會独占 connection，必须 duplicate）
+ */
+export function initControlBridge(sub: Redis): void {
+  sub.on("error", (err) => {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "control subscriber error");
+  });
+  sub.subscribe(CONTROL_CHANNEL, (err) => {
+    if (err) log.error({ err: err.message }, "control subscribe failed");
+  });
+  sub.on("message", (_channel, msg) => {
+    try {
+      const data = JSON.parse(msg) as ControlMessage;
+      if (data.cmd !== "staff:changed" || !data.staffId) return;
+      // 本 instance（socket middleware 用嘅嗰份）cache 即時失效
+      invalidateActiveCache(data.staffId);
+      if (!data.active) {
+        const n = disconnectStaff(data.staffId);
+        log.info({ staffId: data.staffId, sockets: n }, "control: staff:changed(disabled) applied");
+      }
+    } catch (err) {
+      log.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        "control: bad message ignored"
+      );
+    }
+  });
+}
+
+/**
+ * 強制斷指定 staff 嘅所有已連 socket（admin 停用帳號時調用 — P0-3）。
+ * @returns 斷咗幾多 socket
+ */
+export function disconnectStaff(staffId: string): number {
+  const io = state.io;
+  const ids = staffSockets.get(staffId);
+  if (!io || !ids || ids.size === 0) return 0;
+  // socket.io v4：每個 socket 自動 join 一個以自己 socketId 做名嘅 room →
+  // io.in([...ids]) 就係精確呢組 socket；disconnectSockets(true) = 強制斷（MD 指定 API）。
+  io.in([...ids]).disconnectSockets(true);
+  const n = ids.size;
+  staffSockets.delete(staffId);
+  if (n > 0) log.info({ staffId, sockets: n }, "socket: staff disconnected (account disabled)");
+  return n;
 }
 
 /** 推去單一店嘅 room。 */

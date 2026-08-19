@@ -2,7 +2,9 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import argon2 from "argon2";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, invalidateActiveCache } from "@/lib/rbac";
+import { publishControl } from "@/lib/notify";
+import log from "@/lib/log";
 import { handle, toResponse } from "@/lib/api-error";
 
 /**
@@ -12,6 +14,8 @@ import { handle, toResponse } from "@/lib/api-error";
  *       - STAFF 必須有 clinicId（fail-closed：唔會製造跨店帳號）
  *       - 防止鎖死：最後一個 active ADMIN 唔可以降權/停用
  *       - 唔可以 DELETE 自己；自己停用 → 擋（自鎖死保護）
+ *       - ★ P0-3：停用（active true→false）→ 即時失效 requireAuth cache + 強制斷該 staff
+ *         所有已連 socket（disconnectSockets）— 離職員工即刻失去存取，唔使等 session 到期
  * DELETE: 硬刪 — 有 Message.sentByStaffId / Conversation.assigneeId 引用 → 409
  *         （改用 active=false 停用）
  */
@@ -83,6 +87,21 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
       ...(newPassword ? { passwordHash: await argon2.hash(newPassword) } : {}),
     },
   });
+
+  // ★ P0-3：active 任何改動都即時生效（60s cache 唔准令停用/重啟遲到）：
+  //   1) 本 instance（API route 世界）嘅 requireAuth cache 即時失效 → 下一個 API request 即刻 401
+  //   2) 經 Redis control channel 通知「持 io 嗰份 hub instance」→ 強制斷已連 socket
+  //      （而唔係直接調 disconnectStaff() — 兩邊係唔同 module instance，直接調會落到
+  //        state.io === null 嗰份 → 靜默 no-op，見 hub.ts initControlBridge 註釋）
+  if (fields.active !== undefined && fields.active !== target.active) {
+    invalidateActiveCache(id);
+    publishControl({ cmd: "staff:changed", staffId: id, active: fields.active });
+    if (fields.active === false) {
+      log.info({ staffId: id }, "staff: account disabled — active cache invalidated + control broadcast");
+    } else {
+      log.info({ staffId: id }, "staff: account re-enabled — active cache invalidated + control broadcast");
+    }
+  }
 
   const { passwordHash: _ph, ...safe } = user;
   return NextResponse.json({ ...safe, passwordReset: Boolean(newPassword) });

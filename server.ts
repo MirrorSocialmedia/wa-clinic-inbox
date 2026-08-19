@@ -2,7 +2,7 @@ import "@/lib/als-polyfill"; // 必須係第一行 import — 見該檔註釋
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import next from "next";
 import { Server } from "socket.io";
-import { initHub, notifyClinic } from "@/sockets/hub";
+import { initHub, initControlBridge, notifyClinic } from "@/sockets/hub";
 import { getRedis, closeRedis } from "@/lib/queue";
 import { NOTIFY_CHANNEL, type NotifyMessage } from "@/lib/notify";
 import log from "@/lib/log";
@@ -61,7 +61,16 @@ app.prepare().then(() => {
     }
   });
 
+  // P0-3 control bridge：admin 停用 → Redis → 呢個 process（持 io）斷 socket。
+  // 必須喺呢度訂閱（而唔係 API route 直接調 disconnectStaff）— 見 hub.ts 註釋。
+  const controlSub = getRedis().duplicate();
+  initControlBridge(controlSub);
+
   server.on("request", (req: IncomingMessage, res: ServerResponse) => {
+    // ★ /socket.io/* 由 Socket.IO（initHub）處理 — Next handler 唔准攞：
+    //   雙 handler 對同一 response 搶寫 → 308 redirect / ERR_HTTP_HEADERS_SENT 競態
+    //   （E2E T42 捉住：polling POST 被 Next 308 走，client "xhr post error"）。
+    if ((req.url ?? "").startsWith("/socket.io")) return;
     const start = Date.now();
     // 只 log 請求 metadata（method / path / status / ms），body 永遠唔入 log。
     // ★ path 只留 pathname — query string 可能含 token（e.g. webhook GET 驗證嘅
@@ -96,6 +105,7 @@ app.prepare().then(() => {
     log.info({ signal }, "wa-clinic-inbox shutting down");
     io.close();
     notifySub.quit().catch(() => notifySub.disconnect());
+    controlSub.quit().catch(() => controlSub.disconnect());
     server.close(() => {
       void closeRedis().catch(() => undefined).finally(() => process.exit(0));
     });

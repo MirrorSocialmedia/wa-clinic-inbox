@@ -4,20 +4,24 @@ import { publishNotify } from "@/lib/notify";
 import { downloadWaMedia } from "@/lib/wa/media";
 import prisma from "@/lib/prisma";
 import log, { redactDeep } from "@/lib/log";
-import type {
-  Clinic,
-  Contact,
-  Conversation,
-  Message,
-} from "@prisma/client";
+import { notifyAlert } from "@/lib/health/notify";
+import { Prisma, type Clinic, type Contact, type Conversation, type Message } from "@prisma/client";
+
+/** 冪等寫入用嘅 DB client（top-level prisma 或 $transaction 嘅 tx — 同一套 model API）。 */
+type Db = Prisma.TransactionClient;
 
 /**
  * inbound worker — webhook event 解析（框架 MD §6.2 逐條填實）
  *
  * - 分流：entry[].changes[].value.metadata.phone_number_id → Clinic.waPhoneNumberId
  *   找不到店 → log warn + skip（fail-closed：唔會創 orphan 資料）
- * - 冪等：WebhookEvent upsert（id = field 前綴 + wamid），處理過 skip
- *   （Meta 會重發；history 例外 — 量大，靠 Message.waMessageId unique +
+ * - 冪等：WebhookEvent create（id = field 前綴 + wamid）+ 業務寫入同一個 $transaction
+ *   （★ P0-1 修復：舊 code claim 同 message.create 分離 — claim 成功但 create 前 crash，
+ *    retry 時 claim P2002 → skip → 病人訊息永久消失。而家原子：要嘛全有要嘛全冇；
+ *    P2002 時再核 Message 存在先算「真處理過」— 冇 Message = claim 孤兒（舊 code crash /
+ *    升級前殘留）→ 重跑補回，唔丟。media 下載係外部 HTTP 永遠唔入 transaction —
+ *    先落 Message(mediaPath=null)，下載完先 UPDATE；下載失敗只係冇附件，唔係訊息消失。
+ *    history 例外 — 量大，靠 Message.waMessageId unique +
  *    createMany skipDuplicates 去重，唔逐條寫 WebhookEvent）
  * - messages[]      病人 inbound → Contact/Conversation upsert → Message(IN,API)
  *                   → unreadCount++ + lastInboundAt → Socket 推 message:new
@@ -100,18 +104,36 @@ function tsToDate(ts?: string): Date {
 }
 
 /**
- * 冪等 claim：create WebhookEvent，unique violation = 已處理過 → false。
- * 冪等窗口內（兩個相同 event 同時到）最壞情況 = 兩邊都 create 成功 →
- * 第二個撞 P2002 → skip。
+ * 冪等 claim（★ 只准喺 $transaction 內用 — 要同業務寫入原子）：
+ * create WebhookEvent（連 processedAt — 舊 code 從未寫過呢欄，而家 claim=完成同落）。true = 新攞到；
+ * false = 已存在（P2002，可能真處理過，亦可能係 claim 孤兒 — 由 caller 核 Message 決定）。
+ * 非 P2002 錯誤 throw 上嚟（令 transaction 回滾 + job retry）。
+ *
+ * ★ Postgres 語義：任何一條失敗嘅 statement 會毒斃成個 transaction（25P02 —
+ *   "current transaction is aborted, commands ignored until end of transaction block"）。
+ *   所以 claim create 要包喺 SAVEPOINT 入面：P2002 → ROLLBACK TO SAVEPOINT 解毒，
+ *   caller 先可以喺同一 transaction 內安全核 Message。（冇 savepoint 嘅話 P2002 之後
+ *   所有 follow-up query 都 25P02 → 成個 tx 回滾 → job retry 永遠失敗 → 訊息永久丟 —
+ *   即係 P0-1 原本嘅 bug 換咗件衣服返嚟。T40 e2e 就係照住呢個坑。）
  */
-async function claimEvent(id: string, field: string): Promise<boolean> {
+async function claimInTx(db: Db, id: string, field: string): Promise<boolean> {
+  await db.$executeRawUnsafe("SAVEPOINT wa_claim");
   try {
-    await prisma.webhookEvent.create({ data: { id, field } });
+    await db.webhookEvent.create({ data: { id, field, processedAt: new Date() } });
+    await db.$executeRawUnsafe("RELEASE SAVEPOINT wa_claim");
     return true;
   } catch (err) {
-    if ((err as { code?: string }).code === "P2002") return false;
+    if (isUniqueViolation(err)) {
+      await db.$executeRawUnsafe("ROLLBACK TO SAVEPOINT wa_claim");
+      await db.$executeRawUnsafe("RELEASE SAVEPOINT wa_claim");
+      return false;
+    }
     throw err;
   }
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === "P2002";
 }
 
 function profileNameOf(value: WaChange["value"], waId: string): string | null {
@@ -120,11 +142,12 @@ function profileNameOf(value: WaChange["value"], waId: string): string | null {
 }
 
 async function upsertContact(
+  db: Db,
   clinicId: string,
   waId: string,
   profileName: string | null
 ): Promise<Contact> {
-  return prisma.contact.upsert({
+  return db.contact.upsert({
     where: { clinicId_waId: { clinicId, waId } },
     update: profileName ? { profileName } : {},
     create: { clinicId, waId, profileName: profileName ?? null, labels: [] },
@@ -132,11 +155,12 @@ async function upsertContact(
 }
 
 async function findOrCreateConversation(
+  db: Db,
   clinicId: string,
   contactId: string,
   fallbackLastMessageAt: Date
 ): Promise<Conversation> {
-  return prisma.conversation.upsert({
+  return db.conversation.upsert({
     where: { clinicId_contactId: { clinicId, contactId } },
     update: {},
     create: { clinicId, contactId, lastMessageAt: fallbackLastMessageAt },
@@ -185,20 +209,21 @@ function publicMessage(msg: Message) {
 
 /** 原子更新對話時間戳 + unread（raw SQL：GREATEST 容忍亂序 + increment 原子） */
 async function touchConversation(
+  db: Db,
   convId: string,
   ts: Date,
   opts: { incrementUnread: boolean; touchInbound: boolean }
 ): Promise<Conversation | null> {
   const inc = opts.incrementUnread ? 1 : 0;
   const rows = opts.touchInbound
-    ? await prisma.$queryRaw<Conversation[]>`
+    ? await db.$queryRaw<Conversation[]>`
         UPDATE "Conversation"
         SET "lastMessageAt" = GREATEST("lastMessageAt", ${ts}),
             "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${ts}), ${ts}),
             "unreadCount" = "unreadCount" + ${inc}
         WHERE "id" = ${convId}
         RETURNING *`
-    : await prisma.$queryRaw<Conversation[]>`
+    : await db.$queryRaw<Conversation[]>`
         UPDATE "Conversation"
         SET "lastMessageAt" = GREATEST("lastMessageAt", ${ts}),
             "unreadCount" = "unreadCount" + ${inc}
@@ -231,52 +256,88 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
   for (const m of value.messages ?? []) {
     if (!m?.id) continue;
     const wamid = m.id;
-    const claimed = await claimEvent(`messages:${wamid}`, "messages");
-    if (!claimed) {
-      log.debug({ wamid }, "inbound: message already processed (idempotent skip)");
-      continue;
-    }
 
     const waId = m.from;
     if (!waId) {
+      // 無 from 嘅 malformed event：唔 claim（claim 咗都冇法處理，只係多一條無用 WebhookEvent），
+      // 每次重發都會喺呢度 warn（metadata only）— 唔影響冪等。
       log.warn({ wamid }, "inbound: message missing from, skipped");
       continue;
     }
     const waTs = tsToDate(m.timestamp);
+    const profileName = profileNameOf(value, waId);
 
-    const contact = await upsertContact(clinic.id, waId, profileNameOf(value, waId));
-    const conv = await findOrCreateConversation(clinic.id, contact.id, waTs);
+    // ★ P0-1：claim + 業務寫入同一個 $transaction（原子：要嘛全有要嘛全冇）。
+    //   舊 code claim 成功但 message.create 前 crash → retry claim P2002 → 靜默 skip → 訊息永久丟。
+    //   而家 P2002 時核 Message：
+    //     • Message 存在 → 真處理過 → skip（冪等，同舊行為）
+    //     • 無 Message → claim 孤兒（舊 code crash / 升級前殘留）→ 重跑補回，唔丟
+    //   media 下載（外部 HTTP）永遠唔入 transaction — 見下方。
+    const result = await prisma.$transaction(async (tx) => {
+      const claimed = await claimInTx(tx, `messages:${wamid}`, "messages");
+      if (!claimed) {
+        const existing = await tx.message.findUnique({ where: { waMessageId: wamid } });
+        if (existing) return { skipped: true as const };
+        log.info({ wamid }, "inbound: claim orphan detected (claim 存在但無 Message) — 重跑補回");
+        // fall through → 照處理落去（孤兒恢復）
+      }
 
-    let mediaPath: string | null = null;
-    const mid = mediaIdOf(m);
-    if (mid) {
-      mediaPath = (await downloadWaMedia({ mediaId: mid, wamid })).mediaPath;
+      const contact = await upsertContact(tx, clinic.id, waId, profileName);
+      const conv = await findOrCreateConversation(tx, clinic.id, contact.id, waTs);
+      let msg: Message;
+      try {
+        msg = await tx.message.create({
+          data: {
+            conversationId: conv.id,
+            waMessageId: wamid,
+            direction: "IN",
+            channel: "API",
+            type: msgTypeOf(m),
+            body: messageBody(m),
+            mediaPath: null, // ★ 媒體下載喺 transaction 外 — 下載完先 UPDATE
+            status: "RECEIVED",
+            waTimestamp: waTs,
+          },
+        });
+      } catch (err) {
+        // 併發 race：另一個相同 event 嘅 transaction 先 commit 咗 → 當真處理過 skip（本 tx 全部回滾）
+        if (isUniqueViolation(err)) return { skipped: true as const };
+        throw err;
+      }
+      const convUpdated = await touchConversation(tx, conv.id, waTs, {
+        incrementUnread: true,
+        touchInbound: true,
+      });
+      return { skipped: false as const, msg, conv, convUpdated };
+    });
+
+    if (result.skipped) {
+      log.debug({ wamid }, "inbound: message already processed (idempotent skip)");
+      continue;
     }
 
-    const msg = await prisma.message.create({
-      data: {
-        conversationId: conv.id,
-        waMessageId: wamid,
-        direction: "IN",
-        channel: "API",
-        type: msgTypeOf(m),
-        body: messageBody(m),
-        mediaPath,
-        status: "RECEIVED",
-        waTimestamp: waTs,
-      },
-    });
+    // ★ media 下載（外部 HTTP）喺 transaction 外 — 失敗/超時只係冇附件，唔應該令訊息消失或阻塞。
+    const mid = mediaIdOf(m);
+    if (mid) {
+      const dl = await downloadWaMedia({ mediaId: mid, wamid });
+      if (dl.mediaPath) {
+        await prisma.message
+          .update({ where: { id: result.msg.id }, data: { mediaPath: dl.mediaPath } })
+          .catch((err) =>
+            log.warn(
+              { clinic: clinic.code, wamid, err: err instanceof Error ? err.message : String(err) },
+              "inbound: mediaPath update failed（訊息已入庫，只係冇附件）"
+            )
+          );
+      }
+    }
 
-    const updated = await touchConversation(conv.id, waTs, {
-      incrementUnread: true,
-      touchInbound: true,
-    });
-    if (updated) {
-      await notifyNewMessage(clinic.id, updated, msg);
+    if (result.convUpdated) {
+      await notifyNewMessage(clinic.id, result.convUpdated, result.msg);
     }
 
     log.info(
-      { clinic: clinic.code, wamid, type: msgTypeOf(m), hasMedia: Boolean(mid), unread: updated?.unreadCount },
+      { clinic: clinic.code, wamid, type: msgTypeOf(m), hasMedia: Boolean(mid), unread: result.convUpdated?.unreadCount },
       "inbound: message processed"
     );
 
@@ -291,7 +352,7 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
         const { handleFlowReply } = await import("@/lib/booking/flow-reply");
         const outcome = await handleFlowReply({
           clinicId: clinic.id,
-          conversationId: conv.id,
+          conversationId: result.conv.id,
           waId,
           responseJson: {
             payload: String(envelope.payload ?? ""),
@@ -321,8 +382,8 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
     try {
       await aiQueue.add(
         "classify",
-        { conversationId: conv.id, messageId: msg.id, clinicId: clinic.id },
-        { jobId: `ai-${msg.id}` }
+        { conversationId: result.conv.id, messageId: result.msg.id, clinicId: clinic.id },
+        { jobId: `ai-${result.msg.id}` }
       );
     } catch (err) {
       log.warn(
@@ -339,8 +400,6 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
     const m = e?.message;
     if (!m?.id) continue;
     const wamid = m.id;
-    const claimed = await claimEvent(`echo:${wamid}`, "smb_message_echoes");
-    if (!claimed) continue;
 
     // 收件人 = message 入面唔係自己店號碼嘅邊個（echo 係店員手機 App 發出去嘅）
     const recipient =
@@ -351,34 +410,129 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
       continue;
     }
     const waTs = tsToDate(m.timestamp);
-    const contact = await upsertContact(clinic.id, recipient, null);
-    const conv = await findOrCreateConversation(clinic.id, contact.id, waTs);
 
-    let mediaPath: string | null = null;
+    // ★ P0-1 同 handleMessages：claim + 業務寫入同一個 $transaction；
+    //   P2002 + 無 Message = claim 孤兒 → 重跑補回。
+    const result = await prisma.$transaction(async (tx) => {
+      const claimed = await claimInTx(tx, `echo:${wamid}`, "smb_message_echoes");
+      if (!claimed) {
+        const existing = await tx.message.findUnique({ where: { waMessageId: wamid } });
+        if (existing) return { skipped: true as const };
+        log.info({ wamid }, "inbound: claim orphan detected (echo) — 重跑補回");
+      }
+
+      const contact = await upsertContact(tx, clinic.id, recipient, null);
+      const conv = await findOrCreateConversation(tx, clinic.id, contact.id, waTs);
+      let msg: Message;
+      try {
+        msg = await tx.message.create({
+          data: {
+            conversationId: conv.id,
+            waMessageId: wamid,
+            direction: "OUT",
+            channel: "APP_ECHO",
+            type: msgTypeOf(m),
+            body: messageBody(m),
+            mediaPath: null, // ★ 媒體下載喺 transaction 外
+            status: "SENT",
+            waTimestamp: waTs,
+          },
+        });
+      } catch (err) {
+        if (isUniqueViolation(err)) return { skipped: true as const }; // 併發 race
+        throw err;
+      }
+      const convUpdated = await touchConversation(tx, conv.id, waTs, {
+        incrementUnread: false,
+        touchInbound: false,
+      });
+      return { skipped: false as const, msg, conv, convUpdated };
+    });
+
+    if (result.skipped) continue;
+
+    // ★ media 下載喺 transaction 外（失敗只係冇附件）
     const mid = mediaIdOf(m);
-    if (mid) mediaPath = (await downloadWaMedia({ mediaId: mid, wamid })).mediaPath;
+    if (mid) {
+      const dl = await downloadWaMedia({ mediaId: mid, wamid });
+      if (dl.mediaPath) {
+        await prisma.message
+          .update({ where: { id: result.msg.id }, data: { mediaPath: dl.mediaPath } })
+          .catch((err) =>
+            log.warn(
+              { clinic: clinic.code, wamid, err: err instanceof Error ? err.message : String(err) },
+              "inbound: echo mediaPath update failed（訊息已入庫，只係冇附件）"
+            )
+          );
+      }
+    }
 
-    const msg = await prisma.message.create({
-      data: {
-        conversationId: conv.id,
-        waMessageId: wamid,
-        direction: "OUT",
-        channel: "APP_ECHO",
-        type: msgTypeOf(m),
-        body: messageBody(m),
-        mediaPath,
-        status: "SENT",
-        waTimestamp: waTs,
-      },
-    });
-
-    const updated = await touchConversation(conv.id, waTs, {
-      incrementUnread: false,
-      touchInbound: false,
-    });
-    if (updated) await notifyNewMessage(clinic.id, updated, msg);
+    if (result.convUpdated) await notifyNewMessage(clinic.id, result.convUpdated, result.msg);
 
     log.info({ clinic: clinic.code, wamid, type: msgTypeOf(m) }, "inbound: echo processed");
+  }
+}
+
+/**
+ * P0-2 逐條歸戶：IN → m.from；OUT（from=商家號）→ m.to。
+ * ★ Fallback（真 payload 形狀保險）：部分 history payload 嘅 OUT 訊息冇 `to`
+ *   （舊形狀只記 from）— 當全批次只有一個非商家號候選（candidates 計入 contacts[]）
+ *   就歸佢（等價舊 single-patient 行為，唔丟店員回覆咗一半 history）；
+ *   多候選又冇 to → null（真無法歸戶 → skip + Alert(history_skip)）。
+ */
+function historyPatientOf(
+  m: WaTimestampedMessage,
+  bizNumber: string,
+  candidateFallback: string | null
+): string | null {
+  const sender = m.from ?? "";
+  const recipient = m.to ?? "";
+  if (sender && sender !== bizNumber) return sender; // IN：歸發送人
+  if (sender === bizNumber) {
+    // OUT 訊息：歸收件人（排除商家號自己）；冇 to → 單候選 fallback
+    if (recipient && recipient !== bizNumber) return recipient;
+    return candidateFallback;
+  }
+  // 連 from 都冇：to 係非商家號 → 歸 to；否則單候選 fallback
+  if (recipient && recipient !== bizNumber) return recipient;
+  return candidateFallback;
+}
+
+interface HistoryRow {
+  waMessageId: string;
+  direction: "IN" | "OUT";
+  channel: "HISTORY";
+  type: string;
+  body: string | null;
+  mediaPath: null;
+  status: "SENT" | "RECEIVED";
+  waTimestamp: Date;
+}
+
+/**
+ * P0-2：無法歸戶訊息 skip → Alert（唔淨係 warn log — 靜默丟舊 chat 唔可以無訊號）。
+ * 冪等：同店已有未解決 history_skip → 唔重複開（新計數只 log）。
+ */
+async function recordHistorySkipAlert(clinic: Clinic, detail: Record<string, unknown>): Promise<void> {
+  try {
+    const existing = await prisma.alert.findFirst({
+      where: { type: "history_skip", clinicId: clinic.id, resolvedAt: null },
+      select: { id: true },
+    });
+    if (existing) {
+      log.warn({ clinic: clinic.code, ...detail, existingAlert: existing.id }, "history_skip: alert already open (唔重開)");
+      return;
+    }
+    await prisma.alert.create({
+      data: { type: "history_skip", severity: "HIGH", clinicId: clinic.id, clinicCode: clinic.code, detail: detail as unknown as object },
+    });
+    await notifyAlert({ type: "history_skip", severity: "HIGH", clinicCode: clinic.code, detail });
+  } catch (err) {
+    // 警報失敗唔準阻匯入 pipeline（log 係兜底）
+    log.error(
+      { clinic: clinic.code, err: err instanceof Error ? err.message : String(err) },
+      "history_skip: alert creation failed"
+    );
   }
 }
 
@@ -393,86 +547,121 @@ async function handleHistory(clinic: Clinic, value: NonNullable<WaChange["value"
 
   const bizNumber = (clinic.waDisplayNumber ?? "").replace(/\D/g, "");
 
-  // ★ 歷史匯入 = 一個病人嘅舊 chat：所有訊息（兩個方向）都歸入同一病人嘅 conversation。
-  //   病人身份由 value.contacts[] 認定（Meta history payload 嘅 contacts = 病人）；
-  //   fallback：messages 入面唯一非商家號嘅 waId。唔可以按 m.from 拆 conversation
-  //   （咁會將店員回覆拆去「商家號 contact」嘅對話，唔係產品行為）。
+  // ★ P0-2：一個 history 批次可以含多個病人（Meta 官方文檔冇寫死分幾多 phase / 一個 value 混唔混多 chat）。
+  //   舊 code 假設「一批 = 一個病人」— 多病人批次整批放棄 → 靜默丟舊 chat。
+  //   新邏輯：按 m.from（IN）/ m.to（OUT）逐條歸戶；只有連 to 都冇、真係無法歸戶先 skip，
+  //   而且 skip 數計入 Alert type=history_skip（唔淨係 warn log）。
+  //
+  // ★ 試點店 onboarding 當日形狀驗證（rollout-checklist §A）：開 LOG_LEVEL=debug 對真 payload 嘅
+  //   keys/計數驗證呢套假設。★ PII：只 log 結構（keys/計數）— 訊息內文/電話號碼絕不入 log。
+  log.debug(
+    {
+      clinic: clinic.code,
+      spans: spans.length,
+      messages: messages.length,
+      messagesWithFrom: messages.filter((m) => m.from).length,
+      messagesWithTo: messages.filter((m) => m.to).length,
+      distinctFroms: new Set(messages.map((m) => m.from).filter(Boolean)).size,
+      distinctTos: new Set(messages.map((m) => m.to).filter(Boolean)).size,
+      contacts: (value.contacts ?? []).length,
+      endOfHistory,
+    },
+    "history: payload structure (keys/counts only — no content)"
+  );
+
   const profileNames = new Map<string, string>();
   for (const c of value.contacts ?? []) {
     if (c.wa_id && c.profile?.name) profileNames.set(c.wa_id, c.profile.name);
   }
-  const fromContacts = (value.contacts ?? []).map((c) => c.wa_id).find(Boolean);
-  const allFroms = [...new Set(messages.map((m) => m.from).filter((x): x is string => Boolean(x)))];
-  const nonBiz = allFroms.filter((w) => w !== bizNumber);
-  const patientWaId =
-    fromContacts && allFroms.includes(fromContacts)
-      ? fromContacts
-      : nonBiz.length === 1
-        ? nonBiz[0]
-        : undefined;
-  if (!patientWaId) {
+
+  // 單批次歸戶候選：所有非商家號發送人 + contacts[]（只有一個先可用做 fallback）
+  const candidates = new Set<string>();
+  for (const m of messages) {
+    const f = m.from ?? "";
+    if (f && f !== bizNumber) candidates.add(f);
+  }
+  for (const c of value.contacts ?? []) {
+    if (c.wa_id && c.wa_id !== bizNumber) candidates.add(c.wa_id);
+  }
+  const candidateFallback = candidates.size === 1 ? [...candidates][0] : null;
+
+  // 1) 逐條歸戶 + 按病人分組
+  const perPatient = new Map<string, HistoryRow[]>();
+  let skipped = 0;
+  for (const m of messages) {
+    if (!m.id) continue;
+    const patientWaId = historyPatientOf(m, bizNumber, candidateFallback);
+    if (!patientWaId) {
+      skipped++;
+      continue;
+    }
+    const isOut = (m.from ?? "") === bizNumber;
+    const row: HistoryRow = {
+      waMessageId: m.id!,
+      direction: isOut ? "OUT" : "IN",
+      channel: "HISTORY",
+      type: msgTypeOf(m),
+      body: messageBody(m),
+      mediaPath: null, // 歷史媒體唔下載（一次性匯入；MD 只要求記錄搵得返）
+      status: isOut ? "SENT" : "RECEIVED",
+      waTimestamp: tsToDate(m.timestamp),
+    };
+    const bucket = perPatient.get(patientWaId);
+    if (bucket) bucket.push(row);
+    else perPatient.set(patientWaId, [row]);
+  }
+
+  if (perPatient.size === 0) {
     log.warn(
-      { clinic: clinic.code, fromCount: allFroms.length, endOfHistory },
-      "history: cannot determine patient waId, import skipped"
+      { clinic: clinic.code, skipped, total: messages.length, endOfHistory },
+      "history: no attributable messages, import skipped"
     );
+    if (skipped > 0) await recordHistorySkipAlert(clinic, { skipped, total: messages.length, endOfHistory });
     return;
   }
 
-  // 1) 病人 contact + conversation（唔會為商家號建 Contact）
-  const contact = await upsertContact(clinic.id, patientWaId, profileNames.get(patientWaId) ?? null);
-  const conv = await findOrCreateConversation(clinic.id, contact.id, new Date(0));
-
-  // 2) messages：全部歸病人 conversation；wamid unique = 冪等；容忍亂序
-  const rows = messages
-    .filter((m) => m.id)
-    .map((m) => {
-      const isOut = (m.from ?? "") === bizNumber;
-      const waTs = tsToDate(m.timestamp);
-      return {
-        conversationId: conv.id,
-        waMessageId: m.id!,
-        direction: (isOut ? "OUT" : "IN") as "IN" | "OUT",
-        channel: "HISTORY" as const,
-        type: msgTypeOf(m),
-        body: messageBody(m),
-        mediaPath: null, // 歷史媒體唔下載（一次性匯入；MD 只要求記錄搵得返）
-        status: isOut ? ("SENT" as const) : ("RECEIVED" as const),
-        waTimestamp: waTs,
-      };
-    });
-
-  // 分批 500 條（幾萬條級別）
-  for (let i = 0; i < rows.length; i += 500) {
-    await prisma.message.createMany({
-      skipDuplicates: true,
-      data: rows.slice(i, i + 500),
-    });
-  }
-
-  // 3) 對話時間戳修正：GREATEST（容忍亂序；唔會蓋過之後新到嘅實時數據）
-  const maxTs = rows.reduce((a, r) => (r.waTimestamp > a ? r.waTimestamp : a), new Date(0));
-  const maxInboundTs = rows
-    .filter((r) => r.direction === "IN")
-    .reduce<Date | null>((a, r) => (a === null || r.waTimestamp > a ? r.waTimestamp : a), null);
-  if (!maxInboundTs) {
-    // 全部係 OUT（店員發嘅）— 只更新 lastMessageAt
-    await prisma.$executeRaw`
-      UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}) WHERE "id" = ${conv.id}`;
-  } else {
-    await prisma.$executeRaw`
-      UPDATE "Conversation"
-      SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}),
-          "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${maxInboundTs}))
-      WHERE "id" = ${conv.id}`;
+  // 2) 逐病人：contact + conversation + batch insert（wamid unique = 冪等；容忍亂序）
+  //   （唔會為商家號建 Contact — 商家號唔會成為 patient）
+  const imported: { patientMasked: string; count: number }[] = [];
+  for (const [patientWaId, rows0] of perPatient) {
+    const contact = await upsertContact(prisma, clinic.id, patientWaId, profileNames.get(patientWaId) ?? null);
+    const conv = await findOrCreateConversation(prisma, clinic.id, contact.id, new Date(0));
+    const rows = rows0.map((r) => ({ ...r, conversationId: conv.id }));
+    // 分批 500 條（幾萬條級別）
+    for (let i = 0; i < rows.length; i += 500) {
+      await prisma.message.createMany({ skipDuplicates: true, data: rows.slice(i, i + 500) });
+    }
+    // 3) 對話時間戳修正：GREATEST（容忍亂序；唔會蓋過之後新到嘅實時數據）
+    const maxTs = rows.reduce((a, r) => (r.waTimestamp > a ? r.waTimestamp : a), new Date(0));
+    const maxInboundTs = rows
+      .filter((r) => r.direction === "IN")
+      .reduce<Date | null>((a, r) => (a === null || r.waTimestamp > a ? r.waTimestamp : a), null);
+    if (!maxInboundTs) {
+      // 全部係 OUT（店員發嘅）— 只更新 lastMessageAt
+      await prisma.$executeRaw`
+        UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}) WHERE "id" = ${conv.id}`;
+    } else {
+      await prisma.$executeRaw`
+        UPDATE "Conversation"
+        SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}),
+            "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${maxInboundTs}))
+        WHERE "id" = ${conv.id}`;
+    }
+    imported.push({ patientMasked: patientWaId.length > 3 ? `${patientWaId.slice(0, 3)}***` : "***", count: rows.length });
   }
 
   // ★ 唔觸發 unread（完全唔郁 unreadCount）
   // ★ 唔觸發 AI（history 唔入 aiQueue）
-  const masked = patientWaId.length > 3 ? `${patientWaId.slice(0, 3)}***` : "***";
   log.info(
-    { clinic: clinic.code, patient: masked, count: rows.length, endOfHistory },
-    "history: batch imported (no unread, no AI)"
+    { clinic: clinic.code, patients: imported.length, imported, skipped, endOfHistory },
+    "history: batch imported per-patient (no unread, no AI)"
   );
+
+  // 4) 有無法歸戶嘅 → 警報（唔淨係 warn log）
+  if (skipped > 0) {
+    log.warn({ clinic: clinic.code, skipped, total: messages.length }, "history: unattributable messages skipped");
+    await recordHistorySkipAlert(clinic, { skipped, total: messages.length, importedPatients: imported.length, endOfHistory });
+  }
 }
 
 async function handleStatuses(clinic: Clinic, value: NonNullable<WaChange["value"]>): Promise<void> {
@@ -484,28 +673,35 @@ async function handleStatuses(clinic: Clinic, value: NonNullable<WaChange["value
       continue;
     }
     const wamid = s.id;
-    const claimed = await claimEvent(`status:${wamid}:${s.status}`, "statuses");
-    if (!claimed) continue;
-
-    const msg = await prisma.message.findUnique({ where: { waMessageId: wamid } });
-    if (!msg) {
-      log.warn({ wamid, status: s.status }, "inbound: status for unknown message, skipped");
-      continue;
-    }
-
     const errorCode =
       target === "FAILED"
         ? String(s.error_code ?? s.errors?.[0]?.code ?? "") || null
         : null;
 
-    await prisma.message.update({
-      where: { id: msg.id },
-      data: { status: target, errorCode },
+    // ★ P0-1 同一 pattern：claim + update 同一個 $transaction。
+    //   P2002 時分三況：
+    //     • 無 Message → skip（同舊行為）
+    //     • status 已 = target → 真處理過 → 靜默 skip（唔重複 notify，同舊行為）
+    //     • claim 存在但 status 未更新（claim 孤兒）→ 補 apply + notify
+    const result = await prisma.$transaction(async (tx) => {
+      const claimed = await claimInTx(tx, `status:${wamid}:${s.status}`, "statuses");
+      const msg = await tx.message.findUnique({ where: { waMessageId: wamid } });
+      if (!msg) return { missing: true as const, changed: false, convId: null as string | null };
+      const alreadyApplied = !claimed && msg.status === target;
+      if (!alreadyApplied) {
+        await tx.message.update({ where: { id: msg.id }, data: { status: target, errorCode } });
+      }
+      const conv = await tx.conversation.findUnique({ where: { id: msg.conversationId }, select: { id: true } });
+      return { missing: false as const, changed: !alreadyApplied, convId: conv?.id ?? null };
     });
-    const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
-    if (conv) {
+
+    if (result.missing) {
+      log.warn({ wamid, status: s.status }, "inbound: status for unknown message, skipped");
+      continue;
+    }
+    if (result.changed && result.convId) {
       publishNotify(clinic.id, "message:status", {
-        conversationId: conv.id,
+        conversationId: result.convId,
         clinicId: clinic.id,
         waMessageId: wamid,
         status: target,
@@ -513,7 +709,7 @@ async function handleStatuses(clinic: Clinic, value: NonNullable<WaChange["value
       });
     }
     log.info(
-      { clinic: clinic.code, wamid, status: target, errorCode },
+      { clinic: clinic.code, wamid, status: target, errorCode, applied: result.changed },
       "inbound: status updated"
     );
   }

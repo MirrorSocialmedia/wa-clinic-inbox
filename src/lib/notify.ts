@@ -24,6 +24,38 @@ export interface NotifyMessage {
   payload: unknown;
 }
 
+// ── Control channel（P0-3 停用即時斷線） ──────────────────────────────────
+//
+// ★ 點解要經 Redis 而唔係直接調 disconnectStaff()：
+//   custom server 架構下，server.ts（持 io + staffSockets map）同 Next 編譯咗嘅
+//   API route handler 各持一份 hub.ts module instance（dev 下两套 module graph；
+//   prod standalone 亦會係唔同 require cache key）— route 直接調 disconnectStaff()
+//   會落到 state.io === null 嗰份 instance → 靜默 return 0（E2E T42 捉住）。
+//   經 Redis publish 過一次，就由「真正持 io 嗰份 instance」去斷線 — 同一個
+//   process（dev）或者另一個 PM2 cluster node（socket 喺邊個 node 就由邊個斷）都 work。
+export const CONTROL_CHANNEL = "wa-inbox:control";
+
+export interface ControlMessage {
+  cmd: "staff:changed";
+  staffId: string;
+  active: boolean;
+}
+
+/**
+ * 發控制指令（fire-and-forget）：Redis 故障時 log — API 側嘅 cache 失效已經做咗，
+ * socket 斷線會延後到 active cache 60s 到期（fail-closed 兜底）。
+ */
+export function publishControl(msg: ControlMessage): void {
+  getRedis()
+    .publish(CONTROL_CHANNEL, JSON.stringify(msg))
+    .catch((err) => {
+      log.warn(
+        { cmd: msg.cmd, staffId: msg.staffId, err: err instanceof Error ? err.message : String(err) },
+        "control: publish failed（socket 斷線會延後到 active cache 到期）"
+      );
+    });
+}
+
 /**
  * 發通知（fire-and-forget）：Redis 故障唔應該阻塞 inbound pipeline
  * （UI 會經 reconnect backlog 補齊）。
