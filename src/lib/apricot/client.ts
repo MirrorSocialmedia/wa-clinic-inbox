@@ -8,12 +8,13 @@
  * - 攞到新 cookie → saveCreds（寫入失敗 throw）
  * - 401/403/3xx → APRICOT_AUTH_EXPIRED（唔重試 — 重試會加速 token 作廢）
  * - 429 → APRICOT_RATE_LIMITED（唔重試）
- * - 其他 HTTP 錯誤：保留短 body（300 char）做錯訊；成功 response 有病人資料 —
- *   一律唔 log（★ PII 鐵律：raw response 永不入 log 永不落 disk）。
+ * - 其他 HTTP 錯誤：log 只 status + path、throw 只短 code — ★ M-3：response body 永不入 log/
+ *   永不入 error message（可能含敏感內容）；成功 response 有病人資料，一律唔 log。
  *
  * ★ 序列化：本 module 唔可以直接當「任意地方都可 call」用 —
  *   所有 caller 必須經 apricotQueue（concurrency=1）：見 src/workers/apricot.worker.ts。
  */
+import log from "@/lib/log";
 import { loadCreds, saveCreds, markError, type ApricotCreds } from "./session";
 
 const BASE = () => process.env.APRICOT_BASE_URL ?? "https://apricotvita.com";
@@ -74,15 +75,9 @@ export async function apricotCall(path: string, init?: RequestInit): Promise<unk
     throw new Error("APRICOT_RATE_LIMITED"); // ★ 唔重試
   }
   if (!res.ok) {
-    // ★ H2: 只保留短錯誤 body（成功 response 有病人資料，唔准 log）
-    let detail = "";
-    try {
-      detail = (await res.text()).slice(0, 300);
-    } catch {
-      /* 讀唔到就算 */
-    }
-    console.error("[apricot] HTTP error", { status: res.status, path, detail });
-    throw new Error(`APRICOT_HTTP_${res.status}${detail ? `: ${detail}` : ""}`);
+    // ★ M-3：log 只 status + path — response body 唔入 log、唔入 throw message（防上游 catch log 埋 body）
+    log.error({ status: res.status, path }, "apricot: HTTP error");
+    throw new Error(`APRICOT_HTTP_${res.status}`);
   }
   return res.json();
 }

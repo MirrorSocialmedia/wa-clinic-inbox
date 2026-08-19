@@ -56,6 +56,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("worker fatal", err);
+  log.fatal({ err: err instanceof Error ? (err.stack ?? err.message) : String(err) }, "worker fatal");
   process.exit(1);
 });

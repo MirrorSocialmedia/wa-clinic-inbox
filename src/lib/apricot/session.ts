@@ -14,6 +14,7 @@
  */
 import crypto from "node:crypto";
 import prisma from "@/lib/prisma";
+import log from "@/lib/log";
 
 function requireKey(): Buffer {
   const k = Buffer.from(process.env.APRICOT_ENC_KEY ?? "", "base64");
@@ -96,7 +97,7 @@ export async function markError(msg: string): Promise<void> {
         lastError: msg.slice(0, 500),
       },
     })
-    .catch((e) => console.error("[apricot] markError 失敗", e?.message));
+    .catch((e) => log.warn({ err: e instanceof Error ? e.message : String(e) }, "apricot: markError 失敗"));
 }
 
 export function apricotMock(): boolean {

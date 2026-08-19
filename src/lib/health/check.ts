@@ -1,13 +1,15 @@
 /**
  * 5 分鐘健康自檢（MD §9.3）— cron `health-check`（每 5 分鐘一次）+ scripts/e2e-health.ts 共用。
  *
- * 五項檢查：
+ * 六項檢查：
  *  1. webhook stale      — 有 traffic（lastWebhookEventAt != null）但 > 30 分鐘無事件 → MEDIUM
  *                          （店員 uninstall App / 13 日冇開 嘅前哨 — MD §11 風險登記冊）
  *  2. queue depth        — ai / outbound / apricot 任一 queue waiting+failed > 100 → MEDIUM
  *  3. AI breaker OPEN    — HIGH（GPU 死 / sglang 重連中）
  *  4. Apricot heartbeat  — 上次成功 sync > 90 分鐘（或從未 sync）→ MEDIUM
  *  5. disk 餘量          — < 10% → HIGH
+ *  6. backup 失敗 flag   — scripts/backup-wa.sh 失敗時寫 flag 檔（C-2）→ HIGH
+ *                          （flag 清咗 → 下個 cycle auto-resolve）
  *
  * 警報生命周期（冪等）：
  * - breach 中：同 (type, clinicId) 已有未解決 alert → 唔重覆開（每 5 分鐘 cycle 只彈一次）
@@ -19,6 +21,8 @@
  * overrides：E2E 注入用（queueDepth / breakerState）— production scheduler 唔會傳。
  */
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -41,6 +45,8 @@ export interface HealthOverrides {
   queueDepth?: Partial<Record<CheckedQueue, { waiting: number; failed: number }>>;
   /** E2E 注入：覆蓋 breaker 狀態（breaker 係 per-process in-memory — 另開 process 睇唔到） */
   breakerState?: "closed" | "open";
+  /** E2E 注入：覆蓋 backup 失敗 flag（script 寫 flag 檔 — 另開 process 讀真 flag 亦可，呢個俾 unit 級測試） */
+  backupFlag?: { present: boolean; reason?: string };
 }
 
 export interface HealthCheckResult {
@@ -182,6 +188,33 @@ export async function runHealthCheck(
     }
   }
 
+  // ── 6. backup 失敗 flag（C-2：backup-wa.sh 失敗時寫 flag — 只准 metadata，App 轉 Alert） ──
+  // flag 內容 = ts/reason/node_env 三行；reason 只收白字字符（防 flag 檔被植偽 content 入 alert）
+  const backupFlagPath = backupFailFlagPath();
+  let backupReason: string | null = null;
+  if (overrides?.backupFlag) {
+    if (overrides.backupFlag.present) {
+      backupReason = (overrides.backupFlag.reason ?? "unknown").replace(/[^\w.-]/g, "_").slice(0, 200);
+    }
+  } else {
+    try {
+      const raw = await readFile(backupFlagPath, "utf8");
+      const m = raw.match(/^reason=(.+)$/m);
+      backupReason = (m?.[1] ?? "unknown").replace(/[^\w.-]/g, "_").slice(0, 200);
+    } catch {
+      /* 無 flag = 正常 */
+    }
+  }
+  if (backupReason !== null) {
+    breaches.push({
+      type: "backup_failed",
+      severity: "HIGH",
+      clinicId: null,
+      clinicCode: null,
+      detail: { reason: backupReason },
+    });
+  }
+
   // ── 冪等開 alert + 自動 resolve ────────────────────────────────────────
   const created: AlertForNotify[] = [];
   let resolved = 0;
@@ -231,6 +264,7 @@ export async function runHealthCheck(
       breaker: breaker.state,
       apricotSyncMin: apricotMin,
       disk: diskInfo,
+      backupFlag: backupReason,
       created: created.map((c) => c.type),
       resolved,
     },
@@ -240,6 +274,17 @@ export async function runHealthCheck(
   return {
     created,
     resolved,
-    checks: { webhook: webhookInfo, queues: queueInfo, breaker: breaker.state, apricotSyncMin: apricotMin, disk: diskInfo },
+    checks: { webhook: webhookInfo, queues: queueInfo, breaker: breaker.state, apricotSyncMin: apricotMin, disk: diskInfo, backupFlag: backupReason },
   };
+}
+
+/**
+ * backup 失敗 flag 路徑（C-2）— 同 backup-wa.sh 預設公式一致：
+ * $WA_BACKUP_FAIL_FLAG 或 $BACKUP_DIR（預設 .dev/backups）同層 backup-failed.flag。
+ */
+export function backupFailFlagPath(): string {
+  const override = (process.env.WA_BACKUP_FAIL_FLAG ?? "").trim();
+  if (override) return override;
+  const backupDir = (process.env.BACKUP_DIR ?? "").trim() || ".dev/backups";
+  return path.join(path.dirname(backupDir), "backup-failed.flag");
 }

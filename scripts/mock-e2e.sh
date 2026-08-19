@@ -51,8 +51,8 @@
 #       → OpsReport 斷言（FRT 中位數 240s / 採用率 0.75 / Flow 2/3 / 預約 2/3 中位 60min）+ 冪等
 #   T38 (Phase 4) duty-roster：mock fixture 3 人（HTTP 200 + /inbox 側欄「今日當值」卡）；
 #       別店 scope 403；欄位白名單；DUTY_MOCK=0 + 無/壞 URL → 200 {duty:null} 唔 crash
-#   T39 (Phase 4) backup/restore：backup-wa.sh 出 dump 檔（sandbox 無 age → 明文 + 響亮 warning）；
-#       restore-wa-test.sh restore 落 scratch DB + 5 表 row count 全對
+#   T39 (Phase 4) backup/restore：backup-wa.sh 出 dump 檔（sandbox 無 age → NODE_ENV=development 明文軌
+#       + 響亮 warning）；restore-wa-test.sh restore 落 scratch DB + 5 表 row count 全對
 #
 # 深度審查修補（runway 步驟 1）：
 #   T40 (P0-1) claim 孤兒恢復：WebhookEvent 存在但無 Message（舊 code crash 狀態）→
@@ -64,6 +64,8 @@
 #   T43 (P1-1) media clinic scope：店 A staff 攞店 B 媒體 → 403；本店 → 200；無主檔 → 404
 #   T44 (C-1b) media per-file AES-256-GCM：碟上密文（WA1|）/ serve 解密 roundtrip / dev 無 key 明文軌
 #       / legacy 明文偵測 / production fail-fast（不可寫目錄 throw）/ production 無 key throw / 0700+0600 / tamper auth
+#   T45 (C-2) backup 強制加密：production 無 age → FATAL exit 1 + fail flag（metadata only）→
+#       health-check 轉 Alert(backup_failed, HIGH)；flag 清 → auto-resolve；backup dir 0700
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -977,9 +979,15 @@ check "T38 mock API down（DUTY_MOCK=0 + 無/壞 URL）→ 200 {duty:null} 唔 c
 echo "[P4] T39: backup/restore..."
 T39=0
 BDIR="${BACKUP_DIR:-.dev/backups}"
-BOUT=$(bash scripts/backup-wa.sh 2>&1)
+BFAIL_FLAG="$(dirname "$BDIR")/backup-failed.flag"
+rm -f "$BFAIL_FLAG"
+# ★ C-2：sandbox 無 age — 顯式 NODE_ENV=development 行明文軌（production 會 FATAL，見 T45）
+BOUT=$(NODE_ENV=development bash scripts/backup-wa.sh 2>&1)
 echo "$BOUT" | tail -3
 echo "$BOUT" | grep -q "\[backup\] DONE" || { echo "    ❌ T39 backup-wa.sh 冇 DONE"; T39=1; }
+[ -f "$BFAIL_FLAG" ] && { echo "    ❌ T39 成功後仍有 fail flag（應由成功 backup 清咗）"; T39=1; }
+BDMODE=$(stat -c '%a' "$BDIR" 2>/dev/null || echo "?")
+[ "$BDMODE" = "700" ] || { echo "    ❌ T39 backup dir 唔係 0700（=$BDMODE）"; T39=1; }
 DUMP=$(ls -1t "$BDIR"/wa-inbox-*.dump.age "$BDIR"/wa-inbox-*.dump 2>/dev/null | head -1)
 [ -n "$DUMP" ] && [ -f "$DUMP" ] || { echo "    ❌ T39 dump 檔唔存在"; T39=1; }
 if ! command -v age >/dev/null 2>&1; then
@@ -989,7 +997,7 @@ fi
 ROUT=$(bash scripts/restore-wa-test.sh 2>&1)
 echo "$ROUT" | tail -7
 echo "$ROUT" | grep -q "RESTORE-TEST OK" || { echo "    ❌ T39 restore 驗證失敗"; T39=1; }
-[ "$T39" = 0 ] && pass "T39 backup（dump + 兩軌加密 + retention）+ restore 落 scratch DB 5 表 row count 全對" \
+[ "$T39" = 0 ] && pass "T39 backup（dump + 兩軌加密 + 0700 + retention）+ restore 落 scratch DB 5 表 row count 全對" \
   || fail "T39 backup/restore（見上 ❌）"
 
 # ══════════════ 深度審查修補（runway 步驟 1）：T40-T43 ══════════════
@@ -1131,6 +1139,54 @@ else
   echo "$T44_OUT" | tail -20
   fail "T44 media 加密（見上）"
 fi
+
+# ── T45. C-2 backup 強制加密：production 無 age FATAL + fail flag → App Alert + auto-resolve ──
+echo "[P5] T45: backup production FATAL + backup_failed alert..."
+T45=0
+BFAIL_FLAG2="$(dirname "${BACKUP_DIR:-.dev/backups}")/backup-failed.flag"
+rm -f "$BFAIL_FLAG2"
+
+# (1) production 模擬（受限 PATH — 冇 age，唔理系統有冇裝）→ FATAL exit 1 + flag（metadata only）
+FAKEBIN=$(mktemp -d)
+for _t in bash sh pg_dump psql tar date find du grep sed awk chmod mkdir rm cp ls cat echo tr dirname; do
+  _p=$(command -v "$_t" 2>/dev/null) && ln -sf "$_p" "$FAKEBIN/$_t" || true
+done
+FOUT=$(env NODE_ENV=production PATH="$FAKEBIN" bash scripts/backup-wa.sh 2>&1); FRC=$?
+rm -rf "$FAKEBIN"
+if [ "$FRC" = 1 ] && echo "$FOUT" | grep -q "FATAL: production backup"; then
+  pass "T45 production 無 age → FATAL exit 1（唔出產明文 backup）"
+else
+  echo "    ❌ T45 production 無 age 未 FATAL（rc=$FRC）"; echo "$FOUT" | tail -5; T45=1
+fi
+if [ -f "$BFAIL_FLAG2" ] && grep -q "reason=age_not_installed_production" "$BFAIL_FLAG2"; then
+  pass "T45 fail flag 已寫（reason=age_not_installed_production，metadata only）"
+else
+  echo "    ❌ T45 fail flag 未寫 / reason 錯"; [ -f "$BFAIL_FLAG2" ] && cat "$BFAIL_FLAG2"; T45=1
+fi
+
+# (2) flag → App Alert（HIGH）— health-check 讀真 flag 檔（冪等：已有未解決 alert 唔重開）
+q "UPDATE \"Alert\" SET \"resolvedAt\" = now() WHERE \"resolvedAt\" IS NULL AND type='backup_failed'" >/dev/null
+pnpm -s e2e:cron health-check >/dev/null 2>&1 || T45=1
+if wait_for "SELECT count(*)::text c FROM \"Alert\" WHERE type='backup_failed' AND \"resolvedAt\" IS NULL" '[{"c":"1"}]' 30; then
+  pass "T45 backup fail flag → Alert(backup_failed) 開咗"
+else
+  fail "T45 backup_failed Alert 未開"
+fi
+BFS=$(q "SELECT \"severity\"::text s FROM \"Alert\" WHERE type='backup_failed' AND \"resolvedAt\" IS NULL" | jf s)
+check "T45 backup_failed severity=HIGH" "$BFS" "HIGH"
+BFR=$(q "SELECT (detail->>'reason')::text r FROM \"Alert\" WHERE type='backup_failed' AND \"resolvedAt\" IS NULL" | jf r)
+check "T45 alert detail.reason = metadata token（零原文）" "$BFR" "age_not_installed_production"
+
+# (3) flag 清（= 下次 backup 成功）→ auto-resolve
+rm -f "$BFAIL_FLAG2"
+pnpm -s e2e:cron health-check >/dev/null 2>&1 || T45=1
+if wait_for "SELECT (\"resolvedAt\" IS NOT NULL)::text r FROM \"Alert\" WHERE type='backup_failed'" '[{"r":"true"}]' 10; then
+  pass "T45 flag 清後 backup_failed Alert auto-resolved"
+else
+  fail "T45 backup_failed auto-resolve"
+fi
+[ "$T45" = 0 ] && pass "T45 backup 強制加密（production FATAL + 0700 + fail flag → App alert 鏈）" \
+  || fail "T45 backup C-2（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
