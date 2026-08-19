@@ -20,6 +20,8 @@
 #   T12 unknown field → webhook 200 + worker 存活
 #   T13 AI URGENT_PAIN：「好痛」→ URGENT_PAIN + urgent=true + 無 draft + escalation log（DB+log 斷言）
 #   T14 AI BOOKING_REQUEST：「想預約」→ draft 生成（PROPOSED）
+#   T14.5 (H-3) summary 去識別化：mock AI 輸出含 profileName（bait token）嘅 summary
+#       → deterministic scrub → DB aiSummary 0 hit（waId 後 8 位同樣 0 hit）
 #   T15 draft 採用 PATCH（回 draftText）+ 棄用 DELETE（→ DISCARDED）+ 別店 403
 #   T16 AI_MOCK_FAIL=1 降級：舊 intent 保留 + 無新 draft + inbox 200 + stats 記 fail
 #   T17 HISTORY/APP_ECHO 唔觸發 AI queue（job key count 斷言）
@@ -66,6 +68,9 @@
 #       / legacy 明文偵測 / production fail-fast（不可寫目錄 throw）/ production 無 key throw / 0700+0600 / tamper auth
 #   T45 (C-2) backup 強制加密：production 無 age → FATAL exit 1 + fail flag（metadata only）→
 #       health-check 轉 Alert(backup_failed, HIGH)；flag 清 → auto-resolve；backup dir 0700
+#   T46 (H-3) summary deterministic scrub：完整名/部分名/waId 後 8 位/bait token → 病人/***
+#   T47 (M-2) alert 出境 hard-gate：白名單（number/boolean/短字串）保留；超長/object/array drop；
+#       weekly_report.text 特例 ≤4000
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -150,6 +155,13 @@ echo "  redis + postgres OK"
 echo "[1/9] migrate + seed..."
 pnpm migrate:deploy >/tmp/e2e-migrate.log 2>&1 || { echo "FATAL: migrate failed"; tail -20 /tmp/e2e-migrate.log; exit 1; }
 pnpm db:seed >/tmp/e2e-seed.log 2>&1 || { echo "FATAL: seed failed"; tail -20 /tmp/e2e-seed.log; exit 1; }
+# ★ hermetic AI 數據（H-3/M-5）：清上一 run 殘留 Conversation/Message/AiDraft/WebhookEvent —
+#   persistent sandbox DB 跨 run 累積行；pii-scan 第 4 層（aiSummary × profileName 子串）
+#   對舊命名慣例嘅殘留行會 false positive。seed 數據（clinic/staff/provider）唔受影響。
+q "DELETE FROM \"AiDraft\"" >/dev/null 2>&1 || true
+q "DELETE FROM \"Message\"" >/dev/null 2>&1 || true
+q "DELETE FROM \"WebhookEvent\"" >/dev/null 2>&1 || true
+q "DELETE FROM \"Conversation\"" >/dev/null 2>&1 || true
 # 清晒上次 run 殘留嘅 BullMQ job — 舊 job 會被新 worker redeliver → 舊 EPOCH 數據
 # 落咗新 run 嘅 DB 污染斷言（T41/T17 事故）
 pnpm e2e:queue-clear >/dev/null 2>&1 || echo "  WARN: queue clear failed（繼續，留意 T17/T41）"
@@ -242,7 +254,7 @@ check "T2 STAFF(TKW) GET /api/conversations?clinicId=MF → 403" "$CODE" "403"
 
 # ── T3. inbound message ─────────────────────────────────────────────────
 echo "[5/9] T3: inbound message..."
-pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_TKW" --text "e2e 第一則" --wamid "$IN_WAMID" --name "E2E 病人" >/dev/null || fail "T3 mock-inbound message POST"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_TKW" --text "e2e 第一則" --wamid "$IN_WAMID" --name "E2E-A-PLAIN" >/dev/null || fail "T3 mock-inbound message POST"
 if wait_for "SELECT (\"unreadCount\")::text u, (\"lastInboundAt\" IS NOT NULL)::text li FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_TKW'" \
   '[{"u":"1","li":"true"}]' 30; then
   pass "T3 unreadCount=1 + lastInboundAt set（Contact/Conversation/Message 已建立）"
@@ -255,7 +267,7 @@ check "T3 Message(IN,API) count=1" "$CNT" "1"
 # ── T4. 冪等（重發同一 wamid） ─────────────────────────────────────────
 echo "[6/9] T4: idempotency..."
 sleep 1
-pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_TKW" --text "e2e 重發" --wamid "$IN_WAMID" --name "E2E 病人" >/dev/null || true
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_TKW" --text "e2e 重發" --wamid "$IN_WAMID" --name "E2E-A-PLAIN" >/dev/null || true
 sleep 3
 CNT=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$IN_WAMID'" | jf c)
 check "T4 重發後 Message count 仍=1（冪等）" "$CNT" "1"
@@ -277,7 +289,7 @@ check "T5 echo 唔加 unread（仍=1）" "$UNREAD" "1"
 
 # ── T6. history ─────────────────────────────────────────────────────────
 echo "[8/9] T6: history import..."
-pnpm -s mock-inbound history --clinic TKW --from "$PATIENT_TKW" --count "$HIST_COUNT" --name "E2E 病人" >/dev/null || fail "T6 mock-inbound history POST"
+pnpm -s mock-inbound history --clinic TKW --from "$PATIENT_TKW" --count "$HIST_COUNT" --name "E2E-A-PLAIN" >/dev/null || fail "T6 mock-inbound history POST"
 if wait_for "SELECT count(*)::text c FROM \"Message\" m JOIN \"Conversation\" cv ON cv.id=m.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$PATIENT_TKW' AND m.channel='HISTORY'" \
   "[{\"c\":\"$HIST_COUNT\"}]" 30; then
   pass "T6 HISTORY 訊息 = $HIST_COUNT 條"
@@ -322,7 +334,7 @@ GREP=$(grep -o "window_closed" /tmp/e2e-send2.json | head -1)
 check "T9 error code = window_closed" "$GREP" "window_closed"
 
 # ── T10. 跨店 403（單對話） ────────────────────────────────────────────
-pnpm -s mock-inbound message --clinic MF --from "$PATIENT_MF" --text "mf msg" --name "E2E MF 病人" >/dev/null || true
+pnpm -s mock-inbound message --clinic MF --from "$PATIENT_MF" --text "mf msg" --name "E2E-A-MF" >/dev/null || true
 wait_for "SELECT count(*)::text c FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_MF'" '[{"c":"1"}]' 30 || fail "T10 MF conversation 建立"
 MF_CONV_ID=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_MF'" | jf id)
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/conversations/$MF_CONV_ID")
@@ -348,7 +360,7 @@ curl -sf "$BASE/healthz" >/dev/null 2>&1 && pass "T12 worker/server 存活" || f
 echo "[10/10] T13-T17: AI triage..."
 PATIENT_AI1="8526003${EPOCH}"
 WAMID_AI1="wamid.E2E_AI_URGENT_${EPOCH}"
-pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI1" --text "医生我牙好痛" --wamid "$WAMID_AI1" --name "E2E 急症病人" >/dev/null || fail "T13 mock-inbound POST"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI1" --text "医生我牙好痛" --wamid "$WAMID_AI1" --name "E2E-A-URGENT" >/dev/null || fail "T13 mock-inbound POST"
 if wait_for "SELECT \"intent\" i, \"urgency\" u, (\"urgent\")::text ug FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" \
   '[{"i":"URGENT_PAIN","u":"HIGH","ug":"true"}]' 30; then
   pass "T13 URGENT_PAIN + urgency HIGH + urgent=true（DB）"
@@ -368,7 +380,7 @@ URG_LOG=$(grep -F "\"$WAMID_AI1\"" /tmp/e2e-worker.log 2>/dev/null | grep -c '"u
 # ── T14. AI triage：BOOKING_REQUEST → draft 生成（pending） ─────────────
 PATIENT_AI2="8526004${EPOCH}"
 WAMID_AI2="wamid.E2E_AI_BOOK_${EPOCH}"
-pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI2" --text "你好，我想預約下週" --wamid "$WAMID_AI2" --name "E2E 預約病人" >/dev/null || fail "T14 mock-inbound POST"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI2" --text "你好，我想預約下週" --wamid "$WAMID_AI2" --name "E2E-A-BOOKING" >/dev/null || fail "T14 mock-inbound POST"
 if wait_for "SELECT \"intent\" i, \"urgency\" u FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI2'" \
   '[{"i":"BOOKING_REQUEST","u":"LOW"}]' 30; then
   pass "T14 BOOKING_REQUEST + urgency LOW"
@@ -385,6 +397,23 @@ else
 fi
 DRAFT2_ID=$(q "SELECT id FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$AI2_MSG_ID'" | jf id)
 [ -n "$DRAFT2_ID" ] && pass "T14 draft id 存在" || fail "T14 draft id"
+
+# ── T14.5. H-3 summary 去識別化：bait（mock AI 回帶 profileName）→ scrub → DB 0 hit ──
+echo "  T14.5: summary scrub bait..."
+BAIT_NAME="E2E-BAIT-SUM-7f3a"   # 同 src/lib/ai/mock.ts E2E_BAIT_SUM_TOKEN（mock summary 固定含佢）
+BAIT_PAT="8526009${EPOCH}1"
+WAMID_BAIT="wamid.E2E_BAIT_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$BAIT_PAT" --text "e2e bait 肚痛" --wamid "$WAMID_BAIT" --name "$BAIT_NAME" >/dev/null || fail "T14.5 mock-inbound POST"
+if wait_for "SELECT (\"aiSummary\" IS NOT NULL)::text s FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$BAIT_PAT'" '[{"s":"true"}]' 30; then
+  pass "T14.5 bait conversation aiSummary 已落庫"
+else
+  fail "T14.5 bait aiSummary 未落庫"
+fi
+BAIT_HIT=$(q "SELECT count(*)::text c FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$BAIT_PAT' AND c.\"aiSummary\" LIKE '%$BAIT_NAME%'" | jf c)
+check "T14.5 summary scrub：profileName（bait token）DB 0 hit（deterministic scrub 生效）" "$BAIT_HIT" "0"
+BAIT_WA8="${BAIT_PAT: -8}"
+BAIT_WA_HIT=$(q "SELECT count(*)::text c FROM \"Conversation\" c WHERE c.\"aiSummary\" LIKE '%$BAIT_WA8%'" | jf c)
+check "T14.5 summary scrub：waId 後 8 位 DB 0 hit" "$BAIT_WA_HIT" "0"
 
 # ── T15. draft 採用 / 棄用 API ────────────────────────────────────────────
 CONV_AI2=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI2'" | jf id)
@@ -413,7 +442,7 @@ check "T15b 別店 staff 棄用 → 403（RBAC）" "$CODE" "403"
 PATIENT_AI3="8526005${EPOCH}"
 WAMID_AI3A="wamid.E2E_AI_FAILA_${EPOCH}"
 WAMID_AI3B="wamid.E2E_AI_FAILB_${EPOCH}"
-pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI3" --text "你好，想問下埋門時間" --wamid "$WAMID_AI3A" --name "E2E 降級病人" >/dev/null || fail "T16a mock-inbound POST"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI3" --text "你好，想問下埋門時間" --wamid "$WAMID_AI3A" --name "E2E-A-DEGRADED" >/dev/null || fail "T16a mock-inbound POST"
 if wait_for "SELECT \"intent\" i FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI3'" '[{"i":"QUESTION"}]' 30; then
   pass "T16a 正常 AI 分類 QUESTION（舊 intent 建立）"
 else
@@ -429,7 +458,7 @@ WORKER_PID=$!
 for i in $(seq 1 30); do grep -q "all workers started" /tmp/e2e-worker-fail.log 2>&1 && break; sleep 1; done
 
 # step 3：新 inbound → AI fail（attempts 3，backoff 2s/4s）
-pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI3" --text "再問一次時間" --wamid "$WAMID_AI3B" --name "E2E 降級病人" >/dev/null || fail "T16b mock-inbound POST"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI3" --text "再問一次時間" --wamid "$WAMID_AI3B" --name "E2E-A-DEGRADED" >/dev/null || fail "T16b mock-inbound POST"
 sleep 15
 CUR_INTENT=$(q "SELECT \"intent\" i FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI3'" | jf i)
 check "T16 AI 失敗後舊 intent 保留（降級唔抹走）" "$CUR_INTENT" "$OLD_INTENT"
@@ -633,7 +662,7 @@ SSESYNC=$(q "SELECT (\"lastSyncAt\" IS NOT NULL)::text s FROM \"ApricotSession\"
 # 1) 新病人（BOOKING_REQUEST intent — 真實 flow 起點）+ staff 發 Flow
 PATIENT_P3="8526031${EPOCH}"
 WAMID_P3="wamid.E2E_P3_${EPOCH}"
-pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_P3" --text "你好，我想預約下週" --wamid "$WAMID_P3" --name "E2E Flow 病人" >/dev/null || T27=1
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_P3" --text "你好，我想預約下週" --wamid "$WAMID_P3" --name "E2E-A-FLOW" >/dev/null || T27=1
 CONV_P3=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_P3'" | jf id)
 [ -n "$CONV_P3" ] || { echo "    ❌ T27 conv 未建立"; T27=1; }
 curl -s -o /tmp/e2e-flow-send.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST \
@@ -1009,7 +1038,7 @@ ORPHAN_WAMID="wamid.E2E_ORPHAN_${EPOCH}"
 ORPHAN_PAT="8526041${EPOCH}"
 # 模擬舊 code crash 狀態：WebhookEvent（claim）存在，但 Message 從未寫入
 q "INSERT INTO \"WebhookEvent\" (id, field) VALUES ('messages:$ORPHAN_WAMID', 'messages')" >/dev/null || T40=1
-pnpm -s mock-inbound message --clinic TKW --from "$ORPHAN_PAT" --text "e2e orphan recovery" --wamid "$ORPHAN_WAMID" --name "E2E Orphan 病人" >/dev/null || T40=1
+pnpm -s mock-inbound message --clinic TKW --from "$ORPHAN_PAT" --text "e2e orphan recovery" --wamid "$ORPHAN_WAMID" --name "E2E-A-ORPHAN" >/dev/null || T40=1
 if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$ORPHAN_WAMID' AND direction='IN' AND channel='API'" '[{"c":"1"}]' 30; then
   pass "T40 claim 孤兒（有 WebhookEvent 無 Message）重跑 → 訊息補回唔丟"
 else
@@ -1018,7 +1047,7 @@ else
 fi
 # 冪等：再重發同一 wamid（而家有 Message）→ count 不變
 sleep 1
-pnpm -s mock-inbound message --clinic TKW --from "$ORPHAN_PAT" --text "e2e orphan 重發" --wamid "$ORPHAN_WAMID" --name "E2E Orphan 病人" >/dev/null || true
+pnpm -s mock-inbound message --clinic TKW --from "$ORPHAN_PAT" --text "e2e orphan 重發" --wamid "$ORPHAN_WAMID" --name "E2E-A-ORPHAN" >/dev/null || true
 sleep 3
 CNT40=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$ORPHAN_WAMID'" | jf c)
 [ "$CNT40" = "1" ] || { echo "    ❌ T40 補回後重發 count != 1（=$CNT40）"; T40=1; }
@@ -1114,7 +1143,7 @@ T43=0
 MEDIA_PAT="8526044${EPOCH}"
 MEDIA_WAMID="wamid.E2E_MEDIA_${EPOCH}"
 MEDIA_FILE="${MEDIA_WAMID}.jpg"
-pnpm -s mock-inbound message --clinic MF --from "$MEDIA_PAT" --text "e2e media" --wamid "$MEDIA_WAMID" --media image --name "E2E 媒體病人" >/dev/null || T43=1
+pnpm -s mock-inbound message --clinic MF --from "$MEDIA_PAT" --text "e2e media" --wamid "$MEDIA_WAMID" --media image --name "E2E-A-MEDIA" >/dev/null || T43=1
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$MEDIA_WAMID'" '[{"c":"1"}]' 30 || { echo "    ❌ T43 media message 未入庫"; T43=1; }
 # mock mode 唔下載 → 手放檔案 + 回填 mediaPath（等同真下載完成）
 printf 'e2e-media-bytes' > "$WA_MEDIA_DIR/$MEDIA_FILE"
@@ -1187,6 +1216,26 @@ else
 fi
 [ "$T45" = 0 ] && pass "T45 backup 強制加密（production FATAL + 0700 + fail flag → App alert 鏈）" \
   || fail "T45 backup C-2（見上 ❌）"
+
+# ── T46. H-3 summary deterministic scrub（單元級） ──────────────────────────
+echo "[P5] T46: ai summary scrub..."
+T46_OUT=$(pnpm -s e2e:ai-scrub 2>&1)
+if echo "$T46_OUT" | grep -q "AI-SCRUB OK"; then
+  pass "T46 summary scrub（完整名/部分名/waId 後 8 位/bait token/收緊/唔誤傷）"
+else
+  echo "$T46_OUT" | tail -10
+  fail "T46 summary scrub（見上）"
+fi
+
+# ── T47. M-2 alert 出境 hard-gate（單元級） ──────────────────────────────
+echo "[P5] T47: alert detail gate..."
+T47_OUT=$(pnpm -s e2e:alert-gate 2>&1)
+if echo "$T47_OUT" | grep -q "ALERT-GATE OK"; then
+  pass "T47 alert gate（白名單保留 + 超長/object/array drop + weekly text 特例 + notifyAlert 整合）"
+else
+  echo "$T47_OUT" | tail -10
+  fail "T47 alert gate（見上）"
+fi
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

@@ -50,6 +50,7 @@ export function buildSystemPrompt(): string {
     "其他一律 false：預約 / 改期 / 一般資料查詢 / 多謝 / 道別 都係 false。",
     "",
     "summary：一句摘要（≤50 字），語言要同病人最後嗰幾則訊息一致（繁中 / 英文 / 廣東話）。",
+    "★ 去識別化（絕對鐵律）：summary 唔准出現病人姓名、電話號碼、身份證號等任何可識別資料 — 一律用「病人」指代；可以提及症狀類別同請求意向，但唔好抄病人原文完整句。（code 層另有一重 deterministic scrub 兜底，你寫唔寫都得）",
     "",
     "draft（建議覆 reply；若診所係 AUTO 模式且非緊急，呢段會直接自動發畀病人）：",
     "- intent=URGENT_PAIN 或 urgency=HIGH 時必須為 null（緊急鐵律：永不出草稿，更唔會自動發）",

@@ -34,6 +34,13 @@ export function isAiMockFailEnabled(): boolean {
 
 export const MOCK_MODEL_NAME = "mock-qwen-v1";
 
+/**
+ * ★ E2E bait（H-3 scrub 驗證）：mock summary 固定含呢個 token — e2e 會建一個
+ *   profileName 同 token 相同嘅 contact，驗證 deterministic scrub 一定將佢撳走
+ *   （DB aiSummary 0 hit）。token 係獨特 ASCII，唔會撞其他病人。
+ */
+export const E2E_BAIT_SUM_TOKEN = "E2E-BAIT-SUM-7f3a";
+
 const RE_URGENT = /痛|流血|出血|腫|外傷|感染|止唔到血|severe pain|pain|bleed|swollen|infection/i;
 // Phase 2b：病人明確要求真人（T21 mock trigger）— 急症先判，所以「牙痛，想搵人工」會命中 URGENT
 const RE_NEEDS_HUMAN = /人工|真人|human agent|talk to a human/i;
@@ -152,7 +159,8 @@ export async function mockClassifyAndDraft(
   return {
     ...result,
     // summary 鐵律 ≤50 字（mock 模板已短，defense in depth）
-    summary: result.summary.slice(0, 50),
+    // ★ E2E bait：附固定 token — H-3 scrub 測試靶（同 E2E_BAIT_SUM_TOKEN 同名嘅 contact 會俾撳走）
+    summary: `${result.summary.slice(0, 30)} ${E2E_BAIT_SUM_TOKEN}`.slice(0, 50),
     model: MOCK_MODEL_NAME,
     latencyMs: Date.now() - t0,
     tokens: 0,

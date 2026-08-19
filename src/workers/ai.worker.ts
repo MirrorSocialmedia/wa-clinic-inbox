@@ -14,6 +14,7 @@ import {
   type ClassifyAndDraftResult,
 } from "@/lib/ai";
 import { PROMPT_CONTEXT_MESSAGES } from "@/lib/ai/prompts";
+import { scrubAiSummary } from "@/lib/ai/scrub";
 import { fetchDutyRoster, hkToday } from "@/lib/duty/client";
 
 /**
@@ -92,6 +93,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     log.warn({ jobId: job.id, clinicId: conv.clinicId }, "ai job: clinic gone — skip (no retry)");
     return { skipped: "clinic-gone" };
   }
+  // H-3：contact 身份（profileName/waId）— aiSummary 落庫前 deterministic scrub（去識別化）用
+  const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
 
   const recent = await prisma.message.findMany({
     where: { conversationId: conv.id },
@@ -143,6 +146,9 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   await recordAiCall(true, undefined, result.latencyMs, result.tokens);
 
   // ── 3. 分類落 Conversation ───────────────────────────────────────────
+  // ★ H-3 第二層（deterministic scrub，零 AI 依賴）：AI 可能唔聽 prompt 寫咗身份資料 —
+  //   落庫/推送前將 profileName（完整 + ≥2 字子串）同 waId 後 8 位替換做 病人/***
+  const safeSummary = scrubAiSummary(result.summary, { profileName: contact?.profileName, waId: contact?.waId });
   const urgent = result.intent === "URGENT_PAIN" || result.urgency === "HIGH";
   const updatedConv = await prisma.conversation.update({
     where: { id: conv.id },
@@ -150,7 +156,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       intent: result.intent,
       intentConfidence: result.confidence,
       urgency: result.urgency,
-      aiSummary: result.summary.length > 0 ? result.summary.slice(0, 50) : null,
+      aiSummary: safeSummary.length > 0 ? safeSummary.slice(0, 50) : null,
       // urgent 只 set true 唔 set false — 已標急症嘅對話唔會被新一條普通訊息蓋掉
       ...(urgent ? { urgent: true } : {}),
     },
@@ -253,14 +259,13 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   const draftId = draft?.id ?? null;
 
   // ── 5. Socket 推 ─────────────────────────────────────────────────────
-  const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
   publishNotify(conv.clinicId, "ai:classified", {
     conversationId: conv.id,
     intent: result.intent,
     urgency: result.urgency,
     needsHuman: result.needsHuman,
     urgent: updatedConv.urgent,
-    aiSummary: result.summary,
+    aiSummary: safeSummary, // ★ H-3：同 DB 一致（scrub 後）— live push 亦唔帶身份資料
     hasDraft: draftId !== null,
     aiMode: clinic.aiMode,
     autoSent,

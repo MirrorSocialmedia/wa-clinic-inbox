@@ -32,7 +32,9 @@
     "mock-e2e": "bash scripts/mock-e2e.sh",
     "e2e-real-ai": "bash scripts/e2e-real-ai.sh",
     "e2e:ai-job": "tsx scripts/e2e-ai-job.ts",
-  "e2e:media-enc": "tsx scripts/e2e-media-enc.ts"
+  "e2e:media-enc": "tsx scripts/e2e-media-enc.ts",
+  "e2e:ai-scrub": "tsx scripts/e2e-ai-scrub.ts",
+  "e2e:alert-gate": "tsx scripts/e2e-alert-gate.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
