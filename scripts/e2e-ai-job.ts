@@ -88,7 +88,7 @@ async function main(): Promise<void> {
       const contact = await prisma.contact.upsert({
         where: { clinicId_waId: { clinicId: clinic.id, waId: from } },
         update: {},
-        create: { clinicId: clinic.id, waId: from, profileName: "E2E 過窗病人" },
+        create: { clinicId: clinic.id, waId: from, profileName: "E2E-A-WINDOW" },
       });
       const conv = await prisma.conversation.create({
         data: {

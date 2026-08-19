@@ -168,6 +168,7 @@ q "DELETE FROM \"AiDraft\"" >/dev/null 2>&1 || true
 q "DELETE FROM \"Message\"" >/dev/null 2>&1 || true
 q "DELETE FROM \"WebhookEvent\"" >/dev/null 2>&1 || true
 q "DELETE FROM \"Conversation\"" >/dev/null 2>&1 || true
+q "DELETE FROM \"Alert\" WHERE type='backup_failed'" >/dev/null 2>&1 || true  # T45 hermetic（persistent DB 累積舊行）
 # 清晒上次 run 殘留嘅 BullMQ job — 舊 job 會被新 worker redeliver → 舊 EPOCH 數據
 # 落咗新 run 嘅 DB 污染斷言（T41/T17 事故）
 pnpm e2e:queue-clear >/dev/null 2>&1 || echo "  WARN: queue clear failed（繼續，留意 T17/T41）"
@@ -1208,8 +1209,15 @@ check "T43b 碟上係密文（WA1 magic prefix）" "$MAGIC" "WA1"
 pnpm -s mock-inbound message --clinic MF --from "$CT_PAT" --text "e2e media enc" --wamid "$CT_WAMID" --name "E2E-A-MEDIA" >/dev/null || T43=1
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$CT_WAMID'" '[{"c":"1"}]' 30 || { echo "    ❌ T43b media message 未入庫"; T43=1; }
 q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$CT_FILE' WHERE \"waMessageId\"='$CT_WAMID'" >/dev/null
-CODE=$(curl -s -o /tmp/e2e-t43b-body -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/$CT_FILE")
-check "T43b 攞自家加密媒體 → 200" "$CODE" "200"
+# ★ dev server manifest race 重試：呢一瞬間 dev server 可能正喺 recompile（webhook POST 觸發）—
+#   第一發可能打到半寫入嘅 manifest（500 catchall）；2s 後重試即好（生產 build 無呢問題）
+T43B_CODE=000
+for i in 1 2 3; do
+  T43B_CODE=$(curl -s -o /tmp/e2e-t43b-body -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/$CT_FILE")
+  [ "$T43B_CODE" = "200" ] && break
+  sleep 2
+done
+check "T43b 攞自家加密媒體 → 200（dev manifest race retry ×3）" "$T43B_CODE" "200"
 check "T43b 碟上密文 / serve 原文（解密 roundtrip）" "$(cat /tmp/e2e-t43b-body 2>/dev/null)" "enc-secret-bytes-1234"
 rm -f "$WA_MEDIA_DIR/$CT_FILE" /tmp/e2e-enc-src.bin
 [ "$T43" = 0 ] && pass "T43b media 碟上密文 roundtrip（C-1b HTTP 層）" || fail "T43b media 密文 roundtrip（見上 ❌）"
@@ -1262,9 +1270,11 @@ BFR=$(q "SELECT (detail->>'reason')::text r FROM \"Alert\" WHERE type='backup_fa
 check "T45 alert detail.reason = metadata token（零原文）" "$BFR" "age_not_installed_production"
 
 # (3) flag 清（= 下次 backup 成功）→ auto-resolve
+# ★ hermeticity：check「unresolved backup_failed = 0」而非「全行 resolved=true」—
+#   persistent sandbox DB 會累積上一 run 嘅 resolved 舊行，按全行 match 會 flaky（[true,true]）
 rm -f "$BFAIL_FLAG2"
 pnpm -s e2e:cron health-check >/dev/null 2>&1 || T45=1
-if wait_for "SELECT (\"resolvedAt\" IS NOT NULL)::text r FROM \"Alert\" WHERE type='backup_failed'" '[{"r":"true"}]' 10; then
+if wait_for "SELECT count(*)::text c FROM \"Alert\" WHERE type='backup_failed' AND \"resolvedAt\" IS NULL" '[{"c":"0"}]' 10; then
   pass "T45 flag 清後 backup_failed Alert auto-resolved"
 else
   fail "T45 backup_failed auto-resolve"
