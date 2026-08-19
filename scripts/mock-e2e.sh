@@ -1343,6 +1343,8 @@ NLOCK="e2e-nolock-${EPOCH}@wa-clinic.local"
 for i in 1 2 3 4 5; do
   CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" \
     -H 'Content-Type: application/json' -d "{\"email\":\"$NLOCK\",\"password\":\"wrong-$i\"}")
+  # dev-mode flake：route recompile 後首個 request 可能 500（module singleton 未 ready）— retry 一次（先例：T43b dev race retry）
+  if [ "$CODE" = "500" ]; then sleep 1; CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$NLOCK\",\"password\":\"wrong-$i\"}"); fi
   # 401 = 正常認證失敗；429 = IP 限流（mock 下唯一 429 來源 — lockout 禁用）。兩者都唔係 lockout。
   case "$CODE" in 401|429) : ;; *) echo "    ❌ T49 mock mode: fail #$i HTTP=$CODE（預期 401/429）"; T49=1 ;; esac
 done
@@ -1413,16 +1415,22 @@ check "T50 STAFF 登入零影響（唔使第二步）→ 200" "$CODE" "200"
 #     ★ dev 環境註：Next 會將 socket IP 注入 XFF → clientIp 恆解析去本地 socket IP，
 #       XFF header 模擬「新 IP」唔生效；改用清走 admin 7 日 LOGIN baseline →
 #       本次登入嘅 IP 就係「從未見過」。生產（nginx $remote_addr 覆蓋）邏輯同一，只係 IP 源唔同。
-q "DELETE FROM \"AuditLog\" WHERE staffId='$ADMIN_ID' AND action='LOGIN'" >/dev/null
+q "DELETE FROM \"AuditLog\" WHERE \"staffId\"='$ADMIN_ID' AND action='LOGIN'" >/dev/null
+# 雙保險：login 前再清一次該 type alert（抵受外部污染 — 例：手動清咗 LOGIN baseline 後
+# 早期 T1c login 開咗 alert 留落嚟 → 計數會 >1）。正常 run 呢條 DELETE 係 no-op。
+q "DELETE FROM \"Alert\" WHERE type='admin_new_ip_login'" >/dev/null 2>&1 || true
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_ADMIN" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\",\"totp\":\"$(pnpm -s e2e:totp-code "$T50_SECRET")\"}")
 check "T50 新 IP 登入 → 200" "$CODE" "200"
-if wait_for "SELECT count(*)::text c FROM \"Alert\" WHERE type='admin_new_ip_login' AND \"resolvedAt\" IS NULL" '[{\"c\":\"1\"}]' 15; then
+# 斷言用「有冇 create」而唔係「未解決」— health cron（*/5m）會 auto-resolve 佢唔管嘅
+# 事件型 alert（admin_new_ip_login 唔喺 breach set）；hermetic setup 已清晒舊 row → count 恒 = 1
+if wait_for "SELECT count(*)::text c FROM \"Alert\" WHERE type='admin_new_ip_login'" '[{"c":"1"}]' 15; then
   pass "T50 ADMIN 新 IP 登入 → Alert(admin_new_ip_login) 開咗"
 else
   fail "T50 新 IP Alert 未開"
 fi
-LOGIN_IP=$(q "SELECT (\"meta\"->>'ip')::text ip FROM \"AuditLog\" WHERE staffId='$ADMIN_ID' AND action='LOGIN' ORDER BY \"createdAt\" DESC LIMIT 1" | jf ip)
-AL_IP=$(q "SELECT (\"detail\"->>'ip')::text ip FROM \"Alert\" WHERE type='admin_new_ip_login' AND \"resolvedAt\" IS NULL ORDER BY \"createdAt\" DESC LIMIT 1" | jf ip)
+LOGIN_IP=$(q "SELECT (\"meta\"->>'ip')::text ip FROM \"AuditLog\" WHERE \"staffId\"='$ADMIN_ID' AND action='LOGIN' ORDER BY \"createdAt\" DESC LIMIT 1" | jf ip)
+AL_IP=$(q "SELECT (\"detail\"->>'ip')::text ip FROM \"Alert\" WHERE type='admin_new_ip_login' ORDER BY \"createdAt\" DESC LIMIT 1" | jf ip)
+[ -n "$LOGIN_IP" ] && [ -n "$AL_IP" ] || { echo "    ❌ T50 LOGIN_IP/AL_IP 空（query 失敗？）LOGIN_IP='$LOGIN_IP' AL_IP='$AL_IP'"; T50=1; }
 check "T50 alert detail.ip = LOGIN audit ip（metadata only，無其他 PII）" "$AL_IP" "$LOGIN_IP"
 # (7) 清理：unset totp + 清 alert（persistent DB 衛生 — 下輪 T1c 要純登入）
 q "UPDATE \"StaffUser\" SET \"totpSecretEnc\" = NULL WHERE id='$ADMIN_ID'" >/dev/null
