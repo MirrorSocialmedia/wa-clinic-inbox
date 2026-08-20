@@ -2,7 +2,7 @@ import "@/lib/als-polyfill"; // 必須係第一行 import — 見該檔註釋
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import next from "next";
 import { Server } from "socket.io";
-import { initHub, initControlBridge, notifyClinic } from "@/sockets/hub";
+import { initHub, initControlBridge, notifyClinic, notifyStaff } from "@/sockets/hub";
 import { getRedis, closeRedis } from "@/lib/queue";
 import { NOTIFY_CHANNEL, type NotifyMessage } from "@/lib/notify";
 import { bootMediaSecurityCheck } from "@/lib/wa/media";
@@ -67,7 +67,12 @@ app.prepare().then(() => {
   notifySub.on("message", (_channel, msg) => {
     try {
       const data = JSON.parse(msg) as NotifyMessage;
-      notifyClinic(data.clinicId, data.event, data.payload);
+      // ★ H2：staffId 定向（notify:mention → 只 @ 中嗰個人收）vs clinic room 廣播
+      if (data.staffId) {
+        notifyStaff(data.staffId, data.event, data.payload);
+      } else {
+        notifyClinic(data.clinicId, data.event, data.payload);
+      }
     } catch (err) {
       log.warn(
         { err: err instanceof Error ? err.message : String(err) },

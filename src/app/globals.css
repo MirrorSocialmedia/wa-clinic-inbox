@@ -102,6 +102,16 @@ body {
     "PingFang HK", "Microsoft JhengHei", sans-serif;
 }
 
+/* ★ H2：@mention jump — 撳 bell / browser Notification 後定位到該 note 嘅短暫高亮 */
+@keyframes msg-flash-kf {
+  0% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 55%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.msg-flash {
+  animation: msg-flash-kf 0.8s ease-out 2;
+  border-radius: 12px;
+}
+
 /* theme 切換時全局顏色過渡（respect reduced motion） */
 @media (prefers-reduced-motion: no-preference) {
   body, .theme-transition * {

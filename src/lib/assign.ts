@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { RbacError, type AuthContext } from "@/lib/rbac";
-import { publishNotify } from "@/lib/notify";
+import { publishNotify, publishStaffNotify } from "@/lib/notify";
 
 /**
  * 轉交 / 派單核心（MD §3.1）— Send Lock 體系嘅唯一 assign 入口。
@@ -14,7 +14,8 @@ import { publishNotify } from "@/lib/notify";
  *      同等保護：at-rest 加密 / log redaction / per-clinic RBAC / retention）
  *   4) AuditLog（TRANSFER / UNASSIGN / AUTO_CLAIM；metadata only — 零訊息原文）
  *   5) touch lastMessageAt（★ 唔加 unreadCount — 病人冇新嘢）
- * transaction 提交後 → socket conversation:assigned（room clinic:{id}，payload 零內文）。
+ * transaction 提交後 → socket conversation:assigned（room clinic:{id}，payload 零內文）
+ *   + ★ H2：notify:mention 定向發畀被派者（自動 note 已帶 mentions=[toStaffId] — 轉交 = 必有通知）。
  *
  * 權限模型（assertCanAssign，route 層調）：
  *   - ADMIN → 任何店（assertClinicAccess 對 ADMIN 恒真）
@@ -192,6 +193,16 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
     assigneeId: result.assigneeId,
     byStaffId,
   });
+
+  // ★ H2：mention 通知 — 被派者（唔係自己）收 notify:mention（bell badge / 黃點；MD §5：轉交 = 必有通知）
+  if (result.assigneeId && result.assigneeId !== byStaffId) {
+    publishStaffNotify(result.assigneeId, result.clinicId, "notify:mention", {
+      conversationId: result.conversationId,
+      clinicId: result.clinicId,
+      messageId: result.noteMessageId,
+      fromStaffId: byStaffId,
+    });
+  }
 
   return result;
 }

@@ -22,6 +22,8 @@ export interface NotifyMessage {
   clinicId: string;
   event: string;
   payload: unknown;
+  /** ★ H2：設咗 staffId → 只 emit 去 `staff:{staffId}` room（per-staff 定向，e.g. notify:mention） */
+  staffId?: string;
 }
 
 // ── Control channel（P0-3 停用即時斷線） ──────────────────────────────────
@@ -67,6 +69,23 @@ export function publishNotify(clinicId: string, event: string, payload: unknown)
       log.warn(
         { clinicId, event, err: err instanceof Error ? err.message : String(err) },
         "notify: publish failed (UI 會經 reconnect 補漏)"
+      );
+    });
+}
+
+/**
+ * ★ H2：定向發畀指定 staff 嘅 socket（`staff:{staffId}` room）。
+ * 用法：notify:mention（只 @ 中嗰個人收，唔廣播全店）。
+ * clinicId 只係 log metadata（staff 本身綁店）。
+ */
+export function publishStaffNotify(staffId: string, clinicId: string, event: string, payload: unknown): void {
+  const data = JSON.stringify({ clinicId, staffId, event, payload } satisfies NotifyMessage);
+  getRedis()
+    .publish(NOTIFY_CHANNEL, data)
+    .catch((err) => {
+      log.warn(
+        { staffId: staffId.slice(-6), clinicId, event, err: err instanceof Error ? err.message : String(err) },
+        "notify: staff publish failed (UI 會經 reconnect 補漏)"
       );
     });
 }

@@ -95,6 +95,18 @@
 #   T62 Flow Send Lock（423）
 #   T63 ★ 10 條 INTERNAL note → mock Graph 計數不變（物理隔離）+ unread 不變 + 無新 AiDraft
 #   T64 socket/log 零內文（grep 自證）+ hermetic 清理（臨時 staff 刪除）
+#
+# Phase H2（已讀回執 / tick 語義 / @mention 通知）：
+#   T65 read 冪等（重複 read 只 1 row）+ 非 note 400 / 唔存在 404 + 無 mention → assignee tick + socket note:read
+#   T66 跨店 read / 攞 receipts → 403
+#   T67 tick 兩態（mention B+C：半讀 false → 全讀 true）+ GET receipts
+#   T68 notify:mention：被 @ 者實時收到；sender 0 收
+#   T69 self-mention 唔通知自己
+#   T70 mention 校驗：異店/唔存在 staff 靜默 drop
+#   T71 unassigned + 無 mention → requiredStaff 空 → allRead 永遠 false
+#   T72 423 Send Lock 回歸 + lock 唔阻 INTERNAL note
+#   T73 ★ INTERNAL 0 graph 請求 / unread 不變 / 無新 AiDraft（回歸）
+#   T74 socket/log 零內文 + hermetic 清理
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -231,6 +243,10 @@ pkill -f " server.ts" 2>/dev/null || true
 sleep 1
 lsof -ti:"$PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
 sleep 1
+# ★ 2026-08-21：清 .next dev cache — prod `pnpm build` 會覆寫 .next chunk layout，
+#   之後 `next dev` lazy-compile 新 route 會撈 `Cannot find module './vendor-chunks/...'` →
+#   500/404 間歇（real run 實遇：H2 read/receipts route 首 request 200、後續 500）。
+rm -rf .next
 nohup pnpm dev >/tmp/e2e-server.log 2>&1 &
 SERVER_PID=$!
 nohup pnpm worker >/tmp/e2e-worker.log 2>&1 &
@@ -713,8 +729,11 @@ fi
 DOC_A="mock-pract-tkw-1"
 NAME_A="陳明軒（主理）"
 # ★ slot 揀取排除已有 PENDING/CONFIRMED booking 嘅 slot（E2E 多次 run 共用 DB — 防舊 run 殘留 PENDING 污染 precheck）
+# ★ 2026-08-21 midnight-boundary fix：加 syncWindow 下界（HKT 明日開始）— 同 endpoint 斷言 predicate
+#   同義（isOpen + bookedCount=0 + syncWindow）。舊 bug：persistent DB 殘留前日 slot（已過期但
+#   bookedCount=0）→ slot_query 撈到過期日 → endpoint（只回 window 內）斷言 mismatch + time 步 400。
 slot_query() {
-  q "SELECT s.\"date\" d, s.\"startTime\" t FROM \"AvailabilitySlot\" s WHERE s.\"clinicId\"='$TKW_CLINIC_ID' AND s.\"providerApricotId\"='$DOC_A' AND s.\"bookedCount\"=0 AND s.\"isOpen\" AND NOT EXISTS (SELECT 1 FROM \"BookingRequest\" b WHERE b.\"providerApricotId\"=s.\"providerApricotId\" AND b.\"requestedDate\"=s.\"date\" AND b.\"requestedTime\"=s.\"startTime\" AND b.\"status\" IN ('PENDING','CONFIRMED')) $1 ORDER BY s.\"date\", s.\"startTime\" LIMIT 1"
+  q "SELECT s.\"date\" d, s.\"startTime\" t FROM \"AvailabilitySlot\" s WHERE s.\"clinicId\"='$TKW_CLINIC_ID' AND s.\"providerApricotId\"='$DOC_A' AND s.\"bookedCount\"=0 AND s.\"isOpen\" AND s.\"date\" >= ((date_trunc('day', (now() AT TIME ZONE 'Asia/Hong_Kong'))::date + 1)::text) AND NOT EXISTS (SELECT 1 FROM \"BookingRequest\" b WHERE b.\"providerApricotId\"=s.\"providerApricotId\" AND b.\"requestedDate\"=s.\"date\" AND b.\"requestedTime\"=s.\"startTime\" AND b.\"status\" IN ('PENDING','CONFIRMED')) $1 ORDER BY s.\"date\", s.\"startTime\" LIMIT 1"
 }
 step_flow() { # step_flow <desc> <args...> → 設 F_HTTP / F_DATA；回 0/1
   local desc="$1"; shift
@@ -1833,6 +1852,259 @@ check "T64 hermetic：H1 對話已清" "$(q "SELECT count(*)::text c FROM \"Conv
 check "T64 hermetic：臨時 staff 已刪" "$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE email='$H1_B_EMAIL'" | jf c)" "0"
 [ "$H1" = 0 ] && pass "H1 轉交 / Send Lock / 內部備註（T56-T64）" || fail "H1 有項失敗（見上 ❌）"
 
+# ── T65+. H2：已讀回執 / tick 語義 / @mention 通知（Phase H2）──────────────
+# 鐵律實測（MD §H2）：
+#   T65 read 冪等（重複 read 只 1 row）+ 非 note → 400 + 唔存在 → 404 + 無 mention → assignee tick + socket note:read
+#   T66 跨店 read / 攞 receipts → 403
+#   T67 tick 兩態：mention B+C — 半讀 allRead=false（灰✓）/ 全讀 true（藍✓✓）+ GET receipts
+#   T68 notify:mention：B/C 實時收到；sender（A）0 收
+#   T69 自己 @ 自己唔通知自己（A@A+B → 只 B 收）
+#   T70 mention 校驗：異店 staff + 唔存在 id 靜默 drop（只留同店 active）
+#   T71 unassigned + 無 mention → requiredStaff 空 → allRead 永遠 false
+#   T72 423 Send Lock 回歸（H2 對話）+ lock 唔阻 INTERNAL note
+#   T73 ★ INTERNAL 仍然 0 graph 請求 / unread 不變 / 無新 AiDraft（物理隔離回歸）
+#   T74 socket/log 零內文（grep 自證）+ hermetic 清理（臨時 staff B/C 刪除）
+H2=0
+H2_PAT="8526020${EPOCH}"
+H2_WAMID="wamid.E2E_H2_${EPOCH}"
+H2_B_EMAIL="$H1_B_EMAIL"                    # 重用 H1 臨時 staff（T64 已刪 → 重建，密碼同 fixture）
+H2_C_EMAIL="staff-e2e-h2c@wa-clinic.local"  # 第二臨時 staff（e2e:staff 只讀 H1_B_PASSWORD fixture）
+SOCK_H2A=/tmp/e2e-socket-h2a.log
+SOCK_H2B=/tmp/e2e-socket-h2b.log
+SOCK_H2C=/tmp/e2e-socket-h2c.log
+: > "$SOCK_H2A"; : > "$SOCK_H2B"; : > "$SOCK_H2C"
+
+# socket helper（多 log 版）：等 $2 同時出現所有 pattern（最多 $1 秒）
+h2_wait() {
+  local max="$1" logf="$2"; shift 2
+  local i=0 ok=1 pat
+  while [ "$i" -lt "$max" ]; do
+    ok=1
+    for pat in "$@"; do grep -qF "$pat" "$logf" 2>/dev/null || { ok=0; break; }; done
+    [ "$ok" = 1 ] && return 0
+    sleep 1; i=$((i + 1))
+  done
+  return 1
+}
+
+echo "[H2] H2: read receipts / tick / @mention..."
+# dev-mode pre-compile（同 H1 防護）：新 routes 先 warm up
+for _WARM in "/api/notes/warmup-h2/read" "/api/conversations/warmup-h2/note-read-receipts"; do
+  curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE$_WARM" \
+    -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 || true
+done
+sleep 1
+
+# (1) 臨時 staff B + C（TKW 同店；hermetic：run 完即刪）
+STAFF_OUT=$(pnpm -s e2e:staff create --clinic TKW --email "$H2_B_EMAIL" --name "E2E H2 Staff B" 2>/dev/null || true)
+H2_B_ID=$(echo "$STAFF_OUT" | grep -oE 'STAFF_ID=[a-z0-9]+' | head -1 | cut -d= -f2)
+[ -n "$H2_B_ID" ] || { echo "    ❌ H2 臨時 staff B 建立失敗"; H2=1; }
+STAFF_OUT=$(pnpm -s e2e:staff create --clinic TKW --email "$H2_C_EMAIL" --name "E2E H2 Staff C" 2>/dev/null || true)
+H2_C_ID=$(echo "$STAFF_OUT" | grep -oE 'STAFF_ID=[a-z0-9]+' | head -1 | cut -d= -f2)
+[ -n "$H2_C_ID" ] || { echo "    ❌ H2 臨時 staff C 建立失敗"; H2=1; }
+
+# (2) B / C 登入（密碼 = H1 fixture — e2e:staff create 固定用 H1_B_PASSWORD）
+CODE=$(curl -s -o /dev/null -D /tmp/e2e-h2b-login-headers.txt -w '%{http_code}' -c /tmp/e2e-cookie-h2b.txt \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$H2_B_EMAIL\",\"password\":\"$H1B_PASS\"}")
+check "H2-0 臨時 staff B 登入 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -D /tmp/e2e-h2c-login-headers.txt -w '%{http_code}' -c /tmp/e2e-cookie-h2c.txt \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$H2_C_EMAIL\",\"password\":\"$H1B_PASS\"}")
+check "H2-0 臨時 staff C 登入 → 200" "$CODE" "200"
+COOKIE_H2B=/tmp/e2e-cookie-h2b.txt
+COOKIE_H2C=/tmp/e2e-cookie-h2c.txt
+H2B_SESSION=$(grep -i '^set-cookie:' /tmp/e2e-h2b-login-headers.txt 2>/dev/null | grep -oE 'wa_inbox_session=[^;]+' | head -1 | cut -d= -f2-)
+H2C_SESSION=$(grep -i '^set-cookie:' /tmp/e2e-h2c-login-headers.txt 2>/dev/null | grep -oE 'wa_inbox_session=[^;]+' | head -1 | cut -d= -f2-)
+# A 唔重新登入 — 由 cookie jar 提取（jar 係 tab 分隔：domain flag path secure expiry name value，
+# 無 name=value 格式；之前用 grep 'wa_inbox_session=' 會撈空 → socket unauthorized）
+H2A_SESSION=$(awk '$6=="wa_inbox_session"{v=$7} END{if (v!="") print v}' "$COOKIE_TKW" 2>/dev/null)
+[ -n "$H2A_SESSION" ] || { echo "    ❌ H2A session 提取失敗（cookie jar）"; H2=1; }
+MF_STAFF_ID=$(q "SELECT id::text id FROM \"StaffUser\" WHERE \"clinicId\"='$MF_CLINIC_ID' ORDER BY id LIMIT 1" | jf id)
+
+# (3) H2 病人 inbound → 新建對話
+pnpm -s mock-inbound message --clinic TKW --from "$H2_PAT" --text "e2e H2 read receipt 測試" --wamid "$H2_WAMID" --name "E2E H2 Patient" >/dev/null || H2=1
+H2_CONV=""
+for i in $(seq 1 30); do
+  H2_CONV=$(q "SELECT c.id::text id FROM \"Message\" m JOIN \"Conversation\" c ON c.id=m.\"conversationId\" WHERE m.\"waMessageId\"='$H2_WAMID'" | jf id)
+  [ -n "$H2_CONV" ] && break
+  sleep 1
+done
+[ -n "$H2_CONV" ] || { echo "    ❌ H2 對話未建立"; H2=1; }
+
+# (4) A / B / C 三個 socket 監聽（A 用嚟驗證 sender 唔收自己 mention）
+nohup pnpm -s e2e:socket-events --cookie "wa_inbox_session=$H2A_SESSION" --wait-ms 300000 >"$SOCK_H2A" 2>&1 &
+H2A_PID=$!
+nohup pnpm -s e2e:socket-events --cookie "wa_inbox_session=$H2B_SESSION" --wait-ms 300000 >"$SOCK_H2B" 2>&1 &
+H2B_PID=$!
+nohup pnpm -s e2e:socket-events --cookie "wa_inbox_session=$H2C_SESSION" --wait-ms 300000 >"$SOCK_H2C" 2>&1 &
+H2C_PID=$!
+SOCKUP=0
+for i in $(seq 1 40); do
+  grep -q "SOCKET-CONNECTED" "$SOCK_H2A" 2>/dev/null && grep -q "SOCKET-CONNECTED" "$SOCK_H2B" 2>/dev/null && grep -q "SOCKET-CONNECTED" "$SOCK_H2C" 2>/dev/null && { SOCKUP=1; break; }
+  sleep 1
+done
+[ "$SOCKUP" = 1 ] || { echo "    ❌ H2 socket listener 未連上（$(tail -1 "$SOCK_H2B" 2>/dev/null)）"; H2=1; }
+sleep 2
+
+# ── T65. read 冪等 + 錯誤路徑 + 無 mention → assignee tick + socket note:read ──
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H2_CONV\",\"body\":\"e2e H2 A 首發\"}"
+check "T65 A 首發（unassigned）→ 202" "$H1_CODE" "202"
+check "T65 auto-claim：assignee = A" "$(q "SELECT \"assigneeId\"::text a FROM \"Conversation\" WHERE id='$H2_CONV'" | jf a)" "$TKW_STAFF_ID"
+
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H2_CONV/notes" '{"body":"e2e H2 note 1 no mention"}'
+check "T65 A 內部備註（無 mention）→ 201" "$H1_CODE" "201"
+H2_NOTE1=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+
+h1_req "$COOKIE_TKW" POST "$BASE/api/notes/$H2_NOTE1/read"
+check "T65 首次 read → 200" "$H1_CODE" "200"
+grep -q '"allRead":true' "$H1_OUT" && pass "T65 無 mention → 現任 assignee（A）已讀 → allRead=true（藍 ✓✓）" || { fail "T65 assignee tick allRead 應 true（actual=$(cat "$H1_OUT")）"; H2=1; }
+grep -qF "\"requiredStaff\":[\"$TKW_STAFF_ID\"]" "$H1_OUT" && pass "T65 requiredStaff = [assignee]" || { fail "T65 requiredStaff 錯"; H2=1; }
+
+h1_req "$COOKIE_TKW" POST "$BASE/api/notes/$H2_NOTE1/read"
+check "T65 重複 read → 200（冪等）" "$H1_CODE" "200"
+check "T65 冪等：NoteReadReceipt 只 1 row" "$(q "SELECT count(*)::text n FROM \"NoteReadReceipt\" WHERE \"messageId\"='$H2_NOTE1'" | jf n)" "1"
+
+H2_OUTMSG=$(q "SELECT id::text id FROM \"Message\" WHERE \"conversationId\"='$H2_CONV' AND \"channel\"='API' AND \"direction\"='OUT' ORDER BY \"createdAt\" LIMIT 1" | jf id)
+h1_req "$COOKIE_TKW" POST "$BASE/api/notes/$H2_OUTMSG/read"
+check "T65 非 note 訊息 read → 400" "$H1_CODE" "400"
+h1_req "$COOKIE_TKW" POST "$BASE/api/notes/00000000000000000000000000/read"
+check "T65 唔存在 note read → 404" "$H1_CODE" "404"
+
+h2_wait 15 "$SOCK_H2B" "SOCKET-EVENT note:read" "$H2_NOTE1" "$TKW_STAFF_ID" \
+  && pass "T65 socket note:read（B 實時收到；payload 只 id/時間）" || { fail "T65 socket note:read 未收到"; H2=1; }
+
+# ── T66. 跨店 RBAC：別店 read / 攞 receipts → 403 ────────────────────────
+h1_req "$COOKIE_MF" POST "$BASE/api/notes/$H2_NOTE1/read"
+check "T66 別店（MF）read 本店 note → 403" "$H1_CODE" "403"
+h1_req "$COOKIE_MF" GET "$BASE/api/conversations/$H2_CONV/note-read-receipts"
+check "T66 別店（MF）攞 receipts → 403" "$H1_CODE" "403"
+
+# ── T67. tick 兩態：mention B+C（半讀灰✓ → 全讀藍✓✓）+ GET receipts ───────
+H2_M2_NOTE="e2e H2 note 2 mention BC"
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H2_CONV/notes" "{\"body\":\"$H2_M2_NOTE\",\"mentions\":[\"$H2_B_ID\",\"$H2_C_ID\"]}"
+check "T67 A note @B@C → 201" "$H1_CODE" "201"
+H2_NOTE2=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+check "T67 mentions[1] = B" "$(q "SELECT \"mentions\"[1] m FROM \"Message\" WHERE id='$H2_NOTE2'" | jf m)" "$H2_B_ID"
+check "T67 mentions[2] = C" "$(q "SELECT \"mentions\"[2] m FROM \"Message\" WHERE id='$H2_NOTE2'" | jf m)" "$H2_C_ID"
+check "T67 mentions length = 2" "$(q "SELECT coalesce(array_length(\"mentions\",1),0)::text n FROM \"Message\" WHERE id='$H2_NOTE2'" | jf n)" "2"
+
+h1_req "$COOKIE_H2B" POST "$BASE/api/notes/$H2_NOTE2/read"
+check "T67 B read → 200" "$H1_CODE" "200"
+grep -q '"allRead":false' "$H1_OUT" && pass "T67 2 人 mention 半讀 → allRead=false（tick 仍灰 ✓）" || { fail "T67 半讀態 allRead 應 false"; H2=1; }
+
+h1_req "$COOKIE_H2C" POST "$BASE/api/notes/$H2_NOTE2/read"
+check "T67 C read → 200" "$H1_CODE" "200"
+grep -q '"allRead":true' "$H1_OUT" && pass "T67 全部 mention 已讀 → allRead=true（tick 藍 ✓✓）" || { fail "T67 全讀態 allRead 應 true"; H2=1; }
+
+h2_wait 15 "$SOCK_H2B" "SOCKET-EVENT note:read" "$H2_NOTE2" || { fail "T67 socket note:read 未收到"; H2=1; }
+NR=0
+for i in $(seq 1 10); do
+  NR=$(grep 'SOCKET-EVENT note:read' "$SOCK_H2B" 2>/dev/null | grep -cF "$H2_NOTE2")
+  [ "$NR" = "2" ] && break
+  sleep 1
+done
+check "T67 socket note:read ×2（B 自己 read + C read；B 實時收到）" "$NR" "2"
+
+h1_req "$COOKIE_TKW" GET "$BASE/api/conversations/$H2_CONV/note-read-receipts"
+check "T67 GET receipts → 200" "$H1_CODE" "200"
+check "T67 receipts rows = 3（note1:A + note2:B,C）" "$(grep -o '"messageId"' "$H1_OUT" | wc -l | tr -d ' ')" "3"
+
+# ── T68. notify:mention：B/C 實時收到；sender（A）0 收 ──────────────────
+h2_wait 15 "$SOCK_H2B" "SOCKET-EVENT notify:mention" "$H2_NOTE2" "$TKW_STAFF_ID" \
+  && pass "T68 B 收到 notify:mention（零內文）" || { fail "T68 B notify:mention 未收到"; H2=1; }
+h2_wait 15 "$SOCK_H2C" "SOCKET-EVENT notify:mention" "$H2_NOTE2" "$TKW_STAFF_ID" \
+  && pass "T68 C 收到 notify:mention（零內文）" || { fail "T68 C notify:mention 未收到"; H2=1; }
+sleep 3
+check "T68 A（sender）收到 0 個 notify:mention" "$(grep -c 'SOCKET-EVENT notify:mention' "$SOCK_H2A" 2>/dev/null)" "0"
+
+# ── T69. 自己 @ 自己唔通知自己（A@A+B → 只 B 收） ────────────────────────
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H2_CONV/notes" "{\"body\":\"e2e H2 note 3 self mention\",\"mentions\":[\"$TKW_STAFF_ID\",\"$H2_B_ID\"]}"
+check "T69 A note @自己@B → 201" "$H1_CODE" "201"
+H2_NOTE3=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+check "T69 mentions 存晒（自己 + B）" "$(q "SELECT coalesce(array_length(\"mentions\",1),0)::text n FROM \"Message\" WHERE id='$H2_NOTE3'" | jf n)" "2"
+h2_wait 15 "$SOCK_H2B" "SOCKET-EVENT notify:mention" "$H2_NOTE3" \
+  && pass "T69 B 收到 @ 通知" || { fail "T69 B notify:mention 未收到"; H2=1; }
+sleep 3
+check "T69 A（self-mention）仍 0 個 notify:mention" "$(grep -c 'SOCKET-EVENT notify:mention' "$SOCK_H2A" 2>/dev/null)" "0"
+
+# ── T70. mention 校驗：異店 staff + 唔存在 id 靜默 drop（只留同店 active） ─
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H2_CONV/notes" "{\"body\":\"e2e H2 note 4 bad mentions\",\"mentions\":[\"$MF_STAFF_ID\",\"nonexistent-staff-id\",\"$H2_C_ID\"]}"
+check "T70 含異店/唔存在 mention → 201（靜默 drop）" "$H1_CODE" "201"
+H2_NOTE4=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+check "T70 DB mentions 只留 C（length=1）" "$(q "SELECT coalesce(array_length(\"mentions\",1),0)::text n FROM \"Message\" WHERE id='$H2_NOTE4'" | jf n)" "1"
+check "T70 mentions[1] = C" "$(q "SELECT \"mentions\"[1] m FROM \"Message\" WHERE id='$H2_NOTE4'" | jf m)" "$H2_C_ID"
+h2_wait 15 "$SOCK_H2C" "SOCKET-EVENT notify:mention" "$H2_NOTE4" \
+  && pass "T70 有效 mention（C）仍照收通知" || { fail "T70 C notify:mention 未收到"; H2=1; }
+
+# ── T71. unassigned + 無 mention → requiredStaff 空 → allRead 永遠 false ──
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H2_CONV/assign" '{"toStaffId":null,"note":"e2e H2 放返隊列"}'
+check "T71 放返隊列 → 200" "$H1_CODE" "200"
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H2_CONV/notes" '{"body":"e2e H2 note 5 unassigned no mention"}'
+check "T71 unassigned 發 note → 201" "$H1_CODE" "201"
+H2_NOTE5=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+h1_req "$COOKIE_TKW" POST "$BASE/api/notes/$H2_NOTE5/read"
+check "T71 read → 200" "$H1_CODE" "200"
+grep -q '"allRead":false' "$H1_OUT" && grep -qF '"requiredStaff":[]' "$H1_OUT" \
+  && pass "T71 unassigned+無 mention → requiredStaff 空 → allRead 永遠 false（灰✓）" || { fail "T71 unassigned tick 錯（actual=$(cat "$H1_OUT")）"; H2=1; }
+
+# ── T72. 423 Send Lock 回歸（H2 對話）+ lock 唔阻 INTERNAL note ──────────
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H2_CONV/assign" "{\"toStaffId\":\"$TKW_STAFF_ID\",\"note\":\"e2e H2 重派 A\"}"
+check "T72 重派 A → 200" "$H1_CODE" "200"
+h1_req "$COOKIE_H2B" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H2_CONV\",\"body\":\"e2e H2 B locked send\"}"
+check "T72 B（非負責人）send → 423" "$H1_CODE" "423"
+grep -q '"error":"SEND_LOCKED"' "$H1_OUT" && pass "T72 423 body = SEND_LOCKED（H1 斷言回歸）" || { fail "T72 423 body 錯"; H2=1; }
+h1_req "$COOKIE_H2B" POST "$BASE/api/conversations/$H2_CONV/notes" '{"body":"e2e H2 B locked note"}'
+check "T72 B locked 照發 INTERNAL note → 201" "$H1_CODE" "201"
+
+# ── T73. ★ INTERNAL 仍然 0 graph 請求 / unread 不變 / 無新 AiDraft ───────
+GRAPH_B=$(graph_count)
+UNREAD_B=$(q "SELECT \"unreadCount\"::text u FROM \"Conversation\" WHERE id='$H2_CONV'" | jf u)
+DRAFT_B=$(q "SELECT count(*)::text n FROM \"AiDraft\" WHERE \"conversationId\"='$H2_CONV'" | jf n)
+H2_NOTE_OK=0
+for i in 1 2 3; do
+  h1_req "$COOKIE_H2B" POST "$BASE/api/conversations/$H2_CONV/notes" "{\"body\":\"e2e H2 batch note $i\"}"
+  [ "$H1_CODE" = "201" ] && H2_NOTE_OK=$((H2_NOTE_OK+1)) || { fail "T73 note #$i → $H1_CODE"; H2=1; }
+done
+sleep 2 # 俾 worker 機會行（如果 graph 被調，log 一定寫咗）
+check "T73 mock Graph 發送計數不變（物理隔離）" "$(graph_count)" "$GRAPH_B"
+check "T73 unreadCount 不變（note 唔計病人訊息）" "$(q "SELECT \"unreadCount\"::text u FROM \"Conversation\" WHERE id='$H2_CONV'" | jf u)" "$UNREAD_B"
+check "T73 無新 AiDraft（note 唔觸發 AI）" "$(q "SELECT count(*)::text n FROM \"AiDraft\" WHERE \"conversationId\"='$H2_CONV'" | jf n)" "$DRAFT_B"
+H2_INT_ALL=$(q "SELECT count(*)::text n FROM \"Message\" WHERE \"conversationId\"='$H2_CONV' AND \"channel\"='INTERNAL'" | jf n)
+H2_INT_NULL=$(q "SELECT count(*)::text n FROM \"Message\" WHERE \"conversationId\"='$H2_CONV' AND \"channel\"='INTERNAL' AND \"waMessageId\" IS NULL" | jf n)
+check "T73 全部 INTERNAL note waMessageId = NULL" "$H2_INT_NULL" "$H2_INT_ALL"
+
+# ── T74. socket/log 零內文（grep 自證）+ hermetic 清理 ───────────────────
+H2_PII_OK=1
+for tok in "e2e H2 note 1" "note 2 mention" "e2e H2 note 3" "note 4 bad" "e2e H2 note 5" "e2e H2 batch note" "e2e H2 B locked note"; do
+  if grep -qF "$tok" "$SOCK_H2A" "$SOCK_H2B" "$SOCK_H2C" 2>/dev/null; then
+    fail "T74 PII：note 內文入咗 socket log（$tok）"; H2=1; H2_PII_OK=0
+  fi
+done
+[ "$H2_PII_OK" = 1 ] && pass "T74 三個 socket listener 全部零 note 內文" || true
+if grep -qF "e2e H2 batch note" /tmp/e2e-server.log /tmp/e2e-worker.log 2>/dev/null; then
+  fail "T74 PII：note 內文入咗 server/worker log"; H2=1
+else
+  pass "T74 server/worker log 零 note 內文"
+fi
+
+# hermetic 清理：socket listeners + 臨時 staff + 對話數據
+kill $H2A_PID $H2B_PID $H2C_PID 2>/dev/null || true
+wait $H2A_PID $H2B_PID $H2C_PID 2>/dev/null || true
+pnpm -s e2e:staff delete --email "$H2_B_EMAIL" >/dev/null 2>&1 || H2=1
+pnpm -s e2e:staff delete --email "$H2_C_EMAIL" >/dev/null 2>&1 || H2=1
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$H2_CONV'" >/dev/null 2>&1 || true
+q "DELETE FROM \"NoteReadReceipt\" WHERE \"messageId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\"='$H2_CONV')" >/dev/null 2>&1 || true
+q "DELETE FROM \"AuditLog\" WHERE \"entityId\"='$H2_CONV'" >/dev/null 2>&1 || true
+q "DELETE FROM \"AuditLog\" WHERE \"entityId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\"='$H2_CONV')" >/dev/null 2>&1 || true
+q "DELETE FROM \"WebhookEvent\" WHERE id='$H2_WAMID'" >/dev/null 2>&1 || true
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$H2_CONV'" >/dev/null 2>&1 || true
+q "DELETE FROM \"Conversation\" WHERE id='$H2_CONV'" >/dev/null 2>&1 || true
+q "DELETE FROM \"Contact\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"waId\"='$H2_PAT'" >/dev/null 2>&1 || true
+check "T74 hermetic：H2 對話已清" "$(q "SELECT count(*)::text c FROM \"Conversation\" WHERE id='$H2_CONV'" | jf c)" "0"
+check "T74 hermetic：臨時 staff B 已刪" "$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE email='$H2_B_EMAIL'" | jf c)" "0"
+check "T74 hermetic：臨時 staff C 已刪" "$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE email='$H2_C_EMAIL'" | jf c)" "0"
+[ "$H2" = 0 ] && pass "H2 已讀回執 / tick / @mention（T65-T74）" || fail "H2 有項失敗（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

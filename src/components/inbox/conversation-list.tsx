@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { CalendarDays, MessageCircle, Search, X } from "lucide-react";
+import { Bell, CalendarDays, MessageCircle, Search, X } from "lucide-react";
 import type { ClinicInfo, ConversationItem, ConvStatus } from "./types";
 import { relTime } from "./time";
 
@@ -21,6 +21,12 @@ interface Props {
   onClearSearch: () => void;
   /** ★ H1：自己 staffId — 負責人 chip 三狀態（自己=綠「你」/ 別人=琥珀名 / unassigned=無 chip） */
   myStaffId: string;
+  /** ★ H2：conversationId → 未讀 @mention 數（黃點） */
+  mentionUnread: Record<string, number>;
+  /** ★ H2：bell badge 總數 */
+  mentionTotal: number;
+  /** ★ H2：撳 bell → 跳到最近一個 mention 嘅 note */
+  onBellClick: () => void;
 }
 
 const STATUS_LABEL: Record<ConvStatus | "ALL", string> = {
@@ -84,23 +90,39 @@ export function ConversationList(p: Props) {
 
   return (
     <aside className="w-80 shrink-0 border-r border-line bg-panel flex flex-col min-h-0">
-      {/* header：標題 + clinic dropdown（ADMIN only） */}
+      {/* header：標題 + clinic dropdown（ADMIN only）+ ★ H2 bell badge */}
       <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-2">
         <span className="text-[15px] font-semibold text-t1">收件箱</span>
-        {p.userRole === "ADMIN" && (
-          <select
-            value={p.activeClinicId}
-            onChange={(e) => p.onActiveClinic(e.target.value as string | "all")}
-            className="text-xs rounded-full bg-brand-soft text-brand-text border-0 pl-3 pr-7 py-1 focus:outline-none focus:ring-1 focus:ring-brand appearance-none bg-no-repeat bg-[right_0.5rem_center] bg-[length:0.7rem] bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%234338CA%22 stroke-width=%223%22><path d=%22m6 9 6 6 6-6%22/></svg>')]"
+        <div className="flex items-center gap-1.5">
+          {p.userRole === "ADMIN" && (
+            <select
+              value={p.activeClinicId}
+              onChange={(e) => p.onActiveClinic(e.target.value as string | "all")}
+              className="text-xs rounded-full bg-brand-soft text-brand-text border-0 pl-3 pr-7 py-1 focus:outline-none focus:ring-1 focus:ring-brand appearance-none bg-no-repeat bg-[right_0.5rem_center] bg-[length:0.7rem] bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%234338CA%22 stroke-width=%223%22><path d=%22m6 9 6 6 6-6%22/></svg>')]"
+            >
+              <option value="all">全部診所</option>
+              {p.clinics.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.code}
+                </option>
+              ))}
+            </select>
+          )}
+          {/* ★ H2：mention 鈴鐺 badge（數字 = 未讀 mention 總數；撳 → 跳到最近 mention） */}
+          <button
+            onClick={p.onBellClick}
+            aria-label={`Mention 通知（${p.mentionTotal} 未讀）`}
+            title={p.mentionTotal > 0 ? `${p.mentionTotal} 個未讀 @mention — 撳跳到最近一個` : "Mention 通知"}
+            className="relative w-7 h-7 rounded-lg flex items-center justify-center text-t2 hover:bg-panel-2 hover:text-t1"
           >
-            <option value="all">全部診所</option>
-            {p.clinics.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.code}
-              </option>
-            ))}
-          </select>
-        )}
+            <Bell size={15} />
+            {p.mentionTotal > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-0.5 rounded-full bg-warn text-white text-[9px] font-bold flex items-center justify-center">
+                {p.mentionTotal > 99 ? "99+" : p.mentionTotal}
+              </span>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* search */}
@@ -194,7 +216,7 @@ export function ConversationList(p: Props) {
               </div>
 
               <div className="min-w-0 flex-1">
-                {/* row 1：名 + 時間（窗口 tone 變色） */}
+                {/* row 1：名 + 時間（窗口 tone 變色）+ ★ H2 黃點（未讀 mention） */}
                 <div className="flex items-center gap-1.5">
                   <span
                     className={`text-sm truncate ${
@@ -203,6 +225,12 @@ export function ConversationList(p: Props) {
                   >
                     {c.contact?.profileName || c.contact?.waId || "（未知聯絡人）"}
                   </span>
+                  {(p.mentionUnread[c.id] ?? 0) > 0 && (
+                    <span
+                      className="w-2 h-2 rounded-full bg-warn shrink-0"
+                      title={`${p.mentionUnread[c.id]} 個未讀 @mention`}
+                    />
+                  )}
                   <span
                     className={`ml-auto text-[11px] shrink-0 ${timeCls}`}
                     title="24h 窗口狀態：黃 <6h / 紅 已過窗"

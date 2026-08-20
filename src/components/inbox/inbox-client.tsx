@@ -15,8 +15,11 @@ import type {
   DutyInfo,
   MessageItem,
   MessageStatusEvent,
+  MentionNotifyEvent,
   NewMessageEvent,
   NoteNewEvent,
+  NoteReadEvent,
+  NoteReceipt,
   StaffInfo,
   UrgentEscalationEvent,
   UserCtx,
@@ -96,6 +99,15 @@ export function InboxClient({
   selectedIdRef.current = selectedConvId;
   messagesRef.current = messages;
   activeClinicRef.current = activeClinicId;
+
+  // ── ★ H2：已讀回執（tick 語義）+ mention 通知（bell badge / 黃點 / Notification） ──
+  const [receipts, setReceipts] = useState<NoteReceipt[]>([]); // 選中對話嘅回執（socket note:read 增量更新）
+  const [mentionUnread, setMentionUnread] = useState<Record<string, number>>({}); // conversationId → 未讀 mention 數
+  const lastMentionRef = useRef<{ conversationId: string; messageId: string } | null>(null);
+  const mentionUnreadRef = useRef<Record<string, number>>({});
+  mentionUnreadRef.current = mentionUnread;
+
+  const mentionTotal = Object.values(mentionUnread).reduce((a, b) => a + b, 0);
 
   // ── socket ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -266,6 +278,38 @@ export function InboxClient({
       }
     });
 
+    // ★ H2：已讀回執（零內文）→ 選中對話 tick 即時重算（去重：同 messageId+staffId 只留首條）
+    socket.on("note:read", (e: NoteReadEvent) => {
+      if (selectedIdRef.current !== e.conversationId) return;
+      setReceipts((prev) =>
+        prev.some((r) => r.messageId === e.messageId && r.staffId === e.staffId)
+          ? prev
+          : [...prev, { messageId: e.messageId, staffId: e.staffId, readAt: e.readAt }]
+      );
+    });
+
+    // ★ H2：@mention 定向通知（只我收）→ bell badge 數字 + 列表黃點 + 提示音 +
+    // browser Notification（只喺 permission granted 時彈；撳通知跳到該 note）
+    socket.on("notify:mention", (e: MentionNotifyEvent) => {
+      setMentionUnread((prev) => ({ ...prev, [e.conversationId]: (prev[e.conversationId] ?? 0) + 1 }));
+      lastMentionRef.current = { conversationId: e.conversationId, messageId: e.messageId };
+      playChime();
+      const fromName = staffRef.current.find((s) => s.id === e.fromStaffId)?.name ?? "同事";
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        try {
+          const n = new Notification("WA Inbox @mention", {
+            body: `${fromName} 喺內部備註 @ 咗你`,
+          });
+          n.onclick = () => {
+            window.focus();
+            void jumpToMention(e.conversationId, e.messageId);
+          };
+        } catch {
+          /* Notification 構建失敗（mobile / 非 secure context）— 靜默 skip，唔擋流程 */
+        }
+      }
+    });
+
     socket.on("disconnect", () => {
       wasDisconnected = true;
     });
@@ -297,6 +341,7 @@ export function InboxClient({
     if (initialSelectedConvId) {
       void fetchMessagesLatest(initialSelectedConvId);
       void fetchPendingDrafts(initialSelectedConvId);
+      void fetchNoteReceipts(initialSelectedConvId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -421,6 +466,52 @@ export function InboxClient({
     }
   }, [loadingOlder]);
 
+  // ── ★ H2：已讀回執 fetch（開對話一次拉齊；之後 socket note:read 增量） ──────────
+  const fetchNoteReceipts = useCallback(async (convId: string) => {
+    try {
+      const res = await fetch(`/api/conversations/${convId}/note-read-receipts`);
+      if (!res.ok) return;
+      const data = (await res.json()) as { receipts: NoteReceipt[] };
+      setReceipts(data.receipts);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // ── ★ H2：note 進入 viewport → 冪等 read POST（server 側 upsert；重複打唔多行） ──
+  const markNoteRead = useCallback(async (messageId: string) => {
+    try {
+      await fetch(`/api/notes/${messageId}/read`, { method: "POST" });
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // ── ★ H2：跳到被 mention 嘅 note 位置（bell / browser Notification 撳） ──────
+  const jumpToMention = useCallback(
+    async (convId: string, msgId: string) => {
+      if (selectedIdRef.current !== convId) {
+        setSelectedConvId(convId);
+        setNotice(null);
+        void fetchMessagesLatest(convId);
+        void fetchNoteReceipts(convId);
+      }
+      window.setTimeout(() => {
+        const el = document.getElementById(`msg-${msgId}`);
+        if (!el) return;
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("msg-flash");
+        window.setTimeout(() => el.classList.remove("msg-flash"), 1600);
+      }, 450);
+    },
+    [fetchMessagesLatest, fetchNoteReceipts]
+  );
+
+  const onBellClick = useCallback(() => {
+    const lm = lastMentionRef.current;
+    if (lm) void jumpToMention(lm.conversationId, lm.messageId);
+  }, [jumpToMention]);
+
   // ── select conversation（markRead + 載入最新訊息） ───────────────────
   const selectConversation = useCallback(
     async (id: string) => {
@@ -436,6 +527,7 @@ export function InboxClient({
               setSelectedConvId(match.id);
               void fetchMessagesLatest(match.id);
               void fetchPendingDrafts(match.id);
+              void fetchNoteReceipts(match.id);
               void markRead(match.id);
               setSearchResults(null);
               setSearch("");
@@ -452,9 +544,17 @@ export function InboxClient({
       setNotice(null);
       void fetchMessagesLatest(id);
       void fetchPendingDrafts(id);
+      // ★ H2：開對話 → 拉已讀回執（tick）+ 清該對話未讀 mention（bell/黃點）
+      void fetchNoteReceipts(id);
+      setMentionUnread((prev) => {
+        if (!prev[id]) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       void markRead(id);
     },
-    [fetchMessagesLatest, fetchPendingDrafts]
+    [fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts]
   );
 
   async function markRead(id: string) {
@@ -533,14 +633,14 @@ export function InboxClient({
 
   // ── ★ H1：內部備註（lock 模式 composer）──────────────────────
   const sendNote = useCallback(
-    async (body: string): Promise<{ ok: boolean; error?: string }> => {
+    async (body: string, mentions?: string[]): Promise<{ ok: boolean; error?: string }> => {
       const convId = selectedIdRef.current;
       if (!convId) return { ok: false, error: "未選擇對話" };
       try {
         const res = await fetch(`/api/conversations/${convId}/notes`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ body }),
+          body: JSON.stringify({ body, mentions: mentions ?? [] }),
         });
         const data = (await res.json().catch(() => null)) as {
           ok?: boolean;
@@ -550,7 +650,7 @@ export function InboxClient({
         if (!res.ok) {
           return { ok: false, error: data?.error ?? `內部備註發送失敗（${res.status}）` };
         }
-        // 樂觀更新：INTERNAL 氣泡（黃底🔒）
+        // 樂觀更新：INTERNAL 氣泡（黃底🔒；mentions 即刻入氣泡 — tick 由 receipts 重算）
         const optimistic: MessageItem = {
           id: data?.messageId ?? `optimistic-note-${Date.now()}`,
           conversationId: convId,
@@ -563,7 +663,7 @@ export function InboxClient({
           status: "SENT",
           errorCode: null,
           sentByStaffId: user.staffId,
-          mentions: [],
+          mentions: mentions ?? [],
           waTimestamp: new Date().toISOString(),
           createdAt: new Date().toISOString(),
         };
@@ -809,6 +909,9 @@ export function InboxClient({
           setSearchResults(null);
         }}
         myStaffId={user.staffId}
+        mentionUnread={mentionUnread}
+        mentionTotal={mentionTotal}
+        onBellClick={() => void onBellClick()}
       />
 
       <ChatPane
@@ -831,6 +934,8 @@ export function InboxClient({
         onTakeover={takeover}
         takeoverBusy={takeoverBusy}
         staff={staff}
+        readReceipts={receipts}
+        onNoteRead={markNoteRead}
       />
 
       <DetailPane
@@ -889,4 +994,27 @@ function windowFromLastInbound(lastInboundAt: string | null | undefined) {
     remainingHours: remainingMs / 3600000,
     tone: (!remainingMs ? "red" : remainingMs < 6 * 3600 * 1000 ? "yellow" : "green") as "red" | "yellow" | "green",
   };
+}
+
+// ★ H2：mention 提示音（WebAudio 短 beep；任何失敗靜默 skip — 唔擋流程）
+function playChime(): void {
+  try {
+    const Ctor: typeof AudioContext | undefined =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return;
+    const ctx = new Ctor();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    gain.gain.value = 0.04;
+    osc.start();
+    osc.stop(ctx.currentTime + 0.18);
+    osc.onended = () => void ctx.close();
+  } catch {
+    /* ignore */
+  }
 }

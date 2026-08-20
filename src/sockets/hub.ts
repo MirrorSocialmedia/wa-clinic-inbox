@@ -86,6 +86,8 @@ export function initHub(io: SocketIOServer): void {
       staffSockets.set(session.staffId, ids);
     }
     ids.add(socket.id);
+    // ★ H2：per-staff room — notify:mention 定向推送用（只 @ 中嗰個人收）
+    void socket.join(`staff:${session.staffId}`);
     // ★ 診斷（P0-3 sockets:0 排查）：註冊後 log 實際 map 狀態
     log.info(
       {
@@ -203,4 +205,9 @@ export function disconnectStaff(staffId: string): number {
 /** 推去單一店嘅 room。 */
 export function notifyClinic(clinicId: string, event: string, payload: unknown): void {
   state.io?.to(`clinic:${clinicId}`).emit(event, payload);
+}
+
+/** ★ H2：推去單一 staff 嘅所有 socket（`staff:{staffId}` room；notify:mention 定向通知）。 */
+export function notifyStaff(staffId: string, event: string, payload: unknown): void {
+  state.io?.to(`staff:${staffId}`).emit(event, payload);
 }

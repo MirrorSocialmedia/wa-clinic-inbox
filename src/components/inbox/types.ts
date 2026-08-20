@@ -197,3 +197,42 @@ export interface NoteNewEvent {
   clinicId: string;
   messageId: string;
 }
+
+/** ★ H2：socket note:read — 有人讀咗內部備註（零內文 — tick 即時重算） */
+export interface NoteReadEvent {
+  conversationId: string;
+  clinicId: string;
+  messageId: string;
+  staffId: string;
+  readAt: string;
+}
+
+/** ★ H2：socket notify:mention — 定向發畀被 @ 者（零內文；bell badge / 黃點 / Notification） */
+export interface MentionNotifyEvent {
+  conversationId: string;
+  clinicId: string;
+  messageId: string;
+  fromStaffId: string;
+}
+
+/** ★ H2：已讀回執 row（GET note-read-receipts 同 socket note:read 共用 shape） */
+export interface NoteReceipt {
+  messageId: string;
+  staffId: string;
+  readAt: string;
+}
+
+/** ★ H2：INTERNAL note tick 語義（似 WhatsApp）：
+ *  灰 ✓ = note 已發出；藍 ✓✓ = 全部被 mention 嘅 staff 已讀（無 mention → 現任 assignee 已讀）。
+ *  requiredStaff 為空（unassigned + 無 mention）→ 永遠灰 ✓。 */
+export function noteTickState(
+  m: { id: string; mentions?: string[] },
+  assigneeId: string | null,
+  receipts: NoteReceipt[]
+): { allRead: boolean; requiredStaff: string[]; readBy: NoteReceipt[] } {
+  const requiredStaff = m.mentions && m.mentions.length > 0 ? m.mentions : assigneeId ? [assigneeId] : [];
+  const mine = receipts.filter((r) => r.messageId === m.id);
+  const got = new Set(mine.map((r) => r.staffId));
+  const allRead = requiredStaff.length > 0 && requiredStaff.every((s) => got.has(s));
+  return { allRead, requiredStaff, readBy: mine };
+}

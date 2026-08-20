@@ -4,7 +4,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertClinicAccess } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
-import { publishNotify } from "@/lib/notify";
+import { publishNotify, publishStaffNotify } from "@/lib/notify";
 
 /**
  * POST /api/conversations/[id]/notes — 內部備註（MD §4.1）。
@@ -20,7 +20,8 @@ import { publishNotify } from "@/lib/notify";
  * - ★ Send Lock 唔適用：任何人（包括 ADMIN）都攞到 423 都可以發 INTERNAL note（MD §3.2）。
  * - RBAC：assertClinicAccess（STAFF 別店 → 403）；ADMIN 跨店照舊。
  * - mentions：只保留同店 active staffId（UI autocomplete 只出合法值；非法值靜默 drop）。
- * - socket：note:new（room clinic:{id}，payload 零內文 — 內容由 client 撳完拉）。
+ * - socket：note:new（room clinic:{id}，payload 零內文 — 內容由 client 撳完拉）
+ *   + ★ H2：notify:mention（定向發畀每個被 @ 而唔係自己嘅 staff — bell badge / 黃點）。
  */
 export const dynamic = "force-dynamic";
 
@@ -76,6 +77,17 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
     clinicId: conv.clinicId,
     messageId: msg.id,
   });
+
+  // ★ H2：mention 通知 — 被 @ 而唔係自己嗰啲人收定向 socket（零內文；bell badge / 黃點 / Notification）
+  for (const sid of mentions) {
+    if (sid === auth.staff.id) continue; // 自己 @ 自己唔用通知
+    publishStaffNotify(sid, conv.clinicId, "notify:mention", {
+      conversationId: conv.id,
+      clinicId: conv.clinicId,
+      messageId: msg.id,
+      fromStaffId: auth.staff.id,
+    });
+  }
 
   // log：零內文（bodyLen + mentions count 只）— 符合 D5 PII 鐵律
   log.info(

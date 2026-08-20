@@ -13,8 +13,10 @@ import {
   Send,
   Sparkles,
   StickyNote,
+  Users,
 } from "lucide-react";
-import type { ConversationItem, DraftInfo, MessageItem, StaffInfo } from "./types";
+import type { ConversationItem, DraftInfo, MessageItem, NoteReceipt, StaffInfo } from "./types";
+import { noteTickState } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
 interface Props {
@@ -40,14 +42,62 @@ interface Props {
   flowBusy: boolean;
   /** ★ H1：自己嘅 staffId（Send Lock 三狀態判定：自己負責/別人負責/unassigned） */
   myStaffId: string;
-  /** ★ H1：發內部備註（lock 模式 composer 用；INTERNAL — 唔出 WhatsApp） */
-  onSendNote: (body: string) => Promise<{ ok: boolean; error?: string }>;
+  /** ★ H1：發內部備註（lock 模式 composer 用；INTERNAL — 唔出 WhatsApp）
+   *  ★ H2：mentions = @ 咗嘅 staffId 陣列（後端會再校驗同店 active） */
+  onSendNote: (body: string, mentions?: string[]) => Promise<{ ok: boolean; error?: string }>;
   /** ★ H1：〔接手〕— POST assign {toStaffId: self}（lock 翻轉） */
   onTakeover: () => Promise<{ ok: boolean; error?: string }>;
   /** ★ H1：接手進行中（disable 掣） */
   takeoverBusy: boolean;
-  /** ★ H1：店內 staff 列表（INTERNAL note 顯示發送者名） */
+  /** ★ H1：店內 staff 列表（INTERNAL note 顯示發送者名 + ★ H2：@ 自動補全） */
   staff: StaffInfo[];
+  /** ★ H2：已讀回執（選中對話嘅 receipts — tick 重算 + hover 已讀名單） */
+  readReceipts: NoteReceipt[];
+  /** ★ H2：note 進入 viewport → 冪等 POST /api/notes/[id]/read（client 去重，唔重複打） */
+  onNoteRead: (messageId: string) => void;
+}
+
+// ── ★ H2：@mention helper（純函數 — autocomplete 偵測 + 內文反推 mentions + 高亮渲染） ──
+
+/** 由 cursor 前嘅文字偵測 `@query`（行首或空白後；query 唔含空白/@）→ autocomplete 開關 + @ 插入點。 */
+export function detectMention(value: string, caret: number): { query: string; atPos: number } | null {
+  const before = value.slice(0, caret);
+  const m = before.match(/(^|\s)@([^\s@]*)$/);
+  if (!m) return null;
+  return { query: m[2], atPos: caret - m[2].length - 1 };
+}
+
+/** 由 note 內文反推 mentions（autocomplete 插入格式 `@Name`；長名先 match 避開前綴撞車）。
+ *  手打 @Name（唔經 dropdown）都會計入 — 行為一致。 */
+export function mentionsFromBody(body: string, staff: StaffInfo[]): string[] {
+  if (!body) return [];
+  return staff
+    .filter((s) => s.name && body.includes(`@${s.name}`))
+    .map((s) => s.id);
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|\]\\]/g, "\$&");
+}
+
+/** note 內文渲染：@Name 高亮（MD §5：note 內文渲染 @B 高亮） */
+function renderNoteBody(body: string, staff: StaffInfo[]) {
+  const names = staff.map((s) => s.name).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!body || names.length === 0) return body;
+  const re = new RegExp(`@(${names.map(escapeRe).join("|")})`, "g");
+  const parts = body.split(re);
+  if (parts.length === 1) return body;
+  return parts.map((part, i) =>
+    i % 2 === 1 ? (
+      <span key={i} className="text-brand-text font-medium whitespace-pre-wrap">
+        @{part}
+      </span>
+    ) : (
+      <span key={i} className="whitespace-pre-wrap">
+        {part}
+      </span>
+    )
+  );
 }
 
 /** status tick（OUT API 訊息）— lucide 版 */
@@ -93,6 +143,17 @@ export function ChatPane(p: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(false);
   const autoFilledDraftRef = useRef<string | null>(null);
+  // ★ H2：@ autocomplete（note composer）— {query, atPos} = 偵測到嘅 @ 後字串 + @ 字位置
+  const [mentionState, setMentionState] = useState<{ query: string; atPos: number } | null>(null);
+  const [mentionIdx, setMentionIdx] = useState(0);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  // ★ H2：note auto-read 去重（per conversation；server 側本來就冪等，呢度只係慳 request）
+  const noteReadSentRef = useRef<Set<string>>(new Set());
+  // 穩定 callback ref（observer 唔好跟住每次 render 重綁 inline fn）
+  const onNoteReadRef = useRef(p.onNoteRead);
+  useEffect(() => {
+    onNoteReadRef.current = p.onNoteRead;
+  });
 
   useEffect(() => {
     const el = listRef.current;
@@ -102,9 +163,33 @@ export function ChatPane(p: Props) {
   useEffect(() => {
     setDraft("");
     setSendError(null);
+    setMentionState(null);
+    setMentionIdx(0);
     pinnedRef.current = true;
     autoFilledDraftRef.current = null;
+    noteReadSentRef.current = new Set();
   }, [p.conversation?.id]);
+
+  // ★ H2：note 進入 viewport → 冪等 POST read（IntersectionObserver；只 observe INTERNAL note 氣泡）
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const en of entries) {
+          if (!en.isIntersecting) continue;
+          const noteId = (en.target as HTMLElement).dataset.noteId;
+          if (!noteId || noteReadSentRef.current.has(noteId)) continue;
+          noteReadSentRef.current.add(noteId);
+          onNoteReadRef.current(noteId);
+          obs.unobserve(en.target);
+        }
+      },
+      { root: el, threshold: 0.5 }
+    );
+    el.querySelectorAll<HTMLElement>("[data-note-id]").forEach((n) => obs.observe(n));
+    return () => obs.disconnect();
+  }, [p.messages, p.conversation?.id]);
 
   useEffect(() => {
     if (!p.pendingDraft) {
@@ -137,6 +222,29 @@ export function ChatPane(p: Props) {
   const locked = !!c.assigneeId && c.assigneeId !== p.myStaffId;
   const assigneeName = c.assigneeName ?? null;
   const staffNameById = new Map(p.staff.map((s) => [s.id, s.name]));
+  // ★ H2：@ autocomplete candidates（query 前綴 match；長名先；cap 8 — 輕量計算，staff 陣列細，唔使 memo）
+  const mentionCandidates =
+    mentionState === null
+      ? []
+      : p.staff
+          .filter((s) => s.name && s.name.toLowerCase().startsWith(mentionState.query.toLowerCase()))
+          .sort((a, b) => b.name.length - a.name.length)
+          .slice(0, 8);
+
+  /** 揀中 candidate → 把 `@query` 換做 `@Name `（cursor 跟落去） */
+  function applyMention(name: string) {
+    const el = taRef.current;
+    if (!mentionState || !el) return;
+    const caret = el.selectionStart ?? draft.length;
+    const before = draft.slice(0, mentionState.atPos);
+    const after = draft.slice(caret);
+    const next = `${before}@${name} ${after}`;
+    setDraft(next);
+    setMentionState(null);
+    const pos = before.length + name.length + 2;
+    requestAnimationFrame(() => el.setSelectionRange(pos, pos));
+  }
+
   const windowChipCls =
     c.window.tone === "red"
       ? "bg-danger-soft text-danger-text"
@@ -153,11 +261,16 @@ export function ChatPane(p: Props) {
   async function sendNote() {
     const body = draft.trim();
     if (!body || sendingNote || !c) return;
+    // ★ H2：mentions 由內文 @Name token 反推（autocomplete 同手打行為一致）
+    const mentions = mentionsFromBody(body, p.staff);
     setSendingNote(true);
     setSendError(null);
-    const r = await p.onSendNote(body);
+    const r = await p.onSendNote(body, mentions);
     if (!r.ok) setSendError(r.error ?? "內部備註發送失敗");
-    else setDraft("");
+    else {
+      setDraft("");
+      setMentionState(null);
+    }
     setSendingNote(false);
   }
 
@@ -225,25 +338,48 @@ export function ChatPane(p: Props) {
           const media = mediaSrc(m.mediaPath);
           // ★ H1：INTERNAL note — 黃底 + 🔒 + 發送者名（staff 對 staff；病人睇唔到）
           if (isNote) {
+            // ★ H2：tick 語義（似 WhatsApp）— 藍 ✓✓ = 全部被 mention staff 已讀；無 mention → 現任 assignee 已讀
+            const tick = noteTickState(m, c.assigneeId, p.readReceipts);
+            const gotIds = new Set(tick.readBy.map((r) => r.staffId));
+            const readList = tick.readBy
+              .map((r) => `${staffNameById.get(r.staffId) ?? "Staff"} · ${relTime(r.readAt)}`)
+              .join("、");
+            const pendingList = tick.requiredStaff
+              .filter((s) => !gotIds.has(s))
+              .map((s) => staffNameById.get(s) ?? "Staff")
+              .join("、");
+            const tickTitle = tick.allRead
+              ? `已讀：${readList || "—"}`
+              : pendingList
+                ? `等待已讀：${pendingList}${readList ? `（已讀：${readList}）` : ""}`
+                : "等待已讀…";
             return (
-              <div key={m.id} className="flex justify-end">
+              <div key={m.id} id={`msg-${m.id}`} data-note-id={m.id} className="flex justify-end">
                 <div className="max-w-[70%] px-3 py-2 rounded-xl border border-warn/50 bg-warn-soft text-t1">
                   <div className="text-[10px] font-medium text-warn-text mb-0.5 inline-flex items-center gap-1">
                     🔒 內部備註 · 唔會發去 WhatsApp
                   </div>
-                  {m.body && <div className="whitespace-pre-wrap break-words text-sm">{m.body}</div>}
+                  {m.body && <div className="break-words text-sm">{renderNoteBody(m.body, p.staff)}</div>}
                   <div className="flex items-center gap-1 mt-1 justify-end">
                     {m.sentByStaffId && (
                       <span className="text-[10px] text-t2">{staffNameById.get(m.sentByStaffId) ?? "Staff"} · </span>
                     )}
                     <span className="text-[10px] text-t3">{bubbleTime(m.waTimestamp, prev?.waTimestamp)}</span>
+                    {/* ★ H2：已讀 tick — 灰 ✓ = 已發出；藍 ✓✓ = 全部目標已讀（hover 彈已讀名單） */}
+                    <span title={tickTitle} className="inline-flex align-middle">
+                      {tick.allRead ? (
+                        <CheckCheck size={13} className="text-brand" />
+                      ) : (
+                        <Check size={13} className="text-t3" />
+                      )}
+                    </span>
                   </div>
                 </div>
               </div>
             );
           }
           return (
-            <div key={m.id} className={`flex ${isOut ? "justify-end" : "justify-start"}`}>
+            <div key={m.id} id={`msg-${m.id}`} className={`flex ${isOut ? "justify-end" : "justify-start"}`}>
               <div
                 className={`max-w-[70%] px-3 py-2 text-sm ${
                   isOut
@@ -385,7 +521,8 @@ export function ChatPane(p: Props) {
         {sendError && <div className="text-xs text-danger-text mb-1.5">{sendError}</div>}
 
         {locked ? (
-          /* ★ H1 Send Lock：amber 內部備註 composer — 發 WhatsApp 已停用，只可發 staff↔staff 備註 */
+          /* ★ H1 Send Lock：amber 內部備註 composer — 發 WhatsApp 已停用，只可發 staff↔staff 備註
+             ★ H2：打 @ 彈同店 staff 自動補全（選中 → mentions；發去後端校驗） */
           <div className="rounded-xl border border-warn/60 bg-warn-soft p-2.5">
             <div className="flex items-center gap-2 mb-1.5">
               <span className="text-xs font-medium text-warn-text inline-flex items-center gap-1">
@@ -401,25 +538,81 @@ export function ChatPane(p: Props) {
                 {p.takeoverBusy ? "接手咗…" : "接手"}
               </button>
             </div>
-            <div className="flex items-end gap-2">
+            <div className="relative">
+              {/* ★ H2：@ 自動補全 dropdown（同店 active staff；↑↓ 揀 / Enter 選 / Esc 收） */}
+              {mentionState && mentionCandidates.length > 0 && (
+                <div className="absolute bottom-full left-0 mb-1 w-64 max-h-56 overflow-y-auto rounded-xl border border-line bg-panel shadow-lg z-20 py-1">
+                  <div className="px-3 py-1 text-[10px] text-t3 inline-flex items-center gap-1">
+                    <Users size={10} /> @ 通知同事（同店）
+                  </div>
+                  {mentionCandidates.map((s, i) => (
+                    <button
+                      key={s.id}
+                      onMouseDown={(e) => {
+                        e.preventDefault(); // 唔好 blur textarea
+                        applyMention(s.name);
+                      }}
+                      onMouseEnter={() => setMentionIdx(i)}
+                      className={`w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 ${
+                        i === mentionIdx ? "bg-brand-soft text-brand-text" : "text-t1 hover:bg-panel-2"
+                      }`}
+                    >
+                      <span className="w-5 h-5 rounded-full bg-panel-2 text-t2 flex items-center justify-center text-[10px] font-medium shrink-0">
+                        {s.name.charAt(0)}
+                      </span>
+                      <span className="truncate">{s.name}</span>
+                      {s.role === "ADMIN" && <span className="ml-auto text-[10px] text-t3">ADMIN</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
               <textarea
+                ref={taRef}
                 value={draft}
-                onChange={(e) => setDraft(e.target.value)}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  setMentionState(detectMention(e.target.value, e.target.selectionStart ?? e.target.value.length));
+                  setMentionIdx(0);
+                }}
                 onKeyDown={(e) => {
+                  // ★ H2：dropdown 開住時 — 方向鍵/Enter/Tab 揀 candidate，唔係發送
+                  if (mentionState && mentionCandidates.length > 0) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setMentionIdx((v) => (v + 1) % mentionCandidates.length);
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setMentionIdx((v) => (v - 1 + mentionCandidates.length) % mentionCandidates.length);
+                      return;
+                    }
+                    if (e.key === "Enter" || e.key === "Tab") {
+                      e.preventDefault();
+                      applyMention(mentionCandidates[mentionIdx].name);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setMentionState(null);
+                      return;
+                    }
+                  }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
+                    setMentionState(null);
                     void sendNote();
                   }
                 }}
                 rows={1}
-                placeholder="內部備註（唔會發去 WhatsApp；Enter 發送）…"
-                className="flex-1 resize-none rounded-2xl bg-panel border border-warn/50 px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-warn"
+                placeholder="內部備註（唔會發去 WhatsApp；打 @ 通知同事；Enter 發送）…"
+                className="w-full resize-none rounded-2xl bg-panel border border-warn/50 px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-warn"
               />
               <button
                 onClick={() => void sendNote()}
                 disabled={sendingNote || !draft.trim()}
                 aria-label="發送內部備註"
-                className="w-9 h-9 shrink-0 rounded-full bg-warn hover:opacity-90 text-white flex items-center justify-center disabled:opacity-40"
+                className="absolute -top-2 -right-2 w-9 h-9 shrink-0 rounded-full bg-warn hover:opacity-90 text-white flex items-center justify-center disabled:opacity-40"
               >
                 <Send size={15} />
               </button>
