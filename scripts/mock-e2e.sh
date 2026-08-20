@@ -84,6 +84,17 @@
 #   T53 (App Review §2/§2A) onboarding/templates gating：STAFF 403 / unauth 307→/login / ADMIN 200 + mock 3 色 template
 #   T54 (App Review §2.3) exchange mock flow：401/403/400(input)/404(db_update) + 完整 mock flow 寫入 clinic + AuditLog
 #       + hermetic 還原 + token/code/PIN 零入 log（grep 自證）
+#
+# Phase H1（轉交 / Send Lock / 內部備註）：
+#   T56 unassigned 首發 auto-claim（AuditLog AUTO_CLAIM + socket conversation:assigned）
+#   T57 Send Lock：非負責人（含 ADMIN）send → 423 SEND_LOCKED；INTERNAL note 不受 lock
+#   T58 跨店 RBAC：別店 staff send/note/assign → 403
+#   T59 A→B 轉交（帶 note）+ 自動 INTERNAL note + AuditLog TRANSFER + socket
+#   T60 lock 翻轉 + 被 lock 者照發 note + 新負責人可發 + 接手（self-claim）+ socket note:new
+#   T61 放返隊列（unassign）+ 再 auto-claim
+#   T62 Flow Send Lock（423）
+#   T63 ★ 10 條 INTERNAL note → mock Graph 計數不變（物理隔離）+ unread 不變 + 無新 AiDraft
+#   T64 socket/log 零內文（grep 自證）+ hermetic 清理（臨時 staff 刪除）
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -199,7 +210,11 @@ MF_EMAIL=$(awk '/^MF STAFF:/{print $3}' .dev/credentials.txt)
 MF_PASS=$(awk '/^MF STAFF:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
 ADMIN_EMAIL=$(awk '/^ADMIN:/{print $2}' .dev/credentials.txt)
 ADMIN_PASS=$(awk '/^ADMIN:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
+# H1 e2e 臨時 staff fixture（獨立 gitignored 檔 — seed 會覆寫 credentials.txt，所以用獨立檔）
+H1_B_EMAIL=$(awk -F= '/^H1_B_EMAIL=/{print $2}' .dev/e2e-fixtures.txt)
+H1B_PASS=$(awk -F= '/^H1_B_PASSWORD=/{print $2}' .dev/e2e-fixtures.txt)
 [ -n "$TKW_EMAIL" ] && [ -n "$TKW_PASS" ] && [ -n "$ADMIN_EMAIL" ] && [ -n "$ADMIN_PASS" ] || { echo "FATAL: 讀唔到 credentials"; exit 1; }
+[ -n "$H1_B_EMAIL" ] && [ -n "$H1B_PASS" ] || { echo "FATAL: 讀唔到 H1 e2e fixture（.dev/e2e-fixtures.txt）"; exit 1; }
 
 # clinic ids
 TKW_CLINIC_ID=$(q "SELECT id FROM \"Clinic\" WHERE code='TKW'" | jf id)
@@ -1157,7 +1172,13 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT \
   "$BASE/api/admin/staff/$WTC_ID" -H 'Content-Type: application/json' -d '{"active":true}')
 check "T42 重啟帳號 → 200" "$CODE" "200"
 sleep 1
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+# dev manifest flake retry（GET idempotent — 500 + flake 簽名 → 2s 後 retry ×1；真 500 唔 retry）
+CODE=$(curl -s -o /tmp/e2e-t42-rec.json -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+if [ "$CODE" = "500" ] && grep -q "Unexpected end of JSON input" /tmp/e2e-t42-rec.json 2>/dev/null; then
+  echo "    (dev manifest flake 500 → retry)"
+  sleep 2
+  CODE=$(curl -s -o /tmp/e2e-t42-rec.json -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+fi
 check "T42 重啟後 WTC API → 200（恢復）" "$CODE" "200"
 kill "$SOCK_PID" 2>/dev/null || true
 
@@ -1179,7 +1200,13 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_WTC" \
   -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$WTC_EMAIL\",\"password\":\"$NEW_PASS\"}")
 check "T48 新密碼登入 → 200" "$CODE" "200"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+# dev manifest flake retry（GET idempotent — 同 T42；500 + flake 簽名 → retry ×1）
+CODE=$(curl -s -o /tmp/e2e-t48-new.json -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+if [ "$CODE" = "500" ] && grep -q "Unexpected end of JSON input" /tmp/e2e-t48-new.json 2>/dev/null; then
+  echo "    (dev manifest flake 500 → retry)"
+  sleep 2
+  CODE=$(curl -s -o /tmp/e2e-t48-new.json -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations")
+fi
 check "T48 新 session → 200" "$CODE" "200"
 # 恢復原密碼（persistent sandbox DB — 下次 run T42 要用原密碼登入）
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT \
@@ -1564,6 +1591,247 @@ if grep -qF "$EX_CODE" /tmp/e2e-server.log 2>/dev/null; then fail "T54 PII：aut
 if grep -q "mock-oat-" /tmp/e2e-server.log 2>/dev/null; then fail "T54 PII：mock access token 入咗 server log"; else pass "T54 mock access token 零入 log"; fi
 if grep -qF "112233" /tmp/e2e-server.log 2>/dev/null; then fail "T54 PII：PIN 入咗 server log"; else pass "T54 PIN 零入 log"; fi
 if grep -qF "$EX_CODE" /tmp/e2e-ex-ok.json 2>/dev/null; then fail "T54 PII：auth code 入咗 response"; else pass "T54 auth code 唔喺 response"; fi
+
+# ── T55+. H1：轉交 / Send Lock / 內部備註（Phase H1） ─────────────────────────
+# 鐵律實測（MD §7-H1）：
+#   T56 unassigned 首發 auto-claim（AuditLog AUTO_CLAIM + socket）
+#   T57 Send Lock：非負責人（含 ADMIN）send → 423 SEND_LOCKED；INTERNAL note 不受 lock
+#   T58 跨店 RBAC：別店 staff send/note/assign → 403
+#   T59 A→B 轉交（帶 note）：assignee 翻轉 + 自動 INTERNAL note + AuditLog TRANSFER + socket
+#   T60 lock 翻轉：原負責人被 lock；其 note 照發；新負責人可發；接手（self-claim）+ B 被 lock
+#   T61 放返隊列 + 再 claim
+#   T62 Flow Send Lock（423）
+#   T63 ★ 10 條 INTERNAL note → mock Graph 請求計數不變（物理隔離）+ unread 不變 + 無新 AiDraft
+#   T64 socket/log 零內文（grep 自證）+ hermetic 清理
+# H1_B_EMAIL / H1B_PASS 由頂部 .dev/e2e-fixtures.txt 提供（seed 唔會覆寫呢個檔）
+H1_PAT="8526010${EPOCH}"
+H1_WAMID="wamid.E2E_H1_${EPOCH}"
+SOCK_LOG=/tmp/e2e-socket-h1.log
+: > "$SOCK_LOG"
+H1=0
+
+# socket helper：等 $SOCK_LOG 同時出現所有 pattern（最多 N 秒）
+wait_event() { # wait_event <max-sec> <pattern1> [pattern2 ...]
+  local max="$1"; shift
+  local i=0 ok=1 pat
+  while [ "$i" -lt "$max" ]; do
+    ok=1
+    for pat in "$@"; do grep -qF "$pat" "$SOCK_LOG" 2>/dev/null || { ok=0; break; }; done
+    [ "$ok" = 1 ] && return 0
+    sleep 1; i=$((i + 1))
+  done
+  return 1
+}
+graph_count() { local n; n=$(grep -c "graph: send text (MOCK)" /tmp/e2e-worker.log 2>/dev/null); echo "${n:-0}"; }
+
+echo "[H1] H1: handoff / send lock / internal notes..."
+# ★ dev-mode pre-compile：warm up H1 routes — Next dev 首訪即編譯；快速串行打多 route 會令
+#   並行 webpack compilation 搶寫 app manifest → loadManifest JSON.parse 空檔 → 500
+#   （非 app bug；用 dummy request 順向編譯完先跑快速斷言序列）
+for _WARM in "/api/conversations/warmup-h1/assign" "/api/conversations/warmup-h1/notes" "/api/conversations/warmup-h1/flows" "/api/messages/send"; do
+  curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE$_WARM" \
+    -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 || true
+done
+sleep 1
+# (1) 臨時第二個 staff（TKW 同店）— hermetic：run 完即刪
+STAFF_OUT=$(pnpm -s e2e:staff create --clinic TKW --email "$H1_B_EMAIL" --name "E2E H1 Staff B" 2>/dev/null || true)
+H1_B_ID=$(echo "$STAFF_OUT" | grep -oE 'STAFF_ID=[a-z0-9]+' | head -1 | cut -d= -f2)
+[ -n "$H1_B_ID" ] || { echo "    ❌ H1 臨時 staff 建立失敗"; H1=1; }
+
+# (2) H1_B 登入（fixture 密碼由 gitignored .dev/credentials.txt 提供 — 帳戶只存在 persistent sandbox，run 完即刪）
+CODE=$(curl -s -o /dev/null -D /tmp/e2e-h1b-login-headers.txt -w '%{http_code}' -c /tmp/e2e-cookie-h1b.txt \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$H1_B_EMAIL\",\"password\":\"$H1B_PASS\"}")
+check "H1-0 臨時 staff B 登入 → 200" "$CODE" "200"
+COOKIE_H1B=/tmp/e2e-cookie-h1b.txt
+H1B_SESSION=$(grep -i '^set-cookie:' /tmp/e2e-h1b-login-headers.txt 2>/dev/null | grep -oE 'wa_inbox_session=[^;]+' | head -1 | cut -d= -f2-)
+TKW_STAFF_ID=$(q "SELECT id::text id FROM \"StaffUser\" WHERE email='$TKW_EMAIL'" | jf id)
+
+# (3) H1 病人 inbound → 新建對話
+pnpm -s mock-inbound message --clinic TKW --from "$H1_PAT" --text "e2e H1 handoff 測試" --wamid "$H1_WAMID" --name "E2E H1 Patient" >/dev/null || H1=1
+H1_CONV=""
+for i in $(seq 1 30); do
+  H1_CONV=$(q "SELECT c.id::text id FROM \"Message\" m JOIN \"Conversation\" c ON c.id=m.\"conversationId\" WHERE m.\"waMessageId\"='$H1_WAMID'" | jf id)
+  [ -n "$H1_CONV" ] && break
+  sleep 1
+done
+[ -n "$H1_CONV" ] || { echo "    ❌ H1 對話未建立"; H1=1; }
+
+# (4) H1_B 開 socket 監聽（驗證 conversation:assigned / note:new 實時收到）
+if [ -n "$H1B_SESSION" ]; then
+  nohup pnpm -s e2e:socket-events --cookie "wa_inbox_session=$H1B_SESSION" --wait-ms 180000 >"$SOCK_LOG" 2>&1 &
+  SOCK_PID=$!
+  SOCKUP=0
+  for i in $(seq 1 25); do grep -q "SOCKET-CONNECTED" "$SOCK_LOG" 2>/dev/null && { SOCKUP=1; break; }; sleep 1; done
+  [ "$SOCKUP" = 1 ] || { echo "    ❌ H1 socket listener 未連上（$(tail -1 "$SOCK_LOG" 2>/dev/null)）"; H1=1; }
+else
+  echo "    ❌ H1 B session cookie 撈唔到"; H1=1
+fi
+
+# ── H1 API helper：dev-mode manifest flake 防護 ──────────────────────────
+# Next dev 每個 request 後會 re-emit app manifest（webpack 318-module rebuild）；
+# 高速串行 request 會令下一個 request 讀到寫緊嘅 manifest → loadManifest JSON.parse
+# 失敗 → 500（route handler 未執行 → 零副作用）。防護：
+#   (1) request 之間 sleep 1（俾 re-emit 寫完）
+#   (2) 偵測到 flake 簽名（error HTML 含 "Unexpected end of JSON input"）→ 2s 後 retry ×1
+#   真 500（JSON {"error":"internal error"}）唔會 match 簽名 → 照 FAIL，唔會遮漏。
+h1_req() { # h1_req <cookie> <method> <url> [json-body] → $H1_CODE / $H1_OUT
+  local cookie="$1" method="$2" url="$3" body="${4:-}"
+  local code out attempt=0
+  out=$(mktemp /tmp/e2e-h1-api.XXXXXX)
+  while [ "$attempt" -lt 2 ]; do
+    if [ -n "$body" ]; then
+      code=$(curl -s -o "$out" -w '%{http_code}' -b "$cookie" -X "$method" "$url" \
+        -H 'Content-Type: application/json' -d "$body")
+    else
+      code=$(curl -s -o "$out" -w '%{http_code}' -b "$cookie" -X "$method" "$url")
+    fi
+    if [ "$code" = "500" ] && [ "$attempt" = "0" ] && grep -q "Unexpected end of JSON input" "$out" 2>/dev/null; then
+      echo "    (dev manifest flake 500 → retry: ${method} ${url##*/})"
+      rm -f "$out"
+      sleep 2
+      attempt=1
+      continue
+    fi
+    break
+  done
+  sleep 1
+  H1_CODE=$code
+  H1_OUT=$out
+}
+
+# ── T56. unassigned 首發 → auto-claim ──────────────────────────────────
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H1_CONV\",\"body\":\"e2e H1 A 首發\"}"
+check "T56 A 首發（unassigned）→ 202" "$H1_CODE" "202"
+H1_MSG1=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+wait_for "SELECT \"status\"::text c FROM \"Message\" WHERE id='$H1_MSG1'" '[{"c":"SENT"}]' 30 || { echo "    ❌ T56 訊息未 SENT"; H1=1; }
+check "T56 auto-claim：assignee = A（TKW staff）" "$(q "SELECT \"assigneeId\"::text a FROM \"Conversation\" WHERE id='$H1_CONV'" | jf a)" "$TKW_STAFF_ID"
+check "T56 assignedAt 已寫" "$(q "SELECT (\"assignedAt\" IS NOT NULL)::text n FROM \"Conversation\" WHERE id='$H1_CONV'" | jf n)" "true"
+check "T56 AuditLog AUTO_CLAIM = 1" "$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='AUTO_CLAIM' AND \"entityId\"='$H1_CONV'" | jf n)" "1"
+wait_event 10 "SOCKET-EVENT conversation:assigned" "$H1_CONV" "$TKW_STAFF_ID" \
+  && pass "T56 socket conversation:assigned（auto-claim，B 實時收到）" || { fail "T56 socket conversation:assigned 未收到"; H1=1; }
+
+# ── T57. Send Lock：非負責人（含 ADMIN）→ 423；note 不受 lock ──────────────
+h1_req "$COOKIE_ADMIN" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H1_CONV\",\"body\":\"e2e H1 admin 被 lock\"}"
+check "T57 ADMIN（非負責人）send → 423" "$H1_CODE" "423"
+grep -q '"error":"SEND_LOCKED"' "$H1_OUT" && pass "T57 423 body = SEND_LOCKED" || { fail "T57 423 body 錯"; H1=1; }
+h1_req "$COOKIE_H1B" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H1_CONV\",\"body\":\"e2e H1 B 被 lock\"}"
+check "T57 同店 staff B（非負責人）send → 423" "$H1_CODE" "423"
+h1_req "$COOKIE_H1B" POST "$BASE/api/conversations/$H1_CONV/notes" '{"body":"e2e H1 B locked 時內部備註"}'
+check "T57 lock 唔影響 INTERNAL note（B）→ 201" "$H1_CODE" "201"
+h1_req "$COOKIE_ADMIN" POST "$BASE/api/conversations/$H1_CONV/notes" '{"body":"e2e H1 admin 內部備註"}'
+check "T57 lock 唔影響 INTERNAL note（ADMIN）→ 201" "$H1_CODE" "201"
+
+# ── T58. 跨店 RBAC：別店 staff → 403 ──────────────────────────────────
+h1_req "$COOKIE_MF" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H1_CONV\",\"body\":\"e2e H1 跨店 send\"}"
+check "T58 別店（MF）send 本店對話 → 403" "$H1_CODE" "403"
+h1_req "$COOKIE_MF" POST "$BASE/api/conversations/$H1_CONV/notes" '{"body":"e2e H1 跨店 note"}'
+check "T58 別店（MF）note 本店對話 → 403" "$H1_CODE" "403"
+h1_req "$COOKIE_MF" POST "$BASE/api/conversations/$H1_CONV/assign" "{\"toStaffId\":\"$H1_B_ID\"}"
+check "T58 別店（MF）assign 本店對話 → 403" "$H1_CODE" "403"
+
+# ── T59. A→B 轉交（帶 note）+ socket ──────────────────────────────────
+CA_N=$(grep -c "SOCKET-EVENT conversation:assigned" "$SOCK_LOG" 2>/dev/null); CA_N=${CA_N:-0}
+H1_TRANSFER_NOTE="e2e H1 轉交原因：跟進中"
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H1_CONV/assign" "{\"toStaffId\":\"$H1_B_ID\",\"note\":\"$H1_TRANSFER_NOTE\"}"
+check "T59 A→B 轉交 → 200" "$H1_CODE" "200"
+grep -qF "\"assigneeId\":\"$H1_B_ID\"" "$H1_OUT" && pass "T59 response assigneeId=B" || { fail "T59 response assigneeId 錯"; H1=1; }
+H1_XNOTE=$(grep -oE '"noteMessageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+check "T59 自動 INTERNAL note：channel=INTERNAL" "$(q "SELECT \"channel\"::text c FROM \"Message\" WHERE id='$H1_XNOTE'" | jf c)" "INTERNAL"
+check "T59 自動 note 內容 = 轉交留言" "$(q "SELECT \"body\"::text b FROM \"Message\" WHERE id='$H1_XNOTE'" | jf b)" "$H1_TRANSFER_NOTE"
+check "T59 自動 note mentions 含 B" "$(q "SELECT \"mentions\"[1] m FROM \"Message\" WHERE id='$H1_XNOTE'" | jf m)" "$H1_B_ID"
+check "T59 AuditLog TRANSFER = 1" "$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='TRANSFER' AND \"entityId\"='$H1_CONV'" | jf n)" "1"
+check "T59 轉交後 assignee = B" "$(q "SELECT \"assigneeId\"::text a FROM \"Conversation\" WHERE id='$H1_CONV'" | jf a)" "$H1_B_ID"
+wait_event 15 "SOCKET-EVENT conversation:assigned" "$H1_B_ID" \
+  && [ "$(grep -c "SOCKET-EVENT conversation:assigned" "$SOCK_LOG" 2>/dev/null)" = "$((CA_N+1))" ] \
+  && pass "T59 socket conversation:assigned（轉交，B 實時收到）" || { fail "T59 socket conversation:assigned 未收到"; H1=1; }
+
+# ── T60. lock 翻轉 + note + 接手（self-claim） ───────────────────────────
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H1_CONV\",\"body\":\"e2e H1 A 轉交後被 lock\"}"
+check "T60 轉交後 A send → 423（lock 翻轉）" "$H1_CODE" "423"
+NOTE_N0=$(grep -c "SOCKET-EVENT note:new" "$SOCK_LOG" 2>/dev/null); NOTE_N0=${NOTE_N0:-0}
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H1_CONV/notes" "{\"body\":\"e2e H1 A 留低備註\",\"mentions\":[\"$H1_B_ID\"]}"
+check "T60 A（被 lock）發 INTERNAL note → 201" "$H1_CODE" "201"
+H1_NOTE1=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+check "T60 note：waMessageId = NULL（唔出 Graph）" "$(q "SELECT (\"waMessageId\" IS NULL)::text n FROM \"Message\" WHERE id='$H1_NOTE1'" | jf n)" "true"
+check "T60 note：mentions[0] = B" "$(q "SELECT \"mentions\"[1] m FROM \"Message\" WHERE id='$H1_NOTE1'" | jf m)" "$H1_B_ID"
+for i in $(seq 1 15); do
+  [ "$(grep -c "SOCKET-EVENT note:new" "$SOCK_LOG" 2>/dev/null)" = "$((NOTE_N0+1))" ] && break
+  sleep 1
+done
+check "T60 socket note:new（B 實時收到）" "$(grep -c "SOCKET-EVENT note:new" "$SOCK_LOG" 2>/dev/null)" "$((NOTE_N0+1))"
+h1_req "$COOKIE_H1B" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H1_CONV\",\"body\":\"e2e H1 B 轉交後可發\"}"
+check "T60 B（新負責人）send → 202" "$H1_CODE" "202"
+# 接手（MD §7 驗收項 3）：B 負責中，A 撳〔接手〕（self-claim）→ 「A 接手咗」note + TRANSFER audit + B 被 lock
+CA_N2=$(grep -c "SOCKET-EVENT conversation:assigned" "$SOCK_LOG" 2>/dev/null); CA_N2=${CA_N2:-0}
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H1_CONV/assign" "{\"toStaffId\":\"$TKW_STAFF_ID\"}"
+check "T60 接手：A（非負責人）self-claim → 200" "$H1_CODE" "200"
+H1_TKNOTE=$(grep -oE '"noteMessageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+H1_TKNOTE_BODY=$(q "SELECT \"body\"::text b FROM \"Message\" WHERE id='$H1_TKNOTE'" | jf b)
+echo "$H1_TKNOTE_BODY" | grep -q "接手咗" && pass "T60 接手自動 note = 「A 接手咗」" || { fail "T60 接手自動 note 文案錯（actual=$H1_TKNOTE_BODY）"; H1=1; }
+check "T60 接手 AuditLog TRANSFER 累計 = 2" "$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='TRANSFER' AND \"entityId\"='$H1_CONV'" | jf n)" "2"
+check "T60 接手後 assignee = A" "$(q "SELECT \"assigneeId\"::text a FROM \"Conversation\" WHERE id='$H1_CONV'" | jf a)" "$TKW_STAFF_ID"
+h1_req "$COOKIE_H1B" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H1_CONV\",\"body\":\"e2e H1 B 接手後被 lock\"}"
+check "T60 接手後 B send → 423（B 被 lock）" "$H1_CODE" "423"
+for i in $(seq 1 15); do
+  [ "$(grep -c "SOCKET-EVENT conversation:assigned" "$SOCK_LOG" 2>/dev/null)" = "$((CA_N2+1))" ] && break
+  sleep 1
+done
+check "T60 socket conversation:assigned（接手，實時收到）" "$(grep -c "SOCKET-EVENT conversation:assigned" "$SOCK_LOG" 2>/dev/null)" "$((CA_N2+1))"
+
+# ── T61. 放返隊列 + 再 claim（T60 接手後 A 係 assignee — 由 A 放返） ──────
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$H1_CONV/assign" '{"toStaffId":null,"note":"e2e H1 放返隊列"}'
+check "T61 A（現任負責人）放返隊列（toStaffId=null）→ 200" "$H1_CODE" "200"
+check "T61 assignee = null" "$(q "SELECT coalesce(\"assigneeId\",'null')::text a FROM \"Conversation\" WHERE id='$H1_CONV'" | jf a)" "null"
+check "T61 AuditLog UNASSIGN = 1" "$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='UNASSIGN' AND \"entityId\"='$H1_CONV'" | jf n)" "1"
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$H1_CONV\",\"body\":\"e2e H1 A 再 claim\"}"
+check "T61 unassigned 再發（A）→ 202（auto-claim 第二次）" "$H1_CODE" "202"
+check "T61 AUTO_CLAIM 累計 = 2" "$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='AUTO_CLAIM' AND \"entityId\"='$H1_CONV'" | jf n)" "2"
+check "T61 assignee 翻返 A" "$(q "SELECT \"assigneeId\"::text a FROM \"Conversation\" WHERE id='$H1_CONV'" | jf a)" "$TKW_STAFF_ID"
+
+# ── T62. Flow Send Lock ─────────────────────────────────────────────────
+h1_req "$COOKIE_H1B" POST "$BASE/api/conversations/$H1_CONV/flows"
+check "T62 B（非負責人）flow → 423" "$H1_CODE" "423"
+
+# ── T63. ★ 10 條 INTERNAL note → mock Graph 計數不變（物理隔離）────────────
+GRAPH_B=$(graph_count)
+UNREAD_B=$(q "SELECT \"unreadCount\"::text u FROM \"Conversation\" WHERE id='$H1_CONV'" | jf u)
+DRAFT_B=$(q "SELECT count(*)::text n FROM \"AiDraft\" WHERE \"conversationId\"='$H1_CONV'" | jf n)
+H1_NOTE_OK=0
+for i in $(seq 1 10); do
+  h1_req "$COOKIE_H1B" POST "$BASE/api/conversations/$H1_CONV/notes" "{\"body\":\"e2e H1 batch note $i of 10\"}"
+  [ "$H1_CODE" = "201" ] && H1_NOTE_OK=$((H1_NOTE_OK+1)) || { fail "T63 note #$i → $H1_CODE"; H1=1; }
+done
+check "T63 10 條 INTERNAL note 全部 → 201" "$H1_NOTE_OK" "10"
+sleep 2 # 俾 worker 機會行（如果 graph 被調，log 一定寫咗）
+GRAPH_A=$(graph_count)
+check "T63 ★ mock Graph 發送計數不變（物理隔離證明）" "$GRAPH_A" "$GRAPH_B"
+UNREAD_A=$(q "SELECT \"unreadCount\"::text u FROM \"Conversation\" WHERE id='$H1_CONV'" | jf u)
+check "T63 unreadCount 不變（note 唔計病人訊息）" "$UNREAD_A" "$UNREAD_B"
+DRAFT_A=$(q "SELECT count(*)::text n FROM \"AiDraft\" WHERE \"conversationId\"='$H1_CONV'" | jf n)
+check "T63 無新 AiDraft（note 唔觸發 AI／唔入對答庫候選）" "$DRAFT_A" "$DRAFT_B"
+# INTERNAL 注數：T56 auto-claim(1) + T57(B 1 + admin 1) + T59(轉交 1) + T60(A note 1 + 接手 1) + T61(放返 1 + 再 claim 1) + T63(10) = 18
+check "T63 INTERNAL note 總數 = 18 且全部 waMessageId NULL" "$(q "SELECT count(*)::text n FROM \"Message\" WHERE \"conversationId\"='$H1_CONV' AND \"channel\"='INTERNAL' AND \"waMessageId\" IS NULL" | jf n)" "18"
+
+# ── T64. socket/log 零內文（grep 自證）+ hermetic 清理 ─────────────────────
+if grep -qF "e2e H1 batch note" "$SOCK_LOG" 2>/dev/null; then fail "T64 PII：note 內文入咗 socket log"; H1=1; else pass "T64 socket note:new payload 零內文"; fi
+if grep -qF "$H1_TRANSFER_NOTE" "$SOCK_LOG" 2>/dev/null; then fail "T64 PII：轉交留言入咗 socket log"; H1=1; else pass "T64 轉交留言零 socket log"; fi
+if grep -qF "e2e H1 batch note" /tmp/e2e-server.log /tmp/e2e-worker.log 2>/dev/null; then fail "T64 PII：note 內文入咗 server/worker log"; H1=1; else pass "T64 server/worker log 零 note 內文"; fi
+# hermetic 清理：socket listener + 臨時 staff + 對話數據
+kill $SOCK_PID 2>/dev/null || true
+wait $SOCK_PID 2>/dev/null || true
+pnpm -s e2e:staff delete --email "$H1_B_EMAIL" >/dev/null 2>&1 || H1=1
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$H1_CONV'" >/dev/null 2>&1 || true
+q "DELETE FROM \"NoteReadReceipt\" WHERE \"messageId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\"='$H1_CONV')" >/dev/null 2>&1 || true
+q "DELETE FROM \"AuditLog\" WHERE \"entityId\"='$H1_CONV'" >/dev/null 2>&1 || true
+q "DELETE FROM \"AuditLog\" WHERE \"entityId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\"='$H1_CONV')" >/dev/null 2>&1 || true
+q "DELETE FROM \"WebhookEvent\" WHERE id='$H1_WAMID'" >/dev/null 2>&1 || true
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$H1_CONV'" >/dev/null 2>&1 || true
+q "DELETE FROM \"Conversation\" WHERE id='$H1_CONV'" >/dev/null 2>&1 || true
+q "DELETE FROM \"Contact\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"waId\"='$H1_PAT'" >/dev/null 2>&1 || true
+check "T64 hermetic：H1 對話已清" "$(q "SELECT count(*)::text c FROM \"Conversation\" WHERE id='$H1_CONV'" | jf c)" "0"
+check "T64 hermetic：臨時 staff 已刪" "$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE email='$H1_B_EMAIL'" | jf c)" "0"
+[ "$H1" = 0 ] && pass "H1 轉交 / Send Lock / 內部備註（T56-T64）" || fail "H1 有項失敗（見上 ❌）"
 
 
 # ── summary ────────────────────────────────────────────────────────────

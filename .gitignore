@@ -58,3 +58,4 @@ next-env.d.ts
 .dev/backups/
 .dev/age.key
 /.dev/bt/
+/.dev/e2e-fixtures.txt
