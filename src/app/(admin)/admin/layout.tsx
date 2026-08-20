@@ -1,10 +1,13 @@
-import { redirect } from "next/navigation";
+import { redirect, forbidden } from "next/navigation";
 import { getServerSession } from "@/lib/session-server";
 
 /**
- * /admin — ADMIN-only 管理區（店/員工）。
+ * /admin — ADMIN-only 管理區（店/員工/onboarding/templates）。
  * - 未登入 → /login
- * - STAFF → /inbox（fail-closed：管理 API 本身就 403，呢度只係 UX 層）
+ * - STAFF → 403（forbidden）
+ *   ★ 2026-08-20 touch：原先 redirect("/inbox")；App Review §2/§2A 驗收要求
+ *   「onboarding/templates 非 ADMIN 403」，而 layout 先於 page 執行 — redirect 會令
+ *   403 永遠唔見到。對齊 admin API 層 fail-closed 403 語義（管理 API 本身就 403）。
  */
 export default async function AdminLayout({
   children,
@@ -13,7 +16,7 @@ export default async function AdminLayout({
 }) {
   const session = await getServerSession();
   if (!session) redirect("/login");
-  if (session.role !== "ADMIN") redirect("/inbox");
+  if (session.role !== "ADMIN") forbidden();
 
   return (
     <div className="min-h-screen bg-canvas">
@@ -33,6 +36,12 @@ export default async function AdminLayout({
               </a>
               <a href="/admin/staff" className="text-t2 hover:text-t1">
                 員工
+              </a>
+              <a href="/admin/onboarding" className="text-t2 hover:text-t1">
+                Onboarding
+              </a>
+              <a href="/admin/templates" className="text-t2 hover:text-t1">
+                Templates
               </a>
             </nav>
           </div>
