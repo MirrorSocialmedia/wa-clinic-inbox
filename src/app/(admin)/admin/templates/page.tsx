@@ -1,6 +1,6 @@
 import { unauthorized, forbidden } from "next/navigation";
 import { getServerSession } from "@/lib/session-server";
-import { listMessageTemplates, type MessageTemplate } from "@/lib/wa/graph";
+import { listMessageTemplates, waMock, type MessageTemplate } from "@/lib/wa/graph";
 
 /**
  * /admin/templates — WhatsApp message template 審批狀態監察（App Review §2A，ADMIN-only，read-only）。
@@ -33,7 +33,9 @@ export default async function TemplatesPage() {
   if (!session) unauthorized(); // 防線二：layout 已把 unauth 導去 /login
   if (session.role !== "ADMIN") forbidden(); // 非 ADMIN → 403（App Review 驗收）
 
-  const wabaId = process.env.WA_WABA_ID ?? "";
+  // mock mode：WA_WABA_ID 未設都用 mock-waba 占位（e2e/本地開發睇得到 3 fixture）；
+  // real mode：未設 → 提示（唔 500）。
+  const wabaId = process.env.WA_WABA_ID ?? (waMock() ? "mock-waba" : "");
   let templates: MessageTemplate[] = [];
   let error: string | null = null;
   if (wabaId) {

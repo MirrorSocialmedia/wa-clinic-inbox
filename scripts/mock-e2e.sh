@@ -1550,14 +1550,14 @@ grep -q '"clinicCode":"TKW"' /tmp/e2e-ex-ok.json && pass "T54 response clinicCod
 grep -qF "$EX_PHN" /tmp/e2e-ex-ok.json && pass "T54 response 帶回 phoneNumberId" || fail "T54 response 缺 phoneNumberId"
 NOW_PHN=$(q "SELECT \"waPhoneNumberId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf waPhoneNumberId)
 check "T54 DB：TKW.waPhoneNumberId 已寫入" "$NOW_PHN" "$EX_PHN"
-AUD_CNT=$(q "SELECT count(*) AS n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
+AUD_CNT=$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
 check "T54 AuditLog ES_ONBOARD = 1" "$AUD_CNT" "1"
 # hermetic 還原：waPhoneNumberId 還原 + 清審計行
 q "UPDATE \"Clinic\" SET \"waPhoneNumberId\"='$T54_ORIG_PHN' WHERE id='$TKW_CLINIC_ID'" >/dev/null 2>&1 || true
 q "DELETE FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" >/dev/null 2>&1 || true
 RESTORED=$(q "SELECT \"waPhoneNumberId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf waPhoneNumberId)
 check "T54 hermetic：waPhoneNumberId 已還原" "$RESTORED" "$T54_ORIG_PHN"
-AUD_AFTER=$(q "SELECT count(*) AS n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
+AUD_AFTER=$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
 check "T54 hermetic：ES_ONBOARD 審計已清" "$AUD_AFTER" "0"
 # ★ token/code/PIN 零入 log（grep 自證）
 if grep -qF "$EX_CODE" /tmp/e2e-server.log 2>/dev/null; then fail "T54 PII：auth code 入咗 server log"; else pass "T54 auth code 零入 log"; fi
