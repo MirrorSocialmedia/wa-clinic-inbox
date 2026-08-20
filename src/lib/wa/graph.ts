@@ -241,3 +241,33 @@ export async function sendFlowMessage(opts: {
   log.info({ phoneNumberId, to, wamid }, "graph: send flow OK");
   return { wamid, mocked: false };
 }
+
+// ── Message templates（App Review §2A：Template 審批狀態監察頁） ────────────────────────
+
+export interface MessageTemplate {
+  name: string;
+  language: string;
+  category: string; // UTILITY / MARKETING / SERVICE
+  status: string; // APPROVED / PENDING / REJECTED / DISABLED
+}
+
+/** mock fixture：APPROVED / PENDING / REJECTED 各一（§2A 驗收：三條正確上色） */
+const MOCK_TEMPLATES: MessageTemplate[] = [
+  { name: "appointment_reminder", language: "en_US", category: "UTILITY", status: "APPROVED" },
+  { name: "new_arrival_intro", language: "en_US", category: "UTILITY", status: "PENDING" },
+  { name: "checkup_promo_january", language: "en_US", category: "MARKETING", status: "REJECTED" },
+];
+
+/**
+ * 列 WABA 下 message templates（read-only，App Review §2A）。
+ * real mode：GET /{wabaId}/message_templates，10s timeout。
+ */
+export async function listMessageTemplates(wabaId: string): Promise<MessageTemplate[]> {
+  if (waMock()) return MOCK_TEMPLATES;
+  const res = await fetch(
+    `${GRAPH_BASE}/${wabaId}/message_templates?fields=name,language,category,status&limit=50`,
+    { headers: { authorization: `Bearer ${accessToken()}` }, signal: AbortSignal.timeout(10000) }
+  );
+  if (!res.ok) throw new Error(`templates http ${res.status}`);
+  return (await res.json()).data as MessageTemplate[];
+}
