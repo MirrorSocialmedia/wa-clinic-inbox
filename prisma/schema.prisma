@@ -24,6 +24,7 @@ enum Channel {
   API        // 系統發
   APP_ECHO   // 店員手機 App 發嘅回音
   HISTORY    // 舊 chat 匯入
+  INTERNAL   // ★ H1：內部備註（staff↔staff；永不出 Graph API — 物理上唔入 outbound queue）
 }
 
 enum ConvStatus {
@@ -83,6 +84,9 @@ model Clinic {
   // Phase 4：quality_rating 每日檢查結果（GREEN/YELLOW/RED）+ 上次檢查時間（/admin 顯示）
   qualityRating    String?                    // GREEN / YELLOW / RED
   qualityCheckedAt DateTime? @db.Timestamptz
+  // ★ H3：該店自動派單政策（app 內設定）— { mode: "MANUAL_CLAIM"|"ROUND_ROBIN"|"DUTY_ROSTER" }
+  // NULL = 預設 MANUAL_CLAIM（新對話入店隊列 unassigned，員工接手/首發 auto-claim）
+  assignPolicy     Json?
 }
 
 model StaffUser {
@@ -97,6 +101,8 @@ model StaffUser {
   // 見 src/lib/totp-enc.ts，key = TOTP_ENC_KEY）。NULL = 未啟用；啟用後 ADMIN 登入
   // 第二步要 TOTP code；STAFF 永遠 NULL（登入流程完全唔變）。
   totpSecretEnc String?
+  // ★ H3：自動派單 round-robin 用（「上次被派時間」最耐嗰個先；NULL = 從未派）
+  lastAssignedAt DateTime? @db.Timestamptz
 }
 
 model Contact {
@@ -114,6 +120,8 @@ model Conversation {
   contactId        String
   status           ConvStatus @default(OPEN)
   assigneeId       String?
+  // ★ H1：最近一次 assign/transfer/unassign 時間（Send Lock 轉交追蹤；null = 從未派過）
+  assignedAt       DateTime? @db.Timestamptz
   intent           String?                    // 最近一次分類結果
   intentConfidence Float?
   // Phase 2（AI triage）：
@@ -146,6 +154,8 @@ model Message {
   channel        Channel
   type           String                       // text/image/audio/document/interactive/nfm_reply...
   body           String?                      // 文字內容（at-rest 加密 = 部署層 LUKS/雲碟加密，見 deploy 文件；log 絕不出現）
+  // ★ H1：內部備註 @ 咗邊啲 staffId（只 channel=INTERNAL 先有意義；UI autocomplete 入）
+  mentions       String[]  @default([])
   mediaPath      String?                      // 落地 /srv/wa-media/<id>，唔存 Meta URL（會過期）
   status         MsgStatus
   errorCode      String?
@@ -159,6 +169,16 @@ model Message {
   waTimestamp    DateTime @db.Timestamptz
   createdAt      DateTime @db.Timestamptz  @default(now())
   @@index([conversationId, waTimestamp])
+}
+
+// ★ H2：內部備註已讀回執（確認 ② — tick 顯示 @人 已讀）。
+// 前端 IntersectionObserver 入 viewport → POST /api/notes/[id]/read upsert（冪等）。
+model NoteReadReceipt {
+  id        String   @id @default(cuid())
+  messageId String                                  // channel=INTERNAL 嘅 Message
+  staffId   String
+  readAt    DateTime @db.Timestamptz @default(now())
+  @@unique([messageId, staffId])
 }
 
 model AiDraft {

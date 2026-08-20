@@ -177,7 +177,7 @@ function publicMsg(msg: {
   conversationId: string;
   waMessageId: string | null;
   direction: "IN" | "OUT";
-  channel: "API" | "APP_ECHO" | "HISTORY";
+  channel: "API" | "APP_ECHO" | "HISTORY" | "INTERNAL"; // INTERNAL 物理上唔會經呢度（唔入 outbound queue）— union 跟齊 Prisma enum
   type: string;
   body: string | null;
   mediaPath: string | null;
