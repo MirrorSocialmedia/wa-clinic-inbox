@@ -6,6 +6,7 @@ import type {
   AiClassifiedEvent,
   BookingEvent,
   ClinicInfo,
+  ConversationAssignedEvent,
   ConversationItem,
   ConvStatus,
   ConvUpdatedEvent,
@@ -15,6 +16,7 @@ import type {
   MessageItem,
   MessageStatusEvent,
   NewMessageEvent,
+  NoteNewEvent,
   StaffInfo,
   UrgentEscalationEvent,
   UserCtx,
@@ -42,6 +44,8 @@ interface ContactSearchHit {
  * - message:new / message:status / conv:updated 實時更新
  * - Phase 2：ai:classified（intent/urgency/urgent/summary）/ draft:ready（pending 草稿卡）
  *   / urgent:escalation（急症 toast + 隊列頂紅標）
+ * - Phase 3：booking:new / booking:updated（綠色預約卡）
+ * - ★ H1：conversation:assigned（負責人 chip 即時更新）/ note:new（內部備註 → 拉最新訊息）
  * - 斷線重連 → 用 lastMessageAt 拉 backlog 補漏（GET /api/conversations/[id]/messages?after=...）
  */
 export function InboxClient({
@@ -229,6 +233,39 @@ export function InboxClient({
 
     // 斷線重連 → backlog 補漏
     let wasDisconnected = false;
+
+    // ── ★ H1：Send Lock / 內部備註 事件 ────────────────────────
+
+    // 轉交/接手/放返隊列/auto-claim → 負責人 chip 即時更新（payload 零內文）
+    socket.on("conversation:assigned", (e: ConversationAssignedEvent) => {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === e.conversationId
+            ? {
+                ...c,
+                assigneeId: e.assigneeId,
+                assigneeName: e.assigneeId
+                  ? staffRef.current.find((s) => s.id === e.assigneeId)?.name ?? null
+                  : null,
+              }
+            : c
+        )
+      );
+    });
+
+    // 新內部備註（零內文）→ 選中對話拉最新訊息；列表 preview/lastMessageAt 先本地更新
+    socket.on("note:new", (e: NoteNewEvent) => {
+      const now = new Date().toISOString();
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === e.conversationId ? { ...c, lastMessageAt: now, preview: "🔒 內部備註" } : c
+        )
+      );
+      if (selectedIdRef.current === e.conversationId) {
+        void fetchMessagesLatest(e.conversationId);
+      }
+    });
+
     socket.on("disconnect", () => {
       wasDisconnected = true;
     });
@@ -493,6 +530,136 @@ export function InboxClient({
 
   // ── Phase 3：發 Booking Flow（📅 掣） ─────────────────────
   const [flowBusy, setFlowBusy] = useState(false);
+
+  // ── ★ H1：內部備註（lock 模式 composer）──────────────────────
+  const sendNote = useCallback(
+    async (body: string): Promise<{ ok: boolean; error?: string }> => {
+      const convId = selectedIdRef.current;
+      if (!convId) return { ok: false, error: "未選擇對話" };
+      try {
+        const res = await fetch(`/api/conversations/${convId}/notes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ body }),
+        });
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          messageId?: string;
+          error?: string;
+        } | null;
+        if (!res.ok) {
+          return { ok: false, error: data?.error ?? `內部備註發送失敗（${res.status}）` };
+        }
+        // 樂觀更新：INTERNAL 氣泡（黃底🔒）
+        const optimistic: MessageItem = {
+          id: data?.messageId ?? `optimistic-note-${Date.now()}`,
+          conversationId: convId,
+          waMessageId: null,
+          direction: "OUT",
+          channel: "INTERNAL",
+          type: "note",
+          body,
+          mediaPath: null,
+          status: "SENT",
+          errorCode: null,
+          sentByStaffId: user.staffId,
+          mentions: [],
+          waTimestamp: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, optimistic]);
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === convId
+              ? { ...c, lastMessageAt: optimistic.waTimestamp, preview: "🔒 內部備註" }
+              : c
+          )
+        );
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "網絡錯誤" };
+      }
+    },
+    [user.staffId]
+  );
+
+  // ── ★ H1：轉交 / 接手 / 放返隊列（POST assign）──────────────────────
+  const [takeoverBusy, setTakeoverBusy] = useState(false);
+  const [assignBusy, setAssignBusy] = useState(false);
+  const [assignError, setAssignError] = useState<string | null>(null);
+
+  const applyAssignResult = useCallback((convId: string, toStaffId: string | null) => {
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === convId
+          ? {
+              ...c,
+              assigneeId: toStaffId,
+              assigneeName: toStaffId
+                ? staffRef.current.find((s) => s.id === toStaffId)?.name ?? null
+                : null,
+            }
+          : c
+      )
+    );
+  }, []);
+
+  const takeover = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    const convId = selectedIdRef.current;
+    if (!convId) return { ok: false, error: "未選擇對話" };
+    setTakeoverBusy(true);
+    setAssignError(null);
+    try {
+      const res = await fetch(`/api/conversations/${convId}/assign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ toStaffId: user.staffId }),
+      });
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; message?: string } | null;
+      if (!res.ok) {
+        const msg = data?.message ?? data?.error ?? `接手失敗（${res.status}）`;
+        setAssignError(msg);
+        return { ok: false, error: msg };
+      }
+      applyAssignResult(convId, user.staffId);
+      setNotice("你而家係呢個對話嘅負責人 — 可以發 WhatsApp 訊息");
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "網絡錯誤" };
+    } finally {
+      setTakeoverBusy(false);
+    }
+  }, [user.staffId, applyAssignResult]);
+
+  const assignConversationApi = useCallback(
+    async (toStaffId: string | null): Promise<{ ok: boolean; error?: string }> => {
+      const convId = selectedIdRef.current;
+      if (!convId) return { ok: false, error: "未選擇對話" };
+      setAssignBusy(true);
+      setAssignError(null);
+      try {
+        const res = await fetch(`/api/conversations/${convId}/assign`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ toStaffId }),
+        });
+        const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; message?: string } | null;
+        if (!res.ok) {
+          const msg = data?.message ?? data?.error ?? `轉交失敗（${res.status}）`;
+          setAssignError(msg);
+          return { ok: false, error: msg };
+        }
+        applyAssignResult(convId, toStaffId);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "網絡錯誤" };
+      } finally {
+        setAssignBusy(false);
+      }
+    },
+    [applyAssignResult]
+  );
+
   const sendFlow = useCallback(async () => {
     const convId = selectedIdRef.current;
     if (!convId) return { ok: false, error: "未選擇對話" };
@@ -641,6 +808,7 @@ export function InboxClient({
           setSearch("");
           setSearchResults(null);
         }}
+        myStaffId={user.staffId}
       />
 
       <ChatPane
@@ -658,9 +826,24 @@ export function InboxClient({
         draftBusy={draftBusy}
         onSendFlow={sendFlow}
         flowBusy={flowBusy}
+        myStaffId={user.staffId}
+        onSendNote={sendNote}
+        onTakeover={takeover}
+        takeoverBusy={takeoverBusy}
+        staff={staff}
       />
 
-      <DetailPane conversation={selectedConv} staff={staff} onPatch={patchConversation} duty={selectedConv ? duty[selectedConv.clinicId] ?? null : null} />
+      <DetailPane
+        conversation={selectedConv}
+        staff={staff}
+        onPatch={patchConversation}
+        duty={selectedConv ? duty[selectedConv.clinicId] ?? null : null}
+        myStaffId={user.staffId}
+        userRole={user.role}
+        onAssign={assignConversationApi}
+        assignBusy={assignBusy}
+        assignError={assignError}
+      />
 
       {/* Phase 2：急症升級 toast（socket urgent:escalation） */}
       {urgentToast && (

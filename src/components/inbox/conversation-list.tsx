@@ -19,6 +19,8 @@ interface Props {
   onSearch: (q: string) => void;
   searchResults: ConversationItem[] | null;
   onClearSearch: () => void;
+  /** ★ H1：自己 staffId — 負責人 chip 三狀態（自己=綠「你」/ 別人=琥珀名 / unassigned=無 chip） */
+  myStaffId: string;
 }
 
 const STATUS_LABEL: Record<ConvStatus | "ALL", string> = {
@@ -252,8 +254,22 @@ export function ConversationList(p: Props) {
                         等回覆
                       </span>
                     )}
+                    {/* ★ H1 負責人 chip：自己=綠「你」/ 別人=琥珀（Send Lock 中）/ unassigned=無 */}
                     {c.assigneeName && (
-                      <span className="text-[10px] text-brand-text ml-auto">@{c.assigneeName}</span>
+                      <span
+                        className={`ml-auto text-[10px] px-1.5 py-px rounded-full font-medium inline-flex items-center gap-0.5 ${
+                          c.assigneeId === p.myStaffId
+                            ? "bg-ok-soft text-ok-text"
+                            : "bg-warn-soft text-warn-text"
+                        }`}
+                        title={
+                          c.assigneeId === p.myStaffId
+                            ? "你係呢個對話嘅負責人"
+                            : `負責人：${c.assigneeName}（你只可發內部備註）`
+                        }
+                      >
+                        {c.assigneeId === p.myStaffId ? "你" : c.assigneeName}
+                      </span>
                     )}
                   </div>
                 )}

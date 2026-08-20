@@ -2,12 +2,14 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { ZodError } from "zod";
 import { RbacError } from "@/lib/rbac";
+import { AssignError } from "@/lib/assign";
 import log from "@/lib/log";
 
 /**
  * API route 錯誤處理統一層（fail-closed + 唔洩漏堆疊細節）。
  *
  * - RbacError      → 401/403（message 只係內部代碼層嘅描述，無 PII）
+ * - AssignError    → 帶 status（400/404/409）+ code（SEND/ASSIGN 域錯誤碼）
  * - ZodError       → 400 + 欄位級錯誤
  * - Prisma P2002   → 409（unique violation，e.g. 重複 email / waPhoneNumberId）
  * - Prisma P2025   → 404（record 唔存在）
@@ -16,6 +18,9 @@ import log from "@/lib/log";
 export function toResponse(err: unknown): NextResponse {
   if (err instanceof RbacError) {
     return NextResponse.json({ error: err.message }, { status: err.status });
+  }
+  if (err instanceof AssignError) {
+    return NextResponse.json({ error: err.code, message: err.message }, { status: err.status });
   }
   if (err instanceof ZodError) {
     return NextResponse.json(

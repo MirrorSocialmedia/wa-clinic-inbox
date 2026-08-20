@@ -68,7 +68,7 @@ export interface MessageItem {
   conversationId: string;
   waMessageId: string | null;
   direction: "IN" | "OUT";
-  channel: "API" | "APP_ECHO" | "HISTORY";
+  channel: "API" | "APP_ECHO" | "HISTORY" | "INTERNAL"; // ★ H1：INTERNAL = 內部備註（黃底🔒，唔出 WhatsApp）
   type: string;
   body: string | null;
   mediaPath: string | null;
@@ -77,6 +77,8 @@ export interface MessageItem {
   sentByStaffId: string | null;
   /** Phase 2b：AI 自動發送標記（AUTO 模式）— UI 顯示「AI 自動覆」，staff 可審計 */
   aiAutoSent?: boolean;
+  /** ★ H1：INTERNAL note @ 咗邊啲 staffId（H2 tick 語義用） */
+  mentions?: string[];
   waTimestamp: string;
   createdAt: string;
 }
@@ -179,4 +181,19 @@ export interface BookingEvent {
   conversationId: string;
   clinicId: string;
   booking: BookingInfo | null; // null = 已處理/失效（卡消失）
+}
+
+/** ★ H1：socket conversation:assigned — 轉交/接手/放返隊列/auto-claim（payload 零內文） */
+export interface ConversationAssignedEvent {
+  conversationId: string;
+  clinicId: string;
+  assigneeId: string | null;
+  byStaffId: string | null;
+}
+
+/** ★ H1：socket note:new — 有新內部備註（零內文 — 內容由 client 拉） */
+export interface NoteNewEvent {
+  conversationId: string;
+  clinicId: string;
+  messageId: string;
 }

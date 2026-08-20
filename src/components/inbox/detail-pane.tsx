@@ -11,6 +11,13 @@ interface Props {
   onPatch: (body: { status?: ConvStatus; assigneeId?: string | null; urgent?: boolean }) => Promise<void>;
   /** Phase 4：今日當值（該對話嘅 clinic；null/空 → 隱藏卡） */
   duty?: DutyInfo | null;
+  /** ★ H1：自己 staffId + 角色 — 判定 canManage（現任 assignee / ADMIN / unassigned 任何 STAFF） */
+  myStaffId: string;
+  userRole: "ADMIN" | "STAFF";
+  /** ★ H1：轉交/派單/放返隊列 — POST /api/conversations/[id]/assign（INTERNAL note + AuditLog + socket） */
+  onAssign: (toStaffId: string | null) => Promise<{ ok: boolean; error?: string }>;
+  assignBusy: boolean;
+  assignError: string | null;
 }
 
 const STATUS_SEG: { key: ConvStatus; label: string }[] = [
@@ -36,7 +43,7 @@ const URGENCY_META: Record<string, { label: string; cls: string }> = {
  * 側欄（MD §6.4）v2 — SleekFlow 式 contact panel。
  * 功能同 v1 一樣：contact 編輯 / AI 分析 / 當值 / 狀態 / assignee / meta。
  */
-export function DetailPane({ conversation, staff, onPatch, duty }: Props) {
+export function DetailPane({ conversation, staff, onPatch, duty, myStaffId, userRole, onAssign, assignBusy, assignError }: Props) {
   const [name, setName] = useState("");
   const [labels, setLabels] = useState<string[]>([]);
   const [newLabel, setNewLabel] = useState("");
@@ -84,9 +91,8 @@ export function DetailPane({ conversation, staff, onPatch, duty }: Props) {
     await onPatch({ status: s });
   }
 
-  async function setAssignee(id: string) {
-    await onPatch({ assigneeId: id || null });
-  }
+  // ★ H1：只有現任 assignee / ADMIN / unassigned（任何同店 STAFF 可 claim）先可以改負責人
+  const canManage = !c.assigneeId || c.assigneeId === myStaffId || userRole === "ADMIN";
 
   return (
     <aside className="w-72 shrink-0 border-l border-line bg-panel hidden lg:flex flex-col min-h-0 overflow-y-auto">
@@ -222,10 +228,11 @@ export function DetailPane({ conversation, staff, onPatch, duty }: Props) {
           <h3 className="text-[11px] text-t3 font-semibold mb-2">負責員工</h3>
           <select
             value={c.assigneeId ?? ""}
-            onChange={(e) => void setAssignee(e.target.value)}
-            className="w-full text-sm rounded-lg bg-panel-2 border border-transparent px-2.5 py-1.5 text-t1 focus:outline-none focus:border-brand focus:bg-panel"
+            onChange={(e) => void onAssign(e.target.value || null)}
+            disabled={!canManage || assignBusy}
+            className="w-full text-sm rounded-lg bg-panel-2 border border-transparent px-2.5 py-1.5 text-t1 focus:outline-none focus:border-brand focus:bg-panel disabled:opacity-50"
           >
-            <option value="">（未分配）</option>
+            <option value="">（未分配 — 放返隊列）</option>
             {clinicStaff.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
@@ -233,6 +240,12 @@ export function DetailPane({ conversation, staff, onPatch, duty }: Props) {
               </option>
             ))}
           </select>
+          {!canManage && (
+            <div className="text-[10px] text-warn-text mt-1">
+              🔒 只有現任負責人（{c.assigneeName}）或管理員可以改；喺對話欄撳〔接手〕先可以轉交畀自己
+            </div>
+          )}
+          {assignError && <div className="text-[10px] text-danger-text mt-1">{assignError}</div>}
         </div>
 
         {/* Phase 4：今日當值 */}

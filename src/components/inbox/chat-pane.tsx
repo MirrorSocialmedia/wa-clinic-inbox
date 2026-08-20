@@ -7,12 +7,14 @@ import {
   Check,
   CheckCheck,
   Clock,
+  Lock,
   MessageCircle,
   Paperclip,
   Send,
   Sparkles,
+  StickyNote,
 } from "lucide-react";
-import type { ConversationItem, DraftInfo, MessageItem } from "./types";
+import type { ConversationItem, DraftInfo, MessageItem, StaffInfo } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
 interface Props {
@@ -36,6 +38,16 @@ interface Props {
   onSendFlow: () => Promise<{ ok: boolean; error?: string }>;
   /** Phase 3：發 Flow 進行中 */
   flowBusy: boolean;
+  /** ★ H1：自己嘅 staffId（Send Lock 三狀態判定：自己負責/別人負責/unassigned） */
+  myStaffId: string;
+  /** ★ H1：發內部備註（lock 模式 composer 用；INTERNAL — 唔出 WhatsApp） */
+  onSendNote: (body: string) => Promise<{ ok: boolean; error?: string }>;
+  /** ★ H1：〔接手〕— POST assign {toStaffId: self}（lock 翻轉） */
+  onTakeover: () => Promise<{ ok: boolean; error?: string }>;
+  /** ★ H1：接手進行中（disable 掣） */
+  takeoverBusy: boolean;
+  /** ★ H1：店內 staff 列表（INTERNAL note 顯示發送者名） */
+  staff: StaffInfo[];
 }
 
 /** status tick（OUT API 訊息）— lucide 版 */
@@ -75,6 +87,7 @@ function initialOf(c: ConversationItem): string {
 export function ChatPane(p: Props) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [sendingNote, setSendingNote] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [flowError, setFlowError] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -99,11 +112,14 @@ export function ChatPane(p: Props) {
       return;
     }
     if (autoFilledDraftRef.current === p.pendingDraft.id) return;
+    // ★ H1：lock 模式（assignee 係其他人）唔好 auto-fill AI 草稿入 composer — 嗰度係內部備註欄
+    const locked = !!p.conversation?.assigneeId && p.conversation?.assigneeId !== p.myStaffId;
+    if (locked) return;
     if (draft.trim() === "") {
       setDraft(p.pendingDraft.draftText);
       autoFilledDraftRef.current = p.pendingDraft.id;
     }
-  }, [p.pendingDraft, draft]);
+  }, [p.pendingDraft, draft, p.conversation?.assigneeId, p.myStaffId]);
 
   if (!p.conversation) {
     return (
@@ -117,6 +133,10 @@ export function ChatPane(p: Props) {
   }
 
   const c = p.conversation;
+  // ★ H1 Send Lock 三狀態：locked = 有負責人且唔係自己（composer 轉內部備註模式）
+  const locked = !!c.assigneeId && c.assigneeId !== p.myStaffId;
+  const assigneeName = c.assigneeName ?? null;
+  const staffNameById = new Map(p.staff.map((s) => [s.id, s.name]));
   const windowChipCls =
     c.window.tone === "red"
       ? "bg-danger-soft text-danger-text"
@@ -128,6 +148,17 @@ export function ChatPane(p: Props) {
     if (flowError) setFlowError(null);
     const r = await p.onSendFlow();
     if (!r.ok) setFlowError(r.error ?? "發送失敗");
+  }
+
+  async function sendNote() {
+    const body = draft.trim();
+    if (!body || sendingNote || !c) return;
+    setSendingNote(true);
+    setSendError(null);
+    const r = await p.onSendNote(body);
+    if (!r.ok) setSendError(r.error ?? "內部備註發送失敗");
+    else setDraft("");
+    setSendingNote(false);
   }
 
   async function send() {
@@ -153,6 +184,12 @@ export function ChatPane(p: Props) {
             {c.contact?.profileName || "未命名聯絡人"}
           </div>
           {c.contact?.waId && <div className="text-[11px] text-t3">{c.contact.waId}</div>}
+          {assigneeName && (
+            <div className={`text-[10px] inline-flex items-center gap-0.5 ${locked ? "text-warn-text" : "text-t3"}`}>
+              <Lock size={9} />
+              負責人：{c.assigneeId === p.myStaffId ? "你" : assigneeName}
+            </div>
+          )}
         </div>
         <span
           className={`ml-auto text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${windowChipCls}`}
@@ -181,10 +218,30 @@ export function ChatPane(p: Props) {
           const isOut = m.direction === "OUT";
           const isEcho = m.channel === "APP_ECHO";
           const isHistory = m.channel === "HISTORY";
+          const isNote = m.channel === "INTERNAL"; // ★ H1：內部備註（黃底🔒，視覺上同病人訊息完全區隔）
           const isFlow = m.type === "interactive";
           const isAuto = isOut && m.aiAutoSent === true;
           const prev = p.messages[i - 1];
           const media = mediaSrc(m.mediaPath);
+          // ★ H1：INTERNAL note — 黃底 + 🔒 + 發送者名（staff 對 staff；病人睇唔到）
+          if (isNote) {
+            return (
+              <div key={m.id} className="flex justify-end">
+                <div className="max-w-[70%] px-3 py-2 rounded-xl border border-warn/50 bg-warn-soft text-t1">
+                  <div className="text-[10px] font-medium text-warn-text mb-0.5 inline-flex items-center gap-1">
+                    🔒 內部備註 · 唔會發去 WhatsApp
+                  </div>
+                  {m.body && <div className="whitespace-pre-wrap break-words text-sm">{m.body}</div>}
+                  <div className="flex items-center gap-1 mt-1 justify-end">
+                    {m.sentByStaffId && (
+                      <span className="text-[10px] text-t2">{staffNameById.get(m.sentByStaffId) ?? "Staff"} · </span>
+                    )}
+                    <span className="text-[10px] text-t3">{bubbleTime(m.waTimestamp, prev?.waTimestamp)}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          }
           return (
             <div key={m.id} className={`flex ${isOut ? "justify-end" : "justify-start"}`}>
               <div
@@ -277,7 +334,8 @@ export function ChatPane(p: Props) {
               </span>
               <button
                 onClick={() => void sendFlow()}
-                disabled={p.flowBusy}
+                disabled={p.flowBusy || locked}
+                title={locked ? "Send Lock：只有負責人可以發 Flow" : undefined}
                 className="ml-auto shrink-0 text-xs px-2.5 py-1 rounded-lg bg-brand hover:bg-brand-hover text-white font-medium disabled:opacity-40 inline-flex items-center gap-1"
               >
                 <CalendarDays size={12} />
@@ -301,7 +359,8 @@ export function ChatPane(p: Props) {
                     setDraft(p.pendingDraft!.draftText);
                     void p.onAdopt(p.pendingDraft!.id);
                   }}
-                  disabled={p.draftBusy}
+                  disabled={p.draftBusy || locked}
+                  title={locked ? "先接手（become 負責人）先可以採用草稿發 WhatsApp" : undefined}
                   className="text-xs px-3 py-1 rounded-lg bg-brand hover:bg-brand-hover text-white font-medium disabled:opacity-40"
                 >
                   採用並編輯
@@ -315,6 +374,9 @@ export function ChatPane(p: Props) {
                 </button>
               </span>
             </div>
+            {locked && (
+              <div className="text-[10px] text-warn-text mb-1">🔒 先〔接手〕成為負責人，先可以採用草稿發去 WhatsApp</div>
+            )}
             <div className="text-sm text-t1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
               {p.pendingDraft.draftText}
             </div>
@@ -322,7 +384,48 @@ export function ChatPane(p: Props) {
         )}
         {sendError && <div className="text-xs text-danger-text mb-1.5">{sendError}</div>}
 
-        {c.window.open ? (
+        {locked ? (
+          /* ★ H1 Send Lock：amber 內部備註 composer — 發 WhatsApp 已停用，只可發 staff↔staff 備註 */
+          <div className="rounded-xl border border-warn/60 bg-warn-soft p-2.5">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="text-xs font-medium text-warn-text inline-flex items-center gap-1">
+                <Lock size={12} />
+                此對話由 {assigneeName ?? "其他同事"} 負責 — 你只可發內部備註
+              </span>
+              <button
+                onClick={() => void p.onTakeover()}
+                disabled={p.takeoverBusy}
+                className="ml-auto shrink-0 text-xs px-3 py-1 rounded-lg bg-warn text-white font-medium hover:opacity-90 disabled:opacity-40 inline-flex items-center gap-1"
+              >
+                <StickyNote size={12} />
+                {p.takeoverBusy ? "接手咗…" : "接手"}
+              </button>
+            </div>
+            <div className="flex items-end gap-2">
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void sendNote();
+                  }
+                }}
+                rows={1}
+                placeholder="內部備註（唔會發去 WhatsApp；Enter 發送）…"
+                className="flex-1 resize-none rounded-2xl bg-panel border border-warn/50 px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-warn"
+              />
+              <button
+                onClick={() => void sendNote()}
+                disabled={sendingNote || !draft.trim()}
+                aria-label="發送內部備註"
+                className="w-9 h-9 shrink-0 rounded-full bg-warn hover:opacity-90 text-white flex items-center justify-center disabled:opacity-40"
+              >
+                <Send size={15} />
+              </button>
+            </div>
+          </div>
+        ) : c.window.open ? (
           <div className="flex items-end gap-2">
             <textarea
               value={draft}

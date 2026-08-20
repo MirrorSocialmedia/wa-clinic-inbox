@@ -5,6 +5,7 @@ import log from "@/lib/log";
 import { requireAuth, assertClinicAccess } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { publishNotify } from "@/lib/notify";
+import { assertCanAssign } from "@/lib/assign";
 
 /**
  * GET /api/conversations/[id] — 單個對話（+ contact；conversation 含 AI 欄位 intent/urgency/urgent/aiSummary）。別店 → 403。
@@ -44,6 +45,11 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertClinicAccess(auth, conv.clinicId);
+
+  // ★ H1：assignee 改動受權限模型約束（現任 assignee / ADMIN / unassigned claim / 接手 self；否則 403）
+  if (parsed.data.assigneeId !== undefined) {
+    assertCanAssign(auth, conv, parsed.data.assigneeId);
+  }
 
   const { status, assigneeId, markRead, urgent } = parsed.data;
 

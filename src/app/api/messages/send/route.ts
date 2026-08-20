@@ -6,6 +6,7 @@ import { requireAuth, assertClinicAccess, clinicScope } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { outboundQueue } from "@/lib/queue";
 import { getWindowState } from "@/lib/wa/window";
+import { assignConversation } from "@/lib/assign";
 
 /**
  * POST /api/messages/send — 員工發 free-form 訊息（框架 MD §6.3）。
@@ -39,6 +40,24 @@ export const POST = handle(async (req: NextRequest) => {
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertClinicAccess(ctx, conv.clinicId); // STAFF 砌別店 URL → 403
 
+  // ★ H1 Send Lock（MD §3.2）：對話有負責人時，只有負責人可以發 WhatsApp（含 ADMIN）。
+  // 其他店內員工 → 423 SEND_LOCKED（UI composer 轉內部備註模式；INTERNAL note route 冇呢個檢查）。
+  // AI AUTO 派卡係 system sender（worker 直接寫 DB + queue），唔經呢個 HTTP route → 天然唔受 lock。
+  if (conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
+    log.info(
+      { clinicId: conv.clinicId, conversationId: conv.id, staffId: ctx.staff.id, assigneeId: conv.assigneeId },
+      "send: 423 SEND_LOCKED（assignee 係其他 staff）"
+    );
+    return NextResponse.json(
+      {
+        error: "SEND_LOCKED",
+        message: "此對話已有負責人 — 你只可發內部備註，或撳〔接手〕轉交畀自己",
+        assigneeId: conv.assigneeId,
+      },
+      { status: 423 }
+    );
+  }
+
   // 窗口檢查（fail-closed：lastInboundAt = null → 過窗）
   const win = getWindowState(conv.lastInboundAt);
   if (!win.open) {
@@ -58,6 +77,18 @@ export const POST = handle(async (req: NextRequest) => {
 
   // clinicScope 佢都過一次（belt & braces：route 層嘅 fail-closed 驗證）
   void clinicScope(ctx);
+
+  // ★ H1：unassigned 對話首發 → auto-claim 成為負責人（MD §3.2；AuditLog AUTO_CLAIM）。
+  // 喺窗口檢查之後：窗口已過（422）嘅失敗發送唔會 claim。
+  if (!conv.assigneeId) {
+    await assignConversation({
+      conversationId: conv.id,
+      toStaffId: ctx.staff.id,
+      by: "AUTO_CLAIM",
+      byStaffId: ctx.staff.id,
+    });
+    conv.assigneeId = ctx.staff.id;
+  }
 
   const now = new Date();
   const msg = await prisma.message.create({
