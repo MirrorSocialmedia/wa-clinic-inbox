@@ -112,6 +112,21 @@ MF STAFF:  staff-mf@wa-clinic.local  / <隨機>
 - 訊息原文永不入 log、永不外送第三方
 - DB volume + `/srv/wa-media` 開 encryption at rest；backup 先加密先落地
 
+### CSP 例外（WhatsApp Embedded Signup，2026-08-20 新增）
+
+`/admin/onboarding` 會動態載入 FB SDK（`https://connect.facebook.net`）。repo 內無 CSP/headers 配置（`next.config.ts` 冇 `headers()`）— CSP 屬純部署層（AS-2 nginx）。如 AS-2 嚴版 CSP 已上，`/admin/onboarding` 要出寬版，其餘路徑照舊：
+
+```nginx
+# 只改 CSP header（其餘 proxy 指令照原有）：
+location = /admin/onboarding {
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://connect.facebook.net; style-src 'self' 'unsafe-inline'; img-src 'self' https://*.facebook.com https://*.fbcdn.net; frame-src https://www.facebook.com https://m.facebook.com; connect-src 'self' https://*.facebook.com https://*.fbcdn.net" always;
+    # …proxy_pass 等同其他 location…
+}
+```
+
+- MD §2.4 核心只要求 `script-src` 加 `https://connect.facebook.net`；frame-src / connect-src / img-src 係 FB SDK + Embedded Signup iframe 實測所需，實測日對瀏覽器 console 補漏。
+- 如 AS-2 尚未上（全站現無 CSP）→ 此步可以跳過，不影響功能。
+
 ---
 
 ## Phase 2 — 本地 AI 分層 + Triage
@@ -242,6 +257,9 @@ AI_MOCK=                         # 清走 = 真 AI
 | T32 | (3) 48h 冇處理 → cron EXPIRED + AuditLog（DB 時移 49h） |
 | T33 | (3) PII：mock raw（含 clinicPatient/visitReasons/diagnosis 餌字串）經 adapter → DB + log 全 0 hit + pii-scan 0 violation |
 | T34 | (3) 別店 flow_token 被拒 + STAFF 撳別店 booking confirm → 403 |
+| T52 | (App Review §1) privacy 公開頁：無 cookie 200 + `id="deletion"` anchor + 保留期 24/12 月 + 占位符 + 0 PII |
+| T53 | (App Review §2/§2A) STAFF → onboarding/templates 403；unauth → /login；ADMIN 200 + mock 3 色 template fixture |
+| T54 | (App Review §2.3) exchange：401/403/400(input)/404(db_update) + mock 完整 flow 寫入 clinic + AuditLog + hermetic 還原 + token/code/PIN 零入 log（grep 自證） |
 
 ### E2E（真 AI — sglang 實測）
 

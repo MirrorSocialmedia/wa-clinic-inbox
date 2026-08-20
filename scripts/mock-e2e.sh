@@ -78,6 +78,12 @@
 #   T49 (AS-3③) mock mode 禁用 per-account lockout：5 次 fail 無 lockout/loginfail Redis key；
 #       非 mock 路徑單元測（WA_MOCK=0 獨立 process）：第 5 次觸發 / TTL≤900 / NX 唔刷新 / email 變體 / 成功重計
 #   T49b (L-2) search ILIKE escape：q=% 同 q=_ 當字面（0 hit）；control 正常 query 照中
+#
+# App Review 三件套（2026-08-20）：
+#   T52 (App Review §1) privacy 公開頁：無 cookie 200 + `id="deletion"` anchor + 保留期 24/12 月 + 占位符 + 0 PII
+#   T53 (App Review §2/§2A) onboarding/templates gating：STAFF 403 / unauth 307→/login / ADMIN 200 + mock 3 色 template
+#   T54 (App Review §2.3) exchange mock flow：401/403/400(input)/404(db_update) + 完整 mock flow 寫入 clinic + AuditLog
+#       + hermetic 還原 + token/code/PIN 零入 log（grep 自證）
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -1478,6 +1484,87 @@ else
 fi
 [ "$T51" = 0 ] && pass "T51 M-4 change-password 踢全 session（C-3 重用）+ TTL 邊界" \
   || fail "T51 change-password（見上 ❌）"
+
+# ── T52. App Review §1：privacy 公開頁 ───────────────────────────────────────
+echo "[AR-1] T52: privacy page..."
+curl -s -o /tmp/e2e-privacy.html "$BASE/privacy"   # 無 cookie（公開頁）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/privacy")
+check "T52 privacy 無 cookie → 200" "$CODE" "200"
+grep -q 'id="deletion"' /tmp/e2e-privacy.html && pass "T52 第 9 條 id=\"deletion\" anchor 喺 HTML" || fail "T52 缺 id=\"deletion\" anchor"
+grep -q '24 個月' /tmp/e2e-privacy.html && pass "T52 保留期：對話 24 個月" || fail "T52 保留期對話 24 個月缺"
+grep -q '12 個月' /tmp/e2e-privacy.html && pass "T52 保留期：媒體 12 個月" || fail "T52 保留期媒體 12 個月缺"
+grep -q '\[公司名稱\]' /tmp/e2e-privacy.html && pass "T52 占位符保留（[公司名稱]）" || fail "T52 占位符缺"
+if grep -qF "$ADMIN_EMAIL" /tmp/e2e-privacy.html || grep -qF "$PATIENT_TKW" /tmp/e2e-privacy.html; then
+  fail "T52 PII：privacy 頁含 admin email / patient number"
+else
+  pass "T52 PII：privacy 頁 0 admin email / 0 patient number"
+fi
+
+# ── T53. App Review §2/§2A：onboarding + templates gating & mock 3 色 ──────────────
+echo "[AR-2] T53: onboarding/templates gating..."
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/admin/onboarding")
+check "T53 STAFF /admin/onboarding → 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/admin/templates")
+check "T53 STAFF /admin/templates → 403" "$CODE" "403"
+LOC=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/admin/onboarding")  # 無 cookie：layout redirect /login
+case "$LOC" in *"/login") pass "T53 unauth /admin/onboarding → redirect /login" ;; *) fail "T53 unauth redirect 唔係 /login（actual=[$LOC]）" ;; esac
+CODE=$(curl -s -o /tmp/e2e-onboarding.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/admin/onboarding")
+check "T53 ADMIN /admin/onboarding → 200" "$CODE" "200"
+grep -q 'Embedded Signup' /tmp/e2e-onboarding.html && pass "T53 onboarding 頁內容（Embedded Signup）" || fail "T53 onboarding 頁內容缺"
+CODE=$(curl -s -o /tmp/e2e-templates.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/admin/templates")
+check "T53 ADMIN /admin/templates → 200" "$CODE" "200"
+T53_OK=1
+for ST in APPROVED PENDING REJECTED; do
+  grep -q "$ST" /tmp/e2e-templates.html || { T53_OK=0; echo "    ❌ templates 缺 $ST"; }
+done
+[ "$T53_OK" = 1 ] && pass "T53 mock 3 fixture 三色（APPROVED/PENDING/REJECTED）" || fail "T53 mock 3 色不完整"
+for TM in appointment_reminder new_arrival_intro checkup_promo_january; do
+  grep -q "$TM" /tmp/e2e-templates.html || fail "T53 mock fixture 名缺：$TM"
+done
+
+# ── T54. App Review §2.3：exchange mock flow + 零 log ─────────────────────────
+echo "[AR-3] T54: exchange mock flow..."
+CODE=$(curl -s -o /tmp/e2e-ex-nos.json -w '%{http_code}' -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-nosession-0123456","clinicId":"x"}')
+check "T54 無 session → 401" "$CODE" "401"
+CODE=$(curl -s -o /tmp/e2e-ex-staff.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-staff-012345678","clinicId":"x"}')
+check "T54 STAFF → 403" "$CODE" "403"
+# 每步 fail 回 {step,httpStatus,error}：input / db_update
+CODE=$(curl -s -o /tmp/e2e-ex-noph.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-nophn-012345678","clinicId":"'$TKW_CLINIC_ID'"}')
+check "T54 無 phoneNumberId → 400" "$CODE" "400"
+grep -q '"step":"input"' /tmp/e2e-ex-noph.json && pass "T54 fail 帶 step=input" || fail "T54 fail 無 step 欄位"
+CODE=$(curl -s -o /tmp/e2e-ex-nopin.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-nopin-012345678","clinicId":"'$TKW_CLINIC_ID'","phoneNumberId":"e2e-phn-1"}')
+check "T54 無 pin → 400" "$CODE" "400"
+grep -q '"step":"input"' /tmp/e2e-ex-nopin.json && pass "T54 無 pin step=input" || fail "T54 無 pin step 欄位錯"
+CODE=$(curl -s -o /tmp/e2e-ex-badclinic.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-badcl-012345678","clinicId":"e2e-nonexistent-clinic","phoneNumberId":"e2e-phn-2","pin":"112233"}')
+check "T54 clinic 唔存在 → 404" "$CODE" "404"
+grep -q '"step":"db_update"' /tmp/e2e-ex-badclinic.json && pass "T54 clinic 唔存在 step=db_update" || fail "T54 db_update step 欄位錯"
+
+# 完整 mock flow（happy path）— hermetic：save → mutate → restore + 清 AuditLog
+T54_ORIG_PHN=$(q "SELECT \"waPhoneNumberId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf waPhoneNumberId)
+EX_CODE="e2e-code-${EPOCH}-x1"
+EX_PHN="e2e-phn-${EPOCH}"
+EX_WABA="e2e-waba-${EPOCH}"
+CODE=$(curl -s -o /tmp/e2e-ex-ok.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"'$EX_CODE'","clinicId":"'$TKW_CLINIC_ID'","phoneNumberId":"'$EX_PHN'","wabaId":"'$EX_WABA'","pin":"112233"}')
+check "T54 mock 完整 flow → 200" "$CODE" "200"
+grep -q '"clinicCode":"TKW"' /tmp/e2e-ex-ok.json && pass "T54 response clinicCode=TKW" || fail "T54 response clinicCode 錯"
+grep -qF "$EX_PHN" /tmp/e2e-ex-ok.json && pass "T54 response 帶回 phoneNumberId" || fail "T54 response 缺 phoneNumberId"
+NOW_PHN=$(q "SELECT \"waPhoneNumberId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf waPhoneNumberId)
+check "T54 DB：TKW.waPhoneNumberId 已寫入" "$NOW_PHN" "$EX_PHN"
+AUD_CNT=$(q "SELECT count(*) AS n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
+check "T54 AuditLog ES_ONBOARD = 1" "$AUD_CNT" "1"
+# hermetic 還原：waPhoneNumberId 還原 + 清審計行
+q "UPDATE \"Clinic\" SET \"waPhoneNumberId\"='$T54_ORIG_PHN' WHERE id='$TKW_CLINIC_ID'" >/dev/null 2>&1 || true
+q "DELETE FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" >/dev/null 2>&1 || true
+RESTORED=$(q "SELECT \"waPhoneNumberId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf waPhoneNumberId)
+check "T54 hermetic：waPhoneNumberId 已還原" "$RESTORED" "$T54_ORIG_PHN"
+AUD_AFTER=$(q "SELECT count(*) AS n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
+check "T54 hermetic：ES_ONBOARD 審計已清" "$AUD_AFTER" "0"
+# ★ token/code/PIN 零入 log（grep 自證）
+if grep -qF "$EX_CODE" /tmp/e2e-server.log 2>/dev/null; then fail "T54 PII：auth code 入咗 server log"; else pass "T54 auth code 零入 log"; fi
+if grep -q "mock-oat-" /tmp/e2e-server.log 2>/dev/null; then fail "T54 PII：mock access token 入咗 server log"; else pass "T54 mock access token 零入 log"; fi
+if grep -qF "112233" /tmp/e2e-server.log 2>/dev/null; then fail "T54 PII：PIN 入咗 server log"; else pass "T54 PIN 零入 log"; fi
+if grep -qF "$EX_CODE" /tmp/e2e-ex-ok.json 2>/dev/null; then fail "T54 PII：auth code 入咗 response"; else pass "T54 auth code 唔喺 response"; fi
+
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
