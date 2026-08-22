@@ -7,6 +7,7 @@ import {
   Check,
   CheckCheck,
   Clock,
+  ChevronLeft,
   Lock,
   MessageCircle,
   Paperclip,
@@ -21,6 +22,10 @@ import { bubbleTime, relTime, windowCountdown } from "./time";
 
 interface Props {
   conversation: ConversationItem | null;
+  /** 手機返回列表（md 以下顯示 back 掣） */
+  onBack: () => void;
+  /** 手機撳 header 開詳情 sheet */
+  onOpenDetail: () => void;
   messages: MessageItem[];
   hasMore: boolean;
   loadingOlder: boolean;
@@ -208,7 +213,7 @@ export function ChatPane(p: Props) {
 
   if (!p.conversation) {
     return (
-      <section className="flex-1 min-w-0 flex items-center justify-center bg-canvas">
+      <section className="flex-1 min-w-0 hidden md:flex items-center justify-center bg-canvas">
         <div className="text-center text-t3 text-sm flex flex-col items-center gap-2">
           <MessageCircle size={36} strokeWidth={1.25} />
           <div>揀一個對話開始</div>
@@ -288,22 +293,31 @@ export function ChatPane(p: Props) {
   return (
     <section className="flex-1 min-w-0 flex flex-col min-h-0 bg-canvas">
       {/* header：avatar + contact + 窗口 chip */}
-      <div className="h-[52px] shrink-0 bg-panel border-b border-line flex items-center gap-2.5 px-4">
-        <div className="w-8 h-8 rounded-full bg-brand-soft text-brand-text flex items-center justify-center text-[13px] font-medium shrink-0">
-          {initialOf(c)}
-        </div>
-        <div className="min-w-0">
-          <div className="text-sm font-medium text-t1 truncate">
-            {c.contact?.profileName || "未命名聯絡人"}
+      <div className="h-[52px] shrink-0 bg-panel border-b border-line flex items-center gap-2 md:gap-2.5 px-2 md:px-4">
+        <button onClick={p.onBack} aria-label="返回列表" className="md:hidden p-1 -ml-1 text-brand-text">
+          <ChevronLeft size={20} />
+        </button>
+        <button
+          onClick={p.onOpenDetail}
+          className="flex items-center gap-2.5 min-w-0 text-left lg:pointer-events-none"
+          aria-label="開啟聯絡人詳情"
+        >
+          <div className="w-8 h-8 rounded-full bg-brand-soft text-brand-text flex items-center justify-center text-[13px] font-medium shrink-0">
+            {initialOf(c)}
           </div>
-          {c.contact?.waId && <div className="text-[11px] text-t3">{c.contact.waId}</div>}
-          {assigneeName && (
-            <div className={`text-[10px] inline-flex items-center gap-0.5 ${locked ? "text-warn-text" : "text-t3"}`}>
-              <Lock size={9} />
-              負責人：{c.assigneeId === p.myStaffId ? "你" : assigneeName}
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-t1 truncate">
+              {c.contact?.profileName || "未命名聯絡人"}
             </div>
-          )}
-        </div>
+            {c.contact?.waId && <div className="text-[11px] text-t3">{c.contact.waId}</div>}
+            {assigneeName && (
+              <div className={`text-[10px] inline-flex items-center gap-0.5 ${locked ? "text-warn-text" : "text-t3"}`}>
+                <Lock size={9} />
+                負責人：{c.assigneeId === p.myStaffId ? "你" : assigneeName}
+              </div>
+            )}
+          </div>
+        </button>
         <span
           className={`ml-auto text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${windowChipCls}`}
           title="24 小時客服窗口倒數"
@@ -489,7 +503,7 @@ export function ChatPane(p: Props) {
               <Sparkles size={14} className="text-brand-text" />
               <span className="text-xs font-semibold text-brand-text">AI 草稿</span>
               <span className="text-[10px] text-t3">本地模型 · 你確認先發出</span>
-              <span className="ml-auto flex gap-1.5">
+              <span className="ml-auto flex gap-1.5 max-md:w-full max-md:order-last max-md:mt-2 max-md:[&>button]:flex-1">
                 <button
                   onClick={() => {
                     setDraft(p.pendingDraft!.draftText);

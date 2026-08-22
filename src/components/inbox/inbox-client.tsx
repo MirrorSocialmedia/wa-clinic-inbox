@@ -86,6 +86,11 @@ export function InboxClient({
   const [urgentToast, setUrgentToast] = useState<{ conversationId: string; contactName: string | null } | null>(null);
 
   const [selectedConvId, setSelectedConvId] = useState<string | null>(initialSelectedConvId ?? null);
+  // 手機：detail bottom sheet（<lg 撳 chat header 先開；桌面側欄常駐）— 換對話即關
+  const [detailOpen, setDetailOpen] = useState(false);
+  useEffect(() => {
+    setDetailOpen(false);
+  }, [selectedConvId]);
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -885,8 +890,9 @@ export function InboxClient({
   );
 
   return (
-    <div className="h-full flex min-h-0">
+    <div className="h-full flex min-h-0 relative">
       <ConversationList
+        hidden={selectedConvId !== null}
         userRole={user.role}
         clinics={clinics}
         activeClinicId={activeClinicId}
@@ -915,6 +921,8 @@ export function InboxClient({
       />
 
       <ChatPane
+        onBack={() => setSelectedConvId(null)}
+        onOpenDetail={() => setDetailOpen(true)}
         conversation={selectedConv}
         messages={messages}
         hasMore={hasMore}
@@ -943,6 +951,8 @@ export function InboxClient({
         staff={staff}
         onPatch={patchConversation}
         duty={selectedConv ? duty[selectedConv.clinicId] ?? null : null}
+        mobileOpen={detailOpen}
+        onMobileClose={() => setDetailOpen(false)}
         myStaffId={user.staffId}
         userRole={user.role}
         onAssign={assignConversationApi}
@@ -952,7 +962,7 @@ export function InboxClient({
 
       {/* Phase 2：急症升級 toast（socket urgent:escalation） */}
       {urgentToast && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-danger text-white text-sm px-4 py-2.5 rounded-xl shadow-lg z-50 flex items-center gap-3">
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-danger text-white text-sm px-4 py-2.5 rounded-xl shadow-lg z-50 flex items-center gap-3 w-[calc(100%-2rem)] md:w-auto">
           <span className="font-medium">🚨 急症升級：{urgentToast.contactName ?? "病人"} 主訴緊急不適 — 請即刻處理</span>
           <button
             onClick={() => {
@@ -967,7 +977,7 @@ export function InboxClient({
           >
             查看
           </button>
-          <button onClick={() => setUrgentToast(null)} className="text-red-200 hover:text-white shrink-0">
+          <button onClick={() => setUrgentToast(null)} className="text-white/70 hover:text-white shrink-0">
             ✕
           </button>
         </div>

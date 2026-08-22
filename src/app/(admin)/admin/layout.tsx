@@ -1,5 +1,6 @@
 import { redirect, forbidden } from "next/navigation";
 import { getServerSession } from "@/lib/session-server";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 /**
  * /admin — ADMIN-only 管理區（店/員工/onboarding/templates）。
@@ -45,8 +46,9 @@ export default async function AdminLayout({
               </a>
             </nav>
           </div>
-          <span className="text-xs text-t3">
-            {session.name}（ADMIN）
+          <span className="flex items-center gap-3">
+            <ThemeToggle />
+            <span className="text-xs text-t3">{session.name}（ADMIN）</span>
           </span>
         </div>
       </header>

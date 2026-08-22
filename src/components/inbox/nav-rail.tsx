@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { CalendarDays, LogOut, MessageCircle, Settings } from "lucide-react";
+import { CalendarDays, LogOut, MessageCircle, Settings, Stethoscope } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 /**
@@ -36,13 +36,14 @@ export function NavRail({
   const items: { href: string; label: string; icon: React.ReactNode; adminOnly?: boolean }[] = [
     { href: "/inbox", label: "收件箱", icon: <MessageCircle size={18} /> },
     { href: "/bookings", label: "預約", icon: <CalendarDays size={18} /> },
+    { href: "/schedule", label: "醫生時間表", icon: <Stethoscope size={18} /> },
     { href: "/admin", label: "管理", icon: <Settings size={18} />, adminOnly: true },
   ];
 
   const initials = (name || email || "?").trim().charAt(0).toUpperCase();
 
   return (
-    <nav className="w-[46px] shrink-0 h-full bg-panel border-r border-line flex flex-col items-center py-2.5 gap-1.5">
+    <nav className="w-[46px] shrink-0 h-full bg-panel border-r border-line hidden md:flex flex-col items-center py-2.5 gap-1.5">
       {/* logo */}
       <div className="w-[30px] h-[30px] rounded-lg bg-brand text-white flex items-center justify-center text-[13px] font-semibold mb-2 select-none">
         W

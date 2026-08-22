@@ -6,6 +6,8 @@ import type { ClinicInfo, ConversationItem, ConvStatus } from "./types";
 import { relTime } from "./time";
 
 interface Props {
+  /** 手機：入咗聊天就藏列表（桌面永遠顯示） */
+  hidden?: boolean;
   userRole: "ADMIN" | "STAFF";
   clinics: ClinicInfo[];
   activeClinicId: string | "all";
@@ -89,7 +91,11 @@ export function ConversationList(p: Props) {
   }, [p.conversations, p.searchResults, p.statusFilter]);
 
   return (
-    <aside className="w-80 shrink-0 border-r border-line bg-panel flex flex-col min-h-0">
+    <aside
+      className={`w-full md:w-80 shrink-0 md:border-r border-line bg-panel flex-col min-h-0 ${
+        p.hidden ? "hidden md:flex" : "flex"
+      }`}
+    >
       {/* header：標題 + clinic dropdown（ADMIN only）+ ★ H2 bell badge */}
       <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-2">
         <span className="text-[15px] font-semibold text-t1">收件箱</span>
