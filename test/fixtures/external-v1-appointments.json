@@ -1,0 +1,52 @@
+{
+  "_comment": "mock runtime 數據源 + contract shape anchor（booking-ui MD §1 E — 側欄 Apricot 預約卡）— sha256 錨定喺 scripts/booking-ui-contract.ts。phoneHash key 同 external-v1-patient-lookup.json 一致（anchor key = 0123456789abcdef…，contract test 固定 test key）。bookingStatus：0=confirmed / 102=pending（upcoming 過濾）/ -7=cancelled（側欄唔顯示）。e2e 實際數據用 .dev/workforce-mock-patients.json runtime 檔（唔入 git）。",
+  "byPhoneHash": {
+    "0016ac6d13b017afee7eea85bfe9e987cc6e73fe921abb9bf99bd9a5a683b2c1": [
+      {
+        "apricotApptId": "mock-appt-fix-0001",
+        "clinicCode": "TKW",
+        "providerApricotId": "mock-pract-tkw-1",
+        "providerName": "Lee 醫生（mock）",
+        "date": "2026-09-02",
+        "start": "10:00",
+        "end": "10:30",
+        "bookingStatus": 0,
+        "patientApricotId": "mock-pat-0001",
+        "patientCode": "MOCKP001",
+        "patientName": "馮少三（mock 舊客）",
+        "visitReasons": ["0021"],
+        "remarks": null
+      },
+      {
+        "apricotApptId": "mock-appt-fix-0002",
+        "clinicCode": "TKW",
+        "providerApricotId": "mock-pract-tkw-2",
+        "providerName": "Wong 醫生（mock）",
+        "date": "2026-09-15",
+        "start": "14:00",
+        "end": "14:30",
+        "bookingStatus": 102,
+        "patientApricotId": "mock-pat-0001",
+        "patientCode": "MOCKP001",
+        "patientName": "馮少三（mock 舊客）",
+        "visitReasons": ["0010"],
+        "remarks": "WhatsApp booking"
+      },
+      {
+        "apricotApptId": "mock-appt-fix-0003",
+        "clinicCode": "TKW",
+        "providerApricotId": "mock-pract-tkw-1",
+        "providerName": "Lee 醫生（mock）",
+        "date": "2026-08-10",
+        "start": "11:00",
+        "end": "11:30",
+        "bookingStatus": -7,
+        "patientApricotId": "mock-pat-0001",
+        "patientCode": "MOCKP001",
+        "patientName": "馮少三（mock 舊客）",
+        "visitReasons": ["0021"],
+        "remarks": null
+      }
+    ]
+  }
+}

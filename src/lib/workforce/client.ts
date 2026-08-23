@@ -6,18 +6,29 @@
  *   GET {WORKFORCE_API_URL}/api/external/v1/duty-roster?clinicCode=&date=
  *   Header: x-api-key（gen-external-key 出嗰條）
  *
+ * 寫入 + patient-context（booking-ui MD §1 — 2026-08-23）：
+ *   POST /api/external/v1/bookings（代落單；冪等 idempotencyKey）
+ *   PUT  /api/external/v1/bookings/{id}/status?status=102|-7&date=&clinicCode=
+ *   PUT  /api/external/v1/bookings/{id}/remove?date=&clinicCode=
+ *   POST /api/external/v1/bookings/{id}/reschedule（原子 102+新單）
+ *   GET  /api/external/v1/dictionaries?kind=VISIT_REASON|BOOKING_TYPE（1 小時 memory cache）
+ *   GET  /api/external/v1/patient-lookup?phoneHash=
+ *   GET  /api/external/v1/appointments?phoneHash=&from=&to=
+ *
  * zod parse = contract 執行點：response 過唔到 schema = 當 API fail（§3 降級鏈接住）。
  * z.object 預設 strip 唔識欄位 → 病人欄位（medicalHistory 等）物理上入唔到下游。
  *
  * ★ 鐵律：
- * - log 只 path + status（零 body、零 query 值以外嘅敏感位）— WORKFORCE_API_KEY 永遠唔入 log
+ * - log 只 path + status（零 body）— WORKFORCE_API_KEY 永遠唔入 log；error 分類 code 只入
+ *   WorkforceApiError.code（供路由分支），一樣唔入 log
  * - 3s timeout（同機 call，已係天荒地老）
  * - WORKFORCE_MOCK=1 → mock（§4：fixture 決定性，E2E/開發用）
  *
  * env：WORKFORCE_API_URL / WORKFORCE_API_KEY / WORKFORCE_MOCK
+ *      BOOKING_DEFAULT_VISIT_REASON_CODE（預設 visit reason；空 = 無預設，UI/staff 必揀）
  */
 import { z } from "zod";
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import log from "@/lib/log";
 
@@ -40,12 +51,96 @@ const DutySchema = z.object({ v: z.literal(1), staff: z.array(z.object({
   staffName: z.string(), role: z.string(), shiftStart: z.string(), shiftEnd: z.string() })) });
 export type WorkforceDuty = z.infer<typeof DutySchema>;
 
+// ── 寫入 + patient-context contract（booking-ui MD §1 — 同 clinic-workforce 源碼一字一樣）──
+// ★ export：contract 執行點 — scripts/booking-ui-contract.ts 對佢斷言（fixture anchor + parse + PII strip）。
+
+export const BookingCreateResponse = z.object({
+  v: z.literal(1),
+  apricotApptId: z.string(),
+  bookingStatus: z.number().int(),
+  patientApricotId: z.string().nullable(),
+  patientCode: z.string().nullable(),
+  dayRefreshed: z.boolean(),
+  syncedAt: z.string().nullable(),
+});
+export type BookingCreateResult = z.infer<typeof BookingCreateResponse>;
+
+export const BookingStatusResponse = z.object({
+  v: z.literal(1),
+  bookingStatus: z.number().int(),
+  dayRefreshed: z.boolean(),
+  syncedAt: z.string().nullable(),
+});
+export type BookingStatusResult = z.infer<typeof BookingStatusResponse>;
+
+export const BookingRemoveResponse = z.object({
+  v: z.literal(1),
+  removed: z.literal(true),
+  dayRefreshed: z.boolean(),
+  syncedAt: z.string().nullable(),
+});
+export type BookingRemoveResult = z.infer<typeof BookingRemoveResponse>;
+
+export const BookingRescheduleResponse = z.object({
+  v: z.literal(1),
+  oldApptId: z.string(),
+  newApptId: z.string(),
+  dayRefreshed: z.boolean(),
+  syncedAt: z.string().nullable(),
+});
+export type BookingRescheduleResult = z.infer<typeof BookingRescheduleResponse>;
+
+const DictionaryItemSchema = z.object({ apricotId: z.string(), code: z.string(), des: z.string() });
+export const DictionariesResponse = z.object({
+  v: z.literal(1),
+  kind: z.enum(["VISIT_REASON", "BOOKING_TYPE"]),
+  items: z.array(DictionaryItemSchema),
+});
+export type DictionariesResult = z.infer<typeof DictionariesResponse>;
+
+const LastVisitSchema = z.object({ date: z.string(), providerName: z.string(), visitReasons: z.array(z.string()) });
+export const PatientLookupResponse = z.object({
+  v: z.literal(1),
+  matches: z.array(z.object({
+    patientApricotId: z.string(),
+    patientCode: z.string(),
+    patientName: z.string(),
+    lastVisit: LastVisitSchema.nullable(),
+  })),
+});
+export type PatientLookupResult = z.infer<typeof PatientLookupResponse>;
+
+export const AppointmentsResponse = z.object({
+  v: z.literal(1),
+  syncedAt: z.string().nullable(),
+  stale: z.boolean(),
+  appointments: z.array(z.object({
+    apricotApptId: z.string(),
+    clinicCode: z.string(),
+    providerApricotId: z.string(),
+    providerName: z.string(),
+    date: z.string(),
+    start: z.string(),
+    end: z.string(),
+    bookingStatus: z.number().int(),
+    patientApricotId: z.string(),
+    patientCode: z.string(),
+    patientName: z.string(),
+    visitReasons: z.array(z.string()),
+    remarks: z.string().nullable(),
+  })),
+});
+export type WorkforceAppointment = z.infer<typeof AppointmentsResponse>["appointments"][number];
+export type AppointmentsResult = z.infer<typeof AppointmentsResponse>;
+
 // ── 錯誤類型（log 只 path+status）────────────────────────────────────────
 
 export class WorkforceApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly path: string,
+    /** workforce 錯誤碼（SLOT_TAKEN / NEW_PATIENT_DISABLED / WRITE_DISABLED / …）— 只供路由分支，唔入 log */
+    public readonly code?: string,
   ) {
     super(`workforce API ${status} ${path}`);
     this.name = "WorkforceApiError";
@@ -56,15 +151,23 @@ const WORKFORCE_TIMEOUT_MS = 3000;
 
 // ── HTTP（real mode）─────────────────────────────────────────────────────
 
-async function wfGet(path: string, params: Record<string, string>) {
-  if (process.env.WORKFORCE_MOCK === "1") return mockFixture(path, params); // §4
+/**
+ * real mode fetch：log 只 path + status（零 body）。
+ * 4xx/5xx 時只 parse error body 嘅 `code` 欄（分類標籤，供路由分支）— body 本身唔入 log、唔洩傳。
+ */
+async function wfFetch(method: "GET" | "POST" | "PUT", path: string, params: Record<string, string>, body?: unknown): Promise<unknown> {
   const url = new URL(path, process.env.WORKFORCE_API_URL); // http://127.0.0.1:<port>
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
   let res: Response;
   try {
     res = await fetch(url, {
-      headers: { "x-api-key": process.env.WORKFORCE_API_KEY ?? "" },
+      method,
+      headers: {
+        "x-api-key": process.env.WORKFORCE_API_KEY ?? "",
+        "content-type": "application/json",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(WORKFORCE_TIMEOUT_MS),
     });
   } catch (err) {
@@ -74,12 +177,32 @@ async function wfGet(path: string, params: Record<string, string>) {
   }
   if (!res.ok) {
     // ★ log 只 path + status（零 body — 401 都唔洩 response 內容）
+    let code: string | undefined;
+    try {
+      const j = (await res.json()) as { code?: unknown };
+      if (j && typeof j.code === "string") code = j.code; // 只取分類標籤
+    } catch {
+      /* non-JSON error body（reverse proxy HTML 等）— path+status 已夠 */
+    }
     log.warn({ path, status: res.status }, "workforce: non-2xx");
-    throw new WorkforceApiError(res.status, path);
+    throw new WorkforceApiError(res.status, path, code);
   }
   log.debug({ path, status: res.status }, "workforce: fetch ok");
   return res.json();
 }
+
+async function wfGet(path: string, params: Record<string, string>) {
+  if (process.env.WORKFORCE_MOCK === "1") return mockFixture(path, params); // §4
+  return wfFetch("GET", path, params);
+}
+
+async function wfSend(method: "POST" | "PUT", path: string, params: Record<string, string>, body?: unknown) {
+  if (process.env.WORKFORCE_MOCK === "1") return mockFixture(path, params, method, body); // §4
+  return wfFetch(method, path, params, body);
+}
+
+/** test-only 出入口：mock 模式下直接打 workforce 端驗證（e.g. status 白名單）— 本 repo 測試用 */
+export const wfSendForTest = wfSend;
 
 // ── 公開 API ─────────────────────────────────────────────────────────────
 
@@ -101,6 +224,143 @@ export async function fetchDutyRoster(clinicCode: string, date: string): Promise
   return DutySchema.parse(await wfGet("/api/external/v1/duty-roster", { clinicCode, date }));
 }
 
+// ── 寫入 + patient-context API（booking-ui MD §1 — contract 同 clinic-workforce 源碼一字一樣）──
+
+/**
+ * 代落單（staff 揾住舊客 → POST /v1/bookings）。
+ * patient 傳 { patientApricotId }（舊客）— 第一期 UI 唔會傳 { name, phone }（新客）；
+ * 409 SLOT_TAKEN / 422 NEW_PATIENT_DISABLED / 503 WRITE_DISABLED 由路由層映射（MD §3）。
+ */
+export async function createBooking(p: {
+  idempotencyKey: string;
+  clinicCode: string;
+  providerApricotId: string;
+  date: string; // YYYY-MM-DD（clinic 時區）
+  start: string; // HH:mm
+  durationMin: number;
+  visitReasonId: string;
+  remarks?: string;
+  patient: { patientApricotId: string } | { name: string; phone: string };
+}): Promise<BookingCreateResult> {
+  const body = {
+    v: 1 as const,
+    idempotencyKey: p.idempotencyKey,
+    clinicCode: p.clinicCode,
+    providerApricotId: p.providerApricotId,
+    date: p.date,
+    start: p.start,
+    durationMin: p.durationMin,
+    visitReasonId: p.visitReasonId,
+    ...(p.remarks ? { remarks: p.remarks } : {}),
+    patient: p.patient,
+  };
+  const raw = await wfSend("POST", "/api/external/v1/bookings", {}, body);
+  return BookingCreateResponse.parse(raw);
+}
+
+/** 改狀態（白名單 102 / -7 — 其他 workforce 400） */
+export async function updateBookingStatus(
+  apricotApptId: string,
+  status: 102 | -7,
+  p: { clinicCode: string; date: string }
+): Promise<BookingStatusResult> {
+  const raw = await wfSend(
+    "PUT",
+    `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/status`,
+    { status: String(status), date: p.date, clinicCode: p.clinicCode }
+  );
+  return BookingStatusResponse.parse(raw);
+}
+
+/** 刪 appointment（rollback 路徑 — 撤銷代落單） */
+export async function removeBooking(
+  apricotApptId: string,
+  p: { clinicCode: string; date: string }
+): Promise<BookingRemoveResult> {
+  const raw = await wfSend(
+    "PUT",
+    `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/remove`,
+    { date: p.date, clinicCode: p.clinicCode }
+  );
+  return BookingRemoveResponse.parse(raw);
+}
+
+/** 改期（workforce 原子 102 舊單 + 新落單；409 = 新時段撞） */
+export async function rescheduleBooking(
+  apricotApptId: string,
+  p: {
+    clinicCode: string;
+    providerApricotId: string;
+    date: string;
+    start: string;
+    durationMin: number;
+    oldDate: string;
+    patient: { patientApricotId: string } | { name: string; phone: string };
+    visitReasonId?: string;
+    remarks?: string;
+  }
+): Promise<BookingRescheduleResult> {
+  const body = {
+    v: 1 as const,
+    clinicCode: p.clinicCode,
+    providerApricotId: p.providerApricotId,
+    date: p.date,
+    start: p.start,
+    durationMin: p.durationMin,
+    oldDate: p.oldDate,
+    patient: p.patient,
+    ...(p.visitReasonId ? { visitReasonId: p.visitReasonId } : {}),
+    ...(p.remarks ? { remarks: p.remarks } : {}),
+  };
+  const raw = await wfSend("POST", `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/reschedule`, {}, body);
+  return BookingRescheduleResponse.parse(raw);
+}
+
+/**
+ * Dictionaries（VISIT_REASON / BOOKING_TYPE）— 1 小時 memory cache（MD §1）。
+ * cache 跨 request 存活（同 process）；clearDictionariesCache 供測試。
+ */
+const DICT_CACHE_MS = 60 * 60 * 1000;
+let dictCache: { at: number; byKind: Partial<Record<"VISIT_REASON" | "BOOKING_TYPE", DictionariesResult>> } | null = null;
+
+export function clearDictionariesCache(): void {
+  dictCache = null;
+}
+
+export async function fetchDictionaries(kind: "VISIT_REASON" | "BOOKING_TYPE"): Promise<DictionariesResult> {
+  if (dictCache && Date.now() - dictCache.at < DICT_CACHE_MS && dictCache.byKind[kind]) {
+    return dictCache.byKind[kind] as DictionariesResult;
+  }
+  const result = DictionariesResponse.parse(await wfGet("/api/external/v1/dictionaries", { kind }));
+  dictCache = { at: Date.now(), byKind: { ...(dictCache?.byKind ?? {}), [kind]: result } };
+  return result;
+}
+
+/** 舊客匹配（phoneHash — 由 wa-inbox 用 PHONE_HASH_KEY 算好先傳；raw phone 永遠唔出 wa-inbox） */
+export async function lookupPatient(phoneHash: string): Promise<PatientLookupResult> {
+  return PatientLookupResponse.parse(await wfGet("/api/external/v1/patient-lookup", { phoneHash }));
+}
+
+/**
+ * 病人 appointments（patient-context 側欄 — upcoming 過濾喺 wa-inbox 做）。
+ * from/to = YYYY-MM-DD（clinic 時區）；workforce 限制 ≤38 天窗口（超出 400）。
+ */
+export async function fetchAppointments(phoneHash: string, from: string, to: string): Promise<AppointmentsResult> {
+  return AppointmentsResponse.parse(
+    await wfGet("/api/external/v1/appointments", { phoneHash, from, to })
+  );
+}
+
+/**
+ * 預設 visit reason（env BOOKING_DEFAULT_VISIT_REASON_CODE）。
+ * TODO（cwi-bkui-20260823-a1）：0010 定 0021 — 老細上線前拍板後寫入 .env（現留空 = 無預設）。
+ * 空 = null（UI 唔設 preselect；create route 两边都冇 → 400 提示）。
+ */
+export function defaultVisitReasonCode(): string | null {
+  const v = (process.env.BOOKING_DEFAULT_VISIT_REASON_CODE ?? "").trim();
+  return v.length > 0 ? v : null;
+}
+
 // ── Mock（§4 — WORKFORCE_MOCK=1；決定性，E2E 斷言用）────────────────────
 //
 // 設計：
@@ -113,12 +373,30 @@ export async function fetchDutyRoster(clinicCode: string, date: string): Promise
 //   .dev/workforce-mock-stale.json  { clinicCode }        → 該店 mock 回 stale=true + 舊 syncedAt
 //   .dev/workforce-mock-fill.json   [ {clinicCode, providerApricotId, date, startTime} ]
 //                                       → 指定 slot 標滿（測「flow 中途變滿」precheck 路徑）
-// - env 旗：WORKFORCE_MOCK_FAIL=1 / WORKFORCE_MOCK_STALE=1（全店，手動測用）
+//   寫入端點旗（booking-ui MD §1）：
+//   .dev/workforce-mock-write-disabled.json  { clinicCode? }  → 該店（或全店）POST/PUT → 503 WRITE_DISABLED
+//   .dev/workforce-mock-newpatient.json      { on: true }     → 允許 {name,phone} 新客 body（Stage 1 預設 off → 422）
+//   .dev/workforce-mock-slot-taken.json      [ {clinicCode, providerApricotId, date, start} ]
+//                                          → create/reschedule 撞該 slot → 409 SLOT_TAKEN
+//   病人數據（patient-lookup / appointments 端點）：
+//   .dev/workforce-mock-patients.json  { byPhoneHash: { <64hex>: { matches?, appointments? } } }
+//                                          → runtime 覆蓋 committed fixture（e2e 寫入；唔入 git）
+// - env 旗：WORKFORCE_MOCK_FAIL=1 / WORKFORCE_MOCK_STALE=1 / WORKFORCE_MOCK_WRITE_DISABLED=1 /
+//   WORKFORCE_MOCK_NEW_PATIENT_ON=1（全店，手動測用）
+// - 決定性：mock-appt id = mock-appt-<djb2(key)>（冪等重放同 id）；dictionaries/lookup/appointments
+//   = committed fixture（test/fixtures/external-v1-*.json，sha256 錨定）＋ runtime 檔 merge
 
 export const MOCK_FAIL_FLAG = ".dev/workforce-mock-fail.json";
 export const MOCK_STALE_FLAG = ".dev/workforce-mock-stale.json";
 export const MOCK_FILL_FLAG = ".dev/workforce-mock-fill.json";
+export const MOCK_WRITE_DISABLED_FLAG = ".dev/workforce-mock-write-disabled.json";
+export const MOCK_NEW_PATIENT_FLAG = ".dev/workforce-mock-newpatient.json";
+export const MOCK_SLOT_TAKEN_FLAG = ".dev/workforce-mock-slot-taken.json";
+export const MOCK_PATIENTS_FILE = ".dev/workforce-mock-patients.json";
 const FIXTURE_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-availability.json");
+const FIXTURE_DICTIONARIES_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-dictionaries.json");
+const FIXTURE_PATIENT_LOOKUP_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-patient-lookup.json");
+const FIXTURE_APPOINTMENTS_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-appointments.json");
 
 function djb2(s: string): number {
   let h = 5381;
@@ -156,7 +434,31 @@ function readFillFlags(): { clinicCode: string; providerApricotId: string; date:
   }
 }
 
-function mockFixture(path: string, params: Record<string, string>): unknown {
+function mockFixture(path: string, params: Record<string, string>, method?: "POST" | "PUT", body?: unknown): unknown {
+  try {
+    const out = mockFixtureImpl(path, params, method, body);
+    mockCallLog(method ?? "GET", path, 200);
+    return out;
+  } catch (e) {
+    mockCallLog(method ?? "GET", path, e instanceof WorkforceApiError ? e.status : 500);
+    throw e;
+  }
+}
+
+/** e2e 斷言用：mock 調用記錄（只 method+path+status — 零 body / 零 PII；gitignored） */
+export const MOCK_CALLS_LOG = ".dev/workforce-mock-calls.jsonl";
+function mockCallLog(method: string, reqPath: string, status: number): void {
+  try {
+    appendFileSync(
+      path.resolve(process.cwd(), MOCK_CALLS_LOG),
+      JSON.stringify({ method, path: reqPath.split("?")[0], status, ts: new Date().toISOString() }) + "\n"
+    );
+  } catch {
+    /* best-effort — 寫唔到 e2e 斷言會 red */
+  }
+}
+
+function mockFixtureImpl(path: string, params: Record<string, string>, method?: "POST" | "PUT", body?: unknown): unknown {
   // 全店 fail 旗（env）
   if (process.env.WORKFORCE_MOCK_FAIL === "1") {
     log.info({ path, mock: true }, "workforce MOCK: fail（WORKFORCE_MOCK_FAIL=1）");
@@ -185,7 +487,246 @@ function mockFixture(path: string, params: Record<string, string>): unknown {
     };
   }
 
+  // ── 寫入 + patient-context 端點（booking-ui MD §1 — mock 決定性，E2E 斷言用）──
+
+  if (path === "/api/external/v1/bookings" && method === "POST") {
+    return mockCreateBooking(body);
+  }
+
+  if (path === "/api/external/v1/dictionaries") {
+    return mockDictionaries(params);
+  }
+
+  if (path === "/api/external/v1/patient-lookup") {
+    return mockPatientLookup(params);
+  }
+
+  if (path === "/api/external/v1/appointments") {
+    return mockAppointments(params);
+  }
+
+  // /bookings/{id}/status | /remove | /reschedule
+  const m = path.match(/^\/api\/external\/v1\/bookings\/([^/]+)\/(status|remove|reschedule)$/);
+  if (m) {
+    const id = decodeURIComponent(m[1]);
+    const op = m[2];
+    if (op === "status" && method === "PUT") return mockBookingStatus(id, params);
+    if (op === "remove" && method === "PUT") return mockBookingRemove(id, params);
+    if (op === "reschedule" && method === "POST") return mockReschedule(id, body);
+  }
+
   throw new WorkforceApiError(404, path);
+}
+
+// ── mock 寫入端點 helper（決定性；log 同 real mode 一樣只 path+status）──
+
+type MockBookingBody = {
+  v?: number;
+  idempotencyKey?: string;
+  clinicCode?: string;
+  providerApricotId?: string;
+  date?: string;
+  start?: string;
+  durationMin?: number;
+  visitReasonId?: string;
+  remarks?: string;
+  oldDate?: string;
+  patient?: { patientApricotId?: string; name?: string; phone?: string };
+};
+
+function mockWriteDisabled(path: string, clinicCode: string | undefined): void {
+  const hit =
+    process.env.WORKFORCE_MOCK_WRITE_DISABLED === "1" ||
+    !!readFlag<{ clinicCode?: string }>(MOCK_WRITE_DISABLED_FLAG, (f) => !f.clinicCode || f.clinicCode === clinicCode);
+  if (hit) {
+    log.info({ path, mock: true, status: 503 }, "workforce MOCK: WRITE_DISABLED");
+    throw new WorkforceApiError(503, path, "WRITE_DISABLED");
+  }
+}
+
+function mockSlotTaken(path: string, b: MockBookingBody): void {
+  const flags = readSlotTakenFlags();
+  const hit = flags.some(
+    (f) =>
+      f.clinicCode === b.clinicCode &&
+      f.providerApricotId === b.providerApricotId &&
+      f.date === b.date &&
+      f.start === b.start
+  );
+  if (hit) {
+    log.info({ path, mock: true, status: 409 }, "workforce MOCK: SLOT_TAKEN");
+    throw new WorkforceApiError(409, path, "SLOT_TAKEN");
+  }
+}
+
+function mockNewPatientCheck(path: string, b: MockBookingBody): void {
+  const isNewPatient = !!b.patient && typeof b.patient.name === "string" && typeof b.patient.phone === "string";
+  if (!isNewPatient) return;
+  const on = process.env.WORKFORCE_MOCK_NEW_PATIENT_ON === "1" || !!readFlag<{ on?: boolean }>(MOCK_NEW_PATIENT_FLAG, (f) => f.on === true);
+  if (!on) {
+    log.info({ path, mock: true, status: 422 }, "workforce MOCK: NEW_PATIENT_DISABLED");
+    throw new WorkforceApiError(422, path, "NEW_PATIENT_DISABLED");
+  }
+}
+
+const MOCK_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MOCK_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function mockCreateBooking(bodyIn: unknown): unknown {
+  const path = "/api/external/v1/bookings";
+  const b = (bodyIn ?? {}) as MockBookingBody;
+  if (b.v !== 1 || typeof b.idempotencyKey !== "string" || b.idempotencyKey.length < 8) {
+    throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  }
+  if (!b.clinicCode || !b.providerApricotId || !b.visitReasonId) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  if (typeof b.date !== "string" || !MOCK_DATE_RE.test(b.date) || typeof b.start !== "string" || !MOCK_TIME_RE.test(b.start)) {
+    throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  }
+  if (typeof b.durationMin !== "number" || b.durationMin <= 0) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  if (!b.patient) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+
+  mockWriteDisabled(path, b.clinicCode);
+  mockNewPatientCheck(path, b);
+  mockSlotTaken(path, b);
+
+  // ★ 冪等：同 idempotencyKey → 同 apricotApptId（決定性，重放可斷言）
+  const apricotApptId = `mock-appt-${djb2(b.idempotencyKey).toString(16).padStart(8, "0")}`;
+  const patientApricotId =
+    typeof b.patient.patientApricotId === "string"
+      ? b.patient.patientApricotId
+      : `mock-pat-${djb2(`${b.patient?.name}|${b.patient?.phone}`).toString(16).padStart(8, "0")}`;
+  log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking created");
+  return {
+    v: 1,
+    apricotApptId,
+    bookingStatus: 0,
+    patientApricotId,
+    patientCode: `MOCK${djb2(patientApricotId).toString(16).padStart(6, "0").slice(-6).toUpperCase()}`,
+    dayRefreshed: true,
+    syncedAt: new Date().toISOString(),
+  };
+}
+
+function mockBookingStatus(id: string, params: Record<string, string>): unknown {
+  const path = `/api/external/v1/bookings/${encodeURIComponent(id)}/status`;
+  const status = Number(params.status ?? "");
+  if (!Number.isInteger(status) || (status !== 102 && status !== -7)) {
+    throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  }
+  if (!params.date || !params.clinicCode) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  mockWriteDisabled(path, params.clinicCode);
+  log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking status updated");
+  return { v: 1, bookingStatus: status, dayRefreshed: true, syncedAt: new Date().toISOString() };
+}
+
+function mockBookingRemove(id: string, params: Record<string, string>): unknown {
+  const path = `/api/external/v1/bookings/${encodeURIComponent(id)}/remove`;
+  if (!params.date || !params.clinicCode) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  mockWriteDisabled(path, params.clinicCode);
+  log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking removed");
+  return { v: 1, removed: true, dayRefreshed: true, syncedAt: new Date().toISOString() };
+}
+
+function mockReschedule(id: string, bodyIn: unknown): unknown {
+  const path = `/api/external/v1/bookings/${encodeURIComponent(id)}/reschedule`;
+  const b = (bodyIn ?? {}) as MockBookingBody;
+  if (b.v !== 1 || !b.clinicCode || !b.providerApricotId || !b.oldDate) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  if (typeof b.date !== "string" || !MOCK_DATE_RE.test(b.date) || typeof b.start !== "string" || !MOCK_TIME_RE.test(b.start)) {
+    throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  }
+  if (typeof b.durationMin !== "number" || b.durationMin <= 0) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  if (!b.patient) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+
+  mockWriteDisabled(path, b.clinicCode);
+  mockNewPatientCheck(path, b);
+  mockSlotTaken(path, b);
+
+  const newApptId = `mock-appt-${djb2(`resched|${id}|${b.date}|${b.start}`).toString(16).padStart(8, "0")}`;
+  log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking rescheduled");
+  return { v: 1, oldApptId: id, newApptId, dayRefreshed: true, syncedAt: new Date().toISOString() };
+}
+
+function mockDictionaries(params: Record<string, string>): unknown {
+  const path = "/api/external/v1/dictionaries";
+  const kind = params.kind;
+  if (kind !== "VISIT_REASON" && kind !== "BOOKING_TYPE") throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  const data = readFixtureRecord<{ VISIT_REASON?: unknown[]; BOOKING_TYPE?: unknown[] }>(FIXTURE_DICTIONARIES_PATH);
+  const items = data?.[kind];
+  if (!Array.isArray(items)) throw new WorkforceApiError(500, path);
+  log.info({ path, mock: true, status: 200 }, "workforce MOCK: dictionaries");
+  return { v: 1, kind, items };
+}
+
+type MockPatientData = {
+  matches?: Record<string, unknown>[];
+  appointments?: Record<string, unknown>[];
+};
+
+function mockPatientData(phoneHash: string): MockPatientData | null {
+  const fixtureLookup = readFixtureRecord<{ byPhoneHash: Record<string, unknown> }>(FIXTURE_PATIENT_LOOKUP_PATH);
+  const fixtureAppts = readFixtureRecord<{ byPhoneHash: Record<string, unknown> }>(FIXTURE_APPOINTMENTS_PATH);
+  const runtime = readFixtureRecord<{ byPhoneHash: Record<string, MockPatientData> }>(MOCK_PATIENTS_FILE);
+  const r = runtime?.byPhoneHash?.[phoneHash];
+  if (!r) {
+    const matches = fixtureLookup?.byPhoneHash?.[phoneHash];
+    const appointments = fixtureAppts?.byPhoneHash?.[phoneHash];
+    if (!matches && !appointments) return null;
+    return { matches: (matches as Record<string, unknown>[]) ?? [], appointments: (appointments as Record<string, unknown>[]) ?? [] };
+  }
+  return r;
+}
+
+function mockPatientLookup(params: Record<string, string>): unknown {
+  const path = "/api/external/v1/patient-lookup";
+  const phoneHash = params.phoneHash ?? "";
+  if (!/^[a-f0-9]{64}$/.test(phoneHash)) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  const data = mockPatientData(phoneHash);
+  log.info({ path, mock: true, status: 200 }, "workforce MOCK: patient-lookup");
+  return { v: 1, matches: data?.matches ?? [] };
+}
+
+function mockAppointments(params: Record<string, string>): unknown {
+  const path = "/api/external/v1/appointments";
+  const phoneHash = params.phoneHash ?? "";
+  const from = params.from ?? "";
+  const to = params.to ?? "";
+  if (!/^[a-f0-9]{64}$/.test(phoneHash) || !MOCK_DATE_RE.test(from) || !MOCK_DATE_RE.test(to)) {
+    throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  }
+  const data = mockPatientData(phoneHash);
+  const all = (data?.appointments ?? []) as Record<string, unknown>[];
+  const appointments = all.filter((a) => {
+    const d = typeof a.date === "string" ? a.date : "";
+    return d.length === 10 && d >= from && d <= to;
+  });
+  log.info({ path, mock: true, status: 200 }, "workforce MOCK: appointments");
+  return { v: 1, syncedAt: new Date().toISOString(), stale: false, appointments };
+}
+
+function readSlotTakenFlags(): { clinicCode: string; providerApricotId: string; date: string; start: string }[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path.resolve(process.cwd(), MOCK_SLOT_TAKEN_FLAG), "utf8"));
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    return arr.filter(
+      (f) =>
+        f &&
+        typeof f.clinicCode === "string" &&
+        typeof f.providerApricotId === "string" &&
+        typeof f.date === "string" &&
+        typeof f.start === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function readFixtureRecord<S>(abs: string): S | null {
+  try {
+    return JSON.parse(readFileSync(abs, "utf8")) as S;
+  } catch {
+    log.warn({ fixture: path.basename(abs) }, "workforce MOCK: fixture missing → empty");
+    return null;
+  }
 }
 
 /** 決定性 mock availability（shape = contract；rules 沿用舊 mock hash 規則）。

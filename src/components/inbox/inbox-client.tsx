@@ -86,6 +86,8 @@ export function InboxClient({
   const [urgentToast, setUrgentToast] = useState<{ conversationId: string; contactName: string | null } | null>(null);
 
   const [selectedConvId, setSelectedConvId] = useState<string | null>(initialSelectedConvId ?? null);
+  // ★ booking-ui（C）：側欄 patient-context 重載訊號（socket booking:changed / 側欄寫入後 bump）
+  const [ctxRefreshKey, setCtxRefreshKey] = useState(0);
   // 手機：detail bottom sheet（<lg 撳 chat header 先開；桌面側欄常駐）— 換對話即關
   const [detailOpen, setDetailOpen] = useState(false);
   useEffect(() => {
@@ -135,6 +137,7 @@ export function InboxClient({
           status: e.conversation.status,
           assigneeId: existing?.assigneeId ?? null,
           assigneeName: existing?.assigneeName ?? null,
+          pinnedPatient: existing?.pinnedPatient ?? null,
           unreadCount: isOut ? (existing?.unreadCount ?? 0) : e.conversation.unreadCount,
           lastInboundAt: isOut
             ? existing?.lastInboundAt ?? null
@@ -246,6 +249,13 @@ export function InboxClient({
       setConversations((prev) =>
         prev.map((c) => (c.id === e.conversationId ? { ...c, pendingBooking: e.booking } : c))
       );
+    });
+
+    // ★ booking-ui（C）：代落單/rollback/改期/取消 寫入後 → 列表重拉（對話卡狀態）+ 側欄 patient-context 重拉
+    // payload（conversationId/clinicId/date/kind）保留喺 contract（types.ts BookingChangedEvent）；重拉係全列表，故唔 binding
+    socket.on("booking:changed", () => {
+      void fetchConversations(activeClinicRef.current);
+      setCtxRefreshKey((k) => k + 1);
     });
 
     // 斷線重連 → backlog 補漏
@@ -851,6 +861,7 @@ export function InboxClient({
             clinicId: hit.clinicId,
             contactId: hit.id,
             status: "OPEN",
+            pinnedPatient: null,
             assigneeId: null,
             assigneeName: null,
             unreadCount: 0,
@@ -944,6 +955,10 @@ export function InboxClient({
         staff={staff}
         readReceipts={receipts}
         onNoteRead={markNoteRead}
+        onBookingActionDone={() => {
+          void fetchConversations(activeClinicRef.current);
+          setCtxRefreshKey((k) => k + 1);
+        }}
       />
 
       <DetailPane
@@ -958,6 +973,11 @@ export function InboxClient({
         onAssign={assignConversationApi}
         assignBusy={assignBusy}
         assignError={assignError}
+        onBookingUiChanged={() => {
+          void fetchConversations(activeClinicRef.current);
+          setCtxRefreshKey((k) => k + 1);
+        }}
+        ctxRefreshKey={ctxRefreshKey}
       />
 
       {/* Phase 2：急症升級 toast（socket urgent:escalation） */}

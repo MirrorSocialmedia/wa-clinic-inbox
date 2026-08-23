@@ -60,6 +60,11 @@ function addDays(dateStr: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** HK 日界 +/− N 日（booking-ui patient-context 窗口用：今日-7 → 今日+30 = 38 日 ⊆ 契約 ≤38 日上限） */
+export function hkDateOffset(days: number, now: Date = new Date()): string {
+  return addDays(hkTodayStr(now), days);
+}
+
 /** 窗口：聽日 ~ +30 日（HK 日界 — 同 Flow DatePicker min=聽日 max=+30 對齊；30 日 ⊆ 契約 31 日上限） */
 export function syncWindow(now: Date = new Date()): { start: string; end: string; dates: string[] } {
   const today = hkTodayStr(now);

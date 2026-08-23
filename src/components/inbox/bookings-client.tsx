@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { io } from "socket.io-client";
 import Link from "next/link";
 
 /**
@@ -81,6 +82,18 @@ export function BookingsClient({ user }: { user: UserCtx }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // ★ booking-ui（C）：代落單/rollback/改期/取消 寫入後 → 隊列重拉（room 由 hub 按 session 自動 join；payload 全列表重拉，唔 binding）
+  useEffect(() => {
+    const socket = io({ withCredentials: true, transports: ["websocket", "polling"] });
+    socket.on("booking:changed", () => {
+      void load();
+    });
+    return () => {
+      socket.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const flash = (msg: string) => {
     setNotice(msg);

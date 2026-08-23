@@ -1,0 +1,9 @@
+{
+  "VISIT_REASON": [
+    { "apricotId": "vr-0010", "code": "0010", "des": "_regular（Regular）" },
+    { "apricotId": "vr-0021", "code": "0021", "des": "follow-up（Follow-up）" }
+  ],
+  "BOOKING_TYPE": [
+    { "apricotId": "bt-0001", "code": "0001", "des": "normal（Normal）" }
+  ]
+}

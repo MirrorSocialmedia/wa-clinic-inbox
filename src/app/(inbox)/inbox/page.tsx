@@ -37,9 +37,9 @@ export default async function InboxPage({
     prisma.conversation.findMany({ where: scope, orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }], take: 200 }),
     prisma.contact.findMany({ where: scope, select: { id: true, waId: true, profileName: true, labels: true } }),
     prisma.staffUser.findMany({ where: { active: true, ...scope }, select: { id: true, name: true, role: true, clinicId: true } }),
-    // Phase 3：PENDING 預約（綠色卡）— 同 conversations API 一致
+    // Phase 3：PENDING 預約（綠色卡）/ ★ booking-ui（D）：CONFIRMED 亦顯示 — 同 conversations API 一致
     prisma.bookingRequest.findMany({
-      where: { ...scope, status: "PENDING" },
+      where: { ...scope, status: { in: ["PENDING", "CONFIRMED"] } },
       orderBy: { createdAt: "desc" },
       take: 200,
     }),
@@ -47,7 +47,14 @@ export default async function InboxPage({
 
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
-  const pendingBookingMap = new Map(pendingBookings.map((b) => [b.conversationId, b]));
+  // ★ booking-ui（D）：PENDING 優先；冇 PENDING 先顯示最新 CONFIRMED（同 API 一致）
+  const pendingBookingMap = new Map<string, (typeof pendingBookings)[number]>();
+  for (const b of pendingBookings) {
+    const existing = pendingBookingMap.get(b.conversationId);
+    if (!existing || (existing.status !== "PENDING" && b.status === "PENDING")) {
+      pendingBookingMap.set(b.conversationId, b);
+    }
+  }
   const now = Date.now();
 
   // Phase 4：今日當值（側欄卡 — staff 名+職位+更時；null → 隱藏）。
@@ -78,7 +85,9 @@ export default async function InboxPage({
       urgent: cv.urgent,
       aiSummary: cv.aiSummary,
       contact: contactMap.get(cv.contactId) ?? null,
-      // Phase 3：綠色卡（PENDING 預約）
+      // ★ booking-ui（A）：已釘住舊客（藍掣可見性）
+      pinnedPatient: cv.pinnedPatientApricotId ? { patientApricotId: cv.pinnedPatientApricotId } : null,
+      // Phase 3：綠色卡（PENDING 預約）/ ★ booking-ui（D）：CONFIRMED 卡
       pendingBooking: (() => {
         const b = pendingBookingMap.get(cv.id);
         if (!b) return null;
@@ -89,8 +98,14 @@ export default async function InboxPage({
           requestedTime: b.requestedTime,
           timeOfDay: b.timeOfDay,
           precheckPassed: b.precheckPassed,
-          status: b.status as "PENDING",
+          status: b.status as "PENDING" | "CONFIRMED",
           createdAt: b.createdAt.toISOString(),
+          // ★ booking-ui（D）：CONFIRMED 態 + 主訴
+          apricotApptId: b.apricotApptId,
+          visitReasonCode: b.visitReasonCode,
+          handledByStaffName: b.handledByStaffId ? (staffMap.get(b.handledByStaffId) ?? null) : null,
+          handledAt: b.handledAt ? b.handledAt.toISOString() : null,
+          chiefComplaint: b.chiefComplaint,
         };
       })(),
       window: {

@@ -1,0 +1,17 @@
+{
+  "_comment": "mock runtime 數據源 + contract shape anchor（booking-ui MD §1 — 側欄 patient lookup）— sha256 錨定喺 scripts/booking-ui-contract.ts。byPhoneHash key = HMAC-SHA256(anchor key 0123456789abcdef…, contract test 固定 test key) of normalized \"91234567\"（raw \"85291234567\"）。e2e 實際 test contact 用 .dev/workforce-mock-patients.json runtime 檔（唔入 git）。",
+  "byPhoneHash": {
+    "0016ac6d13b017afee7eea85bfe9e987cc6e73fe921abb9bf99bd9a5a683b2c1": [
+      {
+        "patientApricotId": "mock-pat-0001",
+        "patientCode": "MOCKP001",
+        "patientName": "馮少三（mock 舊客）",
+        "lastVisit": {
+          "date": "2026-07-15",
+          "providerName": "Lee 醫生（mock）",
+          "visitReasons": ["0021"]
+        }
+      }
+    ]
+  }
+}

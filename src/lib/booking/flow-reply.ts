@@ -31,7 +31,11 @@ import {
 import { sendBookingFlow } from "@/lib/flows/send";
 import { publishNotify } from "@/lib/notify";
 import { outboundQueue } from "@/lib/queue";
-import { syncWindow, getSlots } from "@/lib/availability";
+import { syncWindow, getSlots, hkDateOffset } from "@/lib/availability";
+import { phoneHash } from "@/lib/phone-hash";
+import { afterBookingWrite } from "@/lib/booking/booking-ops";
+import { rescheduledReply } from "@/lib/booking/booking-text";
+import { WorkforceApiError, fetchAppointments, rescheduleBooking } from "@/lib/workforce/client";
 
 export interface NfmReplyEnvelope {
   payload: string;
@@ -49,6 +53,7 @@ export interface NfmReplyInput {
 
 export type FlowReplyOutcome =
   | { status: "booked"; bookingId: string }
+  | { status: "rescheduled"; oldApptId: string; newApptId: string }
   | { status: "duplicate"; reason: string }
   | { status: "rejected"; reason: string }
   | { status: "send_failed"; reason: string };
@@ -64,6 +69,9 @@ interface DecryptedReply {
 }
 
 const TIME_OF_DAY_VALUES = ["MORNING", "AFTERNOON", "EVENING"] as const;
+
+/** 改期時長（同 create route — Flow 唔收時長） */
+const RESCHEDULE_DURATION_MIN = 15;
 
 /** 自動覆病人（precheck 失敗 / 源離線）— 簡短、唔含 PII */
 export const SLOT_TAKEN_REPLY = "唔好意思，呢個時段啱啱有人預約咗，而家滿咗。請重新揀一個時間 🙏";
@@ -135,6 +143,26 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
     return { status: "rejected", reason: "wa_id_mismatch" };
   }
 
+  // ★ booking-ui（E）：改期路徑判定（側欄〔改期〕設咗旗標）
+  const reschedulingApptId = conv.reschedulingApptId ?? null;
+  if (reschedulingApptId && !conv.pinnedPatientApricotId) {
+    // 旗標殘留但已取消釘住（異常狀態）→ 清旗標 + 轉常規新卡路徑
+    await prisma.conversation.update({ where: { id: conversationId }, data: { reschedulingApptId: null } });
+    log.warn({ conversationId }, "flow-reply: reschedule flag without pinned patient — cleared, fallback to new booking");
+  }
+  const isReschedule = reschedulingApptId !== null && conv.pinnedPatientApricotId !== null;
+  if (isReschedule && isRequirementVariant) {
+    // 改期必須有具體時段（workforce reschedule 要 start）— 純收需求變體唔得
+    await failSessionAndResend(
+      session.id,
+      conv,
+      SOURCE_OFFLINE_REPLY,
+      { clinic: "?", date, reason: "reschedule_requires_time" },
+      "reschedule_requires_time"
+    );
+    return { status: "send_failed", reason: "reschedule_requires_time" };
+  }
+
   // 4) 醫生 belonging + 日期/時間格式
   const provider = await prisma.provider.findFirst({
     where: { apricotId: String(providerId), active: true, clinics: { some: { clinicId } } },
@@ -183,8 +211,9 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
   //    正常變體：FOR UPDATE 鎖 slot row → 兩個病人同時 Complete 同一 slot 會序列化：
   //    第二個 tx 等第一個 commit 之後先醒，再見到 PENDING row → 擋。
   //    純收需求變體：無 slot 可鎖（冇 time）— 只擋同 (醫生,日期,時段偏好) 嘅 PENDING 重複提交。
+  //    ★ booking-ui（E）改期變體：slot 檢查相同，但唔建 BookingRequest（workforce 原子 102+新單）。
   const now = new Date();
-  const txResult: { bookingId?: string; reason?: string } = {};
+  const txResult: { bookingId?: string; rescheduled?: boolean; reason?: string } = {};
 
   try {
     await prisma.$transaction(
@@ -207,6 +236,15 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
           });
           if (!slotRow || !slotRow.isOpen || slotRow.bookedCount > 0) {
             txResult.reason = "slot_taken";
+            return;
+          }
+          if (isReschedule) {
+            // 改期：slot 確認咗就夠（唔建卡）
+            txResult.rescheduled = true;
+            await tx.flowSession.update({
+              where: { id: session.id },
+              data: { status: "COMPLETED", completedAt: now },
+            });
             return;
           }
           const existingPending = await tx.bookingRequest.findFirst({
@@ -267,6 +305,21 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
     return { status: "send_failed", reason: txResult.reason };
   }
 
+  // 5b) ★ booking-ui（E）：改期路徑 — workforce 原子 reschedule（102 舊單 + 新落單）
+  if (txResult.rescheduled && isReschedule) {
+    return handleReschedule({
+      session,
+      conv,
+      contactWaId: contact.waId,
+      oldApptId: reschedulingApptId!,
+      clinicId,
+      clinicCode,
+      providerApricotId: provider.apricotId!,
+      date: date!,
+      time: time!,
+    });
+  }
+
   // 6) 過 → 綠色卡 + /bookings 隊列
   const bookingId = txResult.bookingId!;
   publishNotify(clinicId, "booking:new", {
@@ -290,6 +343,138 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
       : "flow-reply: BookingRequest PENDING created（綠色卡）"
   );
   return { status: "booked", bookingId };
+}
+
+/**
+ * ★ booking-ui（E）：改期执行（slot 已 precheck 過；session 已 COMPLETED）
+ * - 回查舊單（oldDate / clinicCode）→ rescheduleBooking（workforce 原子 102+新單）
+ * - 成功：清旗標 + AuditLog BOOKING_RESCHEDULE + 覆病人 + 即時刷新（舊日+新日）
+ * - 409：新時段撞 → 覆病人 + 重出 Flow（旗標保留 — 病人再交齊時照改期路徑）
+ * - 502/503：workforce 問題 → 覆病人 + 重出 Flow（旗標保留）
+ */
+async function handleReschedule(p: {
+  session: { id: string };
+  conv: { id: string; clinicId: string; pinnedPatientApricotId: string | null };
+  contactWaId: string;
+  oldApptId: string;
+  clinicId: string;
+  clinicCode: string;
+  providerApricotId: string;
+  date: string;
+  time: string;
+}): Promise<FlowReplyOutcome> {
+  const { session, conv, contactWaId, oldApptId, clinicId, clinicCode, providerApricotId, date, time } = p;
+
+  // 舊單回查（side 攞 oldDate / clinicCode — reschedule 契約要；contactWaId 已喺 step 3 驗證 = 病人本人）
+  let oldAppt: { apricotApptId: string; clinicCode: string; date: string; start: string };
+  try {
+    const data = await fetchAppointments(phoneHash(contactWaId), hkDateOffset(-7), hkDateOffset(30));
+    const found = data.appointments.find((a) => a.apricotApptId === oldApptId);
+    if (!found || (found.bookingStatus !== 0 && found.bookingStatus !== 102)) {
+      // 舊單已冇（可能已被改/取消）→ 清旗標 + 當新預約處理不了 → 只清旗標（病人已交齊嘅 slot 唔建卡 — staff 側欄會見到最新狀態）
+      await prisma.conversation.update({ where: { id: conv.id }, data: { reschedulingApptId: null } });
+      log.warn({ conversationId: conv.id, oldApptId }, "flow-reply: reschedule — old appointment gone, flag cleared");
+      return { status: "rejected", reason: "old_appt_gone" };
+    }
+    oldAppt = found;
+  } catch {
+    // workforce 離線 → 重出 Flow（旗標保留 — 病人重試）
+    await failSessionAndResend(
+      session.id,
+      conv,
+      SOURCE_OFFLINE_REPLY,
+      { clinic: clinicCode, oldApptId, reason: "reschedule_lookup_failed" },
+      "reschedule_lookup_failed"
+    );
+    return { status: "send_failed", reason: "reschedule_lookup_failed" };
+  }
+
+  let newApptId: string;
+  try {
+    const r = await rescheduleBooking(oldApptId, {
+      // 舊單喺邊間 clinic 就用邊間嘅 code（E route 已驗證本店；雙保險用舊單自己嘅）
+      clinicCode: oldAppt.clinicCode,
+      providerApricotId,
+      date,
+      start: time,
+      durationMin: RESCHEDULE_DURATION_MIN,
+      oldDate: oldAppt.date,
+      patient: { patientApricotId: conv.pinnedPatientApricotId! },
+    });
+    newApptId = r.newApptId;
+  } catch (err) {
+    const status = err instanceof WorkforceApiError ? err.status : 502;
+    log.warn(
+      { conversationId: conv.id, clinic: clinicCode, oldApptId, newDate: date, workforceStatus: status },
+      "flow-reply: reschedule — workforce failed → 覆病人 + 重出 Flow（旗標保留）"
+    );
+    const reply =
+      status === 409
+        ? SLOT_TAKEN_REPLY
+        : "對唔住，改期暫時出錯咗，請重新揀時間，我哋會再安排 🙏";
+    await failSessionAndResend(
+      session.id,
+      conv,
+      reply,
+      { clinic: clinicCode, oldApptId, newDate: date, reason: `reschedule_failed_${status}` },
+      `reschedule_failed_${status}`
+    );
+    return { status: "send_failed", reason: `reschedule_failed_${status}` };
+  }
+
+  // ── 成功：清旗標 + 審計 + 覆病人 + 即時刷新（舊日 + 新日）──────────────────
+  await prisma.conversation.update({ where: { id: conv.id }, data: { reschedulingApptId: null } });
+  await prisma.auditLog
+    .create({
+      data: {
+        staffId: null,
+        action: "BOOKING_RESCHEDULE",
+        entity: "Conversation",
+        entityId: conv.id,
+        meta: {
+          conversationId: conv.id,
+          clinicId,
+          oldApptId,
+          newApptId,
+          oldDate: oldAppt.date,
+          date,
+        },
+      },
+    })
+    .catch(() => undefined);
+
+  try {
+    const now = new Date();
+    const msg = await prisma.message.create({
+      data: {
+        conversationId: conv.id,
+        direction: "OUT",
+        channel: "API",
+        type: "text",
+        body: rescheduledReply(date, time),
+        status: "QUEUED",
+        sentByStaffId: null,
+        aiAutoSent: true,
+        waTimestamp: now,
+      },
+    });
+    await outboundQueue.add("send", { messageId: msg.id });
+    await prisma.$executeRaw`
+      UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
+  } catch (e) {
+    log.error(
+      { conversationId: conv.id, err: e instanceof Error ? e.message : String(e) },
+      "flow-reply: reschedule — auto message 失敗（改期已成功，staff 手覆）"
+    );
+  }
+
+  await afterBookingWrite(clinicId, [oldAppt.date, date], conv.id, "RESCHEDULED", date);
+
+  log.info(
+    { clinic: clinicCode, oldApptId, newApptId, oldDate: oldAppt.date, date, time },
+    "flow-reply: reschedule complete（workforce 原子 102+新單）"
+  );
+  return { status: "rescheduled", oldApptId, newApptId };
 }
 
 /** precheck 失敗：覆病人「滿咗」+ 重出 Flow（窗口內 — nfm_reply 剛剛 inbound，窗口必開）

@@ -40,7 +40,9 @@ export interface ConversationItem {
   urgent: boolean;
   aiSummary: string | null;
   contact: ContactInfo | null;
-  /** Phase 3：最新 PENDING 預約（綠色卡）— null = 冇 */
+  /** ★ booking-ui（A）：已釘住舊客（chat 卡藍掣「幫我喺 Apricot 落單」可見性）— null = 未釘住 */
+  pinnedPatient: { patientApricotId: string } | null;
+  /** Phase 3：最新 PENDING 預約（綠色卡）/ ★ booking-ui（D）：CONFIRMED 卡 — null = 冇 */
   pendingBooking: BookingInfo | null;
   window: WindowState;
   /** client-only：最後一則訊息 preview */
@@ -58,12 +60,62 @@ export interface BookingInfo {
   precheckPassed: boolean | null;
   status: "PENDING" | "CONFIRMED" | "REJECTED" | "EXPIRED";
   createdAt: string;
+  /** ★ booking-ui（D）：CONFIRMED 態（代落單成功後） */
+  apricotApptId?: string | null; // Apricot 單號
+  visitReasonCode?: string | null; // 揀咗嘅 visit reason（顯示）
+  handledByStaffName?: string | null; // 發起人
+  handledAt?: string | null; // ISO — 5 分鐘撤銷倒數起點
+  /** ★ booking-ui（D）：主訴（AI 摘要快照，≤50 字 — 顯示 + remarks 來源） */
+  chiefComplaint?: string | null;
 }
 
 /** Phase 4：今日當值（clinic-workforce 窄 API，4 欄白名單 — MD §9.2） */
 export interface DutyInfo {
   date: string; // YYYY-MM-DD (HK)
   entries: { staffName: string; role: string; shiftStart: string; shiftEnd: string }[];
+}
+
+/** ★ booking-ui（A）：patient-context — lookup match（零 raw phone；姓名 = PII 白名單 v2 許可） */
+export interface PatientMatch {
+  patientApricotId: string;
+  patientCode: string;
+  patientName: string;
+  lastVisit: { date: string; providerName: string; visitReasons: string[] } | null;
+}
+
+/** ★ booking-ui（E）：Apricot 預約卡（側欄 upcoming — status 0/102 only） */
+export interface PatientAppointment {
+  apricotApptId: string;
+  clinicCode: string;
+  providerApricotId: string;
+  providerName: string;
+  date: string; // YYYY-MM-DD
+  start: string; // HH:mm
+  end: string; // HH:mm
+  bookingStatus: number; // 0 = confirmed / 102 = pending
+  patientApricotId: string;
+  patientCode: string;
+  patientName: string;
+  visitReasons: string[];
+  remarks: string | null;
+}
+
+/** ★ booking-ui（A）：GET /api/conversations/[id]/patient-context */
+export interface PatientContext {
+  pinned: { patientApricotId: string; patientName?: string; lastVisit: PatientMatch["lastVisit"] } | null;
+  /** null = workforce 離線（degraded） */
+  matches: PatientMatch[] | null;
+  /** null = 未釘住或 degraded */
+  upcomingAppointments: PatientAppointment[] | null;
+  degraded: boolean;
+}
+
+/** ★ booking-ui（C）：socket booking:changed — 寫動作後廣播，三位訂閱重拉 */
+export interface BookingChangedEvent {
+  conversationId: string;
+  clinicId: string;
+  date: string; // YYYY-MM-DD（受影響日 — L2 invalidate 範圍）
+  kind: "CREATED" | "ROLLED_BACK" | "RESCHEDULED" | "CANCELLED";
 }
 
 export interface MessageItem {

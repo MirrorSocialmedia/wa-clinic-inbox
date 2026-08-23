@@ -19,9 +19,7 @@ import {
 import type { ConversationItem, DraftInfo, MessageItem, NoteReceipt, StaffInfo } from "./types";
 import { noteTickState } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
-
-/** Phase 3：純收需求變體（資料源離線）時段偏好 label — requestedTime=null 時顯示 */
-const PENDING_TOD_LABEL: Record<string, string> = { MORNING: "上晝", AFTERNOON: "下晝", EVENING: "夜晚" };
+import { BookingCard } from "./booking-card";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -63,6 +61,8 @@ interface Props {
   readReceipts: NoteReceipt[];
   /** ★ H2：note 進入 viewport → 冪等 POST /api/notes/[id]/read（client 去重，唔重複打） */
   onNoteRead: (messageId: string) => void;
+  /** ★ booking-ui（D）：預約卡寫動作完成（代落單/確認/重發 Flow/撤銷）→ parent 重拉對話 + 側欄 */
+  onBookingActionDone?: () => void;
 }
 
 // ── ★ H2：@mention helper（純函數 — autocomplete 偵測 + 內文反推 mentions + 高亮渲染） ──
@@ -459,25 +459,14 @@ export function ChatPane(p: Props) {
 
       {/* composer 區 */}
       <div className="shrink-0 bg-panel border-t border-line p-3">
-        {/* Phase 3：預約卡 / 發 Flow 提示 */}
+        {/* Phase 3：預約卡 / 發 Flow 提示 — ★ booking-ui（D）：兩態卡（PENDING 綠邊 / CONFIRMED 撤銷倒數） */}
         {c.pendingBooking ? (
-          <div className="mb-2 rounded-xl border border-ok/40 bg-ok-soft p-2.5">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-ok-text inline-flex items-center gap-1">
-                <CalendarDays size={13} /> 新預約請求
-              </span>
-              <span className="text-sm text-t1 font-medium truncate">
-                {c.pendingBooking.providerName} · {c.pendingBooking.requestedDate}{" "}
-                {c.pendingBooking.requestedTime ?? PENDING_TOD_LABEL[c.pendingBooking.timeOfDay ?? ""]}
-              </span>
-              <a
-                href="/bookings"
-                className="ml-auto shrink-0 text-xs px-2.5 py-1 rounded-lg bg-ok text-white font-medium hover:opacity-90"
-              >
-                去 /bookings 處理 →
-              </a>
-            </div>
-          </div>
+          <BookingCard
+            conversation={c}
+            booking={c.pendingBooking}
+            myStaffId={p.myStaffId}
+            onActionDone={() => p.onBookingActionDone?.()}
+          />
         ) : (
           c.intent === "BOOKING_REQUEST" &&
           c.window.open && (

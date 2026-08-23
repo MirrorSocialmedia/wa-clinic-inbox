@@ -45,14 +45,22 @@ export const GET = handle(async (req: NextRequest) => {
     prisma.contact.findMany({ select: { id: true, waId: true, profileName: true, labels: true } }),
     prisma.staffUser.findMany({ select: { id: true, name: true } }),
     // Phase 3：綠色卡 — 每對話最新 PENDING 預約（staff 一眼見到「有預約等處理」）
+    // ★ booking-ui（D）：CONFIRMED 亦要顯示（Apricot 單號 + 撤銷倒數）— PENDING 優先
     prisma.bookingRequest.findMany({
-      where: { conversationId: { in: convs.map((c) => c.id) }, status: "PENDING" },
+      where: { conversationId: { in: convs.map((c) => c.id) }, status: { in: ["PENDING", "CONFIRMED"] } },
       orderBy: { createdAt: "desc" },
     }),
   ]);
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
-  const pendingBookingMap = new Map(pendingBookings.map((b) => [b.conversationId, b]));
+  // ★ booking-ui（D）：PENDING 優先（新請求）；冇 PENDING 先顯示最新 CONFIRMED（撤銷倒數卡）
+  const pendingBookingMap = new Map<string, (typeof pendingBookings)[number]>();
+  for (const b of pendingBookings) {
+    const existing = pendingBookingMap.get(b.conversationId);
+    if (!existing || (existing.status !== "PENDING" && b.status === "PENDING")) {
+      pendingBookingMap.set(b.conversationId, b);
+    }
+  }
   const now = Date.now();
 
   return NextResponse.json(
@@ -76,7 +84,9 @@ export const GET = handle(async (req: NextRequest) => {
         urgent: cv.urgent,
         aiSummary: cv.aiSummary,
         contact: contactMap.get(cv.contactId) ?? null,
-        // Phase 3：PENDING 預約卡（綠色卡）— null = 冇待處理預約
+        // ★ booking-ui（A）：已釘住舊客（藍掣「幫我喺 Apricot 落單」可見性）— 只回 id（姓名喺 patient-context API）
+        pinnedPatientApricotId: cv.pinnedPatientApricotId,
+        // Phase 3：PENDING 預約卡（綠色卡）/ ★ booking-ui（D）：CONFIRMED 卡 — null = 冇待處理預約
         pendingBooking: (() => {
           const b = pendingBookingMap.get(cv.id);
           if (!b) return null;
@@ -91,6 +101,13 @@ export const GET = handle(async (req: NextRequest) => {
             precheckPassed: b.precheckPassed,
             status: b.status,
             createdAt: b.createdAt,
+            // ★ booking-ui（D）：主訴（Flow 完成時 AI 摘要快照 — 卡上顯示 + remarks 來源）
+            chiefComplaint: b.chiefComplaint,
+            // ★ booking-ui（D）：CONFIRMED 態（Apricot 單號 + 發起人 + 5 分鐘撤銷倒數起點）
+            apricotApptId: b.apricotApptId,
+            visitReasonCode: b.visitReasonCode,
+            handledByStaffName: b.handledByStaffId ? (staffMap.get(b.handledByStaffId) ?? null) : null,
+            handledAt: b.handledAt,
           };
         })(),
         window: {

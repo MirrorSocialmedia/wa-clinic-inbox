@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Sparkles, Stethoscope, X } from "lucide-react";
+import { CalendarClock, Sparkles, Stethoscope, X } from "lucide-react";
 import Link from "next/link";
-import type { ConversationItem, ConvStatus, DutyInfo, StaffInfo } from "./types";
+import type { ConversationItem, ConvStatus, DutyInfo, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
 import { relTime } from "./time";
 
 interface Props {
@@ -22,6 +22,10 @@ interface Props {
   /** <lg：bottom sheet 開關（由 inbox-client 控制；桌面側欄常駐不受影響） */
   mobileOpen: boolean;
   onMobileClose: () => void;
+  /** ★ booking-ui：patient-context 寫入（釘住/改期/取消）後通知 parent 重拉（對話卡/預約卡）— 同 socket booking:changed 雙保險 */
+  onBookingUiChanged?: () => void;
+  /** ★ booking-ui（C）：socket booking:changed / parent 重拉觸發 patient-context 重載 */
+  ctxRefreshKey?: number;
 }
 
 const STATUS_SEG: { key: ConvStatus; label: string }[] = [
@@ -61,12 +65,60 @@ export function DetailPane({
   assignError,
   mobileOpen,
   onMobileClose,
+  onBookingUiChanged,
+  ctxRefreshKey = 0,
 }: Props) {
   const [name, setName] = useState("");
   const [labels, setLabels] = useState<string[]>([]);
   const [newLabel, setNewLabel] = useState("");
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+
+  // ★ booking-ui（A/E）：patient-context
+  const [ctx, setCtx] = useState<PatientContext | null>(null);
+  const [ctxLoading, setCtxLoading] = useState(false);
+  const [ctxError, setCtxError] = useState<string | null>(null);
+  const [pinBusy, setPinBusy] = useState<string | null>(null);
+  const [apptBusy, setApptBusy] = useState<string | null>(null);
+  const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
+  const [apptNote, setApptNote] = useState<string | null>(null);
+
+  // 故意只對 conversation?.id 敏感（conversation object identity 每次列表更新都變 — 入 deps 會過度重拉）
+  // ctxRefreshKey = socket booking:changed / 寫入後 parent 重拉訊號
+  useEffect(() => {
+    setCtx(null);
+    setCtxError(null);
+    setConfirmCancelId(null);
+    setApptNote(null);
+    if (!conversation) return;
+    let cancelled = false;
+    setCtxLoading(true);
+    fetch(`/api/conversations/${conversation.id}/patient-context`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return (await res.json()) as PatientContext;
+      })
+      .then((data) => {
+        if (!cancelled) setCtx(data);
+      })
+      .catch((e) => {
+        if (!cancelled) setCtxError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setCtxLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation?.id, ctxRefreshKey]);
+
+  // 二次確認倒數（取消預約 3 秒內再撳先執行）
+  useEffect(() => {
+    if (!confirmCancelId) return;
+    const t = setTimeout(() => setConfirmCancelId(null), 3000);
+    return () => clearTimeout(t);
+  }, [confirmCancelId]);
 
   useEffect(() => {
     if (conversation?.contact) {
@@ -117,6 +169,114 @@ export function DetailPane({
   async function setStatus(s: ConvStatus) {
     if (!c || c.status === s) return;
     await onPatch({ status: s });
+  }
+
+  // ★ booking-ui（A/E）：patient-context 操作（423 = Send Lock 非負責人）
+  async function refreshCtx() {
+    if (!c) return;
+    try {
+      const res = await fetch(`/api/conversations/${c.id}/patient-context`);
+      if (res.ok) setCtx((await res.json()) as PatientContext);
+    } catch {
+      /* 下次拉取會補；socket booking:changed 都會觸發 */
+    }
+  }
+
+  async function pinPatient(m: PatientMatch) {
+    if (!c || pinBusy) return;
+    setPinBusy(m.patientApricotId);
+    setCtxError(null);
+    try {
+      const res = await fetch(`/api/conversations/${c.id}/patient-pin`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ patientApricotId: m.patientApricotId, patientName: m.patientName }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(j?.error ?? `HTTP ${res.status}`);
+      }
+      await refreshCtx();
+      onBookingUiChanged?.();
+    } catch (e) {
+      setCtxError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPinBusy(null);
+    }
+  }
+
+  async function unpinPatient() {
+    if (!c) return;
+    setPinBusy("unpin");
+    setCtxError(null);
+    try {
+      const res = await fetch(`/api/conversations/${c.id}/patient-pin`, { method: "DELETE" });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(j?.error ?? `HTTP ${res.status}`);
+      }
+      await refreshCtx();
+      onBookingUiChanged?.();
+    } catch (e) {
+      setCtxError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPinBusy(null);
+    }
+  }
+
+  async function startReschedule(a: PatientAppointment) {
+    if (!c || apptBusy) return;
+    setApptBusy(a.apricotApptId);
+    setApptNote(null);
+    setCtxError(null);
+    try {
+      const res = await fetch(`/api/conversations/${c.id}/patient-appointments/reschedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apricotApptId: a.apricotApptId }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(j?.error ?? `HTTP ${res.status}`);
+      }
+      const j = (await res.json().catch(() => null)) as { error?: string } | null;
+      setApptNote(j?.error ? null : `已發改期 Flow 畀病人（${a.date} ${a.start}）— 等病人揾新時段`);
+      onBookingUiChanged?.();
+    } catch (e) {
+      setCtxError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApptBusy(null);
+    }
+  }
+
+  async function cancelAppointment(a: PatientAppointment) {
+    if (!c || apptBusy) return;
+    // 二次確認：第一次撳 → 3 秒內再撳先執行
+    if (confirmCancelId !== a.apricotApptId) {
+      setConfirmCancelId(a.apricotApptId);
+      return;
+    }
+    setConfirmCancelId(null);
+    setApptBusy(a.apricotApptId);
+    setCtxError(null);
+    try {
+      const res = await fetch(`/api/conversations/${c.id}/patient-appointments/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apricotApptId: a.apricotApptId }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(j?.error ?? `HTTP ${res.status}`);
+      }
+      setApptNote(`已取消 ${a.date} ${a.start} 預約（已發確認訊息）`);
+      await refreshCtx();
+      onBookingUiChanged?.();
+    } catch (e) {
+      setCtxError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApptBusy(null);
+    }
   }
 
   // ★ H1：只有現任 assignee / ADMIN / unassigned（任何同店 STAFF 可 claim）先可以改負責人
@@ -198,6 +358,127 @@ export function DetailPane({
           >
             {saving ? "儲存中…" : "儲存聯絡人"}
           </button>
+        )}
+      </div>
+
+      {/* ★ booking-ui（A）：Apricot patient-context — 釘住舊客 + 三欄（姓名/最近就診/預約狀態）+ （E）預約卡兩新掣 */}
+      <div>
+        <h3 className="text-[11px] text-t3 font-semibold mb-2 inline-flex items-center gap-1">
+          <CalendarClock size={11} /> Apricot 病人 context
+        </h3>
+        {ctxError && <div className="text-[10px] text-danger-text mb-1.5">⚠ {ctxError}</div>}
+        {ctxLoading && !ctx && <div className="text-[11px] text-t3">載入中…</div>}
+        {ctx && (
+          <>
+            {ctx.pinned ? (
+              <div className="rounded-xl bg-panel-2 p-3 text-xs space-y-1.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-[10px] text-t3">姓名（已釘住）</div>
+                    <div className="text-t1 font-medium">{ctx.pinned.patientName ?? "—"}</div>
+                  </div>
+                  <button
+                    onClick={() => void unpinPatient()}
+                    disabled={pinBusy !== null}
+                    className="text-[10px] text-t3 hover:text-danger-text disabled:opacity-50 shrink-0"
+                  >
+                    {pinBusy === "unpin" ? "取消中…" : "改釘/取消"}
+                  </button>
+                </div>
+                <div>
+                  <div className="text-[10px] text-t3">最近就診</div>
+                  <div className="text-t2">
+                    {ctx.pinned.lastVisit
+                      ? `${ctx.pinned.lastVisit.date} · ${ctx.pinned.lastVisit.providerName}（${ctx.pinned.lastVisit.visitReasons.join("、")}）`
+                      : "—（Apricot 無記錄）"}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-t3">預約狀態</div>
+                  <div className="text-t2">
+                    {(ctx.upcomingAppointments ?? []).length > 0
+                      ? `${ctx.upcomingAppointments!.length} 個 upcoming`
+                      : "無 upcoming 預約"}
+                  </div>
+                </div>
+              </div>
+            ) : ctx.degraded || (ctx.matches && ctx.matches.length === 0) ? (
+              <div className="rounded-xl bg-panel-2 p-3 text-[11px] text-t3 space-y-1">
+                <div>{ctx.degraded ? "⚠ 資料源離線（稍後重試）" : "查唔到匹配舊客（Apricot 無此電話記錄）"}</div>
+                {!ctx.degraded && <div>新客請人手喺 Apricot 落單（第一期不支援代落單）</div>}
+              </div>
+            ) : (
+              <div className="rounded-xl bg-panel-2 p-3 text-xs space-y-2">
+                <div className="text-[10px] text-t3">查到匹配舊客 — 撳〔釘住〕先可以用代落單</div>
+                {(ctx.matches ?? []).map((m) => (
+                  <div key={m.patientApricotId} className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-t1 truncate">{m.patientName}</div>
+                      <div className="text-[10px] text-t3 truncate">
+                        {m.lastVisit ? `上次 ${m.lastVisit.date} · ${m.lastVisit.providerName}` : "無就診記錄"}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => void pinPatient(m)}
+                      disabled={pinBusy !== null}
+                      className="shrink-0 text-[11px] px-2.5 py-1 rounded-lg bg-brand hover:bg-brand-hover text-white font-medium disabled:opacity-50"
+                    >
+                      {pinBusy === m.patientApricotId ? "釘住中…" : "釘住"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* （E）upcoming 預約卡（status 0/102 only — API 已過濾）+ 兩新掣（Send Lock） */}
+            {ctx.pinned && (ctx.upcomingAppointments ?? []).length > 0 && (
+              <div className="mt-2 space-y-2">
+                {apptNote && <div className="text-[10px] text-ok-text">✓ {apptNote}</div>}
+                {[...(ctx.upcomingAppointments ?? [])]
+                  .sort((a, b) => `${a.date}${a.start}`.localeCompare(`${b.date}${b.start}`))
+                  .map((a) => (
+                    <div key={a.apricotApptId} className="rounded-xl border border-line bg-panel p-2.5 text-xs space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-t1 font-medium truncate">{a.providerName}</span>
+                        <span
+                          className={`shrink-0 px-1.5 py-px rounded text-[10px] ${
+                            a.bookingStatus === 0 ? "bg-ok-soft text-ok-text" : "bg-warn-soft text-warn-text"
+                          }`}
+                        >
+                          {a.bookingStatus === 0 ? "已確認" : "待確認"}
+                        </span>
+                      </div>
+                      <div className="text-t2 font-mono">
+                        {a.date} {a.start}–{a.end}
+                      </div>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => void startReschedule(a)}
+                          disabled={!canManage || apptBusy !== null}
+                          className="flex-1 text-[11px] px-2 py-1.5 rounded-lg border border-line text-t1 hover:bg-panel-2 disabled:opacity-50"
+                        >
+                          {apptBusy === a.apricotApptId ? "處理中…" : "改期"}
+                        </button>
+                        <button
+                          onClick={() => void cancelAppointment(a)}
+                          disabled={!canManage || apptBusy !== null}
+                          className={`flex-1 text-[11px] px-2 py-1.5 rounded-lg border disabled:opacity-50 ${
+                            confirmCancelId === a.apricotApptId
+                              ? "border-danger-text bg-danger-soft text-danger-text font-semibold"
+                              : "border-line text-danger-text hover:bg-danger-soft"
+                          }`}
+                        >
+                          {confirmCancelId === a.apricotApptId ? "再撳一次確認取消" : "取消預約"}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                {!canManage && (
+                  <div className="text-[10px] text-warn-text">🔒 改期/取消只限現任負責人（{c.assigneeName}）</div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
 

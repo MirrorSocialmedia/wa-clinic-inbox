@@ -133,6 +133,12 @@ model Conversation {
   urgency          String?                    // LOW / MED / HIGH（最近一次分類）
   urgent           Boolean  @default(false)
   aiSummary        String?                    // ≤50 字摘要（側欄顯示；語言跟病人）
+  // ★ booking-ui（2026-08-23, cwi-bkui-20260823-a1）：patient-context 釘住舊客（lookup match 後落 DB）
+  pinnedPatientApricotId String?               // Apricot 病人 id（proxy 落單 patient.patientApricotId 來源）
+  pinnedPatientName      String?               // 快照顯示（唔 join；PII 白名單 v2：姓名許可）
+  pinnedPhoneHash        String?               // 64-hex HMAC-SHA256（raw phone 永遠唔入 DB）
+  // ★ booking-ui（E）：改期 Flow 進行中標記（nfm_reply 見到此欄 → 走 reschedule 變體而非新建 BookingRequest）
+  reschedulingApptId     String?               // 目標 Apricot appointment id（null = 無改期進行中）
   lastInboundAt    DateTime? @db.Timestamptz                  // ★ 24h 窗口由呢個欄計
   lastMessageAt    DateTime @db.Timestamptz
   unreadCount      Int        @default(0)
@@ -226,6 +232,10 @@ model BookingRequest {
   status            BookingStatus @default(PENDING)
   handledByStaffId  String?
   handledAt         DateTime? @db.Timestamptz
+  // ★ booking-ui（2026-08-23, cwi-bkui-20260823-a1）：代落單（CONFIRMED 態 + rollback + 審計）
+  apricotApptId     String?                    // Apricot 單號（workforce create 後寫入；rollback 後清 null）
+  visitReasonCode   String?                    // 卡上揀咗嘅 visit reason（dictionaries code；審計 + remarks 組裝）
+  chiefComplaint    String?                    // 主訴快照（Flow 完成時由 conversation.aiSummary 摘；≤50 字）
   createdAt         DateTime @db.Timestamptz      @default(now())
   // Phase 3：/bookings 隊列查詢（本店 + 狀態 + 時間）
   @@index([clinicId, status, createdAt])
