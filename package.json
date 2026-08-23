@@ -28,6 +28,7 @@
     "e2e:socket-events": "tsx scripts/e2e-socket-events.ts",
     "e2e:staff": "tsx scripts/e2e-staff.ts",
     "e2e:queue-clear": "tsx scripts/e2e-queue-clear.ts",
+    "e2e:workforce-contract": "tsx scripts/workforce-contract.ts",
     "weekly-report": "tsx scripts/weekly-report.ts",
     "pii-scan": "tsx scripts/pii-scan.ts",
     "audit:gate": "pnpm audit --prod --audit-level=high",
@@ -35,13 +36,14 @@
     "mock-e2e": "bash scripts/mock-e2e.sh",
     "e2e-real-ai": "bash scripts/e2e-real-ai.sh",
     "e2e:ai-job": "tsx scripts/e2e-ai-job.ts",
-  "e2e:media-enc": "tsx scripts/e2e-media-enc.ts",
-  "e2e:ai-scrub": "tsx scripts/e2e-ai-scrub.ts",
-  "e2e:alert-gate": "tsx scripts/e2e-alert-gate.ts",
-  "e2e:lockout": "tsx scripts/e2e-lockout.ts",
-  "e2e:media-write": "tsx scripts/e2e-media-write.ts",
-  "e2e:totp-code": "tsx scripts/totp-code.ts",
-  "e2e:session-ttl": "tsx scripts/e2e-session-ttl.ts"
+    "e2e:media-enc": "tsx scripts/e2e-media-enc.ts",
+    "e2e:ai-scrub": "tsx scripts/e2e-ai-scrub.ts",
+    "e2e:alert-gate": "tsx scripts/e2e-alert-gate.ts",
+    "e2e:lockout": "tsx scripts/e2e-lockout.ts",
+    "e2e:media-write": "tsx scripts/e2e-media-write.ts",
+    "e2e:totp-code": "tsx scripts/totp-code.ts",
+    "e2e:session-ttl": "tsx scripts/e2e-session-ttl.ts",
+    "e2e:workforce": "tsx scripts/e2e-workforce.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

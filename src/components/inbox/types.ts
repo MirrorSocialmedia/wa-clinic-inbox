@@ -52,7 +52,10 @@ export interface BookingInfo {
   id: string;
   providerName: string;
   requestedDate: string; // YYYY-MM-DD
-  requestedTime: string; // HH:mm
+  requestedTime: string | null; // HH:mm；null = 純收需求變體（資料源離線）
+  timeOfDay?: string | null; // MORNING / AFTERNOON / EVENING（純收需求變體）
+  /** null = 未經空檔核對（純收需求變體，資料源離線）— UI 灰字卡 */
+  precheckPassed: boolean | null;
   status: "PENDING" | "CONFIRMED" | "REJECTED" | "EXPIRED";
   createdAt: string;
 }

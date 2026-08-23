@@ -6,7 +6,13 @@
  * 防別店/別對話用）③ FlowSession 狀態（SENT 先收）④ wa_id/phone_number_id 對照。
  *
  * 三步：SCREEN_PROVIDER → SCREEN_DATE（聽日~+30，只回有空日）→ SCREEN_TIME
- *（只回空 slot）— 每次 call 查最新 AvailabilitySlot（precheck 原則）。
+ *（只回空 slot）— 每次 call 先經 getSlots()（四層降級鏈）確保 L2 新鮮。
+ *
+ * 降級（switch MD §3）：
+ * - degraded ∈ {OK, STALE_SOURCE, STALE_CACHE} → 照出時段選項（response 帶 note 標記）
+ * - degraded = NONE（API fail + 無 L2 cache）→ 「純收需求」變體：
+ *   SCREEN_DATE / SCREEN_TIME 回 REQUIREMENT screen（DatePicker + 上晝/下晝/夜晚 RadioButtons），
+ *   唔列時段；病人 Complete 時 BookingRequest.precheckPassed = null（卡灰字「未經空檔核對」）。
  *
  * 加密（MD §8.2 樣板）：
  *   request：RSA-OAEP(SHA-256) unwrap AES key → AES-128-GCM 解 body
@@ -27,7 +33,7 @@ import {
   flowJwtSecret,
 } from "@/lib/flows/crypto";
 import { screenProviders, screenDates, screenTimes } from "@/lib/flows/screens";
-import { syncWindow } from "@/lib/apricot/slots";
+import { syncWindow, getSlots } from "@/lib/availability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -117,10 +123,18 @@ export async function POST(req: NextRequest) {
       return err(403, "conversation_mismatch");
     }
 
-    // 7) 逐 screen 處理（每次查最新 AvailabilitySlot — precheck 原則）
+    // 7) 逐 screen 處理（每次先經 getSlots 確保 L2 新鮮 — precheck 原則 + 四層降級鏈）
     let data: unknown;
     let nextAction: string;
+    let note: string | undefined;
     const clinicId = clinic.id;
+
+    const slotRes = await getSlots(clinicId);
+    if (slotRes.degraded === "STALE_SOURCE") {
+      note = "資料源 stale（使用最後已知空檔）";
+    } else if (slotRes.degraded === "STALE_CACHE") {
+      note = "資料源離線（使用緩存空檔）";
+    }
 
     if (action === "SCREEN_PROVIDER") {
       data = await screenProviders(clinicId);
@@ -129,8 +143,21 @@ export async function POST(req: NextRequest) {
       const providerId = String(plain.providerId ?? "");
       const providers = await screenProviders(clinicId);
       if (!providerId || !providers.some((p) => p.id === providerId)) return err(400, "invalid_provider");
-      data = await screenDates(clinicId, providerId);
-      nextAction = "SCREEN_TIME";
+      if (slotRes.degraded === "NONE") {
+        // 純收需求變體：唔列時段 — DatePicker（窗口內）+ 時段偏好 RadioButtons
+        data = {
+          mode: "requirement",
+          dateStart: slotRes.window.start,
+          dateEnd: slotRes.window.end,
+          timeOfDayOptions: ["MORNING", "AFTERNOON", "EVENING"],
+          note: "未經空檔核對（資料源離線）",
+          degraded: "NONE",
+        };
+        nextAction = "REQUIREMENT";
+      } else {
+        data = await screenDates(clinicId, providerId);
+        nextAction = "SCREEN_TIME";
+      }
     } else {
       const providerId = String(plain.providerId ?? "");
       const date = String(plain.date ?? "");
@@ -138,8 +165,21 @@ export async function POST(req: NextRequest) {
       if (!providerId || !providers.some((p) => p.id === providerId)) return err(400, "invalid_provider");
       const { start, end } = syncWindow();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < start || date > end) return err(400, "invalid_date");
-      data = await screenTimes(clinicId, providerId, date);
-      nextAction = "COMPLETE";
+      if (slotRes.degraded === "NONE") {
+        // 純收需求變體（同 SCREEN_DATE — 客戶端可能直跳呢步）
+        data = {
+          mode: "requirement",
+          dateStart: slotRes.window.start,
+          dateEnd: slotRes.window.end,
+          timeOfDayOptions: ["MORNING", "AFTERNOON", "EVENING"],
+          note: "未經空檔核對（資料源離線）",
+          degraded: "NONE",
+        };
+        nextAction = "REQUIREMENT";
+      } else {
+        data = await screenTimes(clinicId, providerId, date);
+        nextAction = "COMPLETE";
+      }
     }
 
     // 8) 加密 response（同一把 AES key + ★ 反轉 IV）
@@ -148,6 +188,7 @@ export async function POST(req: NextRequest) {
       action: nextAction,
       data,
       data_count: Array.isArray(data) ? data.length : 0,
+      ...(note ? { note } : {}),
     });
 
     log.info(
@@ -156,6 +197,7 @@ export async function POST(req: NextRequest) {
         action,
         nextAction,
         options: Array.isArray(data) ? data.length : 0,
+        degraded: slotRes.degraded,
         convId: conv.id,
       },
       "flow endpoint: data_exchange ok"

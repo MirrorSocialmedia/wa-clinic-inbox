@@ -1,25 +1,24 @@
 /**
  * worker process 入口 — `node --import tsx dist/workers/index.js` 或直接 tsx
  *
- * 一個 process 行晒 5 個 worker（inbound/outbound/ai/cron/apricot）。
+ * 一個 process 行晒 4 個 worker（inbound/outbound/ai/cron）。
  * mock E2E 同 dev 都咁跑；production 先拆 process。
+ *
+ * 啟動首跑：refreshAllClinics()（fire-and-forget）— 立即填 L2 cache + WorkforceSyncState，
+ * 唔使等首個 15 分鐘 cron boundary（health check 嘅 workforce_api_degraded 判斷要咁先正確）。
  */
 import { startInboundWorker } from "./inbound.worker";
 import { startOutboundWorker } from "./outbound.worker";
 import { startAiWorker } from "./ai.worker";
 import { startCronWorker } from "./cron.worker";
-import { startApricotWorker } from "./apricot.worker";
 import { cronQueue } from "@/lib/queue";
+import { refreshAllClinics } from "@/lib/availability";
 import log from "@/lib/log";
 
 async function registerSchedulers() {
   // Phase 3 排程（BullMQ v6 upsertJobScheduler — id 冪等，重啟唔會重覆）
   await cronQueue.upsertJobScheduler("sched-sync-availability", { pattern: "*/15 * * * *" }, {
     name: "sync-availability",
-    data: {},
-  });
-  await cronQueue.upsertJobScheduler("sched-apricot-keepalive", { pattern: "0 3 */3 * *" }, {
-    name: "apricot-keepalive",
     data: {},
   });
   await cronQueue.upsertJobScheduler("sched-bookings-expire", { pattern: "*/5 * * * *" }, {
@@ -41,7 +40,7 @@ async function registerSchedulers() {
   });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, apricot-keepalive 3d, bookings-expire */5m, health-check */5m, quality-check daily 06:30, weekly-report Mon 07:00)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, weekly-report Mon 07:00)"
   );
 }
 
@@ -50,9 +49,13 @@ async function main() {
   await startOutboundWorker();
   await startAiWorker();
   await startCronWorker();
-  await startApricotWorker();
   await registerSchedulers();
   log.info({}, "all workers running — waiting for jobs");
+
+  // 啟動首跑（fire-and-forget — 失敗只 log，*/15 cron 會再試）
+  void refreshAllClinics().catch((err) => {
+    log.error({ err: err instanceof Error ? err.message : String(err) }, "worker: startup availability refresh failed");
+  });
 }
 
 main().catch((err) => {

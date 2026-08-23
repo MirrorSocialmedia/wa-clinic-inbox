@@ -7,7 +7,7 @@ import Link from "next/link";
  * /bookings 預約隊列 client（MD §8.3）。
  *
  * 卡 = PENDING 預約（病人/醫生/日期/時間/對話連結）：
- * - 〔已喺 Apricot 落單〕→ POST /api/bookings/[id]/confirm
+ * - 〔已喺醫生系統落單〕→ POST /api/bookings/[id]/confirm
  *   200 = 已確認 + 自動訊息已發；422 = 已確認但過窗（提示用 template）
  * - 〔改期〕→ POST /api/bookings/[id]/reschedule（重出 Flow）
  * - 48h 未處理 → EXPIRED（cron 自動，此處顯示狀態）
@@ -22,8 +22,11 @@ interface Booking {
   providerApricotId: string;
   providerName: string;
   requestedDate: string;
-  requestedTime: string;
-  precheckPassed: boolean;
+  requestedTime: string | null;
+  /** 純收需求變體（資料源離線）：MORNING / AFTERNOON / EVENING */
+  timeOfDay: string | null;
+  /** null = 未經空檔核對（資料源離線，純收需求變體） */
+  precheckPassed: boolean | null;
   status: BookingStatus;
   handledByStaffName: string | null;
   handledAt: string | null;
@@ -55,6 +58,8 @@ const STATUS_LABEL: Record<BookingStatus, string> = {
   REJECTED: "已拒絕",
   EXPIRED: "已過期",
 };
+
+const TIME_OF_DAY_LABEL: Record<string, string> = { MORNING: "上晝", AFTERNOON: "下晝", EVENING: "夜晚" };
 
 export function BookingsClient({ user }: { user: UserCtx }) {
   const [bookings, setBookings] = useState<Booking[] | null>(null);
@@ -155,8 +160,9 @@ export function BookingsClient({ user }: { user: UserCtx }) {
         </div>
 
         <p className="text-xs text-t2">
-          流程：病人 Flow 揀好 → 卡出現（precheck 已對過空檔）→ 你去 Apricot 人手落單 → 返嚟撳〔已喺 Apricot 落單〕→
+          流程：病人 Flow 揀好 → 卡出現（precheck 已對過空檔）→ 你去醫生系統人手落單 → 返嚟撳〔已喺醫生系統落單〕→
           系統自動覆病人。48 小時冇人處理會自動過期。
+          灰字「未經空檔核對」= 資料源離線時嘅純收需求卡（只係日期 + 時段偏好）— 照樣人手對醫生系統落單。
         </p>
 
         {bookings.length === 0 && (
@@ -178,9 +184,13 @@ export function BookingsClient({ user }: { user: UserCtx }) {
                 {STATUS_LABEL[b.status]}
               </span>
               <span className="text-sm font-semibold text-t1">
-                {b.providerName} · {b.requestedDate} {b.requestedTime}
+                {b.providerName} · {b.requestedDate} {b.requestedTime ?? (b.timeOfDay ? TIME_OF_DAY_LABEL[b.timeOfDay] ?? b.timeOfDay : "")}
               </span>
-              {b.precheckPassed && <span className="text-[10px] text-ok-text">✓ precheck 過</span>}
+              {b.precheckPassed === true && <span className="text-[10px] text-ok-text">✓ precheck 過</span>}
+              {b.precheckPassed === null && (
+                <span className="text-[10px] text-t3">未經空檔核對（資料源離線）</span>
+              )}
+              {b.precheckPassed === false && <span className="text-[10px] text-danger-text">✗ precheck 未過</span>}
               <span className="ml-auto text-[11px] text-t3">{new Date(b.createdAt).toLocaleString()}</span>
             </div>
 
@@ -226,7 +236,7 @@ export function BookingsClient({ user }: { user: UserCtx }) {
                   disabled={busyId === b.id}
                   className="text-xs px-3 py-1.5 rounded bg-ok hover:opacity-90 text-white font-medium disabled:opacity-40"
                 >
-                  {busyId === b.id ? "處理中…" : "✓ 已喺 Apricot 落單"}
+                  {busyId === b.id ? "處理中…" : "✓ 已喺醫生系統落單"}
                 </button>
                 <button
                   onClick={() => void reschedule(b.id)}

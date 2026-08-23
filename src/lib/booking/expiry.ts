@@ -1,7 +1,7 @@
 /**
  * BookingRequest 過期邏輯（MD §8.3：48h 冇處理 → EXPIRED + admin 提醒）
  *
- * cron `bookings-expire` 每 5 分鐘行一次（輕量 DB-only，唔經 Apricot）：
+ * cron `bookings-expire` 每 5 分鐘行一次（輕量 DB-only）：
  * - PENDING 且 createdAt < now - 48h → EXPIRED + AuditLog(BOOKING_EXPIRED)
  * - FlowSession SENT 且 createdAt < now - 48h → ABANDONED（flow 中途棄 = 零 BookingRequest，
  *   無殭屍 — ABANDONED 只係清理 token 狀態）

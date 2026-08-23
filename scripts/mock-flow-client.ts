@@ -163,7 +163,13 @@ async function complete(): Promise<void> {
   const providerId = requireOpt("provider");
   const providerName = requireOpt("providerName");
   const date = requireOpt("date");
-  const time = requireOpt("time");
+  // time（正常變體 HH:mm）或 timeOfDay（純收需求變體 MORNING/AFTERNOON/EVENING — 資料源離線 Flow）
+  const time = opts.time ?? "";
+  const timeOfDay = opts["timeOfDay"] ?? "";
+  if (!time && !timeOfDay) {
+    console.error("missing --time (or --timeOfDay for requirement variant)");
+    process.exit(2);
+  }
   const waId = opts["wa-id"] || (await loadConvWaId(clinic.id, convId));
   if (!waId) {
     console.error("cannot resolve wa_id for conversation");
@@ -174,13 +180,15 @@ async function complete(): Promise<void> {
   const kp = ensureKeypair();
   const aesKey = randomBytes(16);
   const iv = randomBytes(12);
-  const { payload, iv: payloadIv } = encryptGcm(aesKey, iv, {
+  const replyPayload: Record<string, unknown> = {
     flow_token: token,
     providerId,
     providerName,
     date,
-    time,
-  });
+  };
+  if (time) replyPayload.time = time;
+  if (timeOfDay) replyPayload.timeOfDay = timeOfDay; // self-describing：endpoint 由 shape 分變體
+  const { payload, iv: payloadIv } = encryptGcm(aesKey, iv, replyPayload);
 
   const bizNumber = (clinic.waDisplayNumber ?? "").replace(/\D/g, "");
   const ts = Math.floor(Date.now() / 1000).toString();

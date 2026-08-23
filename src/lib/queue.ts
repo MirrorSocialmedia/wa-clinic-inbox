@@ -5,13 +5,11 @@ import log from "@/lib/log";
 /**
  * WA Clinic Inbox — BullMQ 骨架（框架 MD §1/§2）
  *
- * 5 個 queue：
+ * 4 個 queue：
  * - inbound  : webhook event 解析（patient 訊息 / echo / history / status）
  * - outbound : 發訊息 + 重試 + status 回寫
  * - ai       : 意圖識別 + 草稿生成（Phase 2）
- * - cron     : 排程入口（空檔 sync / keepalive / bookings-expire）
- * - apricot  : ★ Phase 3 — 所有 Apricot HTTP request 唯一通道（concurrency=1
- *              嚴格序列化，防 token rotation 互相炒車 — MD §8.1）
+ * - cron     : 排程入口（空檔 refresh / bookings-expire / 健康自檢）
  *
  * connection：單一 shared ioredis（BullMQ 要求 maxRetriesPerRequest: null）。
  * 注意：healthz 用獨立 probe client（見 healthz route），唔共用呢個。
@@ -76,16 +74,12 @@ export const inboundQueue = new Queue("inbound", queueOptions());
 export const outboundQueue = new Queue("outbound", queueOptions());
 export const aiQueue = new Queue("ai", queueOptions());
 export const cronQueue = new Queue("cron", queueOptions());
-// ★ Phase 3：Apricot request 嚴格序列化 — 全部 Apricot HTTP 只可經呢個 queue
-// （worker concurrency=1 係唯一保障；唔好喺別處直接打 Apricot HTTP）。
-export const apricotQueue = new Queue("apricot", queueOptions());
 
 export const QUEUE_NAMES = {
   inbound: "inbound",
   outbound: "outbound",
   ai: "ai",
   cron: "cron",
-  apricot: "apricot",
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

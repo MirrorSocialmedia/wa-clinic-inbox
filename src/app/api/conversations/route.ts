@@ -85,6 +85,10 @@ export const GET = handle(async (req: NextRequest) => {
             providerName: b.providerName,
             requestedDate: b.requestedDate,
             requestedTime: b.requestedTime,
+            // 純收需求變體（workforce 切換 MD §3）：timeOfDay + precheckPassed=null —
+            // REST refresh（fetchConversations 全量 replace）必須帶埋，否則 chip 空白。
+            timeOfDay: b.timeOfDay,
+            precheckPassed: b.precheckPassed,
             status: b.status,
             createdAt: b.createdAt,
           };

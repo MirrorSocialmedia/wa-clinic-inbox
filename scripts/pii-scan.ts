@@ -2,13 +2,16 @@
  * pii-scan — PII CI 守門（MD 任務 D / Phase 3 驗收「DB 全表掃描」）
  *
  * 三層掃描：
- * 1. SCHEMA：Apricot 側表（AvailabilitySlot/ApricotSession/BookingRequest/FlowSession/
+ * 1. SCHEMA：workforce cache 側表（AvailabilitySlot/WorkforceSyncState/BookingRequest/FlowSession/
  *    Provider/ProviderClinic）唔可以有 clinicPatient/visitReasons/diagnosis 類欄位
- * 2. DATA：抽呢幾張表嘅真實 DB 數據（JSON dump）+ AuditLog.meta grep
- *    — mock fixture 故意帶 PII bait（MOCK_PII_* 字串）經 adapter 落庫，
- *    呢度斷 0 hit（bait 只可存活喺 raw response 內存，落地即消失）
- * 3. LOG：/tmp/e2e-*.log grep 同樣 marker（log 只准 metadata 鐵律）
- * 4. SUMMARY（安全審計 M-5）：抽 ≤50 條最新 Conversation.aiSummary，對照該 conversation
+ * 2. CONTRACT-STRIP（2026-08-23 workforce 切換 — 舊 Apricot mock bait 層換位）：
+ *    raw availability response 故意插 PII 欄（medicalHistory/clinicPatient/visitReasons/diagnosis）
+ *    → 經 client 嘅 zod 契約 parse → 斷言 strip 後 output 零 PII key/值
+ *    （防線 = 來源換咗但 PII 白名單不變；此層零 DB 可跑）
+ * 3. DATA：抽呢幾張表嘅真實 DB 數據（JSON dump）+ AuditLog.meta grep
+ *    — 含 ★ 負面斷言：AvailabilitySlot（L2 cache）序列化後零病人欄位（mock bait 經 L2 落庫後必須 0 hit）
+ * 4. LOG：/tmp/e2e-*.log grep 同樣 marker（log 只准 metadata 鐵律）
+ * 5. SUMMARY（安全審計 M-5）：抽 ≤50 條最新 Conversation.aiSummary，對照該 conversation
  *    嘅 contact.profileName（完整 + ≥2 字連續子串）同 waId 後 8 位 — 子串 hit = violation
  *    （H-3 deterministic scrub 生效驗證；E2E bait：mock summary 含 E2E-BAIT-SUM-7f3a，
  *    同名 contact 落庫後必須 0 hit）
@@ -30,6 +33,7 @@ try {
 }
 
 import { PrismaClient } from "@prisma/client";
+import { AvailabilityResponse } from "../src/lib/workforce/client";
 import { nameSubstrings } from "../src/lib/ai/scrub";
 
 const prisma = new PrismaClient();
@@ -39,7 +43,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 1) 鐵桿 marker：Apricot 病人資料欄位名 + 值格式（SSN/身份證/email）— 定義喺 ./pii-markers.ts
 // 2) 決定性 bait（mock fixture 故意埋入 — 落地必須 0 hit）— 同上
 
-type Violation = { layer: "schema" | "data" | "log" | "summary"; detail: string };
+type Violation = { layer: "schema" | "contract" | "data" | "log" | "summary"; detail: string };
 const violations: Violation[] = [];
 
 function add(layer: Violation["layer"], detail: string): void {
@@ -48,9 +52,9 @@ function add(layer: Violation["layer"], detail: string): void {
 
 // ── 1) SCHEMA scan ──────────────────────────────────────────────────────
 
-const APRICOT_SIDE_MODELS = [
+const CACHE_SIDE_MODELS = [
   "AvailabilitySlot",
-  "ApricotSession",
+  "WorkforceSyncState",
   "BookingRequest",
   "FlowSession",
   "Provider",
@@ -59,7 +63,7 @@ const APRICOT_SIDE_MODELS = [
 
 function scanSchema(): void {
   const schema = readFileSync(path.join(__dirname, "../prisma/schema.prisma"), "utf8");
-  for (const model of APRICOT_SIDE_MODELS) {
+  for (const model of CACHE_SIDE_MODELS) {
     const m = schema.match(new RegExp(`model ${model} \\{[\\s\\S]*?\\n\\}`));
     if (!m) {
       add("schema", `model ${model} 搵唔到`);
@@ -77,7 +81,58 @@ function scanSchema(): void {
       }
     }
   }
-  console.log(`[pii-scan] schema: ${APRICOT_SIDE_MODELS.length} models checked`);
+  console.log(`[pii-scan] schema: ${CACHE_SIDE_MODELS.length} models checked`);
+}
+
+// ── 1b) CONTRACT-STRIP scan（workforce 切換 — 舊 Apricot bait 層換位） ──────
+// raw availability response 故意插 PII 欄（模拟上游失守）→ client zod 契約必須 strip。
+// 呢層零 DB — 静态可跑（gate 5：pnpm pii-scan 可跑部分綠）。
+
+const BAIT_VALUES = ["MOCK_PII_DIAGNOSIS", "MOCK_PII_PATIENT", "85200000000", "MOCK_PII_REASON", "MOCK_PII_CREATOR"];
+
+function scanContractStrip(): void {
+  const baitRaw = {
+    v: 1,
+    clinicCode: "TKW",
+    syncedAt: "2026-08-23T05:00:00.000Z",
+    stale: false,
+    days: [
+      {
+        date: "2026-08-24",
+        providers: [
+          {
+            providerApricotId: "mock-pract-tkw-1",
+            providerName: "Mock 醫生 1",
+            slots: [{ start: "10:00", end: "10:30", isOpen: true, bookedCount: 0 }],
+            // ★ PII bait（上游失守模擬）— zod 必須 strip：
+            medicalHistory: "MOCK_PII_DIAGNOSIS",
+            clinicPatient: { fullName: "MOCK_PII_PATIENT", phoneNum: "85200000000", dateOfBirth: "1990-01-01" },
+            visitReasons: [{ des: "MOCK_PII_REASON" }],
+            createdBy: "MOCK_PII_CREATOR",
+          },
+        ],
+      },
+    ],
+    // 頂層 bait：
+    diagnosis: "MOCK_PII_DIAGNOSIS",
+  };
+  let parsed: unknown;
+  try {
+    parsed = AvailabilityResponse.parse(baitRaw);
+  } catch (e) {
+    add("contract", `zod parse 失敗（bait 應該被 strip 唔係 reject）: ${e instanceof Error ? e.message.slice(0, 120) : String(e)}`);
+    console.log("[pii-scan] contract: 0 (parse failed)");
+    return;
+  }
+  const out = JSON.stringify(parsed);
+  for (const v of BAIT_VALUES) {
+    if (out.includes(v)) add("contract", `zod strip 失效 — output 含 PII 值 "${v}"`);
+  }
+  for (const key of ["medicalHistory", "clinicPatient", "visitReasons", "createdBy", "diagnosis", "fullName", "phoneNum", "dateOfBirth"]) {
+    if (out.includes(key)) add("contract", `zod strip 失效 — output 含 PII key "${key}"`);
+  }
+  for (const label of matchPiiMarkers(out)) add("contract", `zod strip 失效 — output 發現 "${label}"`);
+  console.log("[pii-scan] contract: 1 bait-laden raw parsed (PII 欄應已 strip)");
 }
 
 // ── 2) DATA scan ────────────────────────────────────────────────────────
@@ -89,14 +144,20 @@ function grepMarkers(json: string, where: string): void {
 async function scanData(): Promise<void> {
   const tables: Record<string, unknown[]> = {
     AvailabilitySlot: await prisma.availabilitySlot.findMany({ select: { clinicId: true, providerApricotId: true, date: true, startTime: true, endTime: true, bookedCount: true, isOpen: true, syncedAt: true } }),
-    ApricotSession: await prisma.apricotSession.findMany(),
+    WorkforceSyncState: await prisma.workforceSyncState.findMany(),
     BookingRequest: await prisma.bookingRequest.findMany({
-      select: { id: true, conversationId: true, clinicId: true, providerApricotId: true, providerName: true, requestedDate: true, requestedTime: true, status: true },
+      select: { id: true, conversationId: true, clinicId: true, providerApricotId: true, providerName: true, requestedDate: true, requestedTime: true, timeOfDay: true, precheckPassed: true, status: true },
     }),
     FlowSession: await prisma.flowSession.findMany({ select: { id: true, conversationId: true, clinicId: true, status: true, flowMessageWamid: true } }),
     Provider: await prisma.provider.findMany(),
     ProviderClinic: await prisma.providerClinic.findMany(),
   };
+  // ★ L2 cache 負面斷言（workforce 切換：來源換咗，cache 零病人欄位防線不變）：
+  //   AvailabilitySlot 序列化後唔准出現任何病人資料欄位名 / PII 值格式
+  const l2Json = JSON.stringify(tables.AvailabilitySlot);
+  for (const key of ["clinicPatient", "visitReasons", "medicalHistory", "diagnosis", "fullName", "phoneNum", "dateOfBirth", "createdBy"]) {
+    if (l2Json.includes(key)) add("data", `AvailabilitySlot（L2 cache）含病人欄位名 "${key}"`);
+  }
   // ★ flowToken（BookingRequest.flowToken / FlowSession.flowToken）係簽咗 conversationId 嘅 JWT —
   //   為咗 scan 完整性用完整 row dump（token 唔係病人 PII，但 dump 住先）。
   const fullBooking = await prisma.bookingRequest.findMany({ select: { flowToken: true } });
@@ -186,10 +247,18 @@ async function scanSummaries(): Promise<void> {
 // ── main ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // --static = 只跑零 DB 層（schema + contract-strip + log）— 15432 down 嘅環境 gate 用
+  const staticOnly = process.argv.includes("--static");
   scanSchema();
-  await scanData();
+  scanContractStrip();
+  if (!staticOnly) {
+    await scanData();
+  }
   scanLogs();
-  await scanSummaries();
+  if (!staticOnly) {
+    await scanSummaries();
+  }
+  if (staticOnly) console.log("[pii-scan] --static: DB 層（data/summary）已 skip");
 
   if (violations.length === 0) {
     console.log("PII-SCAN OK: 0 violations");

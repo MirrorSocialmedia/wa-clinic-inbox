@@ -35,18 +35,19 @@
 #   T24 (Phase 2b) STAFF 攞別店/自家店 aiMode / PATCH 別店 aiMode → 403（RBAC）
 #   T25 (Phase 2b) AUTO 發送冪等：re-delivery（重 enqueue AI job）唔重發
 #   T26 (Phase 2b) AUTO 發送 log PII 抽查（鐵律 1 擴展）
-#   T27 (Phase 3) Apricot mock sync（slot 落庫 + heartbeat）+ Flow endpoint 3 步加密 round-trip
+#   T27 (Phase 3) workforce mock sync（slot 落庫 + WorkforceSyncState heartbeat）+ Flow endpoint 3 步加密 round-trip
 #       （provider 列表 / date 只回有空日 / time 只回空 slot / 壞 token 401）
 #   T28 (Phase 3) 病人 Complete → BookingRequest PENDING + 綠色卡 + /bookings 見到
-#   T29 (Phase 3) 〔已喺 Apricot 落單〕→ CONFIRMED + AuditLog + 自動確認訊息（含日期時間）
+#   T29 (Phase 3) 〔已喺醫生系統落單〕→ CONFIRMED + AuditLog + 自動確認訊息（含日期時間）
 #   T30 (Phase 3) race：兩病人同 slot 同時 Complete → 第二個被擋（precheck）+ 自動覆「滿咗」+ 重出 Flow
 #   T31 (Phase 3) flow 中途棄 → 0 BookingRequest（無殭屍）
 #   T32 (Phase 3) 48h 冇處理 → cron EXPIRED + AuditLog
-#   T33 (Phase 3) PII：Apricot mock raw（含 clinicPatient/visitReasons/diagnosis）經 adapter → DB+log 0 hit + pii-scan 0 violation
+#   T33 (Phase 3) PII：workforce contract strip（插 PII 欄 → zod 零洩露）+ L2 cache 零病人欄位 + log 0 hit + pii-scan 0 violation
 #   T34 (Phase 3) 別店 flow_token 被拒 + STAFF 撳別店 booking confirm → 403
-#   T35 (Phase 4) 健康自檢：inject 異常（webhook stale / queue depth / AI breaker）→ 3 條 Alert
+#   T35 (Phase 4) 健康自檢：inject 異常（webhook stale / queue depth / AI breaker / workforce_api_degraded）→ Alert
 #       + ALERT_CHANNEL=log 見到 metadata-only 警報（0 PII）；恢復 → auto-resolved；
 #       /api/admin/alerts（STAFF 403 / ADMIN 200）+ POST resolve（手動 resolved）
+#   T35b (workforce 切換) 四層降級鏈 E2E（stale / throw / NONE / 恢復 / alert）→ pnpm e2e:workforce
 #   T36 (Phase 4) quality_rating：mock GREEN 無警報 + Clinic.qualityRating/qualityCheckedAt 落庫；
 #       WA_MOCK_QUALITY=RED inject → severity=HIGH 警報（被 ban 前哨）；恢復 → auto-resolved
 #   T37 (Phase 4) 週報：fixture（4 conv/7 msg/4 draft/3 flow/3 booking）→ weekly-report script
@@ -692,21 +693,21 @@ for kw in "想預約下週有冇位" "牙痛到瞓唔著" "想搵人工" "想預
 done
 check "T26 AUTO 發送 log 無訊息原文（metadata only 鐵律）" "$LOGPII2" "0"
 
-# ══════════════ Phase 3：Apricot 空檔 + WhatsApp Flow 預約收集 ══════════════
+# ══════════════ Phase 3：workforce 空檔（clinic-workforce External API）+ WhatsApp Flow 預約收集 ══════════════
 
-echo "[11/11] T27: Apricot sync + Flow endpoint 3 步 round-trip..."
+echo "[11/11] T27: workforce mock sync + Flow endpoint 3 步 round-trip..."
 rm -rf .dev/flow-keys
-rm -f .dev/apricot-mock-fill.json
+rm -f .dev/workforce-mock-fill.json .dev/workforce-mock-fail.json .dev/workforce-mock-stale.json
 
-# 0) 觸發 Apricot sync（cron 路徑：cronQueue → apricot queue concurrency=1）
+# 0) 觸發 workforce sync（cron 路徑：cronQueue → refreshAllClinics → getSlots 四層降級鏈；WORKFORCE_MOCK=1）
 pnpm -s e2e:cron sync-availability >/dev/null 2>&1 || fail "T27 e2e:cron enqueue"
 T27=0
 if ! wait_for "SELECT (count(*) > 0)::text c FROM \"AvailabilitySlot\"" '[{"c":"true"}]' 90; then
   echo "    ❌ T27 AvailabilitySlot 冇 row"
   T27=1
 fi
-SSESYNC=$(q "SELECT (\"lastSyncAt\" IS NOT NULL)::text s FROM \"ApricotSession\" WHERE id=1" | jf s)
-[ "$SSESYNC" = "true" ] || { echo "    ❌ T27 ApricotSession.lastSyncAt 冇 heartbeat"; T27=1; }
+SSESYNC=$(q "SELECT (\"lastOkAt\" IS NOT NULL)::text s FROM \"WorkforceSyncState\" WHERE \"clinicId\"='$TKW_CLINIC_ID'" | jf s)
+[ "$SSESYNC" = "true" ] || { echo "    ❌ T27 WorkforceSyncState.lastOkAt 冇 heartbeat"; T27=1; }
 
 # 1) 新病人（BOOKING_REQUEST intent — 真實 flow 起點）+ staff 發 Flow
 PATIENT_P3="8526031${EPOCH}"
@@ -765,7 +766,7 @@ step_flow "time" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCR
 case "${F_DATA:-}" in *"$TIME_A"*) : ;; *) echo "    ❌ T27 SCREEN_TIME 冇包含 $TIME_A（data=${F_DATA:0:200}）"; T27=1 ;; esac
 step_flow "bad-token" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCREEN_PROVIDER --bad-token
 case "$F_HTTP" in 401|400) : ;; *) echo "    ❌ T27 壞 token 唔係 401/400（HTTP=$F_HTTP）"; T27=1 ;; esac
-[ "$T27" = 0 ] && pass "T27 Apricot sync（slot 落庫 + heartbeat）+ Flow 3 步加密 round-trip（provider 3 人/date 過濾閉诊日/time 只空 slot/壞 token 401）" \
+[ "$T27" = 0 ] && pass "T27 workforce mock sync（slot 落庫 + heartbeat）+ Flow 3 步加密 round-trip（provider 3 人/date 過濾閉诊日/time 只空 slot/壞 token 401）" \
   || fail "T27 Flow endpoint round-trip（見上 ❌）"
 
 # ── T28. 病人 Complete → BookingRequest PENDING + 綠色卡 + /bookings ──────────
@@ -786,7 +787,7 @@ grep -qF "\"id\":\"$BOOK_ID\"" /tmp/e2e-book-list.json || { echo "    ❌ T28 /b
 [ "$T28" = 0 ] && pass "T28 Complete → BookingRequest PENDING + FlowSession COMPLETED + 綠色卡 + /bookings 見到" \
   || fail "T28 Complete → PENDING 鏈（見上 ❌）"
 
-# ── T29. 〔已喺 Apricot 落單〕→ CONFIRMED + AuditLog + 自動確認訊息 ─────────
+# ── T29. 〔已喺醫生系統落單〕→ CONFIRMED + AuditLog + 自動確認訊息 ─────────
 echo "[11/11] T29: confirm → CONFIRMED + auto message..."
 T29=0
 CODE=$(curl -s -o /tmp/e2e-confirm.json -w '%{http_code}' -b "$COOKIE_TKW" \
@@ -917,12 +918,18 @@ AUX=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='BOOKING_EXPIRED
 [ "$T32" = 0 ] && pass "T32 48h 未處理 → cron EXPIRED + AuditLog（DB 時移 49h 實測）" \
   || fail "T32 48h expiry（見上 ❌）"
 
-# ── T33. PII：Apricot mock raw（含 clinicPatient/visitReasons/diagnosis）經 adapter → DB + log 0 hit ──
+# ── T33. PII：workforce contract strip + L2 cache 零病人欄位 + log 0 hit ──
 echo "[11/11] T33: PII scan..."
 T33=0
+# (1) contract script（零 DB）：fixture sha256 錨定 + parse 通過 + 插 PII 欄變體 strip + L2 row shape 白名單
+CONTRACT_OUT=$(pnpm -s e2e:workforce-contract 2>&1)
+echo "$CONTRACT_OUT" | tail -6
+echo "$CONTRACT_OUT" | grep -q "WORKFORCE-CONTRACT OK" || { echo "    ❌ T33 workforce contract 斷言失敗"; T33=1; }
+# (2) pii-scan（schema + contract-strip + DB data + log 層）
 SCAN_OUT=$(pnpm -s pii-scan 2>&1)
 echo "$SCAN_OUT" | tail -5
 echo "$SCAN_OUT" | grep -q "PII-SCAN OK: 0 violations" || { echo "    ❌ T33 pii-scan 有 violation"; T33=1; }
+# (3) log 零 PII（bait marker 防復發 — 來源已換 workforce，但鐵律不變）
 LOGPII3=0
 for kw in "MOCK_PII_PATIENT" "MOCK_PII_DIAGNOSIS" "MOCK_PII_REASON" "MOCK_PII_CREATOR" "85200000000" "clinicPatient" "visitReasons"; do
   if grep -qF "$kw" /tmp/e2e-server.log /tmp/e2e-worker.log /tmp/e2e-worker-fail.log /tmp/e2e-worker2.log 2>/dev/null; then
@@ -931,7 +938,7 @@ for kw in "MOCK_PII_PATIENT" "MOCK_PII_DIAGNOSIS" "MOCK_PII_REASON" "MOCK_PII_CR
   fi
 done
 [ "$LOGPII3" = 0 ] || T33=1
-[ "$T33" = 0 ] && pass "T33 PII：mock raw 含 clinicPatient/visitReasons/diagnosis 經 adapter → DB + log 全 0 hit；pii-scan 0 violation" \
+[ "$T33" = 0 ] && pass "T33 PII：contract strip（插 medicalHistory/clinicPatient/visitReasons → zod 零洩露）+ L2 cache 零病人欄位 + log 0 hit + pii-scan 0 violation" \
   || fail "T33 PII 鐵律（見上 ❌）"
 
 # ══════════════ Phase 4：監控 + 營運硬化 ══════════════
@@ -939,9 +946,9 @@ done
 # ── T35. 健康自檢：inject 異常 → Alert + metadata-only 通知；恢復 → auto-resolved ──
 echo "[P4] T35: health-check..."
 T35=0
-# pre-clean：清舊 health alerts + 統一 webhook 時鐘（TKW = stale，其餘 fresh）+ Apricot fresh
-q "UPDATE \"Alert\" SET \"resolvedAt\" = now() WHERE \"resolvedAt\" IS NULL AND type IN ('webhook_stale','queue_depth','ai_breaker_open','apricot_sync_stale','disk_low')" >/dev/null
-q "UPDATE \"ApricotSession\" SET \"lastSyncAt\" = now() WHERE id=1" >/dev/null
+# pre-clean：清舊 health alerts + 統一 webhook 時鐘（TKW = stale，其餘 fresh）+ workforce fresh
+q "UPDATE \"Alert\" SET \"resolvedAt\" = now() WHERE \"resolvedAt\" IS NULL AND type IN ('webhook_stale','queue_depth','ai_breaker_open','workforce_api_degraded','disk_low')" >/dev/null
+q "UPDATE \"WorkforceSyncState\" SET \"lastOkAt\" = now()" >/dev/null
 q "UPDATE \"Clinic\" SET \"lastWebhookEventAt\" = CASE WHEN id='$TKW_CLINIC_ID' THEN now() - interval '40 minutes' ELSE now() END WHERE \"lastWebhookEventAt\" IS NOT NULL" >/dev/null
 
 # (1) inject：webhook stale（TKW -40min）+ queue depth 假高（ai=150）+ AI breaker open
@@ -963,6 +970,31 @@ ALERTLINE=$(grep -h "ALERT (channel=log): webhook_stale" /tmp/e2e-worker.log /tm
 [ -n "$ALERTLINE" ] || { echo "    ❌ T35 worker log 搵唔到 ALERT (channel=log) 行"; T35=1; }
 echo "$ALERTLINE" | grep -qF "e2e 第一則" && { echo "    ❌ T35 警報 log 含訊息原文（PII 洩露）"; T35=1; }
 echo "$ALERTLINE" | grep -qF "minutesSince" || { echo "    ❌ T35 警報 log 冇 metadata"; T35=1; }
+
+# (2b) workforce_api_degraded：lastOkAt >15 分鐘 → MEDIUM alert；恢復 → auto-resolved
+q "UPDATE \"WorkforceSyncState\" SET \"lastOkAt\" = now() - interval '20 minutes'" >/dev/null
+pnpm -s e2e:cron health-check >/dev/null 2>&1 || T35=1
+if wait_for "SELECT (SELECT count(*) FROM \"Alert\" WHERE \"resolvedAt\" IS NULL AND type='workforce_api_degraded')::text c" '[{"c":"1"}]' 30; then
+  pass "T35 workforce_api_degraded：lastOkAt >15 分鐘 → MEDIUM alert"
+else
+  fail "T35 workforce_api_degraded alert 未開"
+fi
+WFSEV=$(q "SELECT \"severity\"::text s FROM \"Alert\" WHERE type='workforce_api_degraded' AND \"resolvedAt\" IS NULL" | jf s)
+check "T35 workforce_api_degraded severity=MEDIUM" "$WFSEV" "MEDIUM"
+q "UPDATE \"WorkforceSyncState\" SET \"lastOkAt\" = now()" >/dev/null
+pnpm -s e2e:cron health-check >/dev/null 2>&1 || T35=1
+if wait_for "SELECT (SELECT count(*) FROM \"Alert\" WHERE \"resolvedAt\" IS NULL AND type='workforce_api_degraded')::text c" '[{"c":"0"}]' 30; then
+  pass "T35 workforce_api_degraded 恢復 → auto-resolved"
+else
+  fail "T35 workforce_api_degraded auto-resolve 失敗"
+fi
+
+# (2c) T35b：四層降級鏈 E2E（stale / throw→STALE_CACHE / NONE / 恢復 / alert）— workforce 切換 MD §4 新增
+WF_E2E_OUT=$(pnpm -s e2e:workforce 2>&1)
+echo "$WF_E2E_OUT" | tail -8
+echo "$WF_E2E_OUT" | grep -q "E2E-WORKFORCE OK" || { echo "    ❌ T35b 四層降級鏈 E2E 失敗"; T35=1; }
+[ "$T35" = 0 ] && pass "T35b 四層降級鏈 E2E（STALE_SOURCE / STALE_CACHE / NONE / 恢復 / alert）" \
+  || fail "T35b 四層降級鏈 E2E（見上 ❌）"
 
 # (3) 恢復 → auto-resolved
 q "UPDATE \"Clinic\" SET \"lastWebhookEventAt\" = now() WHERE id='$TKW_CLINIC_ID'" >/dev/null

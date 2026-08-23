@@ -219,9 +219,10 @@ model BookingRequest {
   flowToken         String        @unique     // 發 Flow 時生成，nfm_reply 對返
   providerApricotId String
   providerName      String                    // 快照，唔 join
-  requestedDate     String                    // YYYY-MM-DD（跟 Apricot 用 HK 日界）
-  requestedTime     String                    // HH:mm
-  precheckPassed    Boolean                   // 發卡嗰刻對照空檔 cache 嘅結果
+  requestedDate     String                    // YYYY-MM-DD（HK 日界）
+  requestedTime     String?                   // HH:mm（pure requirement 變體 = null，改 timeOfDay）
+  precheckPassed    Boolean?                  // 發卡嗰刻對照空檔 cache 嘅結果；null = 未經核對（資料源離線，pure requirement 變體）
+  timeOfDay         String?                   // MORNING / AFTERNOON / EVENING（pure requirement 變體嘅時段偏好；正常預約 = null）
   status            BookingStatus @default(PENDING)
   handledByStaffId  String?
   handledAt         DateTime? @db.Timestamptz
@@ -231,8 +232,8 @@ model BookingRequest {
 }
 
 // Phase 3：醫生名錄（sync 表）— SCREEN_PROVIDER 嘅數據源。
-// 名錄由 seed（mock 期：由 greetingConfig.doctors 派生決定性 apricotId）或
-// Apricot 醫生 sync（real 期，APRICOT_DOCTORS_PATH 設定時）維護。
+// 名錄由 seed（由 greetingConfig.doctors 派生決定性 apricotId）或 admin 手動維護。
+// （2026-08-23 workforce 切換：舊 Apricot 醫生 sync 已拆 — workforce API 只提供空檔，無名錄 endpoint。）
 // ★ PII：只存醫生名 + Apricot ext id — 零病人資料。
 model Provider {
   id        String   @id @default(cuid())
@@ -268,7 +269,8 @@ model FlowSession {
   @@index([status, createdAt])
 }
 
-model AvailabilitySlot {                       // Apricot 讀返嚟嘅空檔 cache — ★ 只存時段佔用，零病人資料
+model AvailabilitySlot {                       // workforce API 嘅 L2 cache（switch 後來源 = clinic-workforce /api/external/v1/availability）
+                                               // ★ 只存時段佔用，零病人資料（contract zod schema 已 strip 唔識欄位）
   id                String   @id @default(cuid())
   clinicId          String
   providerApricotId String
@@ -276,22 +278,21 @@ model AvailabilitySlot {                       // Apricot 讀返嚟嘅空檔 cac
   startTime         String
   endTime           String
   bookedCount       Int
-  isOpen            Boolean                    // practitionerOpenSchs 開診 = true
-  syncedAt          DateTime @db.Timestamptz
+  isOpen            Boolean                    // workforce response slot.isOpen
+  syncedAt          DateTime @db.Timestamptz   // 用 response 嘅 syncedAt（source 新鮮度）
   @@unique([clinicId, providerApricotId, date, startTime])
 }
 
-model ApricotSession {                         // 三件套（加密存），機制照搬 provider-roster
-  id              Int      @id @default(1)
-  accessTokenEnc  String
-  refreshTokenEnc String
-  iatEnc          String
-  updatedAt       DateTime @db.Timestamptz @updatedAt
-  // Phase 3：監控 metadata（/api/admin/apricot-status 用；零 token 原文）
-  lastSyncAt      DateTime? @db.Timestamptz   // 最近一次空檔 sync 成功（heartbeat）
-  lastKeepaliveAt DateTime? @db.Timestamptz   // 最近一次 keepalive 輕量 request
-  lastError       String?                     // 最近一次失敗（metadata 短句）
-  rotationCount   Int      @default(0)        // Set-Cookie rotation 累計次數
+// workforce API 逐店 sync 狀態（switch 後取代 ApricotSession heartbeat — metadata only，零憑證）
+// lastOkAt = 最近一次 fetchAvailability 成功（response 過 zod）→ L2 新鮮度判斷（≤5 分鐘）
+// + 5 分鐘健康自檢嘅 workforce_api_degraded 訊號（持續 >15 分鐘 → alert）
+model WorkforceSyncState {
+  clinicId      String    @id
+  lastOkAt      DateTime  @db.Timestamptz
+  lastStale     Boolean?  // 最近一次成功 response 嘅 stale 旗（workforce 對上游過咗 30 分鐘）
+  lastErrorAt   DateTime? @db.Timestamptz
+  lastErrorCode String?   // metadata 短碼（http_500 / timeout / zod_invalid / clinic_not_found ...）
+  updatedAt     DateTime  @db.Timestamptz @updatedAt
 }
 
 model WebhookEvent {                           // 冪等 + 除錯（★ 唔存 payload 原文，只存 metadata）

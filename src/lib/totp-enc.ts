@@ -1,13 +1,13 @@
 /**
  * TOTP secret 加密存儲（安全審計 H-2 配套）。
  *
- * 跟 repo 現行 encryption 模式（同 Apricot 憑證同一套）：
+ * 跟 repo 現行 encryption 模式（同 Flow key wrap 同一套）：
  * - AES-256-GCM，格式 `iv(12B)|tag(16B)|ciphertext` → base64
  * - key = env `TOTP_ENC_KEY`（32-byte base64，openssl rand -base64 32）
  *
- * 點解獨立 key 而唔係重用 APRICOT_ENC_KEY：
+ * 點解獨立 key 而唔係重用其他 data encryption key：
  * - TOTP secret 係核心認證資產（dump 咗 = admin 帳號永久可偽裝），
- *   Apricot key 洩漏時 rotation 唔應該連帶影響 auth 邊（同 SESSION_SECRET /
+ *   數據側 key 洩漏時 rotation 唔應該連帶影響 auth 邊（同 SESSION_SECRET /
  *   MEDIA_ENC_KEY / FLOW_JWT_SECRET 一樣：每類敏感資產獨立 key）。
  *
  * Fail-closed：

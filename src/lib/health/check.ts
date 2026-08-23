@@ -4,9 +4,10 @@
  * 六項檢查：
  *  1. webhook stale      — 有 traffic（lastWebhookEventAt != null）但 > 30 分鐘無事件 → MEDIUM
  *                          （店員 uninstall App / 13 日冇開 嘅前哨 — MD §11 風險登記冊）
- *  2. queue depth        — ai / outbound / apricot 任一 queue waiting+failed > 100 → MEDIUM
+ *  2. queue depth        — ai / outbound 任一 queue waiting+failed > 100 → MEDIUM
  *  3. AI breaker OPEN    — HIGH（GPU 死 / sglang 重連中）
- *  4. Apricot heartbeat  — 上次成功 sync > 90 分鐘（或從未 sync）→ MEDIUM
+ *  4. workforce degraded — 上次成功 workforce sync 持續 > 15 分鐘（或從未 sync，除 15 分鐘 grace）
+ *                          → MEDIUM（workforce_api_degraded；L2 cache 過期 = Flow 開始用 stale/離線）
  *  5. disk 餘量          — < 10% → HIGH
  *  6. backup 失敗 flag   — scripts/backup-wa.sh 失敗時寫 flag 檔（C-2）→ HIGH
  *                          （flag 清咗 → 下個 cycle auto-resolve）
@@ -34,10 +35,10 @@ const pExecFile = promisify(execFile);
 // ── 閾值（MD §9.3） ──────────────────────────────────────────────────────
 export const WEBHOOK_STALE_MIN = 30;      // 有 traffic 但 > 30 分鐘無事件
 export const QUEUE_DEPTH_LIMIT = 100;     // waiting + failed
-export const APRICOT_SYNC_STALE_MIN = 90; // 上次成功 sync > 90 分鐘
+export const WORKFORCE_DEGRADED_MIN = 15; // 上次成功 workforce sync > 15 分鐘（持續降級 → alert）
 export const DISK_FREE_PCT_LIMIT = 10;    // 剩餘 < 10%
 
-const CHECKED_QUEUES = ["ai", "outbound", "apricot"] as const;
+const CHECKED_QUEUES = ["ai", "outbound"] as const;
 type CheckedQueue = (typeof CHECKED_QUEUES)[number];
 
 export interface HealthOverrides {
@@ -97,7 +98,7 @@ export async function runHealthCheck(
     }
   }
 
-  // ── 2. queue depth（ai / outbound / apricot） ─────────────────────────
+  // ── 2. queue depth（ai / outbound） ───────────────────────────────────
   const queueInfo: Record<string, { waiting: number; failed: number }> = {};
   for (const q of CHECKED_QUEUES) {
     if (overrides?.queueDepth?.[q]) {
@@ -140,22 +141,36 @@ export async function runHealthCheck(
     });
   }
 
-  // ── 4. Apricot heartbeat（上次成功 sync） ─────────────────────────────
-  const apricot = await prisma.apricotSession.findUnique({ where: { id: 1 } });
-  let apricotMin: number | null = null;
-  if (apricot?.lastSyncAt) {
-    apricotMin = Math.round((now.getTime() - apricot.lastSyncAt.getTime()) / 60000);
-  }
-  if (apricotMin === null || apricotMin > APRICOT_SYNC_STALE_MIN) {
-    breaches.push({
-      type: "apricot_sync_stale",
-      severity: "MEDIUM",
-      clinicId: null,
-      clinicCode: null,
-      detail: apricotMin === null
-        ? { reason: "never-synced", thresholdMin: APRICOT_SYNC_STALE_MIN }
-        : { minutesSince: apricotMin, thresholdMin: APRICOT_SYNC_STALE_MIN },
-    });
+  // ── 4. workforce_api_degraded（上次成功 sync 持續 > 15 分鐘；從未 sync 有 15 分鐘 grace） ──
+  // 訊號 = WorkforceSyncState.lastOkAt（getSlots 成功時寫；cron 15 分鐘 + worker 啟動首跑會定期更新）
+  const wfMax = await prisma.workforceSyncState.aggregate({ _max: { lastOkAt: true } });
+  const wfCount = await prisma.workforceSyncState.count();
+  let wfMin: number | null = null;
+  if (wfMax._max.lastOkAt) {
+    wfMin = Math.round((now.getTime() - wfMax._max.lastOkAt.getTime()) / 60000);
+    if (wfMin > WORKFORCE_DEGRADED_MIN) {
+      breaches.push({
+        type: "workforce_api_degraded",
+        severity: "MEDIUM",
+        clinicId: null,
+        clinicCode: null,
+        detail: { minutesSince: wfMin, thresholdMin: WORKFORCE_DEGRADED_MIN },
+      });
+    }
+  } else if (wfCount === 0) {
+    // 從未 sync：新部署 grace（15 分鐘由最後一次 traffic 起計；完全無 traffic → 永遠 grace，
+    //   因為 worker 啟動首跑 / 首個 getSlots 會立即寫 WorkforceSyncState — wfCount=0 只係極短窗口）
+    const anchor = await prisma.webhookEvent.aggregate({ _max: { receivedAt: true } });
+    const graceBase = anchor._max.receivedAt ?? new Date(now.getTime() - WORKFORCE_DEGRADED_MIN * 60000);
+    if ((now.getTime() - graceBase.getTime()) / 60000 > WORKFORCE_DEGRADED_MIN) {
+      breaches.push({
+        type: "workforce_api_degraded",
+        severity: "MEDIUM",
+        clinicId: null,
+        clinicCode: null,
+        detail: { reason: "never-synced", thresholdMin: WORKFORCE_DEGRADED_MIN },
+      });
+    }
   }
 
   // ── 5. disk 餘量（root + WA_MEDIA_DIR mount，按 device 去重） ──────────
@@ -262,7 +277,7 @@ export async function runHealthCheck(
       webhook: webhookInfo,
       queues: queueInfo,
       breaker: breaker.state,
-      apricotSyncMin: apricotMin,
+      workforceSyncMin: wfMin,
       disk: diskInfo,
       backupFlag: backupReason,
       created: created.map((c) => c.type),
@@ -274,7 +289,7 @@ export async function runHealthCheck(
   return {
     created,
     resolved,
-    checks: { webhook: webhookInfo, queues: queueInfo, breaker: breaker.state, apricotSyncMin: apricotMin, disk: diskInfo, backupFlag: backupReason },
+    checks: { webhook: webhookInfo, queues: queueInfo, breaker: breaker.state, workforceSyncMin: wfMin, disk: diskInfo, backupFlag: backupReason },
   };
 }
 

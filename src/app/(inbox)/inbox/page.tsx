@@ -87,6 +87,8 @@ export default async function InboxPage({
           providerName: b.providerName,
           requestedDate: b.requestedDate,
           requestedTime: b.requestedTime,
+          timeOfDay: b.timeOfDay,
+          precheckPassed: b.precheckPassed,
           status: b.status as "PENDING",
           createdAt: b.createdAt.toISOString(),
         };

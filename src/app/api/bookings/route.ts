@@ -68,6 +68,7 @@ export const GET = handle(async (req: NextRequest) => {
         providerName: b.providerName,
         requestedDate: b.requestedDate,
         requestedTime: b.requestedTime,
+        timeOfDay: b.timeOfDay,
         precheckPassed: b.precheckPassed,
         status: b.status,
         handledByStaffId: b.handledByStaffId,

@@ -4,7 +4,6 @@
  * 用法（repo root）：
  *   pnpm e2e:cron sync-availability
  *   pnpm e2e:cron bookings-expire
- *   pnpm e2e:cron apricot-keepalive
  *   pnpm e2e:cron health-check
  *   pnpm e2e:cron quality-check
  *   pnpm e2e:cron weekly-report
@@ -21,7 +20,7 @@ try {
 
 import { cronQueue } from "../src/lib/queue";
 
-const VALID = ["sync-availability", "bookings-expire", "apricot-keepalive", "health-check", "quality-check", "weekly-report"];
+const VALID = ["sync-availability", "bookings-expire", "health-check", "quality-check", "weekly-report"];
 const name = process.argv[2];
 const dataArg = process.argv[3];
 

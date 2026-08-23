@@ -1,5 +1,5 @@
 /**
- * POST /api/bookings/[id]/confirm — 員工撳〔已喺 Apricot 落單〕（MD §8.3）
+ * POST /api/bookings/[id]/confirm — 員工撳〔已喺醫生系統落單〕（MD §8.3）
  *
  * 1. RBAC：assertClinicAccess（STAFF 撳別店 booking → 403 實測）
  * 2. 狀態機：只 PENDING 可以 confirm（其餘 → 409）
@@ -7,7 +7,7 @@
  * 4. 自動發確認訊息：
  *    - 24h 窗口內 → free-form「已為你預約 X 月 X 日 HH:mm 陳醫生，到時見 🙂」
  *    - 過窗 → 422 提示 staff 用 utility template（MD：過窗用 template；
- *      booking 照樣 CONFIRMED — 狀態要反映「人已喺 Apricot 落咗單」）
+ *      booking 照樣 CONFIRMED — 狀態要反映「人已喺醫生系統落咗單」）
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
@@ -20,10 +20,16 @@ import { publishNotify } from "@/lib/notify";
 
 export const dynamic = "force-dynamic";
 
-/** 確認訊息文字（MD §8.3 格式：「已為你預約 X 月 X 日 HH:mm 陳醫生，到時見 🙂」） */
-function confirmMessageText(b: { requestedDate: string; requestedTime: string; providerName: string }): string {
+/** 確認訊息文字（MD §8.3 格式：「已為你預約 X 月 X 日 HH:mm 陳醫生，到時見 🙂」）
+ *  純收需求變體（requestedTime = null + timeOfDay）：「…上晝…，具體時段職員會再同你確認 🙂」 */
+const TIME_OF_DAY_LABEL: Record<string, string> = { MORNING: "上晝", AFTERNOON: "下晝", EVENING: "夜晚" };
+function confirmMessageText(b: { requestedDate: string; requestedTime: string | null; providerName: string; timeOfDay?: string | null }): string {
   const [, mo, d] = b.requestedDate.split("-");
-  return `已為你預約 ${Number(mo)}月${Number(d)}日 ${b.requestedTime} ${b.providerName}，到時見 🙂`;
+  if (b.requestedTime) {
+    return `已為你預約 ${Number(mo)}月${Number(d)}日 ${b.requestedTime} ${b.providerName}，到時見 🙂`;
+  }
+  const tod = TIME_OF_DAY_LABEL[b.timeOfDay ?? ""] ?? "";
+  return `已為你預約 ${Number(mo)}月${Number(d)}日 ${tod} ${b.providerName}，具體時段職員會再同你確認 🙂`;
 }
 
 const ENQUEUE_TIMEOUT_MS = 1500;

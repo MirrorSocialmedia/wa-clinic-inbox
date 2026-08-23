@@ -1,21 +1,22 @@
 /**
  * Flow data_exchange screen data（MD §8.2）
  *
- * 原則：**每次 call 查最新 AvailabilitySlot**（precheck 原則：病人揀親 = 真有空）。
+ * 原則：**每次 call 先經 getSlots()（四層降級鏈）確保 L2 新鮮，再查 AvailabilitySlot**
+ *（precheck 原則：病人揀親 = 真有空）。NONE 變體（純收需求）由 endpoint 層處理。
  * 三個 screen：
  * - SCREEN_PROVIDER → 該店 active 醫生（Provider/ProviderClinic 對照）
  * - SCREEN_DATE     → 聽日 ~ +30 日，只回「該醫生有空檔」嘅日期
  * - SCREEN_TIME     → 該日該醫生 bookedCount=0 嘅 30 分鐘 slot
  */
 import prisma from "@/lib/prisma";
-import { syncWindow } from "@/lib/apricot/slots";
+import { syncWindow } from "@/lib/availability";
 
 export interface ProviderOption {
   id: string; // apricotId
   name: string;
 }
 
-/** SCREEN_PROVIDER：該店醫生名錄（mock 期由 seed 派生；real 期由 Apricot sync） */
+/** SCREEN_PROVIDER：該店醫生名錄（Provider/ProviderClinic — seed 派生 / admin 手動維護） */
 export async function screenProviders(clinicId: string): Promise<ProviderOption[]> {
   const rows = await prisma.providerClinic.findMany({
     where: { clinicId, provider: { active: true, apricotId: { not: null } } },

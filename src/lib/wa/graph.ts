@@ -183,6 +183,25 @@ export function defaultFlowConfig(flow_token: string): FlowMessageConfig {
 }
 
 /**
+ * 純收需求變體 canvas（資料源離線：DatePicker + 上晝/下晝/夜晚 RadioButtons，唔列時段）。
+ * env：FLOW_REQ_CDN_URL / FLOW_REQ_ID（WhatsApp Manager publish 純收需求 canvas 之後填入）。
+ * 未設定 → 回退正常 canvas（endpoint 嘅 NONE 分支仍會回 REQUIREMENT screen data —
+ * 老 canvas 客戶端收到未知 action 時嘅行為由 canvas 側處理，不影響本 repo 契約）。
+ */
+export function requirementFlowConfig(flow_token: string): FlowMessageConfig {
+  const reqCdn = process.env.FLOW_REQ_CDN_URL ?? "";
+  const reqId = process.env.FLOW_REQ_ID ?? "";
+  if (!reqCdn || !reqId) return defaultFlowConfig(flow_token);
+  return {
+    flow_token,
+    flow_cdn_url: reqCdn,
+    flow_id: reqId,
+    flow_cta: process.env.FLOW_CTA ?? "預約",
+    flow_action: "NAVIGATE",
+  };
+}
+
+/**
  * 發 interactive flow message（MD §8.2：窗口內 free-form 唔收費）。
  * mock mode 回假 wamid（同 sendTextMessage 一致）。
  * ★ PII：flow config 只含 token/CDN/CTA（無病人內容）— log 只帶 wamid。

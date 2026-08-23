@@ -10,7 +10,7 @@
 ```
 Meta webhook → Next.js server (3100) → Postgres (15432)
                         ↓ inboundQueue
-                 Redis (6379) ←→ worker process（inbound/ai/outbound/apricot/cron 五 worker 同 process）
+                 Redis (6379) ←→ worker process（inbound/ai/outbound/cron 四 worker 同 process — 2026-08-23 apricot worker 拆除，空檔改 workforce API）
                  AI (sglang 30000)  ←  breaker 包住（in-memory）
 ```
 
@@ -124,6 +124,23 @@ cd /srv/wa-clinic-inbox && pnpm worker   # （先 kill 舊：pkill -f 'src/worke
 _（見下方演習記錄）_
 
 ---
+
+## 4. 部署 Checklist — workforce 來源切換（2026-08-23，trace cwi-wfsw-20260823-a1）
+
+Apricot 直連 → clinic-workforce External API（v1 availability + duty-roster）切換嘅上線驗收。順序執行：
+
+1. **apply migration**（`prisma/migrations/20260823120000_workforce_switch/`）：
+   review `migration.sql`（drop ApricotSession / BookingRequest nullable / +timeOfDay / create WorkforceSyncState）→ `pnpm prisma:migrate deploy`（或 `prisma migrate deploy`）→ 核對 `prisma migrate status` = up to date。
+   ★ 本 repo 開發 DB（15432）刻意未 apply — 只限生產 / 部署 DB。
+2. **env**：`WORKFORCE_API_URL`（workforce 站 base）+ `WORKFORCE_API_KEY`（scope: availability；永不入 log）；`WORKFORCE_MOCK=0`；
+   `FLOW_REQ_CDN_URL` / `FLOW_REQ_ID`（WhatsApp Manager publish 純收需求 canvas 後填入 — 未填 = NONE 時回落正常 canvas，endpoint 兜底出 REQUIREMENT data）。
+3. **真機 getSlots**：首個 `pnpm e2e:cron sync-availability`（或等 */15 cron）→ log 見 `workforce fetch ok（L2 upserted）`；
+   其後 5 分鐘內 Flow 操作應零 HTTP（log 唔再有 fetch — L2 fresh 即回）；`SELECT * FROM "WorkforceSyncState"` lastOkAt 持續更新。
+4. **四層降級鏈逐層演**（`pnpm e2e:workforce` — stale / throw→STALE_CACHE / NONE / 恢復 / alert 全鏈）：
+   - 真機可手動加劇：workforce 邊停服務 / 改 key → 睇 STALE_CACHE（L2 過期照用）；再清 L2 → NONE → Flow 轉純收需求 canvas（灰字卡）。
+5. **alert 15 分鐘**：停 workforce >15 分鐘 → health-check 開 `workforce_api_degraded`（MEDIUM）+ ALERT_CHANNEL log（metadata only）；恢復 → auto-resolved。
+6. **兩條新 E2E**：`pnpm e2e:workforce`（= T35b，stale + throw 路徑）全綠；`pnpm e2e:workforce-contract`（fixture sha256 錨定 + PII strip）全綠。
+7. **收口**：`grep -ri apricot src/` 只剩 `providerApricotId`/`apricotId`/`apricotClinicId` 型別/欄名/注釋；`.env` 零 `APRICOT_*`；全量 `bash scripts/mock-e2e.sh`（需 15432 起）。
 
 ## 附：演習記錄（RTO 實測）
 

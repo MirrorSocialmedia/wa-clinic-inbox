@@ -20,6 +20,9 @@ import type { ConversationItem, DraftInfo, MessageItem, NoteReceipt, StaffInfo }
 import { noteTickState } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
+/** Phase 3：純收需求變體（資料源離線）時段偏好 label — requestedTime=null 時顯示 */
+const PENDING_TOD_LABEL: Record<string, string> = { MORNING: "上晝", AFTERNOON: "下晝", EVENING: "夜晚" };
+
 interface Props {
   conversation: ConversationItem | null;
   /** 手機返回列表（md 以下顯示 back 掣） */
@@ -465,7 +468,7 @@ export function ChatPane(p: Props) {
               </span>
               <span className="text-sm text-t1 font-medium truncate">
                 {c.pendingBooking.providerName} · {c.pendingBooking.requestedDate}{" "}
-                {c.pendingBooking.requestedTime}
+                {c.pendingBooking.requestedTime ?? PENDING_TOD_LABEL[c.pendingBooking.timeOfDay ?? ""]}
               </span>
               <a
                 href="/bookings"

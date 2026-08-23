@@ -13,8 +13,9 @@ import log from "@/lib/log";
 import { randomBytes } from "node:crypto";
 import { outboundQueue } from "@/lib/queue";
 import { getWindowState } from "@/lib/wa/window";
-import { defaultFlowConfig } from "@/lib/wa/graph";
+import { defaultFlowConfig, requirementFlowConfig, type FlowMessageConfig } from "@/lib/wa/graph";
 import { signFlowToken, flowJwtSecret } from "@/lib/flows/crypto";
+import { getSlots } from "@/lib/availability";
 
 export class WindowClosedError extends Error {
   constructor() {
@@ -62,6 +63,28 @@ export async function sendBookingFlow(opts: {
     { convId: conv.id, clinicId: conv.clinicId, jti: randomBytes(8).toString("hex") },
     flowJwtSecret()
   );
+  // ★ Canvas 變體選擇（switch MD §3）：NONE（資料源離線 + 無 L2）且純收需求 canvas 已設定
+  //   → 出 REQUIREMENT canvas（DatePicker + 時段偏好）；其他一律正常 canvas。
+  //   best-effort：getSlots 本身唔會因 API fail throw（只 DB 錯會）— DB 錯時回正常 canvas，
+  //   endpoint 嘅 NONE 分支仍會兜底（screen data 層照時下狀態出 REQUIREMENT）。
+  let canvasVariant = "normal";
+  let config: FlowMessageConfig;
+  try {
+    const slotRes = await getSlots(conv.clinicId);
+    if (slotRes.degraded === "NONE") {
+      const reqCfg = requirementFlowConfig(token);
+      if (reqCfg.flow_cdn_url !== defaultFlowConfig(token).flow_cdn_url) canvasVariant = "requirement";
+      config = reqCfg;
+    } else {
+      config = defaultFlowConfig(token);
+    }
+  } catch (e) {
+    log.warn(
+      { conversationId: conv.id, err: e instanceof Error ? e.message : String(e) },
+      "flow send: canvas variant check failed → normal canvas（endpoint 兜底）"
+    );
+    config = defaultFlowConfig(token);
+  }
   const session = await prisma.flowSession.create({
     data: {
       conversationId: conv.id,
@@ -78,7 +101,7 @@ export async function sendBookingFlow(opts: {
       direction: "OUT",
       channel: "API",
       type: "interactive",
-      body: JSON.stringify(defaultFlowConfig(token)),
+      body: JSON.stringify(config),
       status: "QUEUED",
       sentByStaffId: opts.staffId,
       waTimestamp: now,
@@ -95,7 +118,7 @@ export async function sendBookingFlow(opts: {
         action: "SEND_FLOW",
         entity: "FlowSession",
         entityId: session.id,
-        meta: { conversationId: conv.id, messageId: msg.id },
+        meta: { conversationId: conv.id, messageId: msg.id, canvasVariant },
       },
     })
     .catch(() => undefined);
@@ -114,7 +137,7 @@ export async function sendBookingFlow(opts: {
   }
 
   log.info(
-    { conversationId: conv.id, clinicId: conv.clinicId, messageId: msg.id, staffId: opts.staffId },
+    { conversationId: conv.id, clinicId: conv.clinicId, messageId: msg.id, staffId: opts.staffId, canvasVariant },
     "flow send: queued interactive flow message"
   );
   return { flowToken: token, flowSessionId: session.id, messageId: msg.id, reused: false };

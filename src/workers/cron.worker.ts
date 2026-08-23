@@ -2,13 +2,12 @@
  * cron worker — 排程入口（MD §8.3）
  *
  * Job names（由 workers/index.ts 用 upsertJobScheduler 登記；E2E 可手動 enqueue）：
- * - sync-availability  每 15 分鐘（cron pattern: 15 分間隔） → enqueue apricot `sync-all`
- *                                       （apricot worker 執行，concurrency=1 序列化）
- * - apricot-keepalive  每 3 日（cron pattern: 隔 3 日 03:00） → enqueue apricot `keepalive`
- *                                       （14 日 token 唔死嘅 heartbeat 之一）
+ * - sync-availability  每 15 分鐘（cron pattern: 15 分間隔） → refreshAllClinics()
+ *                                       （getSlots 四層降級鏈 — workforce API 逐店刷新 L2 cache；
+ *                                       單店失敗唔阻其他店）
  * - bookings-expire    每 5 分鐘（cron pattern: 5 分間隔） → 48h PENDING → EXPIRED + 棄單 Flow 清理
- * - health-check       每 5 分鐘（cron pattern: 5 分間隔） → 5 項健康自檢（MD §9.3）：
- *                                       webhook stale / queue depth / AI breaker / Apricot heartbeat / disk
+ * - health-check       每 5 分鐘（cron pattern: 5 分間隔） → 6 項健康自檢（MD §9.3）：
+ *                                       webhook stale / queue depth / AI breaker / workforce degraded / disk / backup
  * - quality-check      每日 06:30 → 逐號 quality_rating（跌 YELLOW/RED → HIGH alert）
  * - weekly-report      每星期一 07:00 → 上一週營運報表（OpsReport + ALERT_CHANNEL 推送）
  *
@@ -17,7 +16,7 @@
 import { Worker } from "bullmq";
 import { cronQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import log from "@/lib/log";
-import { enqueueApricot } from "./apricot.worker";
+import { refreshAllClinics } from "@/lib/availability";
 import { runExpiry } from "@/lib/booking/expiry";
 import { runHealthCheck, type HealthOverrides } from "@/lib/health/check";
 import { runQualityCheck } from "@/lib/quality/check";
@@ -29,14 +28,12 @@ export async function startCronWorker(): Promise<Worker | null> {
     async (job) => {
       switch (job.name) {
         case "sync-availability": {
-          const jobId = await enqueueApricot("sync-all", { reason: "cron-15min" });
-          log.info({ jobId }, "cron: sync-availability → apricot queue（apricot worker 會行）");
-          return { ok: true, apricotJobId: jobId };
-        }
-        case "apricot-keepalive": {
-          const jobId = await enqueueApricot("keepalive", {});
-          log.info({ jobId }, "cron: apricot-keepalive → apricot queue");
-          return { ok: true, apricotJobId: jobId };
+          const r = await refreshAllClinics();
+          log.info(
+            { total: r.total, ok: r.ok, failed: r.failed },
+            "cron: sync-availability → workforce L2 refresh done"
+          );
+          return { ok: true, total: r.total, okCount: r.ok, failed: r.failed };
         }
         case "bookings-expire": {
           const r = await runExpiry();

@@ -270,7 +270,7 @@ export function ConversationList(p: Props) {
                     {c.pendingBooking && (
                       <span
                         className="text-[10px] px-1.5 py-px rounded bg-ok-soft text-ok-text font-medium inline-flex items-center gap-0.5"
-                        title={`新預約請求：${c.pendingBooking.providerName} ${c.pendingBooking.requestedDate} ${c.pendingBooking.requestedTime}`}
+                        title={`新預約請求：${c.pendingBooking.providerName} ${c.pendingBooking.requestedDate} ${c.pendingBooking.requestedTime ?? (c.pendingBooking.timeOfDay ?? "")}`}
                       >
                         <CalendarDays size={10} /> 預約請求
                       </span>

@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "clinicCode": "TKW",
+  "syncedAt": "2026-08-20T03:15:00Z",
+  "stale": false,
+  "days": [
+    { "date": "2026-08-21",
+      "providers": [
+        { "providerApricotId": "695e6e51...", "providerName": "Dr. Lau",
+          "slots": [ { "start": "10:00", "end": "10:30", "isOpen": true, "bookedCount": 1 } ] }
+      ] }
+  ]
+}

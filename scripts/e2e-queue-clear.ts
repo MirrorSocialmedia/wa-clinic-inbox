@@ -9,9 +9,9 @@
  * 用法：pnpm e2e:queue-clear
  * 淨係清 job（waiting/delayed/active/failed/completed）— 唔郁 scheduler（cron queue）。
  */
-import { inboundQueue, outboundQueue, aiQueue, apricotQueue } from "@/lib/queue";
+import { inboundQueue, outboundQueue, aiQueue } from "@/lib/queue";
 
-const queues = [inboundQueue, outboundQueue, aiQueue, apricotQueue];
+const queues = [inboundQueue, outboundQueue, aiQueue];
 
 async function main(): Promise<void> {
   for (const q of queues) {
@@ -20,7 +20,7 @@ async function main(): Promise<void> {
     await q.clean(0, -1, "completed");
     await q.clean(0, -1, "active"); // 舊 worker 被 kill 後留低嘅 active 殘骸
   }
-  console.log("queue clear OK: inbound/outbound/ai/apricot drained (scheduler 保留)");
+  console.log("queue clear OK: inbound/outbound/ai drained (cron scheduler 保留)");
   process.exit(0);
 }
 

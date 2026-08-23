@@ -8,7 +8,7 @@
  *
  * Phase 3 補充：
  * - 醫生名錄由 greetingConfig.doctors 派生，決定性 apricotId（mock-pract-<clinic>-<n>）—
- *   mock fixture（APRICOT_MOCK=1）同 seed 同一套 id，E2E slot 斷言先可以決定性。
+ *   mock fixture（WORKFORCE_MOCK=1）同 seed 同一套 id，E2E slot 斷言先可以決定性。
  * - apricotClinicId 用 MOCK_APRICOT_<code>（真 bot 帳號開通後由 admin 改真值）。
  */
 import { randomBytes } from "node:crypto";

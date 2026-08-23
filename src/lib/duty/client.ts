@@ -1,26 +1,27 @@
 /**
  * duty-roster 消費端（MD §9.2 — 同 clinic-workforce 嘅唯一接口）。
  *
- * 契約（clinic-workforce 邊提供，照字面用）：
- *   GET {DUTY_API_URL}/api/external/duty-roster?clinicId=<code>&date=YYYY-MM-DD
- *   Header: X-Api-Key: {DUTY_API_KEY}
- *   → [{ "staffName": str, "role": str, "shiftStart": "HH:mm", "shiftEnd": "HH:mm" }]
+ * 契約（switch 後：clinic-workforce External API v1，經 workforce client 共用一條 HTTP 通道）：
+ *   GET {WORKFORCE_API_URL}/api/external/v1/duty-roster?clinicCode=<code>&date=YYYY-MM-DD
+ *   Header: x-api-key（WORKFORCE_API_KEY）
+ *   → { v: 1, staff: [{ "staffName": str, "role": str, "shiftStart": "HH:mm", "shiftEnd": "HH:mm" }] }
  *
  * env：
- * - DUTY_API_URL / DUTY_API_KEY — 真 mode（workforce 邊發嘅專key + IP allowlist 只准 VPS）
- * - DUTY_MOCK=1 — sandbox/開發：回固定 fixture（3 人，決定性）
+ * - WORKFORCE_API_URL / WORKFORCE_API_KEY — 真 mode（同 availability 共用 workforce client）
+ * - DUTY_MOCK=1 — sandbox/開發：回固定 fixture（3 人，決定性）— E2E 斷言用
  *
  * 行為（fail-soft，唔准 crash inbox）：
- * - 3s timeout；404 / 401 / 5xx / timeout / 壞 shape → null（caller 顯示「隱藏卡」/ prompt 唔注入）
+ * - 3s timeout（workforce client 內置）；404 / 401 / 5xx / timeout / 壞 shape → null（caller 顯示「隱藏卡」/ prompt 唔注入）
  * - ★ 欄位白名單：只有 staffName / role / shiftStart / shiftEnd 四欄入到
  *   inbox DB/UI/log（其餘欄位一律丟 — 薪酬/打卡永遠掂唔到，MD §9.2）
  * - log 只記「duty fetched, count=N」（metadata）—  staff 名入 UI 係設計（assign 參考），
- *   但 log 唔記名單（只記 count）。
+ *   但 log 唔記名單（只記 count）。workforce client 自身 log 只 path+status。
  *
  * 5 分鐘 in-memory TTL cache（per clinic+date）：API route / AI worker / SSR 共用，
  * 避免每 5 分鐘 AI call 都打 workforce。
  */
 import log from "@/lib/log";
+import { fetchDutyRoster as wfFetchDutyRoster } from "@/lib/workforce/client";
 
 export interface DutyEntry {
   staffName: string;
@@ -29,7 +30,6 @@ export interface DutyEntry {
   shiftEnd: string;   // HH:mm
 }
 
-const DUTY_TIMEOUT_MS = 3000;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_ENTRIES = 50;
 const MAX_FIELD_LEN = 100;
@@ -50,7 +50,7 @@ interface CacheRow {
 }
 const cache = new Map<string, CacheRow>();
 
-/** 今日 date（HK 日界 — 同 Apricot 一致）：en-CA locale 回 YYYY-MM-DD。 */
+/** 今日 date（HK 日界 — 全系統統一慣例）：en-CA locale 回 YYYY-MM-DD。 */
 export function hkToday(now: Date = new Date()): string {
   return now.toLocaleDateString("en-CA", { timeZone: "Asia/Hong_Kong" });
 }
@@ -106,26 +106,15 @@ export async function fetchDutyRoster(
 }
 
 async function fetchReal(clinicCode: string, date: string): Promise<DutyEntry[] | null> {
-  const base = (process.env.DUTY_API_URL ?? "").trim().replace(/\/+$/, "");
-  if (!base) {
-    log.warn({ clinic: clinicCode }, "duty: DUTY_API_URL 未設定 → null（隱藏卡）");
+  if (!process.env.WORKFORCE_API_URL) {
+    log.warn({ clinic: clinicCode }, "duty: WORKFORCE_API_URL 未設定 → null（隱藏卡）");
     return null;
   }
-  const url = `${base}/api/external/duty-roster?clinicId=${encodeURIComponent(clinicCode)}&date=${encodeURIComponent(date)}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DUTY_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
-      headers: { "X-Api-Key": process.env.DUTY_API_KEY ?? "" },
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      // 404（route 未上線）/ 401（key 錯）/ 5xx → fail-soft
-      log.warn({ clinic: clinicCode, date, httpStatus: res.status }, "duty: fetch failed → null（唔 crash）");
-      return null;
-    }
-    const raw: unknown = await res.json().catch(() => null);
-    const entries = sanitizeDutyPayload(raw);
+    // switch：真 mode 經 workforce client（v1 endpoint + 3s timeout + log 只 path+status）
+    const res = await wfFetchDutyRoster(clinicCode, date);
+    // 白名單 defense 照舊（v1 staff 欄位同舊 shape 一樣，多一層過濾唔錯）
+    const entries = sanitizeDutyPayload(res.staff);
     if (entries === null) {
       log.warn({ clinic: clinicCode, date }, "duty: response shape invalid → null（白名單 defense）");
       return null;
@@ -133,14 +122,10 @@ async function fetchReal(clinicCode: string, date: string): Promise<DutyEntry[] 
     // ★ log 只記 count — 唔記名單
     log.info({ clinic: clinicCode, date, count: entries.length }, "duty fetched, count");
     return entries;
-  } catch (err) {
-    log.warn(
-      { clinic: clinicCode, date, err: err instanceof Error ? err.message : String(err) },
-      "duty: fetch error (timeout/network) → null（唔 crash）"
-    );
+  } catch {
+    // workforce client 已 log path+status（零 body）— 呢度只補 clinic/date metadata
+    log.warn({ clinic: clinicCode, date }, "duty: workforce API fail → null（唔 crash）");
     return null;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
