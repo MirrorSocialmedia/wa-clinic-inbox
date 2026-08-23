@@ -99,7 +99,13 @@ export function InboxClient({
 
   const socketRef = useRef<Socket | null>(null);
   const selectedIdRef = useRef<string | null>(null);
+  // ★ Realtime P0 (R5)：assign/接手要讀最新 assignVersion — ref 避免 callback stale closure
+  const conversationsRef = useRef<ConversationItem[]>(conversations);
+  conversationsRef.current = conversations;
   const lastMsgTsRef = useRef<number>(0); // 斷線前最後訊息時間（backlog cursor）
+  // ★ Realtime P0 (R3, cwi-rt-20260823-a1)：focus/visibility/3 分鐘 idle refetch 游標
+  const lastConvSeenRef = useRef<number>(Date.now()); // 對話列表 lastMessageAt 游標（ms epoch）
+  const deltaInFlightRef = useRef<boolean>(false); // focus+visibility 同時觸發 → 唔重複 fetch
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesRef = useRef<MessageItem[]>([]);
   const activeClinicRef = useRef<string | "all">(activeClinicId);
@@ -137,6 +143,7 @@ export function InboxClient({
           status: e.conversation.status,
           assigneeId: existing?.assigneeId ?? null,
           assigneeName: existing?.assigneeName ?? null,
+          assignVersion: existing?.assignVersion ?? 0,
           pinnedPatient: existing?.pinnedPatient ?? null,
           unreadCount: isOut ? (existing?.unreadCount ?? 0) : e.conversation.unreadCount,
           lastInboundAt: isOut
@@ -169,7 +176,16 @@ export function InboxClient({
       if (selectedIdRef.current === e.conversationId) {
         const msg = e.message;
         setMessages((prev) => {
-          if (prev.some((m) => m.id === msg.id || (msg.waMessageId && m.waMessageId === msg.waMessageId))) return prev;
+          // ★ R1：對消 optimistic bubble — id / waMessageId / clientMessageId 任一命中即同一條訊息
+          if (
+            prev.some(
+              (m) =>
+                m.id === msg.id ||
+                (msg.waMessageId && m.waMessageId === msg.waMessageId) ||
+                (msg.clientMessageId != null && m.clientMessageId === msg.clientMessageId)
+            )
+          )
+            return prev;
           return [...prev, msg].sort((a, b) => new Date(a.waTimestamp).getTime() - new Date(b.waTimestamp).getTime());
         });
       }
@@ -191,6 +207,8 @@ export function InboxClient({
                 status: e.status,
                 assigneeId: e.assigneeId,
                 assigneeName: e.assigneeId ? staffRef.current.find((s) => s.id === e.assigneeId)?.name ?? null : null,
+                // ★ Realtime P0 (R5)：version 同步（PATCH assignee 變動 → server 已 +1）
+                assignVersion: e.assignVersion,
                 unreadCount: e.unreadCount,
                 // RESOLVED 自動清急症紅標（同 API PATCH 語義一致）
                 urgent: e.status === "RESOLVED" ? false : c.urgent,
@@ -274,6 +292,8 @@ export function InboxClient({
                 assigneeName: e.assigneeId
                   ? staffRef.current.find((s) => s.id === e.assigneeId)?.name ?? null
                   : null,
+                // ★ Realtime P0 (R5)：version 同步 — 其他 client 之後 assign 先唔會 409
+                assignVersion: e.assignVersion,
               }
             : c
         )
@@ -421,6 +441,10 @@ export function InboxClient({
       if (!res.ok) return;
       const data = (await res.json()) as ConversationItem[];
       setConversations(data);
+      // ★ R3：全量 fetch 後游標 = 列表最尾 ts（「我見到咗全部」— 之後 delta 只補新嘅）
+      let maxTs = 0;
+      for (const c of data) maxTs = Math.max(maxTs, new Date(c.lastMessageAt).getTime());
+      lastConvSeenRef.current = maxTs;
     } catch {
       /* UI 會喺下次 action 補齊 */
     }
@@ -457,6 +481,67 @@ export function InboxClient({
       /* ignore */
     }
   }, []);
+
+  // ── ★ Realtime P0 (R3, cwi-rt-20260823-a1)：focus-refetch ────────────────
+  // visibilitychange(visible) / window focus / 3 分鐘 idle timer → 同一個 refetchDelta()。
+  // 覆 live 期間漏收嘅 socket event（e.g. Redis 重啟窗口 / 斷線重連之間嘅空隙）：
+  //  1) 對話列表：GET /api/conversations?after=<lastSeen>（server = 現有 list route 加 param）
+  //     → lastMessageAt >= after 嘅對話用 id merge（重疊容許）+ 游標推進
+  //  2) 開住嘅 thread：若選中對話喺 delta 內 → fetchMessagesAfter 補訊息
+  const refetchDelta = useCallback(async () => {
+    if (deltaInFlightRef.current) return;
+    const cursor = lastConvSeenRef.current;
+    if (cursor <= 0) return;
+    deltaInFlightRef.current = true;
+    try {
+      const qs = new URLSearchParams({ after: new Date(cursor).toISOString() });
+      if (activeClinicRef.current !== "all") qs.set("clinicId", activeClinicRef.current);
+      const res = await fetch(`/api/conversations?${qs.toString()}`);
+      if (!res.ok) return;
+      const rows = (await res.json()) as ConversationItem[];
+      if (rows.length === 0) return;
+      let maxTs = cursor;
+      for (const r of rows) maxTs = Math.max(maxTs, new Date(r.lastMessageAt).getTime());
+      lastConvSeenRef.current = maxTs;
+      setConversations((prev) => {
+        const map = new Map(prev.map((c) => [c.id, c]));
+        for (const r of rows) map.set(r.id, r); // server 行 = 更新
+        const next = [...map.values()];
+        next.sort(
+          (a, b) =>
+            (b.urgent ? 1 : 0) - (a.urgent ? 1 : 0) ||
+            new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
+        );
+        return next;
+      });
+      // 開住嘅 thread 補漏（選中對話有更新先 fetch — 唔空攪）
+      const sel = selectedIdRef.current;
+      if (sel && rows.some((r) => r.id === sel)) {
+        if (lastMsgTsRef.current > 0) void fetchMessagesAfter(sel, lastMsgTsRef.current);
+        else void fetchMessagesLatest(sel);
+      }
+    } catch {
+      /* ignore — 下次 trigger 再試 */
+    } finally {
+      deltaInFlightRef.current = false;
+    }
+  }, [fetchMessagesAfter, fetchMessagesLatest]);
+
+  // R3 triggers：tab focus 返 / window focus / 每 3 分鐘 idle 掃一次
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void refetchDelta();
+    };
+    const onFocus = () => void refetchDelta();
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onFocus);
+    const timer = setInterval(() => void refetchDelta(), 3 * 60 * 1000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onFocus);
+      clearInterval(timer);
+    };
+  }, [refetchDelta]);
 
   const loadOlder = useCallback(async () => {
     const convId = selectedIdRef.current;
@@ -590,17 +675,35 @@ export function InboxClient({
     async (body: string): Promise<{ ok: boolean; error?: string }> => {
       const convId = selectedIdRef.current;
       if (!convId) return { ok: false, error: "未選擇對話" };
+      // ★ realtime-p0 R1：一次「邏輯發送」一個 UUID；網絡 retry 用同一 key（chat-pane 嘅
+      // `sending` guard 已防雙擊二調）。server 用 clientMessageId 去重：首請已成功但
+      // response 丟失 → retry 命中 replay 回同一 messageId（唔會重發）。
+      const clientMessageId = crypto.randomUUID();
+      const postWithRetry = async (): Promise<Response> => {
+        let lastErr: unknown;
+        for (let i = 0; i < 3; i++) {
+          try {
+            return await fetch("/api/messages/send", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ conversationId: convId, body, clientMessageId }),
+            });
+          } catch (err) {
+            lastErr = err;
+            if (i < 2) await new Promise((r) => setTimeout(r, 500 * 2 ** i)); // 0.5s → 1s backoff
+          }
+        }
+        throw lastErr;
+      };
       try {
-        const res = await fetch("/api/messages/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversationId: convId, body }),
-        });
+        const res = await postWithRetry();
         const data = (await res.json().catch(() => null)) as {
           ok?: boolean;
           messageId?: string;
           error?: string;
           message?: string;
+          status?: string;
+          idempotentReplay?: boolean;
         } | null;
         if (res.status === 422) {
           return { ok: false, error: data?.message ?? "窗口已過，只可發 template" };
@@ -608,7 +711,10 @@ export function InboxClient({
         if (!res.ok) {
           return { ok: false, error: data?.error ?? `發送失敗（${res.status}）` };
         }
-        // 樂觀更新：QUEUED 氣泡（worker 發完會 push message:new 帶真 wamid）
+        // 樂觀更新：QUEUED 氣泡（worker 發完會 push message:new 帶真 wamid）。
+        // ★ R1：idempotentReplay 時 server 回舊 Message（同一 id）— 若舊 row 已 FAILED
+        //（enqueue 失敗），氣泡直接顯示 FAILED 態（optimistic 對消，唔會佯裝排隊中）。
+        const serverStatus = data?.status ?? "QUEUED";
         const optimistic: MessageItem = {
           id: data?.messageId ?? `optimistic-${Date.now()}`,
           conversationId: convId,
@@ -618,8 +724,11 @@ export function InboxClient({
           type: "text",
           body,
           mediaPath: null,
-          status: "QUEUED",
-          errorCode: null,
+          // ★ R1：optimistic bubble 以 clientMessageId 做 key — worker 之後 push 嘅 message:new
+          //   帶同一 key（或同一 server id）→ 對消，唔會多一泡
+          clientMessageId,
+          status: serverStatus === "FAILED" ? "FAILED" : "QUEUED",
+          errorCode: serverStatus === "FAILED" ? "ENQUEUE_FAILED" : null,
           sentByStaffId: user.staffId,
           aiAutoSent: false,
           waTimestamp: new Date().toISOString(),
@@ -703,7 +812,7 @@ export function InboxClient({
   const [assignBusy, setAssignBusy] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
 
-  const applyAssignResult = useCallback((convId: string, toStaffId: string | null) => {
+  const applyAssignResult = useCallback((convId: string, toStaffId: string | null, assignVersion?: number) => {
     setConversations((prev) =>
       prev.map((c) =>
         c.id === convId
@@ -713,6 +822,8 @@ export function InboxClient({
               assigneeName: toStaffId
                 ? staffRef.current.find((s) => s.id === toStaffId)?.name ?? null
                 : null,
+              // ★ Realtime P0 (R5)：成功 → 新版本（server 回傳值為準；缺 = 本地 +1）
+              assignVersion: assignVersion ?? c.assignVersion + 1,
             }
           : c
       )
@@ -725,18 +836,33 @@ export function InboxClient({
     setTakeoverBusy(true);
     setAssignError(null);
     try {
+      // ★ Realtime P0 (R5)：帶 client 端 version — 陳舊（有人先接手咗）→ 409 ASSIGN_CONFLICT
+      const cur = conversationsRef.current.find((c) => c.id === convId);
       const res = await fetch(`/api/conversations/${convId}/assign`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ toStaffId: user.staffId }),
+        body: JSON.stringify({ toStaffId: user.staffId, assignVersion: cur?.assignVersion }),
       });
-      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; message?: string } | null;
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        message?: string;
+        assignVersion?: number;
+        currentAssigneeName?: string | null;
+      } | null;
       if (!res.ok) {
+        // ★ R5：版本陳舊 → 「啱啱俾 {name} 接咗手」+ refetch 列表（唔覆寫對方）
+        if (res.status === 409 && data?.error === "ASSIGN_CONFLICT") {
+          const name = data.currentAssigneeName ?? "另一位 staff";
+          setNotice(`呢個對話啱啱俾 ${name} 接咗手 — 列表已更新`);
+          void fetchConversations(activeClinicRef.current);
+          return { ok: false, error: `啱啱俾 ${name} 接咗手` };
+        }
         const msg = data?.message ?? data?.error ?? `接手失敗（${res.status}）`;
         setAssignError(msg);
         return { ok: false, error: msg };
       }
-      applyAssignResult(convId, user.staffId);
+      applyAssignResult(convId, user.staffId, data?.assignVersion);
       setNotice("你而家係呢個對話嘅負責人 — 可以發 WhatsApp 訊息");
       return { ok: true };
     } catch {
@@ -744,7 +870,7 @@ export function InboxClient({
     } finally {
       setTakeoverBusy(false);
     }
-  }, [user.staffId, applyAssignResult]);
+  }, [user.staffId, applyAssignResult, fetchConversations]);
 
   const assignConversationApi = useCallback(
     async (toStaffId: string | null): Promise<{ ok: boolean; error?: string }> => {
@@ -753,18 +879,33 @@ export function InboxClient({
       setAssignBusy(true);
       setAssignError(null);
       try {
+        // ★ Realtime P0 (R5)：帶 client 端 version — 陳舊 → 409 ASSIGN_CONFLICT
+        const cur = conversationsRef.current.find((c) => c.id === convId);
         const res = await fetch(`/api/conversations/${convId}/assign`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ toStaffId }),
+          body: JSON.stringify({ toStaffId, assignVersion: cur?.assignVersion }),
         });
-        const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; message?: string } | null;
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          error?: string;
+          message?: string;
+          assignVersion?: number;
+          currentAssigneeName?: string | null;
+        } | null;
         if (!res.ok) {
+          // ★ R5：版本陳舊 → 「啱啱俾 {name} 接咗手」+ refetch 列表（唔覆寫對方）
+          if (res.status === 409 && data?.error === "ASSIGN_CONFLICT") {
+            const name = data.currentAssigneeName ?? "另一位 staff";
+            setNotice(`呢個對話啱啱俾 ${name} 接咗手 — 列表已更新`);
+            void fetchConversations(activeClinicRef.current);
+            return { ok: false, error: `啱啱俾 ${name} 接咗手` };
+          }
           const msg = data?.message ?? data?.error ?? `轉交失敗（${res.status}）`;
           setAssignError(msg);
           return { ok: false, error: msg };
         }
-        applyAssignResult(convId, toStaffId);
+        applyAssignResult(convId, toStaffId, data?.assignVersion);
         return { ok: true };
       } catch {
         return { ok: false, error: "網絡錯誤" };
@@ -772,7 +913,7 @@ export function InboxClient({
         setAssignBusy(false);
       }
     },
-    [applyAssignResult]
+    [applyAssignResult, fetchConversations]
   );
 
   const sendFlow = useCallback(async () => {
@@ -864,6 +1005,7 @@ export function InboxClient({
             pinnedPatient: null,
             assigneeId: null,
             assigneeName: null,
+            assignVersion: 0,
             unreadCount: 0,
             lastInboundAt: null,
             lastMessageAt: new Date(0).toISOString(),

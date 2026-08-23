@@ -5,11 +5,13 @@ import log from "@/lib/log";
 /**
  * WA Clinic Inbox — BullMQ 骨架（框架 MD §1/§2）
  *
- * 4 個 queue：
+ * 5 個 queue：
  * - inbound  : webhook event 解析（patient 訊息 / echo / history / status）
  * - outbound : 發訊息 + 重試 + status 回寫
  * - ai       : 意圖識別 + 草稿生成（Phase 2）
  * - cron     : 排程入口（空檔 refresh / bookings-expire / 健康自檢）
+ * - media    : ★ Realtime P0 (R4) media 下載獨立隊列（inbound job 只落 row + enqueue，
+ *              唔喺入面做 HTTP 下載 — 大 media 唔阻 per-conversation 順序）
  *
  * connection：單一 shared ioredis（BullMQ 要求 maxRetriesPerRequest: null）。
  * 注意：healthz 用獨立 probe client（見 healthz route），唔共用呢個。
@@ -74,12 +76,15 @@ export const inboundQueue = new Queue("inbound", queueOptions());
 export const outboundQueue = new Queue("outbound", queueOptions());
 export const aiQueue = new Queue("ai", queueOptions());
 export const cronQueue = new Queue("cron", queueOptions());
+// ★ Realtime P0 (R4)：media 下載獨立隊列（concurrency 3 — 見 src/workers/media.worker.ts）
+export const mediaQueue = new Queue("media", queueOptions());
 
 export const QUEUE_NAMES = {
   inbound: "inbound",
   outbound: "outbound",
   ai: "ai",
   cron: "cron",
+  media: "media",
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

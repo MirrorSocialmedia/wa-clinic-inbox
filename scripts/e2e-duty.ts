@@ -66,9 +66,13 @@ async function main() {
 
   if (downMode) {
     // ── down 路徑：DUTY_MOCK=0 + 無 URL / 壞 URL → 200 {duty:null} 唔 crash ──
+    // ★ workforce 切換後（0db0f61）duty client 改經 WORKFORCE_API_URL — 舊 DUTY_API_URL
+    //   已無人讀；down 場景要搣 WORKFORCE_API_URL 先真正打唔到（.env 預設指 workforce mock）。
     process.env.DUTY_MOCK = "0";
     delete process.env.DUTY_API_URL;
     delete process.env.DUTY_API_KEY;
+    delete process.env.WORKFORCE_API_URL;
+    process.env.WORKFORCE_MOCK = "0"; // .env 預設 =1（client fetch 前就返 fixture）— down 場景要關
     __resetDutyCache();
 
     const resNoUrl = await GET(mkReq("/api/duty-roster?clinicId=TKW"), { params: Promise.resolve({}) });
@@ -82,7 +86,7 @@ async function main() {
     if (!noUrlOk) fail = 1;
 
     // 壞 URL（closed port）→ conn-refused → 200 {duty:null}
-    process.env.DUTY_API_URL = "http://127.0.0.1:59999";
+    process.env.WORKFORCE_API_URL = "http://127.0.0.1:59999";
     __resetDutyCache();
     const resBad = await GET(mkReq("/api/duty-roster?clinicId=TKW"), { params: Promise.resolve({}) });
     const bodyBad = (await resBad.json().catch(() => null)) as { duty?: unknown } | null;

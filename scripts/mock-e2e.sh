@@ -108,6 +108,15 @@
 #   T72 423 Send Lock 回歸 + lock 唔阻 INTERNAL note
 #   T73 ★ INTERNAL 0 graph 請求 / unread 不變 / 無新 AiDraft（回歸）
 #   T74 socket/log 零內文 + hermetic 清理
+#
+# Realtime P0 chaos e2e（cwi-rt-20260823）：
+#   T75 RT-IDEMPOTENT：同 clientMessageId 3 次 → 1 DB row（R1）
+#   T76 RT-ORDER：20 對話 × 3 訊息壓測 → 每對話 DB 順序 = 發送順序（R4）
+#   T77 RT-MEDIA：MEDIA_CHAOS_DELAY_MS=8000 → media 下載唔阻塞其他對話（R4 mediaQueue）
+#   T78 RT-GRAPH-FAIL（Test H）：WA_GRAPH_MOCK_FAIL=1 → FAILED 無假 SENT
+#   T79 RT-ASSIGN-RACE（Test G）：parallel assign → 1×200 + 1×409 + version+1（R5）
+#   T80 RT-ROLLBACK（Test I）：PG trigger 強行 rollback → 0 socket event + 無 row（R2）
+#   T81 RT-REDIS-RESTART（Test D）：SHUTDOWN NOSAVE → 2 條 inbound → delta refetch 補齊（R3，最後跑）
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -836,7 +845,7 @@ if ! wait_for "SELECT count(*)::text c FROM \"FlowSession\" WHERE \"flowToken\" 
   T30=1
 fi
 sleep 3
-WC=$(q "SELECT count(*)::text c FROM \"BookingRequest\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"requestedDate\"='$DATE_B' AND \"requestedTime\"='$TIME_B'" | jf c)
+WC=$(q "SELECT count(*)::text c FROM \"BookingRequest\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"requestedDate\"='$DATE_B' AND \"requestedTime\"='$TIME_B' AND \"createdAt\" > to_timestamp($EPOCH)" | jf c)
 [ "$WC" = "1" ] || { echo "    ❌ T30 該 slot BookingRequest != 1（=$WC）"; T30=1; }
 FS_FAILED=$(q "SELECT count(*)::text c FROM \"FlowSession\" WHERE \"flowToken\" IN ('$TOKEN_A2','$TOKEN_B') AND \"status\"='FAILED'" | jf c)
 FS_DONE=$(q "SELECT count(*)::text c FROM \"FlowSession\" WHERE \"flowToken\" IN ('$TOKEN_A2','$TOKEN_B') AND \"status\"='COMPLETED'" | jf c)
@@ -847,7 +856,7 @@ REPLY=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\" IN 
 # 輸咗嗰個對話要有新 SENT FlowSession（重出 Flow）
 RESENT=$(q "SELECT count(*)::text c FROM \"FlowSession\" s WHERE s.\"status\"='SENT' AND s.\"conversationId\" IN ('$CONV_P3','$CONV_RACE') AND s.\"flowToken\" NOT IN ('$TOKEN_A2','$TOKEN_B')" | jf c)
 [ "$RESENT" -ge 1 ] 2>/dev/null || { echo "    ❌ T30 輸家冇重出 Flow"; T30=1; }
-BOOK_WINNER=$(q "SELECT id FROM \"BookingRequest\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"requestedDate\"='$DATE_B' AND \"requestedTime\"='$TIME_B'" | jf id)
+BOOK_WINNER=$(q "SELECT id FROM \"BookingRequest\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"requestedDate\"='$DATE_B' AND \"requestedTime\"='$TIME_B' AND \"createdAt\" > to_timestamp($EPOCH) ORDER BY \"createdAt\" DESC LIMIT 1" | jf id)
 [ -n "$BOOK_WINNER" ] || T30=1
 [ "$T30" = 0 ] && pass "T30 race：同 slot 同時 Complete → 1 贏（PENDING）+ 1 被擋（FAILED + 自動覆「滿咗」+ 重出 Flow）" \
   || fail "T30 race 防護（見上 ❌）"
@@ -2137,6 +2146,289 @@ check "T74 hermetic：H2 對話已清" "$(q "SELECT count(*)::text c FROM \"Conv
 check "T74 hermetic：臨時 staff B 已刪" "$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE email='$H2_B_EMAIL'" | jf c)" "0"
 check "T74 hermetic：臨時 staff C 已刪" "$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE email='$H2_C_EMAIL'" | jf c)" "0"
 [ "$H2" = 0 ] && pass "H2 已讀回執 / tick / @mention（T65-T74）" || fail "H2 有項失敗（見上 ❌）"
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Phase R9 — Realtime P0 chaos e2e（cwi-rt-20260823；Kairo mt5w39ck5etgo）
+#   T75 RT-IDEMPOTENT：3 次同 clientMessageId → DB 1 row（R1 驗收）
+#   T76 RT-ORDER：20 對話 × 3 訊息壓測 → 每對話 DB 順序 = 發送順序（R4 驗收）
+#   T77 RT-MEDIA：MEDIA_CHAOS_DELAY_MS=8000 → media 下載唔阻塞其他對話（R4 mediaQueue）
+#   T78 RT-GRAPH-FAIL（Test H）：WA_GRAPH_MOCK_FAIL=1 → FAILED 無假 SENT
+#   T79 RT-ASSIGN-RACE（Test G）：parallel assign → 1×200 + 1×409 + version+1（R5 驗收）
+#   T80 RT-ROLLBACK（Test I）：PG trigger 強行 rollback → 0 socket event + 無 row（R2 驗收）
+#   T81 RT-REDIS-RESTART（Test D）：SHUTDOWN NOSAVE → 2 條 inbound → delta refetch 補齊（R3 驗收；最後跑）
+#   注意：T77/T78 要重啟 worker（T16 pattern；等 "all workers running"）；
+#         T81 會清 redis queue 狀態（SHUTDOWN NOSAVE）→ 必須最後跑
+# ════════════════════════════════════════════════════════════════════════════════
+R9=0
+
+# ── T75. RT-IDEMPOTENT：同 clientMessageId 3 次發送 → DB 1 row ────────────
+echo "[R9] T75: RT-IDEMPOTENT..."
+# ★ T75 必須用新病人 — T3 對話 lastInboundAt 已被 T9 回撥 -25h（window_closed → send 422）
+T75_PAT="8526601${EPOCH}"
+T75_WAMID="wamid.E2E_T75_${EPOCH}"
+"$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T75_PAT" --text "e2e T75 setup" --wamid "$T75_WAMID" --name "E2E-T75" >/dev/null 2>&1 || { fail "T75 setup inbound 失敗"; R9=1; }
+if ! wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$T75_WAMID'" '[{"c":"1"}]' 30; then fail "T75 setup 訊息未落庫"; R9=1; fi
+T75_CONV=$(q "SELECT c.id::text id FROM \"Message\" m JOIN \"Conversation\" c ON c.id=m.\"conversationId\" WHERE m.\"waMessageId\"='$T75_WAMID'" | jf id)
+[ -n "$T75_CONV" ] || { fail "T75 對話搵唔到"; R9=1; }
+T75_CID=$(uuidgen)
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$T75_CONV\",\"body\":\"e2e T75 idempotent 1\",\"clientMessageId\":\"$T75_CID\"}"
+check "T75 首次 POST → 202" "$H1_CODE" "202"
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"clientMessageId\"='$T75_CID'" '[{"c":"1"}]' 15 || fail "T75 首次 row 未 commit"
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$T75_CONV\",\"body\":\"e2e T75 idempotent 2\",\"clientMessageId\":\"$T75_CID\"}"
+check "T75 第 2 次 POST（同 key）→ 200" "$H1_CODE" "200"
+grep -q '"idempotentReplay":true' "$H1_OUT" && pass "T75 第 2 次 replay 標 idempotentReplay=true" || fail "T75 第 2 次 replay body 冇 idempotentReplay"
+T75_MID1=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$T75_CONV\",\"body\":\"e2e T75 idempotent 3\",\"clientMessageId\":\"$T75_CID\"}"
+check "T75 第 3 次 POST（同 key）→ 200" "$H1_CODE" "200"
+T75_MID3=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+check "T75 replay 回同一 messageId（唔重入 queue）" "$T75_MID3" "$T75_MID1"
+check "T75 DB：同 clientMessageId 3 次發送 → 1 row" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"clientMessageId\"='$T75_CID'" | jf c)" "1"
+
+# ── T76. RT-ORDER：20 對話 × 3 訊息壓測 → 每對話 DB 順序 = 發送順序 ─────
+echo "[R9] T76: RT-ORDER..."
+T76_BASE=$(date +%s)
+T76_PIDS=""
+: > /tmp/e2e-t76-dropped.log
+for i in $(seq 1 20); do
+  (
+    for j in 0 1 2; do
+      # 每病人 3 條 strictly sequential（發送順序確定性）；病人之間並行 = 真實流量交錯
+      # ★ 驗 webhook 回應、失敗重試（最多 3 次、間 1s）— 建模 Meta webhook 重試語義；
+      #   20 併發下 Next dev 偶爾 transient drop 一個 request — 靜默 drop 會令 60/60 計數假負
+      T76_OK=0
+      for T76_ATT in 1 2 3; do
+        T76_OUT=$(timeout 15 "$TSX" scripts/mock-inbound.ts message --clinic TKW --from "852610${i}${EPOCH}" --text "e2e T76 order $i.$j" --wamid "wamid.E2E_ORDER_${EPOCH}_${i}_${j}" --name "E2E-T76-P${i}" --ts "$((T76_BASE + i * 3 + j))" 2>&1)
+        case "$T76_OUT" in *OK*) T76_OK=1; break ;; esac
+        sleep 1
+      done
+      [ "$T76_OK" = 1 ] || echo "DROPPED i=$i j=$j out=${T76_OUT:0:200}" >> /tmp/e2e-t76-dropped.log
+    done
+  ) &
+  T76_PIDS="$T76_PIDS $!"
+done
+# ★ 只 wait 呢 20 個 PID — 裸 wait 會等住 pnpm dev / pnpm worker 永遠唔出（T30 同款陷阱）
+wait $T76_PIDS
+[ ! -s /tmp/e2e-t76-dropped.log ] && pass "T76 60/60 發送全部 webhook OK（0 drop；有重試已記錄）" || { fail "T76 $(wc -l < /tmp/e2e-t76-dropped.log) 個 webhook drop（見 /tmp/e2e-t76-dropped.log）"; head -3 /tmp/e2e-t76-dropped.log; }
+if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\" LIKE 'wamid.E2E_ORDER_${EPOCH}%'" '[{"c":"60"}]' 120; then
+  pass "T76 60/60 訊息落庫（20 對話 × 3）"
+else
+  fail "T76 60/60 訊息落庫"
+fi
+check "T76 20 新對話建立" "$(q "SELECT count(*)::text c FROM \"Conversation\" cv JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\" LIKE '852610%${EPOCH}'" | jf c)" "20"
+T76_INVERT=$(q "SELECT count(*)::text c FROM (SELECT \"waTimestamp\" ts, LAG(\"waTimestamp\") OVER (PARTITION BY \"conversationId\" ORDER BY \"createdAt\") prev FROM \"Message\" WHERE \"waMessageId\" LIKE 'wamid.E2E_ORDER_${EPOCH}%') t WHERE prev IS NOT NULL AND prev >= ts" | jf c)
+check "T76 每對話 DB 順序 = 發送順序（0 逆轉）" "$T76_INVERT" "0"
+
+# ── T77. RT-MEDIA：media 下載（chaos 8s）唔阻塞其他對話 ─────────────────
+echo "[R9] T77: RT-MEDIA (MEDIA_CHAOS_DELAY_MS=8000)"
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+MEDIA_CHAOS_DELAY_MS=8000 nohup pnpm worker >/tmp/e2e-worker-media.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-media.log 2>/dev/null && break; sleep 1; done
+T77_PAT1="8526201${EPOCH}"
+T77_PAT2="8526202${EPOCH}"
+T77_W1="wamid.E2E_T77_M1_${EPOCH}"
+T77_W2="wamid.E2E_T77_M2_${EPOCH}"
+"$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T77_PAT1" --text "e2e T77 media" --wamid "$T77_W1" --name "E2E-T77-M1" --media image >/dev/null 2>&1 || fail "T77 M1 mock-inbound"
+if wait_for "SELECT \"mediaStatus\"::text m FROM \"Message\" WHERE \"waMessageId\"='$T77_W1'" '[{"m":"PENDING"}]' 30; then
+  pass "T77 M1（media）落庫 mediaStatus=PENDING（下載入獨立 mediaQueue）"
+else
+  fail "T77 M1 mediaStatus=PENDING"
+fi
+"$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T77_PAT2" --text "e2e T77 plain after media" --wamid "$T77_W2" --name "E2E-T77-M2" >/dev/null 2>&1 || fail "T77 M2 mock-inbound"
+T77_BLOCKED=0
+if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$T77_W2'" '[{"c":"1"}]' 10; then
+  pass "T77 M2（另一對話）10s 內落庫"
+else
+  fail "T77 M2 10s 未落庫（被 media 下載阻塞）"
+  T77_BLOCKED=1
+fi
+[ "$T77_BLOCKED" = 0 ] && {
+  check "T77 M2 落庫時 M1 media 仍 PENDING（並行處理、唔阻塞）" "$(q "SELECT \"mediaStatus\"::text m FROM \"Message\" WHERE \"waMessageId\"='$T77_W1'" | jf m)" "PENDING"
+}
+if wait_for "SELECT \"mediaStatus\"::text m FROM \"Message\" WHERE \"waMessageId\"='$T77_W1'" '[{"m":"SKIPPED"}]' 30; then
+  pass "T77 M1 media 終態 SKIPPED（mock mode 跳下載；訊息保留）"
+else
+  fail "T77 M1 media 未到終態"
+fi
+grep -q "chaos delay" /tmp/e2e-worker-media.log 2>/dev/null && pass "T77 media worker 應咗 8s chaos delay（log）" || fail "T77 chaos delay 未生效（log）"
+# 還原正常 worker
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-rt1.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-rt1.log 2>/dev/null && break; sleep 1; done
+
+# ── T78. RT-GRAPH-FAIL（Test H）：mock Graph 失敗 → FAILED 無假 SENT ─────
+echo "[R9] T78: RT-GRAPH-FAIL (Test H)"
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+WA_GRAPH_MOCK_FAIL=1 nohup pnpm worker >/tmp/e2e-worker-graphfail.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-graphfail.log 2>/dev/null && break; sleep 1; done
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$T75_CONV\",\"body\":\"e2e T78 graph fail\"}"
+check "T78 send → 202（入隊）" "$H1_CODE" "202"
+T78_MID=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T78_MID'" '[{"s":"FAILED"}]' 60; then
+  pass "T78 最終 status = FAILED（無假 SENT）"
+else
+  fail "T78 最終 status 非 FAILED（actual=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T78_MID'" | jf s)）"
+fi
+check "T78 waMessageId = NULL（無假 SENT id）" "$(q "SELECT (\"waMessageId\" IS NULL)::text n FROM \"Message\" WHERE id='$T78_MID'" | jf n)" "true"
+check "T78 status 從未變 SENT（DB）" "$(q "SELECT (\"status\" = 'SENT')::text n FROM \"Message\" WHERE id='$T78_MID'" | jf n)" "false"
+grep -q "permanently failed" /tmp/e2e-worker-graphfail.log 2>/dev/null && pass "T78 worker 3 次重試後放棄（log）" || fail "T78 'permanently failed' log 缺失"
+# 還原正常 worker
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-rt2.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-rt2.log 2>/dev/null && break; sleep 1; done
+
+# ── T79. RT-ASSIGN-RACE（Test G）：parallel assign → 1×200 + 1×409 ─────
+echo "[R9] T79: RT-ASSIGN-RACE (Test G)"
+T79_PAT="8526301${EPOCH}"
+T79_WAMID="wamid.E2E_T79_${EPOCH}"
+"$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T79_PAT" --text "e2e T79 assign race" --wamid "$T79_WAMID" --name "E2E-T79" >/dev/null 2>&1 || fail "T79 mock-inbound"
+T79_CONV=""
+for i in $(seq 1 30); do
+  T79_CONV=$(q "SELECT c.id::text id FROM \"Message\" m JOIN \"Conversation\" c ON c.id=m.\"conversationId\" WHERE m.\"waMessageId\"='$T79_WAMID'" | jf id)
+  [ -n "$T79_CONV" ] && break
+  sleep 1
+done
+[ -n "$T79_CONV" ] || { fail "T79 對話未建立"; R9=1; }
+T79_D_EMAIL="staff-e2e-t79d@wa-clinic.local"
+T79_D_ID=$(pnpm -s e2e:staff create --clinic TKW --email "$T79_D_EMAIL" --name "E2E T79 Staff D" 2>/dev/null | grep -oE 'STAFF_ID=[a-z0-9]+' | head -1 | cut -d= -f2)
+[ -n "$T79_D_ID" ] || { fail "T79 臨時 staff D 建立失敗"; R9=1; }
+# 兩個 parallel claim（同 assignVersion=0；unassigned → 任何同店 STAFF 合法 — 樂觀鎖定勝負）
+curl -s -o /tmp/e2e-t79-a.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$T79_CONV/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$TKW_STAFF_ID\",\"assignVersion\":0}" >/tmp/e2e-t79-ca &
+T79_PA=$!
+curl -s -o /tmp/e2e-t79-b.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$T79_CONV/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$T79_D_ID\",\"assignVersion\":0}" >/tmp/e2e-t79-cb &
+T79_PB=$!
+wait "$T79_PA" "$T79_PB"
+T79_CA=$(cat /tmp/e2e-t79-ca)
+T79_CB=$(cat /tmp/e2e-t79-cb)
+T79_CODES=$(printf '%s\n%s\n' "$T79_CA" "$T79_CB" | sort | tr '\n' ',')
+check "T79 parallel claim → 恰 1×200 + 1×409" "$T79_CODES" "200,409,"
+if [ "$T79_CA" = "200" ]; then T79_WINNER="$TKW_STAFF_ID"; T79_LOSE_BODY=/tmp/e2e-t79-b.json; else T79_WINNER="$T79_D_ID"; T79_LOSE_BODY=/tmp/e2e-t79-a.json; fi
+[ -n "$T79_WINNER" ] && {
+  grep -q '"error":"ASSIGN_CONFLICT"' "$T79_LOSE_BODY" && pass "T79 輸家 409 body = ASSIGN_CONFLICT" || fail "T79 409 body 錯"
+  check "T79 409 帶最新 assignVersion=1" "$(grep -oE '"assignVersion":[0-9]+' "$T79_LOSE_BODY" | head -1 | cut -d: -f2)" "1"
+  check "T79 409 帶 currentAssigneeId = 贏家" "$(grep -oE '"currentAssigneeId":"[^"]*"' "$T79_LOSE_BODY" | head -1 | cut -d'"' -f4)" "$T79_WINNER"
+}
+check "T79 DB 最終 assignVersion = 1（0→1）" "$(q "SELECT \"assignVersion\"::text v FROM \"Conversation\" WHERE id='$T79_CONV'" | jf v)" "1"
+check "T79 DB assignee = 贏家" "$(q "SELECT \"assigneeId\"::text a FROM \"Conversation\" WHERE id='$T79_CONV'" | jf a)" "$T79_WINNER"
+# 贏家用新版本（1）再 assign → 200 + version=2（版本鏈有效）
+if [ "$T79_WINNER" = "$TKW_STAFF_ID" ]; then T79_OTHER="$T79_D_ID"; else T79_OTHER="$TKW_STAFF_ID"; fi
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$T79_CONV/assign" "{\"toStaffId\":\"$T79_OTHER\",\"assignVersion\":1}"
+check "T79 新版本（1）assign → 200" "$H1_CODE" "200"
+check "T79 assignVersion → 2" "$(q "SELECT \"assignVersion\"::text v FROM \"Conversation\" WHERE id='$T79_CONV'" | jf v)" "2"
+# 陳舊版本（0）→ 409（self-claim 合法，版本鎖擋）
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$T79_CONV/assign" "{\"toStaffId\":\"$TKW_STAFF_ID\",\"assignVersion\":0}"
+check "T79 陳舊版本（0）assign → 409" "$H1_CODE" "409"
+
+# ── T80. RT-ROLLBACK（Test I）：PG trigger 強行 rollback → 0 event + 無 row ──
+echo "[R9] T80: RT-ROLLBACK (Test I)"
+T80_SOCK=/tmp/e2e-socket-t80.log
+: > "$T80_SOCK"
+T80_SESSION=$(awk '$6=="wa_inbox_session"{v=$7} END{if (v!="") print v}' "$COOKIE_TKW" 2>/dev/null)
+[ -n "$T80_SESSION" ] || { fail "T80 TKW session 提取失敗"; R9=1; }
+nohup pnpm -s e2e:socket-events --cookie "wa_inbox_session=$T80_SESSION" --wait-ms 180000 >"$T80_SOCK" 2>&1 &
+T80_PID=$!
+T80_SOCKUP=0
+for i in $(seq 1 40); do grep -q "SOCKET-CONNECTED" "$T80_SOCK" 2>/dev/null && { T80_SOCKUP=1; break; }; sleep 1; done
+[ "$T80_SOCKUP" = 1 ] && pass "T80 socket listener 已連" || { fail "T80 socket listener 未連"; R9=1; }
+sleep 2
+T80_NEW_BEFORE=$(grep -c "SOCKET-EVENT message:new" "$T80_SOCK" 2>/dev/null); T80_NEW_BEFORE=${T80_NEW_BEFORE:-0}
+# trigger：T80 wamid 嘅 Message INSERT 強行 abort（模擬 transaction rollback）
+q "CREATE OR REPLACE FUNCTION e2e_t80_guard_fn() RETURNS trigger AS \$\$ BEGIN IF NEW.\"waMessageId\" LIKE 'wamid.E2E_T80%' THEN RAISE EXCEPTION 'e2e T80 forced rollback'; END IF; RETURN NEW; END; \$\$ LANGUAGE plpgsql" >/dev/null 2>&1 || fail "T80 guard function 建立失敗"
+q "DROP TRIGGER IF EXISTS e2e_t80_guard ON \"Message\"" >/dev/null 2>&1
+q "CREATE TRIGGER e2e_t80_guard BEFORE INSERT ON \"Message\" FOR EACH ROW EXECUTE FUNCTION e2e_t80_guard_fn()" >/dev/null 2>&1 || fail "T80 trigger 建立失敗"
+T80_PAT="8526501${EPOCH}"
+T80_WAMID="wamid.E2E_T80_${EPOCH}"
+T80_HOOK=$("$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T80_PAT" --text "e2e T80 rollback" --wamid "$T80_WAMID" --name "E2E-T80" 2>&1)
+echo "$T80_HOOK" | grep -q "OK" && pass "T80 webhook 接受（200 — queue 正常）" || { fail "T80 webhook 未接受：$T80_HOOK"; R9=1; }
+# worker 試 3 次（backoff 2s/4s）— 全部被 trigger abort；每次 abort 打 2 行 log（clinic 層 + jobId 層）
+T80_RETRIES=0
+for i in $(seq 1 45); do
+  T80_RETRIES=$(grep -c "e2e T80 forced rollback" /tmp/e2e-worker-rt2.log 2>/dev/null); T80_RETRIES=${T80_RETRIES:-0}
+  [ "$T80_RETRIES" -ge 6 ] && break
+  sleep 1
+done
+[ "$T80_RETRIES" -ge 6 ] && pass "T80 worker 3 次處理全被 trigger abort（rollback；每次 2 行 log = 共 ≥6）" || fail "T80 trigger abort 次數不足（=$T80_RETRIES，期望 >=6 = 3 次 × 2 行）"
+check "T80 Message row = 0（transaction rollback）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$T80_WAMID'" | jf c)" "0"
+check "T80 Contact row = 0（同一 transaction 回滾）" "$(q "SELECT count(*)::text c FROM \"Contact\" WHERE \"waId\"='$T80_PAT'" | jf c)" "0"
+check "T80 Conversation row = 0" "$(q "SELECT count(*)::text c FROM \"Conversation\" cv JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$T80_PAT'" | jf c)" "0"
+check "T80 WebhookEvent row = 0（claim 同業務寫原子）" "$(q "SELECT count(*)::text c FROM \"WebhookEvent\" WHERE id LIKE '%${T80_WAMID}%'" | jf c)" "0"
+T80_NEW_AFTER=$(grep -c "SOCKET-EVENT message:new" "$T80_SOCK" 2>/dev/null); T80_NEW_AFTER=${T80_NEW_AFTER:-0}
+check "T80 socket：0 新 message:new 事件（未 commit → 未 emit）" "$T80_NEW_AFTER" "$T80_NEW_BEFORE"
+# 清理：drop trigger + 停 socket listener
+q "DROP TRIGGER IF EXISTS e2e_t80_guard ON \"Message\"" >/dev/null 2>&1
+q "DROP FUNCTION IF EXISTS e2e_t80_guard_fn()" >/dev/null 2>&1
+kill "$T80_PID" 2>/dev/null || true
+wait "$T80_PID" 2>/dev/null || true
+
+# ── T81. RT-REDIS-RESTART（Test D，最後跑）：SHUTDOWN NOSAVE → delta 補齊 ──
+echo "[R9] T81: RT-REDIS-RESTART (Test D)"
+T81_LASTSEEN=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+T81_PAT1="8526401${EPOCH}"
+T81_PAT2="8526402${EPOCH}"
+T81_W1="wamid.E2E_T81_A_${EPOCH}"
+T81_W2="wamid.E2E_T81_B_${EPOCH}"
+# 1. redis SHUTDOWN NOSAVE（queue 狀態清空）
+redis-cli SHUTDOWN NOSAVE 2>/dev/null || true
+T81_DOWN=0
+for i in $(seq 1 10); do
+  redis-cli ping >/dev/null 2>&1 || { T81_DOWN=1; break; }
+  sleep 1
+done
+[ "$T81_DOWN" = 1 ] && pass "T81 redis down（SHUTDOWN NOSAVE）" || fail "T81 SHUTDOWN 後 redis 仍活"
+# 2. 故障期間 2 條 inbound → webhook 唔好吊住 request（鐵律 5）
+#    實測行為（exp-t81-behavior 實驗證實）：短故障時 ioredis offline-queue buffer →
+#    queue.add 即刻 resolve → 200（job 重連後 flush，冪等層保證 exactly-once）；
+#    connection end（長故障）先會 500 fast-fail。兩者都合法 — 斷言「快回應、唔吊」。
+T81_O1=$(timeout 10 "$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T81_PAT1" --text "e2e T81 during outage A" --wamid "$T81_W1" --name "E2E-T81-A" 2>&1)
+case "$T81_O1" in
+  *OK*) pass "T81 故障期間 inbound#1 → 快回應 200（offline-queue buffer — 唔吊 request）" ;;
+  *"HTTP 500"*) pass "T81 故障期間 inbound#1 → 快 500（fast fail — Meta 重試語義）" ;;
+  *) fail "T81 故障期間 inbound#1 未快回應（吊咗 request？）：${T81_O1:-<timeout 10s>}"; R9=1 ;;
+esac
+T81_O2=$(timeout 10 "$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T81_PAT2" --text "e2e T81 during outage B" --wamid "$T81_W2" --name "E2E-T81-B" 2>&1)
+case "$T81_O2" in
+  *OK*) pass "T81 故障期間 inbound#2 → 快回應 200（offline-queue buffer）" ;;
+  *"HTTP 500"*) pass "T81 故障期間 inbound#2 → 快 500（fast fail）" ;;
+  *) fail "T81 故障期間 inbound#2 未快回應：${T81_O2:-<timeout 10s>}"; R9=1 ;;
+esac
+# 3. redis 重啟（sandbox 無 supervisor — 手動；模擬 ops 重啟）
+redis-server 127.0.0.1:6379 --daemonize yes >/dev/null 2>&1 || true
+T81_UP=0
+for i in $(seq 1 30); do
+  redis-cli ping 2>/dev/null | grep -q PONG && { T81_UP=1; break; }
+  sleep 1
+done
+[ "$T81_UP" = 1 ] && pass "T81 redis 回復（手動重啟）" || { fail "T81 redis 未回復"; R9=1; }
+# ioredis 自動重連（maxRetriesPerRequest:null）— 俾 server/worker 時間重連 + flush offline queue
+sleep 5
+# 4. Meta 重試語義：redeliver 同 2 個 wamid → 200（冪等層保證唔重複）
+T81_R1=$("$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T81_PAT1" --text "e2e T81 redeliver A" --wamid "$T81_W1" --name "E2E-T81-A" 2>&1)
+T81_R2=$("$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T81_PAT2" --text "e2e T81 redeliver B" --wamid "$T81_W2" --name "E2E-T81-B" 2>&1)
+echo "$T81_R1" | grep -q "OK" && pass "T81 redeliver#1 → 200（重連成功）" || { fail "T81 redeliver#1：$T81_R1"; R9=1; }
+echo "$T81_R2" | grep -q "OK" && pass "T81 redeliver#2 → 200" || { fail "T81 redeliver#2：$T81_R2"; R9=1; }
+# 5. 2 條訊息 commit（冪等：offline-queue flush 或 redeliver — 兩者都係 exactly-once）
+if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\" IN ('$T81_W1','$T81_W2')" '[{"c":"2"}]' 60; then
+  pass "T81 兩條訊息重啟後 commit（exactly-once）"
+else
+  fail "T81 訊息重啟後未 commit"
+fi
+# 6. ★ Test D 驗收：client focus → delta refetch 2s 內補齊
+T81_DELTA=/tmp/e2e-t81-delta.json
+T81_DL=$(curl -s -o "$T81_DELTA" -w '%{time_total}' -b "$COOKIE_TKW" "$BASE/api/conversations?clinicId=$TKW_CLINIC_ID&after=$T81_LASTSEEN")
+T81_D1=$(grep -o "$T81_PAT1" "$T81_DELTA" | wc -l | tr -d ' ')
+T81_D2=$(grep -o "$T81_PAT2" "$T81_DELTA" | wc -l | tr -d ' ')
+[ "$T81_D1" -ge 1 ] && [ "$T81_D2" -ge 1 ] && pass "T81 delta refetch 補齊兩條故障期間對話（focus-refetch 有效）" || fail "T81 delta refetch 補唔齊（A=$T81_D1 B=$T81_D2）"
+echo "$T81_DL" | awk '{exit !($1 < 2)}' && pass "T81 delta refetch 回應 <2s（actual=${T81_DL}s）" || fail "T81 delta refetch 太慢：${T81_DL}s"
+
+# ── R9 summary ─────────────────────────────────────────────────────────
+[ "$R9" = 0 ] && pass "R9 Realtime P0 chaos e2e（T75-T81）" || fail "R9 有項失敗（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

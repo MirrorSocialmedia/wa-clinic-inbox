@@ -1,7 +1,7 @@
 /**
  * worker process 入口 — `node --import tsx dist/workers/index.js` 或直接 tsx
  *
- * 一個 process 行晒 4 個 worker（inbound/outbound/ai/cron）。
+ * 一個 process 行晒 5 個 worker（inbound/outbound/ai/cron/media）。
  * mock E2E 同 dev 都咁跑；production 先拆 process。
  *
  * 啟動首跑：refreshAllClinics()（fire-and-forget）— 立即填 L2 cache + WorkforceSyncState，
@@ -11,6 +11,7 @@ import { startInboundWorker } from "./inbound.worker";
 import { startOutboundWorker } from "./outbound.worker";
 import { startAiWorker } from "./ai.worker";
 import { startCronWorker } from "./cron.worker";
+import { startMediaWorker } from "./media.worker";
 import { cronQueue } from "@/lib/queue";
 import { refreshAllClinics } from "@/lib/availability";
 import log from "@/lib/log";
@@ -48,6 +49,7 @@ async function main() {
   await startInboundWorker();
   await startOutboundWorker();
   await startAiWorker();
+  await startMediaWorker();
   await startCronWorker();
   await registerSchedulers();
   log.info({}, "all workers running — waiting for jobs");

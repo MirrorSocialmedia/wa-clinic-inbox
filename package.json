@@ -29,6 +29,7 @@
     "e2e:staff": "tsx scripts/e2e-staff.ts",
     "e2e:queue-clear": "tsx scripts/e2e-queue-clear.ts",
     "test:booking-ui-unit": "tsx scripts/booking-ui-unit.ts",
+    "test:ordering": "tsx scripts/ordering-drift-guard.ts",
     "e2e:booking-ui": "tsx scripts/e2e-booking-ui.ts",
     "e2e:workforce-contract": "tsx scripts/workforce-contract.ts",
     "e2e:booking-ui-contract": "tsx scripts/booking-ui-contract.ts",

@@ -54,6 +54,12 @@ export interface AssignConversationOptions {
   byStaffId?: string | null;
   /** 轉交留言（1..2000；null = 用自動文案） */
   note?: string;
+  /**
+   * ★ Realtime P0 (R5, cwi-rt-20260823-a1)：client 端持有的 assignVersion（樂觀鎖）。
+   * 人手 assign/接手/放返傳入 → updateMany({where:{id, assignVersion:v}}) count=0 → 409 ASSIGN_CONFLICT。
+   * AUTO_CLAIM / SYSTEM 唔傳（null/undefined）→ 保留舊 assigneeId lock 語義（防並發轉交 race）。
+   */
+  expectedAssignVersion?: number | null;
 }
 
 export type AssignAuditAction = "TRANSFER" | "UNASSIGN" | "AUTO_CLAIM";
@@ -64,6 +70,8 @@ export interface AssignResult {
   fromStaffId: string | null;
   assigneeId: string | null;
   assignedAt: Date;
+  /** ★ Realtime P0 (R5)：成功後嘅新版本號（read 時 +1 — updateMany 已 commit）→ socket/UI 同步 */
+  assignVersion: number;
   /** 自動 INTERNAL note 嘅 Message id（thread 內「轉交原因」） */
   noteMessageId: string;
   auditAction: AssignAuditAction;
@@ -122,12 +130,24 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
 
     const now = new Date();
 
-    // 2) 原子更新（樂觀鎖：where 帶 read 時嘅 assigneeId — 並發轉交只有一個成功）
+    // 2) 原子更新（樂觀鎖）
+    // ★ Realtime P0 (R5, cwi-rt-20260823-a1)：client 帶 version → where 用 assignVersion:v —
+    //   UI 陳舊（另一 staff 喺你先 assign/接手咗 → version 已 +1）→ count=0 → 409 ASSIGN_CONFLICT
+    //   （UI 顯示「啱啱俾 {name} 接咗手」+ refetch，唔覆寫對方）。
+    //   無 version（AUTO_CLAIM / SYSTEM / 舊 client）→ 保留舊 assigneeId lock（防並發轉交 race）。
+    //   不變式：所有 assigneeId 變動（呢度 + PATCH /api/conversations/[id]）都 assignVersion+1。
+    const where: Prisma.ConversationWhereInput =
+      opts.expectedAssignVersion != null
+        ? { id: conv.id, assignVersion: opts.expectedAssignVersion }
+        : { id: conv.id, assigneeId: conv.assigneeId };
     const res = await tx.conversation.updateMany({
-      where: { id: conv.id, assigneeId: conv.assigneeId },
-      data: { assigneeId: toStaffId, assignedAt: now },
+      where,
+      data: { assigneeId: toStaffId, assignedAt: now, assignVersion: { increment: 1 } },
     });
     if (res.count !== 1) {
+      if (opts.expectedAssignVersion != null) {
+        throw new AssignError(409, "ASSIGN_CONFLICT", "conversation assignee changed concurrently, please retry");
+      }
       throw new AssignError(409, "CONFLICT", "conversation assignee changed concurrently, please retry");
     }
 
@@ -181,6 +201,7 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
       fromStaffId: conv.assigneeId,
       assigneeId: toStaffId,
       assignedAt: now,
+      assignVersion: conv.assignVersion + 1, // increment 已 commit（read +1 = 新值）
       noteMessageId: noteMsg.id,
       auditAction,
     };
@@ -192,6 +213,8 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
     clinicId: result.clinicId,
     assigneeId: result.assigneeId,
     byStaffId,
+    // ★ R5：新版本號 — 其他 client 即時同步（之後嘅 assign 用呢個 version 先唔會 409）
+    assignVersion: result.assignVersion,
   });
 
   // ★ H2：mention 通知 — 被派者（唔係自己）收 notify:mention（bell badge / 黃點；MD §5：轉交 = 必有通知）

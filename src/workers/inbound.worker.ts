@@ -1,11 +1,11 @@
 import { Worker, type Job } from "bullmq";
-import { inboundQueue, aiQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { inboundQueue, aiQueue, mediaQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { publishNotify } from "@/lib/notify";
-import { downloadWaMedia } from "@/lib/wa/media";
 import prisma from "@/lib/prisma";
 import log, { redactDeep } from "@/lib/log";
 import { notifyAlert } from "@/lib/health/notify";
 import { Prisma, type Clinic, type Contact, type Conversation, type Message } from "@prisma/client";
+import { INBOUND_CONCURRENCY } from "./concurrency";
 
 /** 冪等寫入用嘅 DB client（top-level prisma 或 $transaction 嘅 tx — 同一套 model API）。 */
 type Db = Prisma.TransactionClient;
@@ -29,7 +29,9 @@ type Db = Prisma.TransactionClient;
  * - history         舊 chat 匯入 → Message(HISTORY)，歷史 waTimestamp，
  *                   唔觸發 unread / 唔觸發 AI，batch insert + 容忍亂序
  * - statuses[]      → Message.status（SENT/DELIVERED/READ/FAILED + errorCode）→ Socket 推
- * - 媒體            → getMediaInfo + 下載（mock 跳過）
+ * - 媒體            → ★ Realtime P0 (R4)：inbound job 只落 Message(mediaStatus=PENDING)
+ *                   + enqueue media job 即完（唔喺入面做 HTTP 下載）；
+ *                   實際下載由獨立 media worker（concurrency 3）做，完成 → READY + emit media:ready
  * - 未知 field      → 記 log（metadata only）+ 唔崩
  *
  * ★ PII 鐵律：log 只准 metadata（wamid/type/clinic/status/bytes），
@@ -199,6 +201,9 @@ function publicMessage(msg: Message) {
     type: msg.type,
     body: msg.body,
     mediaPath: msg.mediaPath,
+    mediaStatus: msg.mediaStatus,
+    // ★ Realtime P0 (R1)：client 冪等 key（inbound 永遠 null）— UI 用以對消 optimistic bubble
+    clientMessageId: msg.clientMessageId,
     status: msg.status,
     errorCode: msg.errorCode,
     sentByStaffId: msg.sentByStaffId,
@@ -266,6 +271,7 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
     }
     const waTs = tsToDate(m.timestamp);
     const profileName = profileNameOf(value, waId);
+    const mid = mediaIdOf(m);
 
     // ★ P0-1：claim + 業務寫入同一個 $transaction（原子：要嘛全有要嘛全冇）。
     //   舊 code claim 成功但 message.create 前 crash → retry claim P2002 → 靜默 skip → 訊息永久丟。
@@ -294,7 +300,9 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
             channel: "API",
             type: msgTypeOf(m),
             body: messageBody(m),
-            mediaPath: null, // ★ 媒體下載喺 transaction 外 — 下載完先 UPDATE
+            mediaPath: null, // ★ media 下載喺獨立 media queue（R4）— 先落 PENDING row
+            // ★ Realtime P0 (R4)：有 media → PENDING（media worker 下載完 → READY + emit media:ready）
+            mediaStatus: mid ? "PENDING" : "READY",
             status: "RECEIVED",
             waTimestamp: waTs,
           },
@@ -316,19 +324,25 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
       continue;
     }
 
-    // ★ media 下載（外部 HTTP）喺 transaction 外 — 失敗/超時只係冇附件，唔應該令訊息消失或阻塞。
-    const mid = mediaIdOf(m);
+    // ★ Realtime P0 (R4)：media 下載搬去獨立 media queue（concurrency 3）— 呢度只 enqueue，
+    //   大 media 唔會阻住同對話後面的訊息（per-conversation 順序由 inbound concurrency=1 保證）。
+    //   jobId = media-<messageId>（BullMQ 冪等 — retry 唔會重複 enqueue）。
     if (mid) {
-      const dl = await downloadWaMedia({ mediaId: mid, wamid });
-      if (dl.mediaPath) {
+      try {
+        await mediaQueue.add(
+          "download",
+          { messageId: result.msg.id, mediaId: mid, wamid, clinicId: clinic.id },
+          { jobId: `media-${result.msg.id}` }
+        );
+      } catch (err) {
+        // enqueue 失敗（Redis 瞬時不可用等）→ 標 SKIPPED（訊息安全，只係冇附件；唔好留 PENDING 吊咗）
         await prisma.message
-          .update({ where: { id: result.msg.id }, data: { mediaPath: dl.mediaPath } })
-          .catch((err) =>
-            log.warn(
-              { clinic: clinic.code, wamid, err: err instanceof Error ? err.message : String(err) },
-              "inbound: mediaPath update failed（訊息已入庫，只係冇附件）"
-            )
-          );
+          .update({ where: { id: result.msg.id }, data: { mediaStatus: "SKIPPED" } })
+          .catch(() => undefined);
+        log.warn(
+          { clinic: clinic.code, wamid, err: err instanceof Error ? err.message : String(err) },
+          "inbound: media enqueue failed — marked SKIPPED（訊息已入庫，只係冇附件）"
+        );
       }
     }
 
@@ -410,6 +424,7 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
       continue;
     }
     const waTs = tsToDate(m.timestamp);
+    const mid = mediaIdOf(m);
 
     // ★ P0-1 同 handleMessages：claim + 業務寫入同一個 $transaction；
     //   P2002 + 無 Message = claim 孤兒 → 重跑補回。
@@ -433,7 +448,8 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
             channel: "APP_ECHO",
             type: msgTypeOf(m),
             body: messageBody(m),
-            mediaPath: null, // ★ 媒體下載喺 transaction 外
+            mediaPath: null, // ★ media 下載喺獨立 media queue（R4）
+            mediaStatus: mid ? "PENDING" : "READY",
             status: "SENT",
             waTimestamp: waTs,
           },
@@ -451,19 +467,22 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
 
     if (result.skipped) continue;
 
-    // ★ media 下載喺 transaction 外（失敗只係冇附件）
-    const mid = mediaIdOf(m);
+    // ★ Realtime P0 (R4)：echo media 一樣走獨立 media queue（見 handleMessages 註釋）
     if (mid) {
-      const dl = await downloadWaMedia({ mediaId: mid, wamid });
-      if (dl.mediaPath) {
+      try {
+        await mediaQueue.add(
+          "download",
+          { messageId: result.msg.id, mediaId: mid, wamid, clinicId: clinic.id },
+          { jobId: `media-${result.msg.id}` }
+        );
+      } catch (err) {
         await prisma.message
-          .update({ where: { id: result.msg.id }, data: { mediaPath: dl.mediaPath } })
-          .catch((err) =>
-            log.warn(
-              { clinic: clinic.code, wamid, err: err instanceof Error ? err.message : String(err) },
-              "inbound: echo mediaPath update failed（訊息已入庫，只係冇附件）"
-            )
-          );
+          .update({ where: { id: result.msg.id }, data: { mediaStatus: "SKIPPED" } })
+          .catch(() => undefined);
+        log.warn(
+          { clinic: clinic.code, wamid, err: err instanceof Error ? err.message : String(err) },
+          "inbound: echo media enqueue failed — marked SKIPPED（訊息已入庫，只係冇附件）"
+        );
       }
     }
 
@@ -782,7 +801,13 @@ export function startInboundWorker(): Worker {
       await processInboundEvent(data);
       return { ok: true, jobId: job.id };
     },
-    { connection: getRedis(), prefix: QUEUE_PREFIX, concurrency: 5 }
+    {
+      connection: getRedis(),
+      prefix: QUEUE_PREFIX,
+      // ★ Realtime P0 (R4)：唔准調大 — per-conversation ordering 靠佢（見 src/workers/concurrency.ts）；
+      //   要 scale 先實施 group-by-conversationId（R8 觸發條件）。drift guard：pnpm test:ordering
+      concurrency: INBOUND_CONCURRENCY,
+    }
   );
 
   worker.on("completed", (job) => {

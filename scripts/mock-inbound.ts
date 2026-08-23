@@ -74,8 +74,10 @@ function buildMessage(clinicPhoneId: string, bizNumber: string, o: {
   text: string;
   name?: string;
   media?: string;
+  /** ★ Realtime P0 (R4 e2e)：指定 waTimestamp（unix seconds）— 順序壓測要確定性递增 ts */
+  ts?: string;
 }): unknown {
-  const ts = Math.floor(Date.now() / 1000).toString();
+  const ts = o.ts && o.ts.length > 0 ? o.ts : Math.floor(Date.now() / 1000).toString();
   const msg: WaMsg = {
     from: o.from,
     id: o.wamid,
@@ -272,6 +274,7 @@ async function main(): Promise<void> {
         text: opts.text ?? "（mock 訊息）",
         name: opts.name,
         media: opts.media,
+        ts: opts.ts,
       });
       break;
     case "echo":

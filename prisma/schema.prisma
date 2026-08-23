@@ -42,6 +42,17 @@ enum MsgStatus {
   FAILED
 }
 
+// ★ Realtime P0 (R4, cwi-rt-20260823-a1)：media 下載生命週期。
+// inbound job 落 Message 時 media 訊息 = PENDING（唔阻 per-conversation 排序）；
+// media worker（獨立 concurrency=3）下載完 → READY（emit media:ready）/ SKIPPED（mock/失敗降級）/ FAILED（重試 exhausted）。
+// 文字訊息永遠 READY（無 media 概念），預設值保持舊行語義不變。
+enum MediaStatus {
+  PENDING
+  READY
+  FAILED
+  SKIPPED
+}
+
 enum DraftStatus {
   PROPOSED
   SENT_AS_IS
@@ -120,6 +131,11 @@ model Conversation {
   contactId        String
   status           ConvStatus @default(OPEN)
   assigneeId       String?
+  // ★ Realtime P0 (R5, cwi-rt-20260823-a1)：manual assign 樂觀鎖版本號。
+  // 人手 assign/takeover 必帶 client 端 version → updateMany({where:{id, assignVersion:v}}) 命中先 +1；
+  // 兩 staff 併發 → 後到者 count=0 → 409 ASSIGN_CONFLICT（UI 提示「啱啱俾 {name} 接咗手」+ refetch）。
+  // AUTO_CLAIM / SYSTEM 路徑唔帶 version（保留 assigneeId 舊 lock 語義）。
+  assignVersion    Int        @default(0)
   // ★ H1：最近一次 assign/transfer/unassign 時間（Send Lock 轉交追蹤；null = 從未派過）
   assignedAt       DateTime? @db.Timestamptz
   intent           String?                    // 最近一次分類結果
@@ -156,6 +172,11 @@ model Message {
   // QUEUED row 寫唔到。Postgres unique index 允許多 NULL，冪等語義唔變
   // （inbound/status 永遠有 wamid，webhook 冪等仍然成立）。
   waMessageId    String?   @unique            // ★ 冪等 key（webhook 會重發）
+  // ★ Realtime P0 (R1, cwi-rt-20260823-a1)：client 端冪等 key（clientMessageId）。
+  // composer 每次「新發送意圖」生成一個 UUID；網絡 retry / 雙擊重發用同一個 key。
+  // send route 命中已存在 row → 直接回舊 Message（200 冪等）唔再入 queue。
+  // 只 OUT/API 訊息有用；inbound/echo 永遠 null（Postgres unique 允許多 NULL）。
+  clientMessageId String?   @unique
   direction      Direction
   channel        Channel
   type           String                       // text/image/audio/document/interactive/nfm_reply...
@@ -163,6 +184,8 @@ model Message {
   // ★ H1：內部備註 @ 咗邊啲 staffId（只 channel=INTERNAL 先有意義；UI autocomplete 入）
   mentions       String[]  @default([])
   mediaPath      String?                      // 落地 /srv/wa-media/<id>，唔存 Meta URL（會過期）
+  // ★ Realtime P0 (R4, cwi-rt-20260823-a1)：media 下載狀態（見 MediaStatus enum 註釋）
+  mediaStatus    MediaStatus @default(READY)
   status         MsgStatus
   errorCode      String?
   sentByStaffId  String?

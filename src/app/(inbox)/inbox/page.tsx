@@ -76,6 +76,8 @@ export default async function InboxPage({
       status: cv.status,
       assigneeId: cv.assigneeId,
       assigneeName: cv.assigneeId ? staffMap.get(cv.assigneeId) ?? null : null,
+      // ★ Realtime P0 (R5)：樂觀鎖版本
+      assignVersion: cv.assignVersion,
       unreadCount: cv.unreadCount,
       lastInboundAt: cv.lastInboundAt ? cv.lastInboundAt.toISOString() : null,
       lastMessageAt: cv.lastMessageAt.toISOString(),

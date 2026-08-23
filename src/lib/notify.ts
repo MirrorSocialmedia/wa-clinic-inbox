@@ -2,6 +2,26 @@ import { getRedis } from "@/lib/queue";
 import log from "@/lib/log";
 
 /**
+ * ★ Realtime P0 (R2, cwi-rt-20260823-a1) — commit-then-emit 鐵律（MD §2 R2）：
+ *
+ *   任何 socket publish（publishNotify / publishStaffNotify / publishControl）
+ *   必須喺 DB transaction 成功 commit 之後先調用。
+ *   publish 調用永遠唔准出現喺 `$transaction(async (tx) => { ... })` callback 入面。
+ *
+ *   點解：tx 回滾時若已經 emit → UI 收到「訊息到了」但 DB 冇 row → 幻影訊息，
+ *   staff 見到嘅同 DB 唔一致（最嚴重嘅 realtime bug 類別）。
+ *   正確 pattern：
+ *     const result = await prisma.$transaction(async (tx) => { ...; return {...}; });
+ *     // ← tx 成功 return = 已 commit
+ *     publishNotify(clinicId, event, payload);   // ← 先 emit
+ *
+ *   防護：(1) eslint local rule `no-publish-in-transaction`（CI 攔截）
+ *        (2) chaos e2e Test I：PG trigger 強迫 rollback → 斷言零 socket event。
+ *   audit（2026-08-23）：全 repo 6 個 $transaction 點（assign.ts / availability.ts /
+ *   flow-reply.ts / inbound.worker.ts ×3）全部符合 — 0 違規。
+ */
+
+/**
  * 跨 process 實時通知橋（Redis pub/sub）。
  *
  * 架構：web server（Socket.IO）同 BullMQ workers 係兩個 PM2 process。

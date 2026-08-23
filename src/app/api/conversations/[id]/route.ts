@@ -69,7 +69,14 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
     where: { id },
     data: {
       ...(status !== undefined ? { status } : {}),
-      ...(assigneeId !== undefined ? { assigneeId } : {}),
+      ...(assigneeId !== undefined
+        ? {
+            assigneeId,
+            // ★ Realtime P0 (R5)：assignee 變動必 assignVersion+1（同 assign.ts 不變式 —
+            //   人手 assign 用 version 樂觀鎖，呢度直接改 assignee 都要推版本）
+            assignVersion: { increment: 1 },
+          }
+        : {}),
       ...(markRead === true ? { unreadCount: 0 } : {}),
       // 急症紅標：status→RESOLVED 自動清；urgent=false 手動清；唔會由呢度設 true
       ...(status === "RESOLVED" || urgent === false ? { urgent: false } : {}),
@@ -93,6 +100,8 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
     clinicId: conv.clinicId,
     status: updated.status,
     assigneeId: updated.assigneeId,
+    // ★ R5：新 version — 其他 client 同步（之後 assign 先唔會 409）
+    assignVersion: updated.assignVersion,
     unreadCount: updated.unreadCount,
   });
 

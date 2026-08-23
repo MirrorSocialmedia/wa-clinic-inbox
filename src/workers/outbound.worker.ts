@@ -1,5 +1,6 @@
 import { Worker, type Job } from "bullmq";
 import { outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { OUTBOUND_CONCURRENCY } from "./concurrency";
 import { publishNotify } from "@/lib/notify";
 import { sendTextMessage, sendFlowMessage, type FlowMessageConfig } from "@/lib/wa/graph";
 import { acquireToken } from "@/lib/rate-limit";
@@ -181,6 +182,9 @@ function publicMsg(msg: {
   type: string;
   body: string | null;
   mediaPath: string | null;
+  mediaStatus: string;
+  // ★ Realtime P0 (R1)：client 冪等 key（UI 對消 optimistic bubble；inbound 側永遠 null）
+  clientMessageId: string | null;
   status: string;
   errorCode: string | null;
   sentByStaffId: string | null;
@@ -197,6 +201,8 @@ function publicMsg(msg: {
     type: msg.type,
     body: msg.body,
     mediaPath: msg.mediaPath,
+    mediaStatus: msg.mediaStatus,
+    clientMessageId: msg.clientMessageId,
     status: msg.status,
     errorCode: msg.errorCode,
     sentByStaffId: msg.sentByStaffId,
@@ -211,7 +217,13 @@ export function startOutboundWorker(): Worker {
   const worker = new Worker<OutboundJobData>(
     outboundQueue.name,
     (job: Job<OutboundJobData>) => processOutboundJob(job),
-    { connection: getRedis(), prefix: QUEUE_PREFIX, concurrency: 5 }
+    {
+      connection: getRedis(),
+      prefix: QUEUE_PREFIX,
+      // ★ Realtime P0 (R4)：唔准調大 — per-conversation ordering 靠佢（見 src/workers/concurrency.ts）；
+      //   要 scale 先實施 group-by-conversationId（R8 觸發條件）。drift guard：pnpm test:ordering
+      concurrency: OUTBOUND_CONCURRENCY,
+    }
   );
 
   worker.on("completed", (job) => {

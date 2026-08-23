@@ -4,9 +4,12 @@ import { requireAuth, clinicScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
- * GET /api/conversations?clinicId=&status= — 隊列列表（MD §6.4 隊列欄）。
+ * GET /api/conversations?clinicId=&status=&after= — 隊列列表（MD §6.4 隊列欄）。
  * - clinicId：ADMIN 可以指定（tab 切換）；STAFF 忽略（硬性綁自己店，砌別店 → 403 實測）
  * - status：OPEN / PENDING / RESOLVED（filter）
+ * - ★ Realtime P0 (R3, cwi-rt-20260823-a1)：after=<ISO/epochMs> — delta refetch，
+ *   只回 lastMessageAt >= after 嘅對話（MD 寫 /delta 獨立 route；按 MD 授權「現有 list
+ *   route 加 param 就得」— client focus/visibility/3 分鐘 idle 補漏用；重疊容許，client 用 id 去重）
  * - 排序：urgent 優先（Phase 2 鐵律：急症排頂），其餘 lastMessageAt desc
  * - 回傳 contact 資料 + 24h 窗口狀態（UI chip 用）+ AI triage 欄位（intent/urgency/urgent/aiSummary）
  */
@@ -34,6 +37,17 @@ export const GET = handle(async (req: NextRequest) => {
       return NextResponse.json({ error: "invalid status" }, { status: 400 });
     }
     where.status = statusParam;
+  }
+  // ★ Realtime P0 (R3)：delta refetch — 只回 lastMessageAt >= after 嘅對話。
+  // gte（容許重疊）：同毫秒邊界唔會永久漏；client 以 id merge，重複行無害。
+  // assign 會 touch lastMessageAt（assign.ts step 5）→ 派生變動亦會入 delta。
+  const afterParam = url.searchParams.get("after");
+  if (afterParam) {
+    const d = new Date(afterParam);
+    if (Number.isNaN(d.getTime())) {
+      return NextResponse.json({ error: "invalid after" }, { status: 400 });
+    }
+    where.lastMessageAt = { gte: d };
   }
 
   const convs = await prisma.conversation.findMany({
@@ -75,6 +89,8 @@ export const GET = handle(async (req: NextRequest) => {
         status: cv.status,
         assigneeId: cv.assigneeId,
         assigneeName: cv.assigneeId ? staffMap.get(cv.assigneeId) ?? null : null,
+        // ★ Realtime P0 (R5)：樂觀鎖版本（client assign 時帶返嚟）
+        assignVersion: cv.assignVersion,
         unreadCount: cv.unreadCount,
         lastInboundAt: cv.lastInboundAt,
         lastMessageAt: cv.lastMessageAt,

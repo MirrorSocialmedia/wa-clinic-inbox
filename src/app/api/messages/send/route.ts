@@ -25,6 +25,11 @@ export const dynamic = "force-dynamic";
 const schema = z.object({
   conversationId: z.string().min(1),
   body: z.string().min(1).max(4096), // WA text 上限 4096 chars
+  // ★ realtime-p0 R1（cwi-rt-20260823-a1）：client 冪等 key（UUID）。
+  // 每次「邏輯發送」一個 key；斷網 retry / 雙擊重發同 key → 命中已存在 Message
+  // → 直接回舊 row 200（idempotentReplay: true）唔再入 queue（DB 1 條、病人收 1 條）。
+  // optional：舊 client / e2e 唔帶 → 行為不變（無冪等）。
+  clientMessageId: z.string().uuid().optional(),
 });
 
 const ENQUEUE_TIMEOUT_MS = 1500;
@@ -90,19 +95,72 @@ export const POST = handle(async (req: NextRequest) => {
     conv.assigneeId = ctx.staff.id;
   }
 
+  // ★ realtime-p0 R1：client 冪等 — 命中已存在 Message（同 clientMessageId）→ 回舊 row，
+  // 唔入 queue、唔再計一次 auto-claim/draft link。放喺 423/window/auto-claim 之後：
+  // 首次被 423/422 拒時冇 Message 落庫 → replay 會再次經過同一條拒因（語義一致）。
+  if (parsed.data.clientMessageId) {
+    const existing = await prisma.message.findUnique({
+      where: { clientMessageId: parsed.data.clientMessageId },
+    });
+    if (existing) {
+      log.info(
+        {
+          clinicId: conv.clinicId,
+          conversationId: conv.id,
+          messageId: existing.id,
+          status: existing.status,
+          clientMessageId: parsed.data.clientMessageId,
+        },
+        "send: idempotent replay（clientMessageId 命中，唔入 queue）"
+      );
+      return NextResponse.json(
+        {
+          ok: true,
+          messageId: existing.id,
+          status: existing.status,
+          idempotentReplay: true,
+        },
+        { status: 200 }
+      );
+    }
+  }
+
   const now = new Date();
-  const msg = await prisma.message.create({
-    data: {
-      conversationId: conv.id,
-      direction: "OUT",
-      channel: "API",
-      type: "text",
-      body: parsed.data.body,
-      status: "QUEUED",
-      sentByStaffId: ctx.staff.id,
-      waTimestamp: now,
-    },
-  });
+  let msg;
+  try {
+    msg = await prisma.message.create({
+      data: {
+        conversationId: conv.id,
+        direction: "OUT",
+        channel: "API",
+        type: "text",
+        body: parsed.data.body,
+        status: "QUEUED",
+        sentByStaffId: ctx.staff.id,
+        clientMessageId: parsed.data.clientMessageId ?? null,
+        waTimestamp: now,
+      },
+    });
+  } catch (err) {
+    // ★ R1 race：兩個併發 POST 用同一 clientMessageId（雙 tab / 雙擊）— 一個先 commit，
+    // 另一個 unique violation (P2002) → 當冪等 replay 回已 commit 嘅 row（200），唔回 500。
+    if ((err as { code?: string } | null)?.code === "P2002" && parsed.data.clientMessageId) {
+      const existing = await prisma.message.findUnique({
+        where: { clientMessageId: parsed.data.clientMessageId },
+      });
+      if (existing) {
+        log.info(
+          { clinicId: conv.clinicId, conversationId: conv.id, messageId: existing.id, status: existing.status },
+          "send: idempotent replay (P2002 race，唔入 queue)"
+        );
+        return NextResponse.json(
+          { ok: true, messageId: existing.id, status: existing.status, idempotentReplay: true },
+          { status: 200 }
+        );
+      }
+    }
+    throw err;
+  }
 
   await prisma.$executeRaw`
     UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;

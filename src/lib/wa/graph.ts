@@ -43,6 +43,12 @@ export async function sendTextMessage(opts: {
   const { phoneNumberId, to, body } = opts;
 
   if (waMock()) {
+    // ★ Realtime P0 (R9 Test H, cwi-rt-20260823-a1)：模擬 Graph API 故障（worker 以
+    //   WA_GRAPH_MOCK_FAIL=1 啟動）— send throw → outbound job 重試 3 次 exhausted →
+    //   Message 標 FAILED（冇假 SENT）。production WA_MOCK=0 → 呢段唔會行到。
+    if (process.env.WA_GRAPH_MOCK_FAIL === "1") {
+      throw new Error("MOCK_GRAPH_TIMEOUT: simulated Graph API failure (WA_GRAPH_MOCK_FAIL=1)");
+    }
     // 模擬輕微網絡延遲（let queue retry/backoff 行為真實啲）
     await new Promise((r) => setTimeout(r, 10));
     const wamid = `mock-wamid-${randomBytes(10).toString("hex")}`;

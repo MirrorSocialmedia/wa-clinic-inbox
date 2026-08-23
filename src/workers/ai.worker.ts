@@ -1,5 +1,6 @@
 import { Worker, type Job } from "bullmq";
 import { aiQueue, outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { AI_CONCURRENCY } from "./concurrency";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
@@ -442,7 +443,13 @@ export function startAiWorker(): Worker {
   const worker = new Worker<AiJobData>(
     aiQueue.name,
     async (job: Job<AiJobData>) => handleAiJob(job),
-    { connection: getRedis(), prefix: QUEUE_PREFIX, concurrency: 3 }
+    {
+      connection: getRedis(),
+      prefix: QUEUE_PREFIX,
+      // ★ Realtime P0 (R4)：唔准調大 — per-conversation ordering 靠佢（見 src/workers/concurrency.ts）；
+      //   要 scale 先實施 group-by-conversationId（R8 觸發條件）。drift guard：pnpm test:ordering
+      concurrency: AI_CONCURRENCY,
+    }
   );
 
   worker.on("completed", (job) => {

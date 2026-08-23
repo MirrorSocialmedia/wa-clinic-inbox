@@ -31,6 +31,8 @@ export interface ConversationItem {
   status: ConvStatus;
   assigneeId: string | null;
   assigneeName: string | null;
+  /** ★ Realtime P0 (R5, cwi-rt-20260823-a1)：樂觀鎖版本 — assign/接手時帶返 server */
+  assignVersion: number;
   unreadCount: number;
   lastInboundAt: string | null;
   lastMessageAt: string;
@@ -134,6 +136,10 @@ export interface MessageItem {
   aiAutoSent?: boolean;
   /** ★ H1：INTERNAL note @ 咗邊啲 staffId（H2 tick 語義用） */
   mentions?: string[];
+  /** ★ Realtime P0 (R1)：client 冪等 key — optimistic bubble 對消用（server 回传/optimistic 同 key） */
+  clientMessageId?: string | null;
+  /** ★ Realtime P0 (R4)：media 下載狀態（PENDING/READY/SKIPPED/FAILED；文字訊息永遠 READY） */
+  mediaStatus?: string;
   waTimestamp: string;
   createdAt: string;
 }
@@ -180,6 +186,8 @@ export interface ConvUpdatedEvent {
   clinicId: string;
   status: ConvStatus;
   assigneeId: string | null;
+  /** ★ Realtime P0 (R5)：新 version（PATCH assigneeId 變動 → +1） */
+  assignVersion: number;
   unreadCount: number;
 }
 
@@ -244,6 +252,8 @@ export interface ConversationAssignedEvent {
   clinicId: string;
   assigneeId: string | null;
   byStaffId: string | null;
+  /** ★ Realtime P0 (R5)：新 version（assign 成功 → +1）— 其他 client 同步 */
+  assignVersion: number;
 }
 
 /** ★ H1：socket note:new — 有新內部備註（零內文 — 內容由 client 拉） */
