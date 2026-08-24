@@ -62,6 +62,17 @@ enum DraftStatus {
   DISCARDED
 }
 
+// AI Workflow Phase A（cwi-ai-20260824-t1）：內部通知軌（D-8/D-9）—「AI 通知俾職員」
+// 同「客戶 WhatsApp 通知」兩條軌完全分開。kind 決定 UI 圖示/顏色；新 kind 先加 enum。
+enum NoticeKind {
+  MEDIA_RECEIVED    // 病人 send 相/檔案（Phase A2）
+  URGENT_ESCALATION // 急症（socket-only 升級為持久化 — 離線員工唔漏）
+  HANDOFF_REQUEST   // session 卡死 / 病人要真人（Phase C 用）
+  BOOKING_AUTO      // L4：AI 已自動落單（資訊性）
+  SUGGESTION_READY  // 學習迴路有新建議（Phase E 用）
+  SYSTEM
+}
+
 // Phase 2b：逐舖 AI 模式（指揮大神 2026-08-18 決定，覆蓋 MD D5「AI 永不發送」）
 // DRAFT = 預設：AI 只出建議，staff 採用先發；AUTO = AI 回覆直接自動發出
 // （URGENT_PAIN / HIGH / needsHuman / 過 24h 窗口 永遠例外 — 退回 DRAFT 行為）
@@ -373,6 +384,44 @@ model Alert {
 // - 一行一個 scope：clinicId=null = ALL（ADMIN 視角，metrics 內含逐店 breakdown）；
 //   clinicId=店 = 該店（STAFF /admin/ops 視角）。
 // - metrics/text 全部係計數/中位數/比率（metadata only）— 零病人資料。
+// ★ AI Workflow Phase A（cwi-ai-20260824-t1）：內部通知軌（D-8/D-9）。
+// 同客戶訊息 unread 完全分開（唔影響 Conversation.unreadCount）。
+// title = 顯示句（scrub 後；永不含病人訊息原文）；meta = metadata only（wamid/bookingId 等）。
+// 已讀 = readAt 有值（per-staff：一個職員標已讀只改自己嗰個視角？— v1 語義：readAt 有值 = 已讀，
+// 任何職員標即算已讀（同 Alert 水位；v2 先做 per-staff 視角））。
+model StaffNotice {
+  id             String     @id @default(cuid())
+  clinicId       String
+  conversationId String?
+  kind           NoticeKind
+  title          String
+  meta           Json?
+  createdAt      DateTime       @db.Timestamptz @default(now())
+  readByStaffId  String?
+  readAt         DateTime?      @db.Timestamptz
+  @@index([clinicId, readAt, createdAt])
+}
+
+// ★ AI Workflow D-10（cwi-ai-20260824-t1）：病人事實抽取表。
+// 鐵律三條：
+// (1) 來源只可以係 Message（sourceMessageId 必填 — 可追溯；Apricot 資料永不入呢張表）；
+// (2) retention 跟對話 24 個月 — retention-purge cron 一齊剷（連同對應 Message 刪除）；
+// (3) v1 只做 deterministic 抽取（Phase C：completed BookingSession 嘅 preferred provider/timeOfDay
+//     自動落 PREFERENCE）— LLM 自由抽 facts 排 Phase E 後（prompt 唔加職責，避免影響分類質素）。
+// 無 FK relation（純 String 欄）— 由 purge cron 負責級聯清理（delete-by-sourceMessageId）。
+model PatientFact {
+  id              String   @id @default(cuid())
+  contactId       String
+  clinicId        String
+  kind            String   // PREFERENCE / LOGISTICS / SELF_REPORTED
+  text            String   // ≤100 字，scrub 後先落庫
+  sourceMessageId String   // 必填 — 邊條訊息講嘅（可追溯）
+  sourceWamid     String?
+  model           String?  // 抽取者（deterministic 抽 = null）
+  createdAt       DateTime @db.Timestamptz @default(now())
+  @@index([contactId, createdAt])
+}
+
 model OpsReport {
   id          String   @id @default(cuid())
   periodStart DateTime @db.Timestamptz   // 週一 00:00（本地）

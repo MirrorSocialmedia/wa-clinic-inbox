@@ -118,6 +118,11 @@
 #   T79 RT-ASSIGN-RACE（Test G）：parallel assign → 1×200 + 1×409 + version+1（R5）
 #   T80 RT-ROLLBACK（Test I）：PG trigger 強行 rollback → 0 socket event + 無 row（R2）
 #   T81 RT-REDIS-RESTART（Test D）：SHUTDOWN NOSAVE → 2 條 inbound → delta refetch 補齊（R3，最後跑）
+#
+# AI Workflow T1（cwi-ai-20260824-t1）：
+#   T82 P0 retention-purge：超期 fixture（25/13/11mo 訊息 + 媒體檔 + 90d 邊界 draft/notice）→
+#       手動 enqueue → 24mo 全刪（連 NoteReadReceipt/PatientFact）/ 12mo 刪檔+清 mediaPath /
+#       AiDraft 90d（≠PROPOSED）/ StaffNotice 已讀 90d + 未到期零觸碰 + OpsReport + log metadata only
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -2172,6 +2177,86 @@ check "T74 hermetic：臨時 staff C 已刪" "$(q "SELECT count(*)::text c FROM 
 [ "$H2" = 0 ] && pass "H2 已讀回執 / tick / @mention（T65-T74）" || fail "H2 有項失敗（見上 ❌）"
 
 # ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# Phase AI-T1 — AI Workflow T1（cwi-ai-20260824-t1；Kairo mt6yt85v4yi3v）
+#   P0 retention purge + Phase A（AUTO 七閘 + 媒體 StaffNotice 內部通知軌）
+#   ★ 必須喺 R9 chaos 之前跑（T81 redis SHUTDOWN NOSAVE 會清掉未消費 job）
+# ═══════════════════════════════════════════════════════════════
+
+# ── T82. P0 retention-purge：超期 fixture → 手動 enqueue → 斷言刪除 + 未到期零觸碰 ──
+echo "[AI-T1] T82: retention-purge (P0)..."
+T82=0
+RET_C="ret-c-${EPOCH}"
+RET_CONV="ret-conv-${EPOCH}"
+M_OLD_TEXT="ret-m-oldtext-${EPOCH}"    # 25mo → 全刪（連 NoteReadReceipt + PatientFact）
+M_OLD_MEDIA="ret-m-oldmedia-${EPOCH}"  # 13mo + 媒體檔 → 刪檔 + mediaPath=null（殼留）
+M_SHELL="ret-m-shell-${EPOCH}"         # 13mo 無媒體 → 殼保留到 24mo
+M_MEDIA_KEEP="ret-m-keep-${EPOCH}"     # 11mo + 媒體檔 → 零觸碰（未到期）
+D_OLD_DISC="ret-d-old-${EPOCH}"        # 100d DISCARDED → 刪
+D_KEEP_PROP="ret-d-prop-${EPOCH}"      # 100d PROPOSED → 留（staff 未審批）
+D_NEW_DISC="ret-d-new-${EPOCH}"        # 10d DISCARDED → 留（未 90d）
+N_OLD="ret-n-old-${EPOCH}"             # 已讀 100d → 刪
+N_RECENT="ret-n-recent-${EPOCH}"       # 已讀 10d → 留
+N_UNREAD="ret-n-unread-${EPOCH}"       # 未讀 → 留
+T25MO=$(date -u -d "-25 months" +%Y-%m-%dT%H:%M:%SZ)
+T13MO=$(date -u -d "-13 months" +%Y-%m-%dT%H:%M:%SZ)
+T11MO=$(date -u -d "-11 months" +%Y-%m-%dT%H:%M:%SZ)
+T100D=$(date -u -d "-100 days" +%Y-%m-%dT%H:%M:%SZ)
+T10D=$(date -u -d "-10 days" +%Y-%m-%dT%H:%M:%SZ)
+NOWISO=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
+RET_MEDIA_OLD="$WA_MEDIA_DIR/ret-old-${EPOCH}.bin"
+RET_MEDIA_KEEP="$WA_MEDIA_DIR/ret-keep-${EPOCH}.bin"
+echo "e2e-retention-fixture" > "$RET_MEDIA_OLD"
+echo "e2e-retention-fixture" > "$RET_MEDIA_KEEP"
+MF_STAFF_ID=$(q "SELECT id FROM \"StaffUser\" WHERE \"clinicId\"='$MF_CLINIC_ID' AND role='STAFF' LIMIT 1" | jf id)
+[ -n "$MF_STAFF_ID" ] || { fail "T82 fixture: MF staff 搵唔到"; T82=1; }
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$RET_C', '$MF_CLINIC_ID', '8526099${EPOCH}', 'E2E RET', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$RET_CONV', '$MF_CLINIC_ID', '$RET_C', 'OPEN', '$NOWISO')" >/dev/null 2>&1
+q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, \"mediaPath\", \"mediaStatus\", status, \"waTimestamp\") VALUES ('$M_OLD_TEXT', '$RET_CONV', 'IN', 'API', 'text', 'e2e retention old text', NULL, 'READY', 'RECEIVED', '$T25MO')" >/dev/null 2>&1
+q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, \"mediaPath\", \"mediaStatus\", status, \"waTimestamp\") VALUES ('$M_OLD_MEDIA', '$RET_CONV', 'IN', 'API', 'image', NULL, '$RET_MEDIA_OLD', 'READY', 'RECEIVED', '$T13MO')" >/dev/null 2>&1
+q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, \"mediaPath\", \"mediaStatus\", status, \"waTimestamp\") VALUES ('$M_SHELL', '$RET_CONV', 'IN', 'API', 'text', 'e2e retention shell', NULL, 'READY', 'RECEIVED', '$T13MO')" >/dev/null 2>&1
+q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, \"mediaPath\", \"mediaStatus\", status, \"waTimestamp\") VALUES ('$M_MEDIA_KEEP', '$RET_CONV', 'IN', 'API', 'image', NULL, '$RET_MEDIA_KEEP', 'READY', 'RECEIVED', '$T11MO')" >/dev/null 2>&1
+q "INSERT INTO \"NoteReadReceipt\" (id, \"messageId\", \"staffId\") VALUES ('ret-nrr-${EPOCH}', '$M_OLD_TEXT', '$MF_STAFF_ID')" >/dev/null 2>&1
+q "INSERT INTO \"PatientFact\" (id, \"contactId\", \"clinicId\", kind, text, \"sourceMessageId\") VALUES ('ret-pf-${EPOCH}', '$RET_C', '$MF_CLINIC_ID', 'LOGISTICS', 'e2e retention fact', '$M_OLD_TEXT')" >/dev/null 2>&1
+q "INSERT INTO \"AiDraft\" (id, \"conversationId\", \"inReplyToMessageId\", \"draftText\", model, \"latencyMs\", status, \"createdAt\") VALUES ('$D_OLD_DISC', '$RET_CONV', '$M_OLD_TEXT', 'e2e old discarded', 'mock', 1, 'DISCARDED', '$T100D')" >/dev/null 2>&1
+q "INSERT INTO \"AiDraft\" (id, \"conversationId\", \"inReplyToMessageId\", \"draftText\", model, \"latencyMs\", status, \"createdAt\") VALUES ('$D_KEEP_PROP', '$RET_CONV', '$M_SHELL', 'e2e keep proposed', 'mock', 1, 'PROPOSED', '$T100D')" >/dev/null 2>&1
+q "INSERT INTO \"AiDraft\" (id, \"conversationId\", \"inReplyToMessageId\", \"draftText\", model, \"latencyMs\", status, \"createdAt\") VALUES ('$D_NEW_DISC', '$RET_CONV', '$M_MEDIA_KEEP', 'e2e new discarded', 'mock', 1, 'DISCARDED', '$T10D')" >/dev/null 2>&1
+q "INSERT INTO \"StaffNotice\" (id, \"clinicId\", \"conversationId\", kind, title, \"readByStaffId\", \"readAt\") VALUES ('$N_OLD', '$MF_CLINIC_ID', '$RET_CONV', 'MEDIA_RECEIVED', 'e2e retention notice', '$MF_STAFF_ID', '$T100D')" >/dev/null 2>&1
+q "INSERT INTO \"StaffNotice\" (id, \"clinicId\", \"conversationId\", kind, title, \"readByStaffId\", \"readAt\") VALUES ('$N_RECENT', '$MF_CLINIC_ID', '$RET_CONV', 'MEDIA_RECEIVED', 'e2e retention notice', '$MF_STAFF_ID', '$T10D')" >/dev/null 2>&1
+q "INSERT INTO \"StaffNotice\" (id, \"clinicId\", \"conversationId\", kind, title) VALUES ('$N_UNREAD', '$MF_CLINIC_ID', '$RET_CONV', 'MEDIA_RECEIVED', 'e2e retention notice')" >/dev/null 2>&1
+
+pnpm -s e2e:cron retention-purge >/dev/null 2>&1 || { fail "T82 e2e:cron retention-purge enqueue"; T82=1; }
+# 24 月訊息消失 = purge 跑完 marker（之後先斷言其餘）
+if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE id='$M_OLD_TEXT'" '[{"c":"0"}]' 90; then
+  pass "T82 24 月 Message 刪除（purge 跑完）"
+else
+  fail "T82 24 月 Message 未刪"; T82=1
+fi
+check "T82 25mo text 訊息 + NoteReadReceipt 連刪" "$(q "SELECT count(*)::text c FROM \"NoteReadReceipt\" WHERE \"messageId\"='$M_OLD_TEXT'" | jf c)" "0"
+check "T82 PatientFact(sourceMessageId) 連刪" "$(q "SELECT count(*)::text c FROM \"PatientFact\" WHERE \"sourceMessageId\"='$M_OLD_TEXT'" | jf c)" "0"
+check "T82 13mo 無媒體訊息殼保留到 24mo" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE id='$M_SHELL'" | jf c)" "1"
+check "T82 13mo 媒體訊息 mediaPath 清 null" "$(q "SELECT (\"mediaPath\" IS NULL)::text n FROM \"Message\" WHERE id='$M_OLD_MEDIA'" | jf n)" "true"
+[ ! -f "$RET_MEDIA_OLD" ] && pass "T82 過期媒體檔碟上已刪" || { fail "T82 過期媒體檔仍在碟上"; T82=1; }
+check "T82 11mo 媒體 mediaPath 零觸碰（未到期）" "$(q "SELECT \"mediaPath\" FROM \"Message\" WHERE id='$M_MEDIA_KEEP'" | jf mediaPath)" "$RET_MEDIA_KEEP"
+[ -f "$RET_MEDIA_KEEP" ] && pass "T82 11mo 媒體檔碟上保留（未到期）" || { fail "T82 未到期媒體檔被誤刪"; T82=1; }
+check "T82 AiDraft 100d DISCARDED 刪" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE id='$D_OLD_DISC'" | jf c)" "0"
+check "T82 AiDraft 100d PROPOSED 保留（staff 未審批）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE id='$D_KEEP_PROP'" | jf c)" "1"
+check "T82 AiDraft 10d DISCARDED 保留（未 90d）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE id='$D_NEW_DISC'" | jf c)" "1"
+check "T82 StaffNotice 已讀 100d 刪" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE id='$N_OLD'" | jf c)" "0"
+check "T82 StaffNotice 已讀 10d 保留" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE id='$N_RECENT'" | jf c)" "1"
+check "T82 StaffNotice 未讀保留" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE id='$N_UNREAD'" | jf c)" "1"
+T82_OP=$(q "SELECT count(*)::text c FROM \"OpsReport\" WHERE \"clinicId\"='' AND \"periodStart\"::date = CURRENT_DATE" | jf c)
+[ -n "$T82_OP" ] && [ "$T82_OP" -ge 1 ] && pass "T82 OpsReport 落庫（當日 run 記錄）" || { fail "T82 OpsReport 未落庫（count=$T82_OP）"; T82=1; }
+grep -q "retention-purge: done" /tmp/e2e-worker*.log 2>/dev/null && pass "T82 log metadata only（retention-purge: done + counts）" || { fail "T82 retention-purge log"; T82=1; }
+# hermetic：清 fixture 殘留
+q "DELETE FROM \"StaffNotice\" WHERE id IN ('$N_RECENT','$N_UNREAD')" >/dev/null 2>&1
+q "DELETE FROM \"AiDraft\" WHERE id IN ('$D_KEEP_PROP','$D_NEW_DISC')" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE id IN ('$M_SHELL','$M_MEDIA_KEEP')" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$RET_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id='$RET_C'" >/dev/null 2>&1
+rm -f "$RET_MEDIA_KEEP" "$RET_MEDIA_OLD"
+[ "$T82" = 0 ] && pass "T82 P0 retention-purge 全鏈（刪除 + 未到期零觸碰 + OpsReport）" || fail "T82 retention-purge 有項失敗（見上 ❌）"
+
 # Phase R9 — Realtime P0 chaos e2e（cwi-rt-20260823；Kairo mt5w39ck5etgo）
 #   T75 RT-IDEMPOTENT：3 次同 clientMessageId → DB 1 row（R1 驗收）
 #   T76 RT-ORDER：20 對話 × 3 訊息壓測 → 每對話 DB 順序 = 發送順序（R4 驗收）

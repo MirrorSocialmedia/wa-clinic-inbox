@@ -7,6 +7,7 @@
  *   pnpm e2e:cron health-check
  *   pnpm e2e:cron quality-check
  *   pnpm e2e:cron weekly-report
+ *   pnpm e2e:cron retention-purge
  *   pnpm e2e:cron health-check '{"overrides":{"queueDepth":{"ai":{"waiting":150,"failed":0}},"breakerState":"open"}}'
  *
  * 第三參數（選填）= JSON job data（Phase 4：health-check overrides 注入 E2E 用）。
@@ -20,7 +21,7 @@ try {
 
 import { cronQueue } from "../src/lib/queue";
 
-const VALID = ["sync-availability", "bookings-expire", "health-check", "quality-check", "weekly-report"];
+const VALID = ["sync-availability", "bookings-expire", "health-check", "quality-check", "weekly-report", "retention-purge"];
 const name = process.argv[2];
 const dataArg = process.argv[3];
 

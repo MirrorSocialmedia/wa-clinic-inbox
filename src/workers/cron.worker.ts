@@ -10,6 +10,9 @@
  *                                       webhook stale / queue depth / AI breaker / workforce degraded / disk / backup
  * - quality-check      每日 06:30 → 逐號 quality_rating（跌 YELLOW/RED → HIGH alert）
  * - weekly-report      每星期一 07:00 → 上一週營運報表（OpsReport + ALERT_CHANNEL 推送）
+ * - retention-purge    每日 04:00（HK，同其他 job 一樣跟 process TZ）→ P0 自動刪除（§6.0）：
+ *                                       Message 24 月（連 NoteReadReceipt/PatientFact）/ 媒體 12 月 / AiDraft 90 日 / StaffNotice 已讀 90 日
+ *                                       保留期 env 化（RETENTION_CONV_MONTHS 等三變數）+ 寫 OpsReport
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
  */
@@ -21,6 +24,7 @@ import { runExpiry } from "@/lib/booking/expiry";
 import { runHealthCheck, type HealthOverrides } from "@/lib/health/check";
 import { runQualityCheck } from "@/lib/quality/check";
 import { runWeeklyReport } from "@/lib/ops/report";
+import { runRetentionPurge } from "@/lib/ops/retention-purge";
 
 export async function startCronWorker(): Promise<Worker | null> {
   const worker = new Worker(
@@ -52,6 +56,11 @@ export async function startCronWorker(): Promise<Worker | null> {
         case "weekly-report": {
           const r = await runWeeklyReport();
           return { ok: true, scopes: r.scopes };
+        }
+        case "retention-purge": {
+          // P0（§6.0）：每日 04:00 HK；E2E 可手動 enqueue（pnpm e2e:cron retention-purge）
+          const r = await runRetentionPurge();
+          return { ok: true, ...r };
         }
         default:
           log.warn({ jobName: job.name }, "cron worker: unknown job — skip");
