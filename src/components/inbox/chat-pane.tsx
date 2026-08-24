@@ -32,7 +32,7 @@ interface Props {
   loadingOlder: boolean;
   onScrollTop: () => void;
   window: { open: boolean; remainingMs: number; tone: string } | null;
-  onSend: (body: string) => Promise<{ ok: boolean; error?: string }>;
+  onSend: (body: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[] }>;
   staffName: string;
   /** Phase 2：該對話最新嘅 pending AI 草稿（PROPOSED）；null = 無 */
   pendingDraft: DraftInfo | null;
@@ -46,6 +46,8 @@ interface Props {
   onSendFlow: () => Promise<{ ok: boolean; error?: string }>;
   /** Phase 3：發 Flow 進行中 */
   flowBusy: boolean;
+  /** Phase B：過窗 template 發送（422 後 composer 出揀選 → 撳掣帶 templateName 發）；唔傳 = 功能唔啟用 */
+  onSendTemplate?: (name: string) => Promise<{ ok: boolean; error?: string }>;
   /** ★ H1：自己嘅 staffId（Send Lock 三狀態判定：自己負責/別人負責/unassigned） */
   myStaffId: string;
   /** ★ H1：發內部備註（lock 模式 composer 用；INTERNAL — 唔出 WhatsApp）
@@ -148,6 +150,9 @@ export function ChatPane(p: Props) {
   const [sendingNote, setSendingNote] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [flowError, setFlowError] = useState<string | null>(null);
+  // Phase B：過窗 422 後嘅 template 揀選（server 回嘅 APPROVED+UTILITY 名單）
+  const [templateOptions, setTemplateOptions] = useState<{ name: string; language: string }[] | null>(null);
+  const [templateBusy, setTemplateBusy] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(false);
   const autoFilledDraftRef = useRef<string | null>(null);
@@ -173,6 +178,7 @@ export function ChatPane(p: Props) {
     setSendError(null);
     setMentionState(null);
     setMentionIdx(0);
+    setTemplateOptions(null);
     pinnedRef.current = true;
     autoFilledDraftRef.current = null;
     noteReadSentRef.current = new Set();
@@ -288,9 +294,24 @@ export function ChatPane(p: Props) {
     setSending(true);
     setSendError(null);
     const r = await p.onSend(body);
-    if (!r.ok) setSendError(r.error ?? "發送失敗");
-    else setDraft("");
+    if (!r.ok) {
+      setSendError(r.error ?? "發送失敗");
+      // Phase B：過窗 422 帶 templates 名單 → 出 template 揀選
+      if (r.templates && r.templates.length > 0) setTemplateOptions(r.templates);
+    } else setDraft("");
     setSending(false);
+  }
+
+  async function sendTemplate(name: string) {
+    setTemplateBusy(true);
+    setSendError(null);
+    const r = await p.onSendTemplate!(name);
+    if (!r.ok) {
+      setSendError(r.error ?? "template 發送失敗");
+    } else {
+      setTemplateOptions(null);
+    }
+    setTemplateBusy(false);
   }
 
   return (
@@ -525,6 +546,32 @@ export function ChatPane(p: Props) {
           </div>
         )}
         {sendError && <div className="text-xs text-danger-text mb-1.5">{sendError}</div>}
+        {templateOptions && templateOptions.length > 0 && (
+          /* Phase B：過窗 template 覆 — server 422 帶回 APPROVED+UTILITY 名單；撳掣帶 templateName 發 */
+          <div className="rounded-xl border border-warn/60 bg-warn-soft p-2.5 mb-1.5">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="text-xs font-medium text-warn-text">24h 窗口已過 — 揀一個 template 發：</span>
+              <button
+                onClick={() => setTemplateOptions(null)}
+                className="ml-auto text-[10px] text-t3 hover:text-t1"
+              >
+                取消
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {templateOptions.map((t) => (
+                <button
+                  key={t.name}
+                  onClick={() => void sendTemplate(t.name)}
+                  disabled={templateBusy}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-panel border border-line-strong text-t1 hover:bg-panel-2 disabled:opacity-40"
+                >
+                  {t.name} <span className="text-[10px] text-t3">{t.language}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {locked ? (
           /* ★ H1 Send Lock：amber 內部備註 composer — 發 WhatsApp 已停用，只可發 staff↔staff 備註

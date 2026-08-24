@@ -712,7 +712,7 @@ export function InboxClient({
 
   // ── composer ──────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    async (body: string): Promise<{ ok: boolean; error?: string }> => {
+    async (body: string): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[] }> => {
       const convId = selectedIdRef.current;
       if (!convId) return { ok: false, error: "未選擇對話" };
       // ★ realtime-p0 R1：一次「邏輯發送」一個 UUID；網絡 retry 用同一 key（chat-pane 嘅
@@ -744,9 +744,11 @@ export function InboxClient({
           message?: string;
           status?: string;
           idempotentReplay?: boolean;
+          // Phase B：422 過窗時 server 帶 APPROVED+UTILITY 名單（UI 轉 template 揀選）
+          templates?: { name: string; language: string }[];
         } | null;
         if (res.status === 422) {
-          return { ok: false, error: data?.message ?? "窗口已過，只可發 template" };
+          return { ok: false, error: data?.message ?? "窗口已過，只可發 template", templates: data?.templates };
         }
         if (!res.ok) {
           return { ok: false, error: data?.error ?? `發送失敗（${res.status}）` };
@@ -790,6 +792,64 @@ export function InboxClient({
       }
     },
     [user.staffId, fetchPendingDrafts]
+  );
+
+  // ── Phase B：過窗 template 發送（422 後 UI 揀 template → 同一 route 帶 templateName）──
+  const sendTemplate = useCallback(
+    async (templateName: string): Promise<{ ok: boolean; error?: string }> => {
+      const convId = selectedIdRef.current;
+      if (!convId) return { ok: false, error: "未選擇對話" };
+      // 同一 R1 冪等語義：一次 template 發送意圖一個 UUID
+      const clientMessageId = crypto.randomUUID();
+      try {
+        const res = await fetch("/api/messages/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversationId: convId, templateName, clientMessageId }),
+        });
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          messageId?: string;
+          error?: string;
+          message?: string;
+          status?: string;
+        } | null;
+        if (!res.ok) {
+          return { ok: false, error: data?.message ?? data?.error ?? `發送失敗（${res.status}）` };
+        }
+        // 樂觀氣泡：預覽文字由 server 組（worker 發完 push message:new 帶真 wamid 對消）
+        const serverStatus = data?.status ?? "QUEUED";
+        const optimistic: MessageItem = {
+          id: data?.messageId ?? `optimistic-${Date.now()}`,
+          conversationId: convId,
+          waMessageId: null,
+          direction: "OUT",
+          channel: "API",
+          type: "template",
+          body: `[template] ${templateName}`,
+          mediaPath: null,
+          clientMessageId,
+          status: serverStatus === "FAILED" ? "FAILED" : "QUEUED",
+          errorCode: null,
+          sentByStaffId: user.staffId,
+          aiAutoSent: false,
+          waTimestamp: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, optimistic]);
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === convId
+              ? { ...c, lastMessageAt: optimistic.waTimestamp, preview: `[template] ${templateName}`, status: c.status === "RESOLVED" ? "OPEN" : c.status }
+              : c
+          )
+        );
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "網絡錯誤" };
+      }
+    },
+    [user.staffId]
   );
 
   // ── Phase 3：發 Booking Flow（📅 掣） ─────────────────────
@@ -1125,6 +1185,7 @@ export function InboxClient({
         onScrollTop={() => void loadOlder()}
         window={selectedConv?.window ?? null}
         onSend={sendMessage}
+        onSendTemplate={sendTemplate}
         staffName={user.name}
         pendingDraft={selectedConv ? (pendingDrafts[selectedConv.id] ?? null) : null}
         onAdopt={adoptDraft}

@@ -1,38 +1,78 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import log from "@/lib/log";
 import { requireAuth, assertClinicAccess, clinicScope } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { outboundQueue } from "@/lib/queue";
 import { getWindowState } from "@/lib/wa/window";
 import { assignConversation } from "@/lib/assign";
+import {
+  listMessageTemplates,
+  waMock,
+  type MessageTemplate,
+} from "@/lib/wa/graph";
+import {
+  buildTemplateComponents,
+  confirmPreviewText,
+  confirmTemplateName,
+  reminderPreviewText,
+  reminderTemplateName,
+  type TemplateInput,
+} from "@/lib/wa/templates";
 
 /**
- * POST /api/messages/send — 員工發 free-form 訊息（框架 MD §6.3）。
+ * POST /api/messages/send — 員工發訊息（框架 MD §6.3 + Phase B template 覆）。
  *
  * 1. RBAC：STAFF 只能發自己店嘅對話（assertClinicAccess → 403 實測）
- * 2. 窗口檢查：now - lastInboundAt < 24h 先准 free-form；
- *    過窗 → 422（UI 轉 template 選項 — template 發送 Phase 1 之後）
- * 3. 寫 Message(OUT, API, QUEUED) + AuditLog(SEND)
- * 4. outboundQueue.add → worker 負責真發送（mock mode 回假 wamid）
+ * 2. free-form（body）：窗口檢查 now - lastInboundAt < 24h 先准；
+ *    過窗 → 422 + `templates` 欄（APPROVED + UTILITY 名單 — UI 轉 template 揀選）
+ * 3. template（templateName）：窗口外合法（utility template 就係為呢個情境）；
+ *    v1 只支援 appt_reminder_zh / appt_confirm_zh 兩款有 builder 嘅；
+ *    變數（日期/時間/醫生）= client 帶 templateParams 或自動攞對話最新 CONFIRMED booking
+ * 4. 寫 Message(OUT, API, QUEUED) + AuditLog(SEND)
+ * 5. outboundQueue.add → worker 負責真發送（mock mode 回假 wamid）
  *
- * ★ 過窗 template 發送：Phase 1 範圍外（template 管理頁未做）— 422 明確
- *   告知「只可發 template」。真機對接後補 POST /api/messages/send-template。
+ * ★ PII：log 只 metadata（conversationId/templateName/狀態）— 預覽文字/變數內容唔入 log。
  */
 export const dynamic = "force-dynamic";
 
-const schema = z.object({
-  conversationId: z.string().min(1),
-  body: z.string().min(1).max(4096), // WA text 上限 4096 chars
-  // ★ realtime-p0 R1（cwi-rt-20260823-a1）：client 冪等 key（UUID）。
-  // 每次「邏輯發送」一個 key；斷網 retry / 雙擊重發同 key → 命中已存在 Message
-  // → 直接回舊 row 200（idempotentReplay: true）唔再入 queue（DB 1 條、病人收 1 條）。
-  // optional：舊 client / e2e 唔帶 → 行為不變（無冪等）。
-  clientMessageId: z.string().uuid().optional(),
-});
+const templateParamsSchema = z.object({
+  requestedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD"),
+  requestedTime: z.string().regex(/^\d{2}:\d{2}$/, "HH:mm"),
+  providerName: z.string().min(1).max(100),
+}).optional();
+
+const schema = z
+  .object({
+    conversationId: z.string().min(1),
+    body: z.string().min(1).max(4096).optional(), // WA text 上限 4096 chars
+    // Phase B：template 發送（同 body 二揀一）— 過窗 422 後 UI 帶呢個字段重發
+    templateName: z.string().min(1).max(120).optional(),
+    templateParams: templateParamsSchema,
+    // ★ realtime-p0 R1（cwi-rt-20260823-a1）：client 冪等 key（UUID）。
+    // 每次「邏輯發送」一個 key；斷網 retry / 雙擊重發同 key → 命中已存在 Message
+    // → 直接回舊 row 200（idempotentReplay: true）唔再入 queue（DB 1 條、病人收 1 條）。
+    // optional：舊 client / e2e 唔帶 → 行為不變（無冪等）。
+    clientMessageId: z.string().uuid().optional(),
+  })
+  .refine((d) => (d.body ? 1 : 0) + (d.templateName ? 1 : 0) === 1, {
+    message: "body 同 templateName 必須二揀一",
+  });
 
 const ENQUEUE_TIMEOUT_MS = 1500;
+
+/** APPROVED + UTILITY template 名單（422 回應 + template 發送校驗共用）。失敗回 []（唔阻 422）。 */
+async function approvedTemplateList(clinic: { waBusinessAccountId: string | null }): Promise<MessageTemplate[]> {
+  try {
+    if (!clinic.waBusinessAccountId && !waMock()) return [];
+    const all = await listMessageTemplates(clinic.waBusinessAccountId ?? "");
+    return all.filter((t) => t.status === "APPROVED" && t.category === "UTILITY");
+  } catch {
+    return [];
+  }
+}
 
 export const POST = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
@@ -63,21 +103,96 @@ export const POST = handle(async (req: NextRequest) => {
     );
   }
 
-  // 窗口檢查（fail-closed：lastInboundAt = null → 過窗）
-  const win = getWindowState(conv.lastInboundAt);
-  if (!win.open) {
+  // Phase B：free-form vs template 二分流（template 唔受 24h 窗口限制 — 佢就係過窗嘅合法路徑）
+  const isTemplateSend = !!parsed.data.templateName;
+  const clinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId } });
+  if (!clinic) return NextResponse.json({ error: "clinic missing" }, { status: 500 });
+
+  let templateMeta: Prisma.InputJsonValue | undefined;
+  let templatePreview = "";
+  if (isTemplateSend) {
+    // ── template 發送校驗（失敗一律唔 claim / 唔落 Message）──
+    if (!clinic.waBusinessAccountId && !waMock()) {
+      return NextResponse.json(
+        { error: "waba_not_configured", message: "呢間店未設定 WABA id — 唔可以發 template" },
+        { status: 400 }
+      );
+    }
+    let approved: MessageTemplate[];
+    try {
+      approved = await approvedTemplateList(clinic);
+    } catch {
+      return NextResponse.json({ error: "template_list_unavailable" }, { status: 502 });
+    }
+    const tpl = approved.find((t) => t.name === parsed.data.templateName);
+    if (!tpl) {
+      return NextResponse.json(
+        {
+          error: "template_not_found",
+          message: "呢個 template 唔喺 APPROVED + UTILITY 名單（未審批/唔係 utility/已停用）",
+          templates: approved.map((t) => ({ name: t.name, language: t.language })),
+        },
+        { status: 400 }
+      );
+    }
+    const isReminder = tpl.name === reminderTemplateName();
+    const isConfirm = tpl.name === confirmTemplateName();
+    if (!isReminder && !isConfirm) {
+      return NextResponse.json(
+        {
+          error: "template_not_supported",
+          message: "v1 只支援 appt_reminder_zh / appt_confirm_zh（有 builder 嘅 template）",
+        },
+        { status: 400 }
+      );
+    }
+    // 變數：client 帶 templateParams → 用；冇 → 自動攞對話最新 CONFIRMED booking（同 T-24h 提醒同源）
+    let input: TemplateInput;
+    if (parsed.data.templateParams) {
+      input = { ...parsed.data.templateParams, clinicName: clinic.name };
+    } else {
+      const br = await prisma.bookingRequest.findFirst({
+        where: { conversationId: conv.id, status: "CONFIRMED" },
+        orderBy: { createdAt: "desc" },
+      });
+      if (!br || !br.requestedTime) {
+        return NextResponse.json(
+          { error: "template_params_required", message: "對話冇 CONFIRMED 預約 — 請帶 templateParams（日期/時間/醫生）" },
+          { status: 400 }
+        );
+      }
+      input = { requestedDate: br.requestedDate, requestedTime: br.requestedTime, providerName: br.providerName, clinicName: clinic.name };
+    }
+    templateMeta = {
+      name: tpl.name,
+      language: tpl.language,
+      components: buildTemplateComponents(input),
+    } as unknown as Prisma.InputJsonValue;
+    templatePreview = isReminder ? reminderPreviewText(input) : confirmPreviewText(input);
     log.info(
-      { clinicId: conv.clinicId, conversationId: conv.id, staffId: ctx.staff.id, remainingHours: Math.round(win.remainingHours * 10) / 10 },
-      "send: window closed, free-form rejected"
+      { clinicId: clinic.id, conversationId: conv.id, staffId: ctx.staff.id, templateName: tpl.name },
+      "send: template send validated（window-closed 合法路徑）"
     );
-    return NextResponse.json(
-      {
-        error: "window_closed",
-        message: "24 小時客服窗口已過，只可以發 template（utility）",
-        remainingHours: 0,
-      },
-      { status: 422 }
-    );
+  } else {
+    // ── free-form：窗口檢查（fail-closed：lastInboundAt = null → 過窗）──
+    const win = getWindowState(conv.lastInboundAt);
+    if (!win.open) {
+      const templates = await approvedTemplateList(clinic);
+      log.info(
+        { clinicId: clinic.id, conversationId: conv.id, staffId: ctx.staff.id, remainingHours: Math.round(win.remainingHours * 10) / 10 },
+        "send: window closed, free-form rejected"
+      );
+      return NextResponse.json(
+        {
+          error: "window_closed",
+          message: "24 小時客服窗口已過，只可以發 template（utility）",
+          remainingHours: 0,
+          // Phase B：UI composer 收到呢個欄 → 出 template 揀選（選完帶 templateName 重發）
+          templates: templates.map((t) => ({ name: t.name, language: t.language })),
+        },
+        { status: 422 }
+      );
+    }
   }
 
   // clinicScope 佢都過一次（belt & braces：route 層嘅 fail-closed 驗證）
@@ -131,11 +246,14 @@ export const POST = handle(async (req: NextRequest) => {
     msg = await prisma.message.create({
       data: {
         conversationId: conv.id,
-        direction: "OUT",
-        channel: "API",
-        type: "text",
-        body: parsed.data.body,
-        status: "QUEUED",
+        direction: "OUT" as const,
+        channel: "API" as const,
+        type: isTemplateSend ? "template" : "text",
+        // refine 已保證：非 template 分支 body 必有值
+        body: isTemplateSend ? templatePreview : parsed.data.body!,
+        // Phase B：template row 先有 templateMeta（text row 唔寫呢個欄）
+        ...(isTemplateSend ? { templateMeta } : {}),
+        status: "QUEUED" as const,
         sentByStaffId: ctx.staff.id,
         clientMessageId: parsed.data.clientMessageId ?? null,
         waTimestamp: now,
@@ -186,7 +304,7 @@ export const POST = handle(async (req: NextRequest) => {
       orderBy: { waTimestamp: "desc" },
       select: { aiDraftId: true },
     });
-    if (linkedMsg?.aiDraftId) {
+    if (linkedMsg?.aiDraftId && parsed.data.body) {
       const draft = await prisma.aiDraft.findUnique({ where: { id: linkedMsg.aiDraftId } });
       if (draft && draft.conversationId === conv.id && draft.status === "PROPOSED") {
         const asIs = parsed.data.body.trim() === draft.draftText.trim();
@@ -229,7 +347,15 @@ export const POST = handle(async (req: NextRequest) => {
   }
 
   log.info(
-    { clinicId: conv.clinicId, conversationId: conv.id, messageId: msg.id, staffId: ctx.staff.id, bodyLen: parsed.data.body.length },
+    {
+      clinicId: conv.clinicId,
+      conversationId: conv.id,
+      messageId: msg.id,
+      staffId: ctx.staff.id,
+      type: msg.type,
+      // Phase B：template 發送 log 只帶 templateName（變數內容/預覽文字唔入 log）
+      ...(isTemplateSend ? { templateName: parsed.data.templateName } : { bodyLen: parsed.data.body?.length ?? 0 }),
+    },
     "send: queued"
   );
   return NextResponse.json({ ok: true, messageId: msg.id, status: "QUEUED" }, { status: 202 });

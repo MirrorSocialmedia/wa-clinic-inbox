@@ -97,6 +97,8 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
       visitReasonCode: null,
       handledByStaffId: null,
       handledAt: null,
+      // ★ Phase B（cwi-tmpl-20260824-b1）：rollback 清提醒旗 — 重新 CONFIRMED 後會再提醒
+      remindedAt: null,
     },
   });
   await prisma.auditLog

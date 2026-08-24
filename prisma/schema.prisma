@@ -93,6 +93,9 @@ model Clinic {
   code             String  @unique            // TKW / MF ...（同 clinic-workforce 用同一套 code，方便對照）
   name             String
   waPhoneNumberId  String  @unique            // Meta phone_number_id — 分流嘅 key
+  // ★ Phase B（cwi-tmpl-20260824-b1）：WABA id（template 列表 API 作用域 —
+  //   GET /{wabaId}/message_templates）。onboarding exchange 帶到先寫入；nullable（舊店可後補）。
+  waBusinessAccountId String? 
   waDisplayNumber  String
   apricotClinicId  String?                    // 對照 provider-roster 已有實值
   greetingConfig   Json?                      // 營業時間/地址/常見 FAQ，餵畀 AI 草稿用
@@ -206,6 +209,11 @@ model Message {
   // 識別「系統 AI 自動發」；再加 source 會同 channel 雙重事實來源（drift 風險）。
   // AUTO 訊息 = direction=OUT + channel=API + sentByStaffId=null + aiAutoSent=true。
   aiAutoSent     Boolean  @default(false)
+  // ★ Phase B（cwi-tmpl-20260824-b1）：template 發送元數據（type="template" 先有）。
+  // 結構：{ name, language, components }（components = [{type:"body",parameters:[...]}]）。
+  // ★ PII：只有 template 名/語言/日期時間醫生診所變數 — 零病人自由文本。
+  // body 欄 = 預覽文字（UI 顯示；同 template 實際渲染一致）。
+  templateMeta   Json?
   waTimestamp    DateTime @db.Timestamptz
   createdAt      DateTime @db.Timestamptz  @default(now())
   @@index([conversationId, waTimestamp])
@@ -268,6 +276,9 @@ model BookingRequest {
   handledAt         DateTime? @db.Timestamptz
   // ★ booking-ui（2026-08-23, cwi-bkui-20260823-a1）：代落單（CONFIRMED 態 + rollback + 審計）
   apricotApptId     String?                    // Apricot 單號（workforce create 後寫入；rollback 後清 null）
+  // ★ Phase B（cwi-tmpl-20260824-b1）：T-24h 提醒已發時間（冪等旗 — null = 未提醒）。
+  // 改期/rollback 時 reset null（新時間/重新確認會再提醒）。
+  remindedAt        DateTime? @db.Timestamptz
   visitReasonCode   String?                    // 卡上揀咗嘅 visit reason（dictionaries code；審計 + remarks 組裝）
   chiefComplaint    String?                    // 主訴快照（Flow 完成時由 conversation.aiSummary 摘；≤50 字）
   createdAt         DateTime @db.Timestamptz      @default(now())

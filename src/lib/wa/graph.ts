@@ -97,6 +97,86 @@ export async function sendTextMessage(opts: {
   return { wamid, mocked: false };
 }
 
+// ── Template message（Phase B — cwi-tmpl-20260824-b1） ────────────────────
+
+export interface TemplateComponent {
+  type: "body";
+  parameters: { type: "text"; text: string }[];
+}
+
+/**
+ * 發 utility template（24h 窗口外唯一合法發送路徑；MD §6.2 B1）。
+ * 變數由 caller 組好（src/lib/wa/templates.ts pure builder）— 呢度零 PII 邏輯。
+ * mock：決定性假 wamid（前綴 mock-wamid-）；WA_GRAPH_MOCK_FAIL=1 可注入失敗（e2e 用）。
+ */
+export async function sendTemplateMessage(opts: {
+  phoneNumberId: string;
+  to: string;
+  templateName: string;
+  language: string; // e.g. "zh_HK"
+  components: TemplateComponent[];
+}): Promise<SendTextResult> {
+  const { phoneNumberId, to, templateName, language, components } = opts;
+
+  if (waMock()) {
+    // 同 sendTextMessage mock 語義一致：決定性假 wamid；WA_GRAPH_MOCK_FAIL 注入失敗
+    //（worker 以該 env 啟動 → 重試 3 次 exhausted → Message FAILED，冇假 SENT）
+    if (process.env.WA_GRAPH_MOCK_FAIL === "1") {
+      throw new Error("MOCK_GRAPH_TIMEOUT: simulated Graph API failure (WA_GRAPH_MOCK_FAIL=1)");
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    const wamid = `mock-wamid-${randomBytes(10).toString("hex")}`;
+    // ★ PII：log 只 template 名/語言/變數個數 — 變數內容（日期/醫生）唔入 log
+    log.info(
+      { phoneNumberId, to, wamid, templateName, language, paramCount: components[0]?.parameters.length ?? 0, mock: true },
+      "graph: send template (MOCK)"
+    );
+    return { wamid, mocked: true };
+  }
+
+  const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken()}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "template",
+      template: {
+        name: templateName,
+        language: { code: language },
+        components,
+      },
+    }),
+  });
+
+  const data = (await res.json().catch(() => null)) as
+    | { messages?: { id: string }[]; error?: { message?: string; code?: number } }
+    | null;
+
+  if (!res.ok || !data?.messages?.[0]?.id) {
+    // ★ log 只帶 error metadata（Meta 錯誤描述，唔含 template 變數內容）
+    log.warn(
+      {
+        phoneNumberId,
+        to,
+        templateName,
+        httpStatus: res.status,
+        waCode: data?.error?.code ?? null,
+        errMsg: data?.error?.message ?? "unknown",
+      },
+      "graph: send template FAILED"
+    );
+    throw new Error(`graph send template failed: HTTP ${res.status} code=${data?.error?.code ?? "?"}`);
+  }
+
+  const wamid = data.messages[0].id;
+  log.info({ phoneNumberId, to, wamid, templateName }, "graph: send template OK");
+  return { wamid, mocked: false };
+}
+
 export interface MediaInfo {
   url: string;
   mimeType: string;
@@ -276,11 +356,14 @@ export interface MessageTemplate {
   status: string; // APPROVED / PENDING / REJECTED / DISABLED
 }
 
-/** mock fixture：APPROVED / PENDING / REJECTED 各一（§2A 驗收：三條正確上色） */
+/** mock fixture：APPROVED / PENDING / REJECTED 各一（§2A 驗收：三條正確上色）。
+ *  ★ Phase B：加 appt_reminder_zh（zh_HK UTILITY APPROVED）— B3 過窗 template 列表 e2e
+ *    需要有「真名 + builder 存在」嘅選項（T53 只斷言頭三條在，唔計數 — 加多一條安全）。 */
 const MOCK_TEMPLATES: MessageTemplate[] = [
   { name: "appointment_reminder", language: "en_US", category: "UTILITY", status: "APPROVED" },
   { name: "new_arrival_intro", language: "en_US", category: "UTILITY", status: "PENDING" },
   { name: "checkup_promo_january", language: "en_US", category: "MARKETING", status: "REJECTED" },
+  { name: "appt_reminder_zh", language: "zh_HK", category: "UTILITY", status: "APPROVED" },
 ];
 
 /**

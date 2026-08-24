@@ -13,6 +13,9 @@
  * - retention-purge    每日 04:00（HK，同其他 job 一樣跟 process TZ）→ P0 自動刪除（§6.0）：
  *                                       Message 24 月（連 NoteReadReceipt/PatientFact）/ 媒體 12 月 / AiDraft 90 日 / StaffNotice 已讀 90 日
  *                                       保留期 env 化（RETENTION_CONV_MONTHS 等三變數）+ 寫 OpsReport
+ * - reminder-scan      每 15 分鐘 → T-24h 預約提醒（Phase B，cwi-tmpl-20260824-b1）：
+ *                                       CONFIRMED + apricotApptId + 未提醒 + 開診時刻 ∈ [now+23h, now+25h]
+ *                                       → template Message + remindedAt 冪等 transaction（寧漏勿重）
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
  */
@@ -25,6 +28,7 @@ import { runHealthCheck, type HealthOverrides } from "@/lib/health/check";
 import { runQualityCheck } from "@/lib/quality/check";
 import { runWeeklyReport } from "@/lib/ops/report";
 import { runRetentionPurge } from "@/lib/ops/retention-purge";
+import { runReminderScan } from "@/lib/booking/reminder";
 
 export async function startCronWorker(): Promise<Worker | null> {
   const worker = new Worker(
@@ -60,6 +64,11 @@ export async function startCronWorker(): Promise<Worker | null> {
         case "retention-purge": {
           // P0（§6.0）：每日 04:00 HK；E2E 可手動 enqueue（pnpm e2e:cron retention-purge）
           const r = await runRetentionPurge();
+          return { ok: true, ...r };
+        }
+        case "reminder-scan": {
+          // Phase B（cwi-tmpl-20260824-b1）：T-24h 預約提醒；E2E 可手動 enqueue（pnpm e2e:cron reminder-scan）
+          const r = await runReminderScan();
           return { ok: true, ...r };
         }
         default:

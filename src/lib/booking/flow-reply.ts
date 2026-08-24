@@ -443,6 +443,34 @@ async function handleReschedule(p: {
     })
     .catch(() => undefined);
 
+  // ★ Phase B（cwi-tmpl-20260824-b1）：改期成功 → BookingRequest 同步新時間 + remindedAt reset。
+  // 語義：reminder scan 用 requestedDate/Time + apricotApptId — 不同步會按舊時間提醒（錯）；
+  // remindedAt=null → 新時間落入 23–25h 窗口時會照提醒（正確）。
+  // 只命中「本對話 + 舊單號」嘅 row（電話落嘅 Apricot 單無 BookingRequest row → 0 行，安全）。
+  try {
+    const br = await prisma.bookingRequest.updateMany({
+      where: { conversationId: conv.id, apricotApptId: oldApptId },
+      data: {
+        requestedDate: date,
+        requestedTime: time,
+        apricotApptId: newApptId,
+        remindedAt: null,
+      },
+    });
+    if (br.count > 0) {
+      log.info(
+        { conversationId: conv.id, clinic: clinicCode, oldApptId, newApptId, date, rows: br.count },
+        "flow-reply: reschedule — BookingRequest synced（remindedAt reset）"
+      );
+    }
+  } catch (err) {
+    // 同步失敗唔阻改期主流程（Apricot 已改成功）— log 俾 staff 留意
+    log.error(
+      { conversationId: conv.id, err: err instanceof Error ? err.message : String(err) },
+      "flow-reply: reschedule — BookingRequest sync 失敗（改期已成功，提醒會按舊時間 — 需人手覆核）"
+    );
+  }
+
   try {
     const now = new Date();
     const msg = await prisma.message.create({

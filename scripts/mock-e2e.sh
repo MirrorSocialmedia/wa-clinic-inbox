@@ -2668,6 +2668,159 @@ echo "$T81_DL" | awk '{exit !($1 < 2)}' && pass "T81 delta refetch 回應 <2s（
 # ── R9 summary ─────────────────────────────────────────────────────────
 [ "$R9" = 0 ] && pass "R9 Realtime P0 chaos e2e（T75-T81）" || fail "R9 有項失敗（見上 ❌）"
 
+# ── T88-T92. Phase B：template 發送鏈 + T-24h 預約提醒（cwi-tmpl-20260824-b1）──
+echo "[12/12] T88-T92: Phase B template + T-24h reminder..."
+T88=0
+# 窗口 fixture 時刻：now+24h（HK）— 確保落入 23–25h 提醒窗口（單位测试已證邊界）
+REM_D=$(TZ=Asia/Hong_Kong date -d '+24 hours' +%F)
+REM_T=$(TZ=Asia/Hong_Kong date -d '+24 hours' +%H:%M)
+REM2_D=$(TZ=Asia/Hong_Kong date -d '+26 hours' +%F)   # 窗口外（T92 用：route 發送唔受窗口限制）
+REM2_T=$(TZ=Asia/Hong_Kong date -d '+26 hours' +%H:%M)
+DL_REM=$(TZ=Asia/Hong_Kong date -d '+24 hours' '+%-m月%-d日')
+# ★ EPOCH-scoped fixture id（重跑慣例 — 固定 id 會喺共享 DB 撞 PK；2026-08-24 T2 驗證回報修復）
+BOOK_T88="bk-e2e-t88-${EPOCH}"
+BOOK_T89="bk-e2e-t89-${EPOCH}"
+BOOK_T90="bk-e2e-t90-${EPOCH}"
+BOOK_T91="bk-e2e-t91-${EPOCH}"
+BOOK_T92="bk-e2e-t92-${EPOCH}"
+
+# fixture helper：新病人對話（mock-inbound 真路徑）+ 直插 BookingRequest
+# 用法：mk_rem_bk <book-id> <wa-phone> <wamid> <name> <status> <date> <time> → 設 REMB_CONV
+mk_rem_bk() {
+  local bid="$1" pat="$2" wamid="$3" nm="$4" st="$5" d="$6" t="$7"
+  pnpm -s mock-inbound message --clinic TKW --from "$pat" --text "e2e phase-b fixture $bid" --wamid "$wamid" --name "$nm" >/dev/null 2>&1 || return 1
+  local conv=""
+  for i in $(seq 1 30); do
+    conv=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" | jf id)
+    [ -n "$conv" ] && break
+    sleep 1
+  done
+  [ -n "$conv" ] || return 1
+  q "INSERT INTO \"BookingRequest\" (id, \"conversationId\", \"clinicId\", \"flowToken\", \"providerApricotId\", \"providerName\", \"requestedDate\", \"requestedTime\", status, \"apricotApptId\", \"createdAt\") VALUES ('$bid', '$conv', '$TKW_CLINIC_ID', 'e2e-$bid-$EPOCH', 'mock-pract-tkw-1', '陳明軒（主理）', '$d', '$t', '$st', 'mock-appt-$bid', now())" >/dev/null 2>&1 || return 1
+  REMB_CONV="$conv"
+}
+
+# ── T88. T-24h 提醒：窗口內 CONFIRMED 單 → template SENT + remindedAt；二掃冪等（零重發）──
+echo "[12/12] T88: reminder scan → template SENT + idempotent..."
+T88=0
+mk_rem_bk "$BOOK_T88" "852648${EPOCH}" "wamid.E2E_T88_${EPOCH}" "E2E-T88" CONFIRMED "$REM_D" "$REM_T" || { fail "T88 fixture 建立失敗"; T88=1; }
+if [ "$T88" = 0 ]; then
+  pnpm -s e2e:cron reminder-scan >/dev/null 2>&1 || T88=1
+  if wait_for "SELECT (count(*) > 0)::text c FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND direction='OUT' AND type='template' AND status='SENT' AND \"templateMeta\" IS NOT NULL" '[{"c":"true"}]' 45; then
+    pass "T88 窗口內 CONFIRMED 單 → template Message SENT（mock Graph）"
+  else
+    fail "T88 template Message 未 SENT"
+    T88=1
+  fi
+  check "T88 templateMeta.name = appt_reminder_zh" "$(q "SELECT (\"templateMeta\"->>'name')::text n FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template'" | jf n)" "appt_reminder_zh"
+  check "T88 templateMeta.language = zh_HK" "$(q "SELECT (\"templateMeta\"->>'language')::text l FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template'" | jf l)" "zh_HK"
+  check "T88 預覽文字含 提提你 + $DL_REM" "$(q "SELECT (\"body\" LIKE '%提提你%' AND \"body\" LIKE '%$DL_REM%' AND \"body\" LIKE '%$REM_T%')::text n FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template'" | jf n)" "true"
+  check "T88 waMessageId = mock-wamid-*（mock 發送）" "$(q "SELECT left(\"waMessageId\",11)::text p FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template'" | jf p)" "mock-wamid-"
+  check "T88 remindedAt 已寫（冪等旗）" "$(q "SELECT (\"remindedAt\" IS NOT NULL)::text n FROM \"BookingRequest\" WHERE id='$BOOK_T88'" | jf n)" "true"
+  # 冪等：第二遍掃 → 零新 template Message（remindedAt 旗 + status 門）
+  pnpm -s e2e:cron reminder-scan >/dev/null 2>&1 || T88=1
+  sleep 5
+  check "T88 二掃後 template Message 仍 = 1（零重發）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template'" | jf c)" "1"
+fi
+[ "$T88" = 0 ] && pass "T88 T-24h 提醒冪等鏈（掃→SENT→remindedAt→二掃零重發）" || fail "T88 提醒鏈（見上 ❌）"
+
+# ── T89. 非 CONFIRMED（REJECTED/已取消）單 → 掃描 skip（零發送、remindedAt 留 null）──
+echo "[12/12] T89: rejected booking skipped..."
+T89=0
+mk_rem_bk "$BOOK_T89" "852649${EPOCH}" "wamid.E2E_T89_${EPOCH}" "E2E-T89" REJECTED "$REM_D" "$REM_T" || { fail "T89 fixture 建立失敗"; T89=1; }
+if [ "$T89" = 0 ]; then
+  pnpm -s e2e:cron reminder-scan >/dev/null 2>&1 || T89=1
+  sleep 5
+  check "T89 REJECTED 單零 template Message" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template'" | jf c)" "0"
+  check "T89 remindedAt 仍 null（未提醒）" "$(q "SELECT (\"remindedAt\" IS NULL)::text n FROM \"BookingRequest\" WHERE id='$BOOK_T89'" | jf n)" "true"
+  pass "T89 非 CONFIRMED 單 skip（零發送）"
+fi
+
+# ── T90. 發送失敗（WA_GRAPH_MOCK_FAIL）→ FAILED + remindedAt 已寫 + 恢復後二掃零重發 ──
+echo "[12/12] T90: graph fail → FAILED + no resend..."
+T90=0
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+WA_GRAPH_MOCK_FAIL=1 nohup pnpm worker >/tmp/e2e-worker-t90.log 2>&1 &
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t90.log 2>/dev/null && break; sleep 1; done
+mk_rem_bk "$BOOK_T90" "852650${EPOCH}" "wamid.E2E_T90_${EPOCH}" "E2E-T90" CONFIRMED "$REM_D" "$REM_T" || { fail "T90 fixture 建立失敗"; T90=1; }
+if [ "$T90" = 0 ]; then
+  pnpm -s e2e:cron reminder-scan >/dev/null 2>&1 || T90=1
+  if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template'" '[{"s":"FAILED"}]' 90; then
+    pass "T90 graph 失敗 → Message FAILED（無假 SENT）"
+  else
+    fail "T90 Message 未 FAILED（actual=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template'" | jf s)）"
+    T90=1
+  fi
+  check "T90 remindedAt 已寫（寧漏勿重 — 唔會再試）" "$(q "SELECT (\"remindedAt\" IS NOT NULL)::text n FROM \"BookingRequest\" WHERE id='$BOOK_T90'" | jf n)" "true"
+  # 恢復正常 worker → 二掃 → 零重發（remindedAt 旗擋）
+  pkill -f "src/workers/index.ts" 2>/dev/null || true
+  sleep 1
+  nohup pnpm worker >/tmp/e2e-worker-t90r.log 2>&1 &
+  for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t90r.log 2>/dev/null && break; sleep 1; done
+  pnpm -s e2e:cron reminder-scan >/dev/null 2>&1 || T90=1
+  sleep 5
+  check "T90 恢復後二掃 → template Message 仍 = 1（FAILED，零重發）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template'" | jf c)" "1"
+fi
+
+# ── T91. 提醒後病人回覆 → 正常入 AI triage（conversation.intent 落庫）──
+echo "[12/12] T91: post-reminder reply → triage..."
+T91=0
+mk_rem_bk "$BOOK_T91" "852651${EPOCH}" "wamid.E2E_T91_${EPOCH}" "E2E-T91" CONFIRMED "$REM_D" "$REM_T" || { fail "T91 fixture 建立失敗"; T91=1; }
+if [ "$T91" = 0 ]; then
+  pnpm -s e2e:cron reminder-scan >/dev/null 2>&1 || T91=1
+  if wait_for "SELECT (count(*) > 0)::text c FROM \"Message\" WHERE \"conversationId\"='$REMB_CONV' AND type='template' AND status='SENT'" '[{"c":"true"}]' 45; then
+    :; else fail "T91 提醒未 SENT"; T91=1; fi
+  # 病人收到提醒後回覆（mock AI：預約意向 → BOOKING_REQUEST）
+  pnpm -s mock-inbound message --clinic TKW --from "852651${EPOCH}" --text "你好，我想預約下週" --wamid "wamid.E2E_T91_REPLY_${EPOCH}" --name "E2E-T91" >/dev/null 2>&1 || T91=1
+  if wait_for "SELECT \"intent\" i FROM \"Conversation\" WHERE id='$REMB_CONV'" '[{"i":"BOOKING_REQUEST"}]' 45; then
+    pass "T91 提醒後病人回覆 → AI triage BOOKING_REQUEST（正常入隊）"
+  else
+    fail "T91 回覆未 triage（actual=$(q "SELECT \"intent\" i FROM \"Conversation\" WHERE id='$REMB_CONV'" | jf i)）"
+    T91=1
+  fi
+fi
+
+# ── T92. 過窗 422 帶 templates 欄 + templateName 發送（窗口外合法）+ 400 分支 ──
+echo "[12/12] T92: window-closed 422 templates + template send..."
+T92=0
+mk_rem_bk "$BOOK_T92" "852652${EPOCH}" "wamid.E2E_T92_${EPOCH}" "E2E-T92" CONFIRMED "$REM2_D" "$REM2_T" || { fail "T92 fixture 執行失敗"; T92=1; }
+if [ "$T92" = 0 ]; then
+  # 製造過窗對話（lastInboundAt = 25h 前）
+  q "UPDATE \"Conversation\" SET \"lastInboundAt\" = now() - interval '25 hours' WHERE id='$REMB_CONV'" >/dev/null 2>&1 || T92=1
+  # 1) free-form 過窗 → 422 + templates 欄（APPROVED+UTILITY 名單）
+  h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"body\":\"e2e T92 free-form closed window\"}"
+  check "T92 過窗 free-form → 422" "$H1_CODE" "422"
+  grep -q '"templates"' "$H1_OUT" && pass "T92 422 帶 templates 欄" || { fail "T92 422 冇 templates 欄"; T92=1; }
+  grep -q '"appt_reminder_zh"' "$H1_OUT" && grep -q '"appointment_reminder"' "$H1_OUT" \
+    && pass "T92 templates 含 APPROVED+UTILITY（appt_reminder_zh + appointment_reminder）" \
+    || { fail "T92 templates 名單錯"; T92=1; }
+  if grep -q '"new_arrival_intro"' "$H1_OUT"; then fail "T92 PENDING template 漏進名單"; T92=1; fi
+  if grep -q '"checkup_promo_january"' "$H1_OUT"; then fail "T92 REJECTED template 漏進名單"; T92=1; fi
+  # 2) templateName 發送（窗口外合法；自動攞對話 CONFIRMED booking 做變數）
+  h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"templateName\":\"appt_reminder_zh\"}"
+  check "T92 templateName 發送（窗口外）→ 202" "$H1_CODE" "202"
+  T92_MID=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+  if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T92_MID'" '[{"s":"SENT"}]' 45; then
+    pass "T92 template Message SENT（staff 覆，窗口外）"
+  else
+    fail "T92 template 未 SENT"
+    T92=1
+  fi
+  check "T92 staff 發送（sentByStaffId 非空）" "$(q "SELECT (\"sentByStaffId\" IS NOT NULL)::text n FROM \"Message\" WHERE id='$T92_MID'" | jf n)" "true"
+  # 3) 400 分支：approved 但冇 builder / 唔存在 / body+template 同傳
+  h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"templateName\":\"appointment_reminder\"}"
+  check "T92 approved 但冇 builder → 400 template_not_supported" "$(grep -oE '"error":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)" "template_not_supported"
+  h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"templateName\":\"no_such_template\"}"
+  check "T92 唔存在 template → 400 template_not_found" "$(grep -oE '"error":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)" "template_not_found"
+  h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"body\":\"x\",\"templateName\":\"appt_reminder_zh\"}"
+  check "T92 body+templateName 同傳 → 400" "$H1_CODE" "400"
+fi
+
+# ── R10 summary ─────────────────────────────────────────────────────────────
+[ "$T88" = 0 ] && [ "$T89" = 0 ] && [ "$T90" = 0 ] && [ "$T91" = 0 ] && [ "$T92" = 0 ] \
+  && pass "R10 Phase B e2e（T88-T92）" || fail "R10 Phase B 有項失敗（見上 ❌）"
+
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

@@ -45,9 +45,15 @@ async function registerSchedulers() {
     name: "retention-purge",
     data: {},
   });
+  // Phase B（cwi-tmpl-20260824-b1）：T-24h 預約提醒 — 每 15 分鐘掃（窗口 23–25h 內每 15 分鐘掃一次；
+  // remindedAt 冪等 transaction 保證重覆掃描唔會重發）
+  await cronQueue.upsertJobScheduler("sched-reminder-scan", { pattern: "*/15 * * * *" }, {
+    name: "reminder-scan",
+    data: {},
+  });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, weekly-report Mon 07:00, retention-purge daily 04:00)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m)"
   );
 }
 

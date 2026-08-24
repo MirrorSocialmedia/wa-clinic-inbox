@@ -2,7 +2,7 @@ import { Worker, type Job } from "bullmq";
 import { outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { OUTBOUND_CONCURRENCY } from "./concurrency";
 import { publishNotify } from "@/lib/notify";
-import { sendTextMessage, sendFlowMessage, type FlowMessageConfig } from "@/lib/wa/graph";
+import { sendTextMessage, sendFlowMessage, sendTemplateMessage, type FlowMessageConfig, type TemplateComponent } from "@/lib/wa/graph";
 import { acquireToken } from "@/lib/rate-limit";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -79,6 +79,7 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
   }
 
   const isFlow = msg.type === "interactive";
+  const isTemplate = msg.type === "template";
   const maxAttempts = job.opts.attempts ?? 3;
   try {
     let wamid: string;
@@ -92,6 +93,22 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
         phoneNumberId: clinic.waPhoneNumberId,
         to: contactRow.waId,
         flow: flowCfg,
+      });
+      wamid = r.wamid;
+    } else if (isTemplate) {
+      // Phase B：template message — templateMeta = { name, language, components }。
+      // body = 預覽文字（永遠非空 — 上面空 body guard 唔會誤殺）。
+      // 壞 meta → throw → 行現有 retry/FAILED 路徑（零新分支）。
+      const meta = msg.templateMeta as { name?: string; language?: string; components?: TemplateComponent[] } | null;
+      if (!meta?.name || !meta.language || !Array.isArray(meta.components)) {
+        throw new Error("BAD_TEMPLATE_META");
+      }
+      const r = await sendTemplateMessage({
+        phoneNumberId: clinic.waPhoneNumberId,
+        to: contactRow.waId,
+        templateName: meta.name,
+        language: meta.language,
+        components: meta.components,
       });
       wamid = r.wamid;
     } else {
