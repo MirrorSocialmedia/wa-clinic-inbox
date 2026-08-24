@@ -23,6 +23,8 @@ import type {
   ClassifyAndDraftResult,
 } from "./types";
 import { AiCallError } from "./types";
+import type { SessionAiOutput, SessionSlots } from "./session-types";
+import type { SessionPromptInput } from "./session-prompts";
 
 export function isAiMockEnabled(): boolean {
   return process.env.AI_MOCK === "1";
@@ -41,7 +43,10 @@ export const MOCK_MODEL_NAME = "mock-qwen-v1";
  */
 export const E2E_BAIT_SUM_TOKEN = "E2E-BAIT-SUM-7f3a";
 
+
 const RE_URGENT = /痛|流血|出血|腫|外傷|感染|止唔到血|severe pain|pain|bleed|swollen|infection/i;
+// ★ Phase C（cwi-sess-20260824-c1）：COMPLAINT 觸發詞（投訴/退款/賠償/服務態度）
+const RE_COMPLAINT = /投訴|退款|賠償|態度好差|太黑心/i;
 // Phase 2b：病人明確要求真人（T21 mock trigger）— 急症先判，所以「牙痛，想搵人工」會命中 URGENT
 const RE_NEEDS_HUMAN = /人工|真人|human agent|talk to a human/i;
 const RE_BOOKING = /預約|想約|book|appointment|reschedul|改期|改約|取消預約|有冇位|冇位/i;
@@ -117,6 +122,17 @@ export async function mockClassifyAndDraft(
       summary: "病人主訴劇痛/出血等急性不適（mock）",
       draft: null,
     };
+  } else if (RE_COMPLAINT.test(body)) {
+    // ★ Phase C（cwi-sess-20260824-c1）：COMPLAINT — 優先喺 NEEDS_HUMAN 之前（更具體）；
+    //   draft=null（投訴唔出 AI 草稿；worker canDraft 對 COMPLAINT 一律唔建 draft）。
+    result = {
+      intent: "COMPLAINT",
+      urgency: "LOW",
+      needsHuman: true,
+      confidence: 0.95,
+      summary: "病人投訴 / 對服務不滿（mock）",
+      draft: null,
+    };
   } else if (RE_NEEDS_HUMAN.test(body)) {
     // Phase 2b：明确要求人工 — 出 pending draft（staff 審批），AUTO 模式亦唔會自動發
     result = {
@@ -169,4 +185,72 @@ export async function mockClassifyAndDraft(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── Phase C（cwi-sess-20260824-c1）：slot-filling session mock（C3.4 決定性關鍵字）──────
+// 優先序：URGENT > HUMAN > CANCEL > slot 更新（CONTINUE）> CONFIRM > CONTINUE。
+// 只返 roster 全名（engine mergeSlots 會 deterministic 對返 apricotId）。
+
+const RE_SESS_URGENT = /好痛|劇痛|忍唔到|流血|出血|腫|外傷|severe pain|pain|bleed/i;
+const RE_SESS_HUMAN = /人工|真人|human agent|talk to a human/i;
+const RE_SESS_CANCEL = /唔約|唔使約|算啦|遲啲先|取消預約/;
+const RE_SESS_CONFIRM = /^(好呀|好啊|得呀|冇問題|冇問題呀|ok|okay|就咁|好|可以)/i;
+const RE_TIME_1500 = /三點|\b3點|15:00|3pm|下午三點/i; // MD C3.4：三點/3點/15:00（\b 防 23點 誤中）
+
+function lastInboundBodySession(input: SessionPromptInput): string {
+  for (let i = input.recentMessages.length - 1; i >= 0; i--) {
+    if (input.recentMessages[i].direction === "IN") return input.recentMessages[i].body;
+  }
+  return "";
+}
+
+/** 病人講嘅醫生名 → roster 全名（決定性：全名包含 / 姓+醫生；多過一個候選 = 唔確定 → null） */
+function mockMatchProvider(body: string, providers: { apricotId: string; name: string }[]): string | null {
+  const stripParen = (s: string) => s.replace(/[（(][^）)]*[）)]/g, "");
+  const cands: string[] = [];
+  for (const p of providers) {
+    const base = stripParen(p.name).replace(/\s+/g, "");
+    if (!base) continue;
+    const surname = base.slice(0, 1);
+    if (body.includes(base) || body.includes(`${surname}醫生`)) cands.push(p.name);
+  }
+  return cands.length === 1 ? cands[0] : null;
+}
+
+export async function mockSessionTurn(input: SessionPromptInput): Promise<SessionAiOutput> {
+  if (isAiMockFailEnabled()) {
+    await sleep(MOCK_LATENCY_MS);
+    throw new AiCallError("AI_MOCK_FAIL=1 — simulated AI outage");
+  }
+  await sleep(MOCK_LATENCY_MS);
+
+  const body = lastInboundBodySession(input);
+  const none: SessionSlots = { providerName: null, date: null, time: null, timeOfDay: null };
+
+  if (RE_SESS_URGENT.test(body))
+    return { slotUpdates: none, action: "URGENT", reply: "聽到你講緊嘅事，我即刻叫職員跟進 🙏" };
+  if (RE_SESS_HUMAN.test(body)) return { slotUpdates: none, action: "HUMAN", reply: "收到，我哋職員好快覆你" };
+  if (RE_SESS_CANCEL.test(body)) return { slotUpdates: none, action: "CANCEL", reply: "明白～" };
+
+  const upd: SessionSlots = { ...none };
+  // 相對日期（用 input.todayHk 換算 — 同 engine 嘅 todayHk 同源）
+  const addDays = (base: string, n: number): string => {
+    const d = new Date(`${base}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  if (/大後日/.test(body)) upd.date = addDays(input.todayHk, 3);
+  else if (/後日/.test(body)) upd.date = addDays(input.todayHk, 2);
+  else if (/聽日/.test(body)) upd.date = addDays(input.todayHk, 1);
+  if (RE_TIME_1500.test(body)) upd.time = "15:00";
+  else if (/朝早/.test(body)) upd.timeOfDay = "MORNING";
+  else if (/下晝/.test(body)) upd.timeOfDay = "AFTERNOON";
+  else if (/晚/.test(body)) upd.timeOfDay = "EVENING";
+  const prov = mockMatchProvider(body, input.providers);
+  if (prov) upd.providerName = prov;
+
+  const hasUpdate = upd.providerName !== null || upd.date !== null || upd.time !== null || upd.timeOfDay !== null;
+  if (hasUpdate) return { slotUpdates: upd, action: "CONTINUE", reply: "收到！" };
+  if (RE_SESS_CONFIRM.test(body)) return { slotUpdates: none, action: "CONFIRM", reply: "好呀" };
+  return { slotUpdates: none, action: "CONTINUE", reply: "明白～" };
 }

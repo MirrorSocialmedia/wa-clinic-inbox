@@ -129,6 +129,17 @@
 #   T86 A2 媒體：send 相 → 客戶端零回覆 + StaffNotice(MEDIA_RECEIVED) 落庫 + /api/notices bell +1 +
 #       AiDraft 零新增（canDraft 限 text）+ 分類照行 + PATCH 標已讀
 #   T87 hermetic：MF 還原 DRAFT（T83 起轉 AUTO）
+#
+# Phase C（slot-filling 對話式預約，cwi-ai-20260824-t3）：
+#   PC-G1 L3 全鏈：4 條訊息 slot-filling（provider→相對日期→15:00→確認）→ 綠色卡 PENDING
+#       + 相對日期實證（聽日/後日/大後日 → +1/+2/+3 日）+ PatientFact（provider 模板 row，model=null，source=provider 訊息）
+#   PC-G2 L3 slot-taken：fill flag 填位 → 「滿咗」+ 候選重出 + time 清回 + session 續行（改另一日 → 收卡）
+#   PC-G3 HANDOFF：「真人」逃生口 → HANDOFF + StaffNotice + PatientFact 零 row + HANDOFF 後跌普通 triage（零 session 回覆）
+#   PC-S1 staff claim 中途接手 → session HANDOFF 讓路（零 session 回覆）
+#   PC-S2 媒體入 session → 客戶端零回覆 + MEDIA_RECEIVED + session 不動
+#   PC-G4 L4 自動落單（pinned + 預設 visit reason）→ CONFIRMED + autoBooked + workforce mock 調用 +
+#       AuditLog(AI_AUTO_BOOKING, staffId=null) + StaffNotice(BOOKING_AUTO) + 「已為你預約」訊息（aiAutoSent）
+#   PC-G5 kill switch：AI_GLOBAL_MAX_LEVEL=L2 → 有 policy row 都唔開 session + 舊 draft 行為（L1/L2 byte-for-byte 實證）
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -2820,6 +2831,335 @@ fi
 # ── R10 summary ─────────────────────────────────────────────────────────────
 [ "$T88" = 0 ] && [ "$T89" = 0 ] && [ "$T90" = 0 ] && [ "$T91" = 0 ] && [ "$T92" = 0 ] \
   && pass "R10 Phase B e2e（T88-T92）" || fail "R10 Phase B 有項失敗（見上 ❌）"
+
+# ══════════ Phase C：slot-filling 對話式預約 e2e（cwi-ai-20260824-t3）══════════
+# 鐵律驗證：事實句全 engine 砌（斷言 reply byte-for-byte）/ L1/L2 店 byte-for-byte 不變
+#（kill switch + 本節前所有 T14/T19-T27 無 policy row 跑舊鏈）/ commit-then-emit / jobId 冪等。
+echo "[PC] Phase C: slot-filling session e2e (G1-G5 + S1/S2 + PatientFact) ..."
+PC_FAIL=0
+
+# ── PC setup：helpers + 重起 worker（乾浄 env + 預設 visit reason）+ 槽位選擇 ──
+# 相對日期窗口（mock AI 只識聽日/後日/大後日 → +1/+2/+3）
+PC_D1=$(date -d '+1 day' +%F); PC_D2=$(date -d '+2 day' +%F); PC_D3=$(date -d '+3 day' +%F)
+# pc_pick <clinicId> <providerApricotId|''> <offset> → "providerApricotId|date"（15:00 open 槽）
+pc_pick() {
+  local prov="${2:-}"
+  q "SELECT (\"providerApricotId\"||'|'||\"date\") v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$1' AND \"startTime\"='15:00' AND \"isOpen\"=true AND \"bookedCount\"=0 AND \"date\" IN ('$PC_D1','$PC_D2','$PC_D3')${prov:+ AND \"providerApricotId\"='$prov'} ORDER BY \"date\",\"providerApricotId\" LIMIT 1 OFFSET ${3:-0}" | jf v
+}
+pc_prov_name() { q "SELECT name FROM \"Provider\" WHERE \"apricotId\"='$1'" | jf name; }
+pc_surname() { local n; n=$(pc_prov_name "$1"); echo "${n%% *}"; }
+pc_date_kw() { case "$1" in "$PC_D1") echo "聽日";; "$PC_D2") echo "後日";; "$PC_D3") echo "大後日";; *) echo "";; esac; }
+pc_conv_of() { q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$1' AND c.\"clinicId\"='$2' ORDER BY c.\"lastMessageAt\" DESC LIMIT 1" | jf id; }
+pc_contact_of() { q "SELECT id FROM \"Contact\" WHERE \"waId\"='$1' AND \"clinicId\"='$2'" | jf id; }
+pc_sess_replies() { q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$1' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" | jf c; }
+pc_sess_reply() { # $1=convId $2=第幾條回覆（1-based）；q() 瞬時空 → retry x3
+  local n="${2:-1}" out i
+  for i in 1 2 3; do
+    out=$(q "SELECT \"body\" b FROM \"Message\" WHERE \"conversationId\"='$1' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL ORDER BY \"waTimestamp\" ASC OFFSET $((n - 1)) LIMIT 1" | jf b)
+    [ -n "$out" ] && break
+    sleep 1
+  done
+  echo "$out"
+}
+
+# 重起 worker（PC 段用自己 env：預設 visit reason 俾 L4 AUTO_BOOK 用）
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+export BOOKING_DEFAULT_VISIT_REASON_CODE=0021
+nohup pnpm worker >/tmp/e2e-worker-pc.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 60); do grep -q "all workers running" /tmp/e2e-worker-pc.log 2>/dev/null && break; sleep 1; done
+grep -q "all workers running" /tmp/e2e-worker-pc.log 2>/dev/null || { echo "  ❌ FATAL: PC worker 未起"; FAIL=$((FAIL + 1)); }
+
+# 槽位選擇（決定性 djb2 grid — 執行時由 L2 查；T27 已 sync）
+PC_SLOT1=$(pc_pick "$TKW_CLINIC_ID" "" 0)
+[ -n "$PC_SLOT1" ] || { fail "PC setup：TKW 明日/後日/大後日 無任何 15:00 空槽（djb2 grid）"; PC_FAIL=1; }
+if [ -n "$PC_SLOT1" ]; then
+  PC_P1=${PC_SLOT1%%|*}; PC_D1S=${PC_SLOT1##*|}
+  PC_S1_NAME=$(pc_prov_name "$PC_P1"); PC_S1_SUR=$(pc_surname "$PC_P1")
+  # L3 店：TKW policy row（冪等 upsert — 重跑唔撞 unique；★ raw SQL 必帶 id — @default(cuid()) 係 Prisma client-level，DB 冇 default）
+  PC1_POL=$(q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-pc-tkw-l3','$TKW_CLINIC_ID','BOOKING_REQUEST','L3',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\" RETURNING \"id\"" | jf id)
+  [ -n "$PC1_POL" ] || { fail "PC setup：TKW L3 policy INSERT 失敗（raw SQL 靜默錯）"; PC_FAIL=1; }
+
+  # ── PC-G1. L3 全鏈（4 訊息 slot-filling → 綠色卡）+ 相對日期 + PatientFact 存在 ──
+  echo "[PC] G1: L3 full chain (provider → 相對日期 → 15:00 → 確認) ..."
+  PC1_WA="8526121${EPOCH}"; PC1_W1="wamid.E2E_PC1_1_${EPOCH}"
+  pnpm -s mock-inbound message --clinic TKW --from "$PC1_WA" --text "想約${PC_S1_SUR}醫生洗牙" --wamid "$PC1_W1" --name "E2E PC1" >/dev/null 2>&1
+  PC1_CONV=$(pc_conv_of "$PC1_WA" "$TKW_CLINIC_ID")
+  if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC1_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"1"}]' 45; then
+    pass "PC-G1 r1 收到（候選時段 list）"
+  else
+    fail "PC-G1 r1 未收到（session 未開？）"; PC_FAIL=1
+  fi
+  PC1_SESS=$(q "SELECT id FROM \"BookingSession\" WHERE \"conversationId\"='$PC1_CONV'" | jf id)
+  check "PC-G1 session 已開" "$(q "SELECT count(*)::text c FROM \"BookingSession\" WHERE \"conversationId\"='$PC1_CONV'" | jf c)" "1"
+  check "PC-G1 session ACTIVE" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$PC1_SESS'" | jf s)" "ACTIVE"
+  check "PC-G1 provider 已記" "$(q "SELECT (\"slots\"->>'providerApricotId') v FROM \"BookingSession\" WHERE id='$PC1_SESS'" | jf v)" "$PC_P1"
+  PC1_R1=$(pc_sess_reply "$PC1_CONV" 1)
+  case "$PC1_R1" in "收到！ 而家有以下時段："*) pass "PC-G1 r1 事實句 = engine 候選 list（零 LLM 事實）";; *) fail "PC-G1 r1 格式錯（[:0:0]）：${PC1_R1:0:80}"; PC_FAIL=1;; esac
+
+  # 訊息 2：相對日期（聽日/後日/大後日 → +1/+2/+3 — mock 用 todayHk 換算，斷言 requestedDate 對上 bash 同日）
+  PC1_KW=$(pc_date_kw "$PC_D1S")
+  pnpm -s mock-inbound message --clinic TKW --from "$PC1_WA" --text "$PC1_KW" --wamid "wamid.E2E_PC1_2_${EPOCH}" --name "E2E PC1" >/dev/null 2>&1
+  if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC1_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"2"}]' 45; then
+    pass "PC-G1 r2 收到（日期已濾候選）"
+  else
+    fail "PC-G1 r2 未收到"; PC_FAIL=1
+  fi
+  PC1_R2=$(pc_sess_reply "$PC1_CONV" 2)
+  # 候選 list cap=5（MD C4 candidateText）— 15:00 唔一定喺前 5 項；事實鐵律斷言 = engine 砌 list 前綴（15:00 有效性由 confirmLine 逐字證明）
+  case "$PC1_R2" in "收到！ 而家有以下時段："*) pass "PC-G1 r2 事實句 = engine 候選 list（日期已濾，${PC1_KW}）";; *) fail "PC-G1 r2 唔係候選 list：${PC1_R2:0:80}"; PC_FAIL=1;; esac
+
+  # 訊息 3：15:00 → CONFIRMING + confirmLine
+  pnpm -s mock-inbound message --clinic TKW --from "$PC1_WA" --text "三點啦" --wamid "wamid.E2E_PC1_3_${EPOCH}" --name "E2E PC1" >/dev/null 2>&1
+  if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC1_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"3"}]' 45; then
+    pass "PC-G1 r3 收到（confirmLine）"
+  else
+    fail "PC-G1 r3 未收到"; PC_FAIL=1
+  fi
+  check "PC-G1 session CONFIRMING" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$PC1_SESS'" | jf s)" "CONFIRMING"
+  PC1_MO=$((10#${PC_D1S:5:2})); PC1_DD=$((10#${PC_D1S:8:2}))
+  check "PC-G1 confirmLine 逐字（engine 事實句）" "$(pc_sess_reply "$PC1_CONV" 3)" "收到！ 同你確認一次：${PC1_MO}月${PC1_DD}日 15:00 ${PC_S1_NAME}，啱唔啱？"
+
+  # 訊息 4：確認 → COMPLETED + CREATE_CARD（L3）
+  pnpm -s mock-inbound message --clinic TKW --from "$PC1_WA" --text "好呀" --wamid "wamid.E2E_PC1_4_${EPOCH}" --name "E2E PC1" >/dev/null 2>&1
+  if wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$PC1_CONV'" '[{"s":"PENDING"}]' 45; then
+    pass "PC-G1 綠色卡 PENDING（precheck 過）"
+  else
+    fail "PC-G1 BookingRequest 未建"; PC_FAIL=1
+  fi
+  check "PC-G1 session COMPLETED" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$PC1_SESS'" | jf s)" "COMPLETED"
+  check "PC-G1 卡 requestedDate（相對日期實證）" "$(q "SELECT \"requestedDate\" v FROM \"BookingRequest\" WHERE \"conversationId\"='$PC1_CONV'" | jf v)" "$PC_D1S"
+  check "PC-G1 卡 requestedTime" "$(q "SELECT \"requestedTime\"::text v FROM \"BookingRequest\" WHERE \"conversationId\"='$PC1_CONV'" | jf v)" "15:00"
+  check "PC-G1 卡 providerName 快照" "$(q "SELECT \"providerName\" v FROM \"BookingRequest\" WHERE \"conversationId\"='$PC1_CONV'" | jf v)" "$PC_S1_NAME"
+  check "PC-G1 卡 precheckPassed" "$(q "SELECT (\"precheckPassed\")::text v FROM \"BookingRequest\" WHERE \"conversationId\"='$PC1_CONV'" | jf v)" "true"
+  check "PC-G1 4 訊息 = 4 回覆（每條一次 LLM call、一條覆）" "$(pc_sess_replies "$PC1_CONV")" "4"
+  check "PC-G1 收卡回覆逐字" "$(pc_sess_reply "$PC1_CONV" 4)" "收到！職員會好快幫你確認 🙂"
+
+  # PatientFact #1（golden #1 後查存在）：COMPLETED 首次觸發、provider 固定模板、model=null、source=completion 前最後 IN text（writer 文檔化 1-step fallback）
+  PC1_CONTACT=$(pc_contact_of "$PC1_WA" "$TKW_CLINIC_ID")
+  check "PC-G1 PatientFact 恰 1 row" "$(q "SELECT count(*)::text c FROM \"PatientFact\" WHERE \"contactId\"='$PC1_CONTACT'" | jf c)" "1"
+  check "PC-G1 PatientFact provider 模板" "$(q "SELECT text FROM \"PatientFact\" WHERE \"contactId\"='$PC1_CONTACT'" | jf text)" "預約偏好：${PC_S1_NAME}"
+  check "PC-G1 PatientFact kind=PREFERENCE" "$(q "SELECT \"kind\"::text k FROM \"PatientFact\" WHERE \"contactId\"='$PC1_CONTACT'" | jf k)" "PREFERENCE"
+  check "PC-G1 PatientFact model=null（deterministic 零 LLM）" "$(q "SELECT (\"model\" IS NULL)::text n FROM \"PatientFact\" WHERE \"contactId\"='$PC1_CONTACT'" | jf n)" "true"
+  PC1_M3=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_PC1_3_${EPOCH}' AND \"direction\"='IN'" | jf id)
+  check "PC-G1 PatientFact source=completion 前 IN 訊息" "$(q "SELECT (\"sourceMessageId\"='$PC1_M3')::text m FROM \"PatientFact\" WHERE \"contactId\"='$PC1_CONTACT'" | jf m)" "true"
+fi
+
+# ── PC-G2. L3 slot-taken（fill flag 填位 → 「滿咗」+ 候選重出 + session 續行）──
+echo "[PC] G2: L3 slot-taken (fill flag) ..."
+if [ -n "$PC_SLOT1" ]; then
+  PC_SLOT2=$(pc_pick "$TKW_CLINIC_ID" "" 1)
+  [ -n "$PC_SLOT2" ] || PC_SLOT2=$PC_SLOT1
+  PC_P2=${PC_SLOT2%%|*}; PC_D2S=${PC_SLOT2##*|}
+  PC_S2_SUR=$(pc_surname "$PC_P2")
+  # 填位 flag（mock 填位形態：isOpen 照 true、bookedCount=1）
+  [ -f .dev/workforce-mock-fill.json ] && cp .dev/workforce-mock-fill.json /tmp/pc-fill-flag.bak
+  printf '[{"clinicCode":"TKW","providerApricotId":"%s","date":"%s","startTime":"15:00"}]' "$PC_P2" "$PC_D2S" > .dev/workforce-mock-fill.json
+  # 自驗（in-process mock fetch）：flag 生效先繼續 — 路徑/內容錯係咗即刻響亮 fail（唔好等 90 秒 timeout）
+  cat > /tmp/pc-fill-check.ts <<EOF2
+import { fetchAvailability } from "$(pwd)/src/lib/workforce/client";
+(async () => {
+  const r: any = await fetchAvailability("TKW", "$PC_D1", "$PC_D3");
+  const d = r.days.find((x: any) => x.date === "$PC_D2S");
+  const p = d?.providers.find((x: any) => x.providerApricotId === "$PC_P2");
+  const s = p?.slots.find((x: any) => x.start === "15:00");
+  console.log(s ? String(s.bookedCount) : "missing");
+})();
+EOF2
+  PC_FLAG_B=$( (set -a; . ./.env; set +a; ./node_modules/.bin/tsx /tmp/pc-fill-check.ts 2>/dev/null) )
+  [ "$PC_FLAG_B" = "1" ] || { fail "PC-G2 fill flag 自驗失敗（in-process mock b=$PC_FLAG_B; flag file: $(cat .dev/workforce-mock-fill.json)）"; PC_FAIL=1; }
+  # 強制 TKW L2 stale → sync job 重新 fetch（帶 flag）→ L2 落 b=1
+  q "UPDATE \"AvailabilitySlot\" SET \"syncedAt\"=\"syncedAt\"-interval '1 hour' WHERE \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null
+  pnpm -s e2e:cron sync-availability >/dev/null 2>&1
+  if wait_for "SELECT (\"bookedCount\")::text b FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$PC_P2' AND \"date\"='$PC_D2S' AND \"startTime\"='15:00'" '[{"b":"1"}]' 90; then
+    pass "PC-G2 填位落 L2（bookedCount=1）"
+  else
+    fail "PC-G2 填位未生效（flag file: $(cat .dev/workforce-mock-fill.json)）"; PC_FAIL=1
+  fi
+
+  PC2_WA="8526122${EPOCH}"
+  pnpm -s mock-inbound message --clinic TKW --from "$PC2_WA" --text "想約${PC_S2_SUR}醫生洗牙" --wamid "wamid.E2E_PC2_1_${EPOCH}" --name "E2E PC2" >/dev/null 2>&1
+  PC2_CONV=$(pc_conv_of "$PC2_WA" "$TKW_CLINIC_ID")
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC2_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"1"}]' 45 || { fail "PC-G2 r1 未收到"; PC_FAIL=1; }
+  PC2_SESS=$(q "SELECT id FROM \"BookingSession\" WHERE \"conversationId\"='$PC2_CONV'" | jf id)
+  PC2_KW=$(pc_date_kw "$PC_D2S")
+  pnpm -s mock-inbound message --clinic TKW --from "$PC2_WA" --text "$PC2_KW" --wamid "wamid.E2E_PC2_2_${EPOCH}" --name "E2E PC2" >/dev/null 2>&1
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC2_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"2"}]' 45 || { fail "PC-G2 r2 未收到"; PC_FAIL=1; }
+  pnpm -s mock-inbound message --clinic TKW --from "$PC2_WA" --text "三點啦" --wamid "wamid.E2E_PC2_3_${EPOCH}" --name "E2E PC2" >/dev/null 2>&1
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC2_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"3"}]' 45 || { fail "PC-G2 r3 未收到"; PC_FAIL=1; }
+  PC2_R3=$(pc_sess_reply "$PC2_CONV" 3)
+  case "$PC2_R3" in *"唔好意思，呢個時段啱啱滿咗。而家有以下時段："*) pass "PC-G2 slot-taken 事實句逐字（滿咗 + 候選重出）";; *) fail "PC-G2 r3 唔係 slot-taken：${PC2_R3:0:80}"; PC_FAIL=1;; esac
+  check "PC-G2 session 續行（ACTIVE）" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$PC2_SESS'" | jf s)" "ACTIVE"
+  check "PC-G2 time 清回 null（等揀新時段）" "$(q "SELECT (\"slots\"->>'time' IS NULL)::text n FROM \"BookingSession\" WHERE id='$PC2_SESS'" | jf n)" "true"
+
+  # 續行實證：改另一日（同 provider 另一 open 15:00）→ 收卡
+  PC_D3S=$(q "SELECT \"date\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$PC_P2' AND \"startTime\"='15:00' AND \"isOpen\"=true AND \"bookedCount\"=0 AND \"date\"!='$PC_D2S' AND \"date\" IN ('$PC_D1','$PC_D2','$PC_D3') ORDER BY \"date\" LIMIT 1" | jf v)
+  if [ -n "$PC_D3S" ]; then
+    pnpm -s mock-inbound message --clinic TKW --from "$PC2_WA" --text "$(pc_date_kw "$PC_D3S")" --wamid "wamid.E2E_PC2_4_${EPOCH}" --name "E2E PC2" >/dev/null 2>&1
+    wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC2_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"4"}]' 45 || { fail "PC-G2 r4 未收到"; PC_FAIL=1; }
+    pnpm -s mock-inbound message --clinic TKW --from "$PC2_WA" --text "三點啦" --wamid "wamid.E2E_PC2_5_${EPOCH}" --name "E2E PC2" >/dev/null 2>&1
+    wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC2_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"5"}]' 45 || { fail "PC-G2 r5 未收到"; PC_FAIL=1; }
+    pnpm -s mock-inbound message --clinic TKW --from "$PC2_WA" --text "好呀" --wamid "wamid.E2E_PC2_6_${EPOCH}" --name "E2E PC2" >/dev/null 2>&1
+    if wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$PC2_CONV'" '[{"s":"PENDING"}]' 45; then
+      pass "PC-G2 session 續行改期 → 收卡（COMPLETED）"
+    else
+      fail "PC-G2 續行未收卡"; PC_FAIL=1
+    fi
+  else
+    pass "PC-G2 session 續行（冇其他空槽 — 跳過收卡分支）"
+  fi
+
+  # 還原填位 flag + 重 sync（避免污染後續 run/店）
+  if [ -f /tmp/pc-fill-flag.bak ]; then mv /tmp/pc-fill-flag.bak .dev/workforce-mock-fill.json; else rm -f .dev/workforce-mock-fill.json; fi
+  pnpm -s e2e:cron sync-availability >/dev/null 2>&1
+fi
+
+# ── PC-G3. HANDOFF（「真人」逃生口）+ PatientFact 零 row + HANDOFF 後跌普通 triage ──
+echo "[PC] G3: HANDOFF + PatientFact zero-row ..."
+if [ -n "$PC_SLOT1" ]; then
+  PC3_WA="8526123${EPOCH}"
+  pnpm -s mock-inbound message --clinic TKW --from "$PC3_WA" --text "想約李醫生洗牙" --wamid "wamid.E2E_PC3_1_${EPOCH}" --name "E2E PC3" >/dev/null 2>&1
+  PC3_CONV=$(pc_conv_of "$PC3_WA" "$TKW_CLINIC_ID")
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC3_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"1"}]' 45 || { fail "PC-G3 r1 未收到"; PC_FAIL=1; }
+  pnpm -s mock-inbound message --clinic TKW --from "$PC3_WA" --text "我想搵真人" --wamid "wamid.E2E_PC3_2_${EPOCH}" --name "E2E PC3" >/dev/null 2>&1
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC3_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"2"}]' 45 || { fail "PC-G3 r2 未收到"; PC_FAIL=1; }
+  PC3_SESS=$(q "SELECT id FROM \"BookingSession\" WHERE \"conversationId\"='$PC3_CONV'" | jf id)
+  check "PC-G3 session HANDOFF" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$PC3_SESS'" | jf s)" "HANDOFF"
+  check "PC-G3 HANDOFF 回覆逐字" "$(pc_sess_reply "$PC3_CONV" 2)" "收到，我哋職員好快覆你 🙏"
+  wait_for "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$PC3_CONV' AND kind='HANDOFF_REQUEST'" '[{"c":"1"}]' 30 \
+    && pass "PC-G3 StaffNotice(HANDOFF_REQUEST) 落庫" || { fail "PC-G3 HANDOFF 通知未落庫"; PC_FAIL=1; }
+  # PatientFact #2（golden #4 HANDOFF 查零 row）
+  check "PC-G3 PatientFact 零 row（HANDOFF 唔寫 fact）" "$(q "SELECT count(*)::text c FROM \"PatientFact\" WHERE \"contactId\"='$(pc_contact_of "$PC3_WA" "$TKW_CLINIC_ID")'" | jf c)" "0"
+  # HANDOFF 後病人再講嘢 → 普通 triage（零 session 回覆、session 唔再起）
+  pnpm -s mock-inbound message --clinic TKW --from "$PC3_WA" --text "再問下時間" --wamid "wamid.E2E_PC3_3_${EPOCH}" --name "E2E PC3" >/dev/null 2>&1
+  wait_for "SELECT (\"aiSummary\" IS NOT NULL AND \"intent\"!='BOOKING_REQUEST')::text s FROM \"Conversation\" WHERE id='$PC3_CONV'" '[{"s":"true"}]' 45 \
+    && pass "PC-G3 HANDOFF 後跌普通 triage" || { fail "PC-G3 HANDOFF 後未 triage"; PC_FAIL=1; }
+  sleep 3
+  check "PC-G3 HANDOFF 後零 session 回覆" "$(pc_sess_replies "$PC3_CONV")" "2"
+  check "PC-G3 無第二 session" "$(q "SELECT count(*)::text c FROM \"BookingSession\" WHERE \"conversationId\"='$PC3_CONV'" | jf c)" "1"
+fi
+
+# ── PC-S1. staff 中途 claim → session 讓路（HANDOFF）+ 零 session 回覆 ──
+echo "[PC] S1: staff claim mid-session ..."
+if [ -n "$PC_SLOT1" ]; then
+  PC5_WA="8526125${EPOCH}"
+  pnpm -s mock-inbound message --clinic TKW --from "$PC5_WA" --text "想約王醫生洗牙" --wamid "wamid.E2E_PC5_1_${EPOCH}" --name "E2E PC5" >/dev/null 2>&1
+  PC5_CONV=$(pc_conv_of "$PC5_WA" "$TKW_CLINIC_ID")
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC5_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"1"}]' 45 || { fail "PC-S1 r1 未收到"; PC_FAIL=1; }
+  PC5_SESS=$(q "SELECT id FROM \"BookingSession\" WHERE \"conversationId\"='$PC5_CONV'" | jf id)
+  PC5_STAFF=$(q "SELECT id::text id FROM \"StaffUser\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND role='STAFF' LIMIT 1" | jf id)
+  q "UPDATE \"Conversation\" SET \"assigneeId\"='$PC5_STAFF' WHERE id='$PC5_CONV'" >/dev/null 2>&1
+  pnpm -s mock-inbound message --clinic TKW --from "$PC5_WA" --text "聽日得唔得" --wamid "wamid.E2E_PC5_2_${EPOCH}" --name "E2E PC5" >/dev/null 2>&1
+  wait_for "SELECT (\"aiSummary\" IS NOT NULL AND \"intent\"='QUESTION')::text s FROM \"Conversation\" WHERE id='$PC5_CONV'" '[{"s":"true"}]' 45 \
+    && pass "PC-S1 病人再來訊已 triage" || { fail "PC-S1 未 triage"; PC_FAIL=1; }
+  sleep 3
+  check "PC-S1 session HANDOFF（讓路）" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$PC5_SESS'" | jf s)" "HANDOFF"
+  check "PC-S1 零 session 回覆（ staff 接手）" "$(pc_sess_replies "$PC5_CONV")" "1"
+fi
+
+# ── PC-S2. 媒體入 session → 客戶端零回覆 + MEDIA_RECEIVED + session 不動 ──
+echo "[PC] S2: media into active session ..."
+if [ -n "$PC_SLOT1" ]; then
+  PC6_WA="8526126${EPOCH}"
+  pnpm -s mock-inbound message --clinic TKW --from "$PC6_WA" --text "想約陳醫生洗牙" --wamid "wamid.E2E_PC6_1_${EPOCH}" --name "E2E PC6" >/dev/null 2>&1
+  PC6_CONV=$(pc_conv_of "$PC6_WA" "$TKW_CLINIC_ID")
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC6_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"1"}]' 45 || { fail "PC-S2 r1 未收到"; PC_FAIL=1; }
+  PC6_SESS=$(q "SELECT id FROM \"BookingSession\" WHERE \"conversationId\"='$PC6_CONV'" | jf id)
+  pnpm -s mock-inbound message --clinic TKW --from "$PC6_WA" --text "e2e PC6 photo" --media image --wamid "wamid.E2E_PC6_2_${EPOCH}" --name "E2E PC6" >/dev/null 2>&1
+  wait_for "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$PC6_CONV' AND kind='MEDIA_RECEIVED'" '[{"c":"1"}]' 30 \
+    && pass "PC-S2 StaffNotice(MEDIA_RECEIVED) 落庫" || { fail "PC-S2 MEDIA 通知未落庫"; PC_FAIL=1; }
+  sleep 3
+  check "PC-S2 媒體零客戶端回覆" "$(pc_sess_replies "$PC6_CONV")" "1"
+  check "PC-S2 session 不動（ACTIVE）" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$PC6_SESS'" | jf s)" "ACTIVE"
+fi
+
+# ── PC-G4. L4 自動落單（pinned + 預設 visit reason → AUTO_BOOK 全鏈）──
+echo "[PC] G4: L4 auto-book ..."
+PC4_CID="$MF_CLINIC_ID"; PC4_CODE="MF"
+PC4_SLOT=$(pc_pick "$MF_CLINIC_ID" "" 0)
+if [ -z "$PC4_SLOT" ]; then
+  PC4_CID=$(q "SELECT id FROM \"Clinic\" WHERE code='WTC'" | jf id); PC4_CODE="WTC"
+  PC4_SLOT=$(pc_pick "$PC4_CID" "" 0)
+fi
+if [ -n "$PC4_SLOT" ]; then
+  PC4_P=${PC4_SLOT%%|*}; PC4_D=${PC4_SLOT##*|}
+  PC4_NAME=$(pc_prov_name "$PC4_P"); PC4_SUR=$(pc_surname "$PC4_P")
+  q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-pc-l4-${PC4_CODE}','$PC4_CID','BOOKING_REQUEST','L4',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\" RETURNING \"id\"" | jf id | grep -q . || { fail "PC-G4：L4 policy INSERT 失敗"; PC_FAIL=1; }
+  PC4_WA="8526124${EPOCH}"
+  # 先一條中性訊息開對話（QUESTION），pin 之後先發 BOOKING_REQUEST（pinned 必須喺開波前已設）
+  pnpm -s mock-inbound message --clinic "$PC4_CODE" --from "$PC4_WA" --text "你好，想問下地址" --wamid "wamid.E2E_PC4_1_${EPOCH}" --name "E2E PC4" >/dev/null 2>&1
+  wait_for "SELECT \"intent\"::text i FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PC4_WA' AND c.\"clinicId\"='$PC4_CID'" '[{"i":"QUESTION"}]' 45 || { fail "PC-G4 首訊未 triage"; PC_FAIL=1; }
+  PC4_CONV=$(pc_conv_of "$PC4_WA" "$PC4_CID")
+  q "UPDATE \"Conversation\" SET \"pinnedPatientApricotId\"='e2e-pc-l4-pat' WHERE id='$PC4_CONV'" >/dev/null 2>&1
+
+  pnpm -s mock-inbound message --clinic "$PC4_CODE" --from "$PC4_WA" --text "想約${PC4_SUR}醫生洗牙" --wamid "wamid.E2E_PC4_2_${EPOCH}" --name "E2E PC4" >/dev/null 2>&1
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC4_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"1"}]' 45 || { fail "PC-G4 r1 未收到"; PC_FAIL=1; }
+  PC4_SESS=$(q "SELECT id FROM \"BookingSession\" WHERE \"conversationId\"='$PC4_CONV'" | jf id)
+  pnpm -s mock-inbound message --clinic "$PC4_CODE" --from "$PC4_WA" --text "$(pc_date_kw "$PC4_D")" --wamid "wamid.E2E_PC4_3_${EPOCH}" --name "E2E PC4" >/dev/null 2>&1
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC4_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"2"}]' 45 || { fail "PC-G4 r2 未收到"; PC_FAIL=1; }
+  pnpm -s mock-inbound message --clinic "$PC4_CODE" --from "$PC4_WA" --text "三點啦" --wamid "wamid.E2E_PC4_4_${EPOCH}" --name "E2E PC4" >/dev/null 2>&1
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC4_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"3"}]' 45 || { fail "PC-G4 r3 未收到"; PC_FAIL=1; }
+  PC4_MO_N=$((10#$(echo "$PC4_D" | cut -d- -f2))); PC4_DD_N=$((10#$(echo "$PC4_D" | cut -d- -f3)))
+  check "PC-G4 confirmLine 逐字" "$(pc_sess_reply "$PC4_CONV" 3)" "收到！ 同你確認一次：${PC4_MO_N}月${PC4_DD_N}日 15:00 ${PC4_NAME}，啱唔啱？"
+
+  PC4_CALLS_LOG=.dev/workforce-mock-calls.jsonl
+  pc4_creates() { grep -c '"method":"POST","path":"/api/external/v1/bookings","status":200' "$PC4_CALLS_LOG" 2>/dev/null; }
+  PC4_CREATE_BEFORE=$(pc4_creates); PC4_CREATE_BEFORE=${PC4_CREATE_BEFORE:-0}
+  pnpm -s mock-inbound message --clinic "$PC4_CODE" --from "$PC4_WA" --text "好呀" --wamid "wamid.E2E_PC4_5_${EPOCH}" --name "E2E PC4" >/dev/null 2>&1
+  if wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$PC4_CONV'" '[{"s":"CONFIRMED"}]' 60; then
+    pass "PC-G4 L4 自動落單 → CONFIRMED"
+  else
+    fail "PC-G4 未 CONFIRMED（auto-book 失敗？）"; PC_FAIL=1
+  fi
+  check "PC-G4 autoBooked=true" "$(q "SELECT (\"autoBooked\")::text v FROM \"BookingRequest\" WHERE \"conversationId\"='$PC4_CONV'" | jf v)" "true"
+  check "PC-G4 apricotApptId（mock 決定性單號）" "$(q "SELECT (\"apricotApptId\" LIKE 'mock-appt-%')::text v FROM \"BookingRequest\" WHERE \"conversationId\"='$PC4_CONV'" | jf v)" "true"
+  PC4_CREATE_AFTER=$(pc4_creates); PC4_CREATE_AFTER=${PC4_CREATE_AFTER:-0}
+  check "PC-G4 workforce mock 真調 create（恰一次）" "$((PC4_CREATE_AFTER - PC4_CREATE_BEFORE))" "1"
+  check "PC-G4 AuditLog(AI_AUTO_BOOKING)" "$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='AI_AUTO_BOOKING' AND \"meta\"->>'sessionId'='$PC4_SESS'" | jf c)" "1"
+  check "PC-G4 AuditLog staffId=null（AI 無 staff）" "$(q "SELECT (\"staffId\" IS NULL)::text n FROM \"AuditLog\" WHERE action='AI_AUTO_BOOKING' AND \"meta\"->>'sessionId'='$PC4_SESS'" | jf n)" "true"
+  check "PC-G4 StaffNotice(BOOKING_AUTO) title" "$(q "SELECT title FROM \"StaffNotice\" WHERE \"conversationId\"='$PC4_CONV' AND kind='BOOKING_AUTO'" | jf title)" "AI 已自動落單 ${PC4_MO_N}月${PC4_DD_N}日 15:00 ${PC4_NAME}"
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC4_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"4"}]' 45 || { fail "PC-G4 確認訊息未 SENT"; PC_FAIL=1; }
+  PC4_R4=$(pc_sess_reply "$PC4_CONV" 4)
+  case "$PC4_R4" in "已為你預約 ${PC4_MO_N}月${PC4_DD_N}日 15:00 ${PC4_NAME}，到時見 🙂") pass "PC-G4 病人確認訊息逐字（confirm-core）";; *) fail "PC-G4 確認訊息錯：${PC4_R4:0:80}"; PC_FAIL=1;; esac
+  check "PC-G4 確認訊息 aiAutoSent + session 追溯" "$(q "SELECT (\"aiAutoSent\" AND \"bookingSessionId\"='$PC4_SESS')::text v FROM \"Message\" WHERE \"conversationId\"='$PC4_CONV' AND \"bookingSessionId\"='$PC4_SESS' AND \"aiAutoSent\"" | jf v)" "true"
+  check "PC-G4 session COMPLETED" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$PC4_SESS'" | jf s)" "COMPLETED"
+  check "PC-G4 PatientFact（COMPLETED 觸發）" "$(q "SELECT count(*)::text c FROM \"PatientFact\" WHERE \"contactId\"='$(pc_contact_of "$PC4_WA" "$PC4_CID")' AND text='預約偏好：${PC4_NAME}'" | jf c)" "1"
+else
+  fail "PC-G4：MF/WTC 明日/後日/大後日 無 15:00 空槽（djb2 grid）"; PC_FAIL=1
+fi
+
+# ── PC-G5. kill switch 演練：AI_GLOBAL_MAX_LEVEL=L2 → 有 L3 policy 都唔開 session ──
+echo "[PC] G5: kill switch (AI_GLOBAL_MAX_LEVEL=L2) ..."
+if [ -n "$PC_SLOT1" ]; then
+  pkill -f "src/workers/index.ts" 2>/dev/null || true
+  sleep 1
+  AI_GLOBAL_MAX_LEVEL=L2 BOOKING_DEFAULT_VISIT_REASON_CODE=0021 nohup pnpm worker >/tmp/e2e-worker-pc-cap.log 2>&1 &
+  WORKER_PID=$!
+  for i in $(seq 1 60); do grep -q "all workers running" /tmp/e2e-worker-pc-cap.log 2>/dev/null && break; sleep 1; done
+  PC7_WA="8526127${EPOCH}"
+  pnpm -s mock-inbound message --clinic TKW --from "$PC7_WA" --text "想約陳醫生洗牙" --wamid "wamid.E2E_PC7_1_${EPOCH}" --name "E2E PC7" >/dev/null 2>&1
+  PC7_CONV=$(pc_conv_of "$PC7_WA" "$TKW_CLINIC_ID")
+  wait_for "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$PC7_CONV'" '[{"c":"1"}]' 45 \
+    && pass "PC-G5 cap 生效：舊 draft 行為照行（L1/L2 鏈 byte-for-byte）" || { fail "PC-G5 舊 draft 未出（cap 異常？）"; PC_FAIL=1; }
+  check "PC-G5 零 session（cap L2 壓過 policy L3）" "$(q "SELECT count(*)::text c FROM \"BookingSession\" WHERE \"conversationId\"='$PC7_CONV'" | jf c)" "0"
+  check "PC-G5 零 session 回覆" "$(pc_sess_replies "$PC7_CONV")" "0"
+  # 還原 worker（清晒 PC env）
+  pkill -f "src/workers/index.ts" 2>/dev/null || true
+  sleep 1
+  unset BOOKING_DEFAULT_VISIT_REASON_CODE
+  nohup pnpm worker >/tmp/e2e-worker.log 2>&1 &
+  WORKER_PID=$!
+  for i in $(seq 1 60); do grep -q "all workers running" /tmp/e2e-worker.log 2>/dev/null && break; sleep 1; done
+fi
+
+# ── PC cleanup：policy row 清走（持久 DB — 下次 run 嘅 T14 等要舊行為）──
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND category='BOOKING_REQUEST' AND \"level\" IN ('L3','L4')" >/dev/null 2>&1
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$MF_CLINIC_ID' AND category='BOOKING_REQUEST' AND \"level\" IN ('L3','L4')" >/dev/null 2>&1
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\" IN (SELECT id FROM \"Clinic\" WHERE code='WTC') AND category='BOOKING_REQUEST' AND \"level\" IN ('L3','L4')" >/dev/null 2>&1
+
+# ── PC summary ─────────────────────────────────────────────────────────
+[ "$PC_FAIL" = 0 ] && pass "R-PC Phase C e2e（G1-G5 + S1/S2 + PatientFact 全綠）" || fail "R-PC Phase C 有項失敗（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

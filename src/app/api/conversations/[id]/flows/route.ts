@@ -55,6 +55,16 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     conv.assigneeId = ctx.staff.id;
   }
 
+  // ★ Phase C（cwi-sess-20260824-c1）：staff 手動出 Flow 撞 session → 標 CANCELLED
+  //   （staff 主動用表格 = 人接管流程；session 唔會再收到病人訊息分流）
+  const cancelledSession = await prisma.bookingSession.updateMany({
+    where: { conversationId: conv.id, status: { in: ["ACTIVE", "CONFIRMING"] } },
+    data: { status: "CANCELLED" },
+  });
+  if (cancelledSession.count > 0) {
+    log.info({ conversationId: conv.id, count: cancelledSession.count }, "flows: staff 手動出 Flow → session CANCELLED（人接管）");
+  }
+
   try {
     const r = await sendBookingFlow({ conversationId: conv.id, staffId: ctx.staff.id });
     return NextResponse.json({

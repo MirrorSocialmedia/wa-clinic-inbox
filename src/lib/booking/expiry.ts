@@ -5,8 +5,9 @@
  * - PENDING 且 createdAt < now - 48h → EXPIRED + AuditLog(BOOKING_EXPIRED)
  * - FlowSession SENT 且 createdAt < now - 48h → ABANDONED（flow 中途棄 = 零 BookingRequest，
  *   無殭屍 — ABANDONED 只係清理 token 狀態）
+ * - ★ Phase C：BookingSession ACTIVE/CONFIRMING 且 expiresAt < now（24h TTL）→ ABANDONED
  *
- * 冪等：重複執行只處理 still-PENDING 嘅 row（UPDATE WHERE status='PENDING'）。
+ * 冪等：重複執行只處理 still-PENDING/ACTIVE 嘅 row（UPDATE WHERE status=...）。
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -16,6 +17,8 @@ export const EXPIRY_HOURS = 48;
 export interface ExpiryResult {
   expiredBookings: number;
   abandonedFlows: number;
+  /** ★ Phase C：過期 slot-filling session（24h TTL） */
+  abandonedSessions: number;
 }
 
 export async function runExpiry(now: Date = new Date()): Promise<ExpiryResult> {
@@ -51,8 +54,18 @@ export async function runExpiry(now: Date = new Date()): Promise<ExpiryResult> {
     data: { status: "ABANDONED" },
   });
 
-  if (expiredBookings > 0 || abandoned.count > 0) {
-    log.info({ expiredBookings, abandonedFlows: abandoned.count }, "cron: bookings-expire ok");
+  // 3) ★ Phase C（cwi-sess-20260824-c1）：slot-filling session 24h TTL → ABANDONED
+  //    （唔通知 — 病人 24h 冇理 = 自然冷卻；再講預約會重新開 session）
+  const abandonedSessions = await prisma.bookingSession.updateMany({
+    where: { status: { in: ["ACTIVE", "CONFIRMING"] }, expiresAt: { lt: now } },
+    data: { status: "ABANDONED" },
+  });
+
+  if (expiredBookings > 0 || abandoned.count > 0 || abandonedSessions.count > 0) {
+    log.info(
+      { expiredBookings, abandonedFlows: abandoned.count, abandonedSessions: abandonedSessions.count },
+      "cron: bookings-expire ok"
+    );
   }
-  return { expiredBookings, abandonedFlows: abandoned.count };
+  return { expiredBookings, abandonedFlows: abandoned.count, abandonedSessions: abandonedSessions.count };
 }

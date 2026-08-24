@@ -17,9 +17,16 @@ import {
   type ClassifyAndDraftResult,
 } from "./types";
 import { AI_INTENTS, AI_URGENCIES } from "./types";
-import { mockClassifyAndDraft, isAiMockEnabled, isAiMockFailEnabled } from "./mock";
+import { mockClassifyAndDraft, isAiMockEnabled, isAiMockFailEnabled, mockSessionTurn } from "./mock";
 import { chatWithFallback, getAiConfig, getBreakerState } from "./vllm";
 import { buildSystemPrompt, buildUserPrompt, CLASSIFY_DRAFT_JSON_SCHEMA } from "./prompts";
+import {
+  buildSessionSystemPrompt,
+  buildSessionUserPrompt,
+  SESSION_JSON_SCHEMA,
+  type SessionPromptInput,
+} from "./session-prompts";
+import { SESSION_ACTIONS, type SessionAiOutput } from "./session-types";
 import log from "@/lib/log";
 
 function extractJson(content: string): string {
@@ -102,6 +109,54 @@ export async function classifyAndDraft(
   return { ...parsed, model: r.model, latencyMs: r.latencyMs, tokens: r.tokens };
 }
 
+// ── Phase C（cwi-sess-20260824-c1）：slot-filling session turn ─────────
+// 每條病人訊息一次 LLM call；LLM 只出語氣句 + slotUpdates 抽取（事實鐵律）。
+
+export async function classifySessionTurn(input: SessionPromptInput): Promise<SessionAiOutput> {
+  if (isAiMockEnabled()) return mockSessionTurn(input); // C3.4 決定性 mock
+  const cfg = getAiConfig();
+  const messages = [
+    { role: "system" as const, content: buildSessionSystemPrompt() },
+    { role: "user" as const, content: buildSessionUserPrompt(input) },
+  ];
+  const r = await chatWithFallback(cfg, { messages, guidedJson: SESSION_JSON_SCHEMA });
+  return parseSessionOutput(r.content);
+}
+
+/**
+ * parse 端驗證（sglang 忽略 guided_json → 三重保險第三層）。
+ * ★ 錯誤訊息只描述結構問題 — 唔可以回顯 output 內容（可能含病人文字）。
+ */
+export function parseSessionOutput(content: string): SessionAiOutput {
+  let raw: string;
+  try {
+    raw = extractJson(content);
+    // JSON.parse 喺呢度包住 → SyntaxError 都轉 AiCallError（worker 統一 catch AiCallError）
+  } catch (err) {
+    if (err instanceof AiCallError) throw err;
+    throw new AiCallError("ai output: invalid JSON");
+  }
+  const o = JSON.parse(raw) as Record<string, unknown>;
+  const su = (o["slotUpdates"] ?? {}) as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const date = str(su["date"]);
+  const time = str(su["time"]);
+  const tod = str(su["timeOfDay"]);
+  const action = SESSION_ACTIONS.includes(o["action"] as (typeof SESSION_ACTIONS)[number])
+    ? (o["action"] as (typeof SESSION_ACTIONS)[number])
+    : "CONTINUE";
+  return {
+    slotUpdates: {
+      providerName: str(su["providerName"]),
+      date: date && /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(date) ? date : null, // 格式/範圍唔啱當冇講（2026-13-99 → null）
+      time: time && /^\d{2}:\d{2}$/.test(time) ? time : null,
+      timeOfDay: tod === "MORNING" || tod === "AFTERNOON" || tod === "EVENING" ? tod : null,
+    },
+    action,
+    reply: typeof o["reply"] === "string" ? o["reply"].slice(0, 200) : "",
+  };
+}
+
 export interface AiRuntimeInfo {
   mode: "mock" | "real";
   mockFail: boolean;
@@ -128,5 +183,7 @@ export { AiCallError } from "./types";
 export type { ClassifyAndDraftInput, ClassifyAndDraftResult, AiIntent, AiUrgency, AiContextMessage } from "./types";
 export { isAiMockEnabled, isAiMockFailEnabled } from "./mock";
 export { getAiConfig, getBreakerState } from "./vllm";
+export type { SessionAiOutput, SessionSlots, SessionAction } from "./session-types";
+export type { SessionPromptInput } from "./session-prompts";
 export { checkAiHealth, type AiHealth } from "./health";
 export { getAiCallStats, recordAiCall, type AiCallStatsRow } from "./stats";

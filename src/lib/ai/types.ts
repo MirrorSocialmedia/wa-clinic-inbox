@@ -12,6 +12,8 @@ export const AI_INTENTS = [
   "QUESTION",
   "URGENT_PAIN",
   "OUT_OF_SCOPE",
+  // ★ Phase C（cwi-sess-20260824-c1）：第 6 類 — 投訴 / 對服務不滿 / 要求退款賠償（needsHuman 必須 true）
+  "COMPLAINT",
   "OTHER",
 ] as const;
 export type AiIntent = (typeof AI_INTENTS)[number];

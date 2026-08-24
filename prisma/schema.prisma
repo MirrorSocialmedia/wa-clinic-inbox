@@ -88,6 +88,19 @@ enum BookingStatus {
   EXPIRED
 }
 
+// ★ AI Workflow Phase C（cwi-sess-20260824-c1）：slot-filling 對話式預約 session 狀態。
+// ACTIVE = 收集緊 slot；CONFIRMING = 等病人對確認句話 ok；COMPLETED = 齊料（出卡/AUTO_BOOK）；
+// HANDOFF = 人手接手（要真人 / 急症 / 輪數超限 / 冇進展 / staff claim）；
+// ABANDONED = 過期（24h TTL cron）/ 源離線改行 Flow 接力；CANCELLED = 病人取消 / staff 改用表格 Flow。
+enum BookingSessionStatus {
+  ACTIVE
+  CONFIRMING
+  COMPLETED
+  HANDOFF
+  ABANDONED
+  CANCELLED
+}
+
 model Clinic {
   id               String  @id @default(cuid())
   code             String  @unique            // TKW / MF ...（同 clinic-workforce 用同一套 code，方便對照）
@@ -209,6 +222,9 @@ model Message {
   // 識別「系統 AI 自動發」；再加 source 會同 channel 雙重事實來源（drift 風險）。
   // AUTO 訊息 = direction=OUT + channel=API + sentByStaffId=null + aiAutoSent=true。
   aiAutoSent     Boolean  @default(false)
+  // ★ AI Workflow Phase C（cwi-sess-20260824-c1）：呢條 OUT 訊息屬邊個 slot-filling session
+  //   （追溯 session 回覆用；null = 非 session 訊息。無 FK — session 行清唔會阻訊息 retention）。
+  bookingSessionId String?
   // ★ Phase B（cwi-tmpl-20260824-b1）：template 發送元數據（type="template" 先有）。
   // 結構：{ name, language, components }（components = [{type:"body",parameters:[...]}]）。
   // ★ PII：只有 template 名/語言/日期時間醫生診所變數 — 零病人自由文本。
@@ -227,6 +243,38 @@ model NoteReadReceipt {
   staffId   String
   readAt    DateTime @db.Timestamptz @default(now())
   @@unique([messageId, staffId])
+}
+
+// ★ AI Workflow Phase C（cwi-sess-20260824-c1）：逐店逐類自動化級別（總綱 §3.3 D-4/D-5）。
+// category = intent 名（"BOOKING_REQUEST" 等）或 "*"（該店預設）。
+// 優先序：exact → "*" → legacy clinic.aiMode（DRAFT→L1, AUTO→L2）；天花板 = env AI_GLOBAL_MAX_LEVEL。
+// 寫入只經 admin route（Phase E 先開 UI；C 期 seed/SQL 手動設測試店）。
+model AutomationPolicy {
+  id        String   @id @default(cuid())
+  clinicId  String
+  category  String                       // intent；"*" = 該店預設
+  level     String                       // L1 / L2 / L3 / L4
+  updatedBy String?
+  updatedAt DateTime @db.Timestamptz @updatedAt
+  @@unique([clinicId, category])
+}
+
+// ★ AI Workflow Phase C（cwi-sess-20260824-c1）：slot-filling 對話 session（總綱 §6.3 D-2）。
+// slots = SessionSlots（Json — providerApricotId/providerName/date/time/timeOfDay；engine 驗證過先算數）。
+// 零病人自由文本落庫：只 business metadata（醫生 id/名、日期、時間、時段偏好）。
+model BookingSession {
+  id             String               @id @default(cuid())
+  conversationId String
+  clinicId       String
+  status         BookingSessionStatus @default(ACTIVE)
+  slots          Json                 // SessionSlots（見 src/lib/ai/session-types.ts）
+  turns          Int                  @default(0)
+  noProgress     Int                  @default(0)
+  createdAt      DateTime @db.Timestamptz @default(now())
+  updatedAt      DateTime @db.Timestamptz @updatedAt
+  expiresAt      DateTime @db.Timestamptz
+  @@index([conversationId, status])
+  @@index([status, expiresAt])
 }
 
 model AiDraft {
@@ -281,6 +329,9 @@ model BookingRequest {
   remindedAt        DateTime? @db.Timestamptz
   visitReasonCode   String?                    // 卡上揀咗嘅 visit reason（dictionaries code；審計 + remarks 組裝）
   chiefComplaint    String?                    // 主訴快照（Flow 完成時由 conversation.aiSummary 摘；≤50 字）
+  // ★ AI Workflow Phase C（cwi-sess-20260824-c1）：L4 AI 自動落單標記（Phase E rollback 統計鈎）。
+  //   staff 三掣 / 普通 Flow 路徑 = false；BookingSession AUTO_BOOK 成功 = true。
+  autoBooked        Boolean @default(false)
   createdAt         DateTime @db.Timestamptz      @default(now())
   // Phase 3：/bookings 隊列查詢（本店 + 狀態 + 時間）
   @@index([clinicId, status, createdAt])
