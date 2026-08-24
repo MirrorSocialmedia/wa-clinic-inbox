@@ -94,6 +94,7 @@
 #   T60 lock 翻轉 + 被 lock 者照發 note + 新負責人可發 + 接手（self-claim）+ socket note:new
 #   T61 放返隊列（unassign）+ 再 auto-claim
 #   T62 Flow Send Lock（423）
+#   T62b Booking Send Lock（代落單 create 非負責人 → 423 SEND_LOCKED；負責人唔 423，cwi-prefix-20260824-b1）
 #   T63 ★ 10 條 INTERNAL note → mock Graph 計數不變（物理隔離）+ unread 不變 + 無新 AiDraft
 #   T64 socket/log 零內文（grep 自證）+ hermetic 清理（臨時 staff 刪除）
 #
@@ -1688,7 +1689,7 @@ echo "[H1] H1: handoff / send lock / internal notes..."
 # ★ dev-mode pre-compile：warm up H1 routes — Next dev 首訪即編譯；快速串行打多 route 會令
 #   並行 webpack compilation 搶寫 app manifest → loadManifest JSON.parse 空檔 → 500
 #   （非 app bug；用 dummy request 順向編譯完先跑快速斷言序列）
-for _WARM in "/api/conversations/warmup-h1/assign" "/api/conversations/warmup-h1/notes" "/api/conversations/warmup-h1/flows" "/api/messages/send"; do
+for _WARM in "/api/conversations/warmup-h1/assign" "/api/conversations/warmup-h1/notes" "/api/conversations/warmup-h1/flows" "/api/messages/send" "/api/bookings/warmup-h1/create"; do
   curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE$_WARM" \
     -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 || true
 done
@@ -1853,6 +1854,28 @@ check "T61 assignee 翻返 A" "$(q "SELECT \"assigneeId\"::text a FROM \"Convers
 h1_req "$COOKIE_H1B" POST "$BASE/api/conversations/$H1_CONV/flows"
 check "T62 B（非負責人）flow → 423" "$H1_CODE" "423"
 
+# ── T62b. Booking Send Lock：代落單 create 非負責人 → 423（MD §7，cwi-prefix-20260824-b1）─
+# 代落單 = 向 Apricot 寫入 — 同 rollback/cancel/reschedule 一樣受 Send Lock。
+# fixture：H1_CONV（T61 後 assignee = A）+ 直接 DB 造 PENDING booking + pin 舊客（令 create 舊客 gate 通過）。
+# 直接 SQL（同 T9/T32 慣例）；BookingRequest 無 FK cascade → T64 hermetic 段補 DELETE。
+LOCK_BOOK_ID="e2e_h1_lock_book_$EPOCH"
+q "UPDATE \"Conversation\" SET \"assigneeId\"='$TKW_STAFF_ID', \"pinnedPatientApricotId\"='e2e-h1-lock-pat', \"pinnedPatientName\"='E2E H1 Lock Patient' WHERE id='$H1_CONV'" >/dev/null
+q "INSERT INTO \"BookingRequest\" (id, \"conversationId\", \"clinicId\", \"flowToken\", \"providerApricotId\", \"providerName\", \"requestedDate\", \"requestedTime\", \"status\") VALUES ('$LOCK_BOOK_ID', '$H1_CONV', '$TKW_CLINIC_ID', 'e2e-h1-lock-flow-$EPOCH', 'mock-pract-tkw-1', 'E2E H1 Lock Dr', '2026-09-02', '10:00', 'PENDING')" >/dev/null
+check "T62b fixture：PENDING booking 已插" "$(q "SELECT count(*)::text n FROM \"BookingRequest\" WHERE id='$LOCK_BOOK_ID' AND \"status\"='PENDING'" | jf n)" "1"
+# (a) B（非負責人）直接打 create route（唔經 UI）→ 423 SEND_LOCKED
+h1_req "$COOKIE_H1B" POST "$BASE/api/bookings/$LOCK_BOOK_ID/create"
+check "T62b B（非負責人）代落單 → 423" "$H1_CODE" "423"
+grep -q '"error":"SEND_LOCKED"' "$H1_OUT" && pass "T62b 423 body = SEND_LOCKED" || { fail "T62b 423 body 錯"; H1=1; }
+grep -qF "\"assigneeId\":\"$TKW_STAFF_ID\"" "$H1_OUT" && pass "T62b 423 body 帶 assigneeId" || { fail "T62b 423 body 無 assigneeId"; H1=1; }
+# (b) A（負責人自己）唔會 423/500 — write-disabled flag 令 workforce 寫止住喺 503（booking 保持 PENDING，無 CONFIRMED/無訊息副作用）
+printf '{"clinicCode":"TKW"}' > .dev/workforce-mock-write-disabled.json
+h1_req "$COOKIE_TKW" POST "$BASE/api/bookings/$LOCK_BOOK_ID/create" '{"visitReasonId":"vr-0010"}'
+rm -f .dev/workforce-mock-write-disabled.json
+[ "$H1_CODE" != "423" ] && [ "$H1_CODE" != "500" ] && pass "T62b A（負責人）代落單唔係 423/500（actual=$H1_CODE）" || { fail "T62b A 代落單被 lock 或 500（actual=$H1_CODE）"; H1=1; }
+check "T62b A 落單 → 503 WRITE_DISABLED（mock flag 決定性）" "$H1_CODE" "503"
+grep -q '"error":"WRITE_DISABLED"' "$H1_OUT" && pass "T62b 503 body = WRITE_DISABLED" || { fail "T62b 503 body 錯"; H1=1; }
+check "T62b booking 保持 PENDING（503 無改狀態）" "$(q "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$LOCK_BOOK_ID'" | jf s)" "PENDING"
+
 # ── T63. ★ 10 條 INTERNAL note → mock Graph 計數不變（物理隔離）────────────
 GRAPH_B=$(graph_count)
 UNREAD_B=$(q "SELECT \"unreadCount\"::text u FROM \"Conversation\" WHERE id='$H1_CONV'" | jf u)
@@ -1885,6 +1908,7 @@ q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$H1_CONV'" >/dev/null 2>&1 
 q "DELETE FROM \"NoteReadReceipt\" WHERE \"messageId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\"='$H1_CONV')" >/dev/null 2>&1 || true
 q "DELETE FROM \"AuditLog\" WHERE \"entityId\"='$H1_CONV'" >/dev/null 2>&1 || true
 q "DELETE FROM \"AuditLog\" WHERE \"entityId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\"='$H1_CONV')" >/dev/null 2>&1 || true
+q "DELETE FROM \"BookingRequest\" WHERE id='$LOCK_BOOK_ID'" >/dev/null 2>&1 || true
 q "DELETE FROM \"WebhookEvent\" WHERE id='$H1_WAMID'" >/dev/null 2>&1 || true
 q "DELETE FROM \"Message\" WHERE \"conversationId\"='$H1_CONV'" >/dev/null 2>&1 || true
 q "DELETE FROM \"Conversation\" WHERE id='$H1_CONV'" >/dev/null 2>&1 || true

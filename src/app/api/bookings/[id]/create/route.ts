@@ -18,7 +18,8 @@
  * - 503 WRITE_DISABLED / APRICOT_BUSY → 503 人手指示
  * - 502 APRICOT_ERROR / 其他 → 502 人手指示
  *
- * 權限：assertClinicAccess（同 confirm route — MD §7 嘅 Send Lock 只限撤銷/改期/取消三動作）。
+ * 權限：assertClinicAccess + Send Lock（MD §7：代落單 = 向 Apricot 寫入 → 非負責人 423，
+ * 同 rollback/cancel/reschedule 一致）。
  * 24h 窗口邏輯：窗口只影響「自動確認訊息」，唔影響落單本身（同 confirm 一致）。
  */
 import { type NextRequest, NextResponse } from "next/server";
@@ -69,6 +70,18 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   const clinic = await prisma.clinic.findUnique({ where: { id: booking.clinicId } });
   if (!conv || !clinic) {
     return NextResponse.json({ error: "conversation missing" }, { status: 500 });
+  }
+
+  // Send Lock（MD §7：代落單 = 向 Apricot 寫入，非負責人唔准）
+  if (conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
+    log.info(
+      { clinicId: booking.clinicId, conversationId: booking.conversationId, staffId: ctx.staff.id, assigneeId: conv.assigneeId },
+      "bookings: create — 423 SEND_LOCKED"
+    );
+    return NextResponse.json(
+      { error: "SEND_LOCKED", message: "只有負責人可以代落單", assigneeId: conv.assigneeId },
+      { status: 423 }
+    );
   }
 
   // 鐵律 A：只對已釘住舊客（pinnedPatientApricotId）先可以代落單
