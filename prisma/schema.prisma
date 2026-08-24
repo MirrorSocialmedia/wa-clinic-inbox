@@ -326,7 +326,7 @@ model BookingRequest {
   apricotApptId     String?                    // Apricot 單號（workforce create 後寫入；rollback 後清 null）
   // ★ Phase B（cwi-tmpl-20260824-b1）：T-24h 提醒已發時間（冪等旗 — null = 未提醒）。
   // 改期/rollback 時 reset null（新時間/重新確認會再提醒）。
-  remindedAt        DateTime? @db.Timestamptz
+  remindedAt        DateTime? @db.Timestamptz  // Phase B 建表 drift（migration 建 TIMESTAMP(3)）— pre-existing，Phase D 唔經手
   visitReasonCode   String?                    // 卡上揀咗嘅 visit reason（dictionaries code；審計 + remarks 組裝）
   chiefComplaint    String?                    // 主訴快照（Flow 完成時由 conversation.aiSummary 摘；≤50 字）
   // ★ AI Workflow Phase C（cwi-sess-20260824-c1）：L4 AI 自動落單標記（Phase E rollback 統計鈎）。
@@ -482,6 +482,27 @@ model PatientFact {
   model           String?  // 抽取者（deterministic 抽 = null）
   createdAt       DateTime @db.Timestamptz @default(now())
   @@index([contactId, createdAt])
+}
+
+// ★ AI Workflow Phase D（cwi-ai-20260825-t4）：workflow 參數化 + builder v1（總綱 §6.4 D-11）。
+// 可調嘢（文案／閾值／開關）收歸呢張版本化表：admin 改 → publish → 生效 → 可回退，全程 audit。
+// - clinicId null = 全局；店行有自己 ACTIVE 就 override（getParams 三級 fallback）。
+// - status 用 String 唔用 enum（同 Alert.severity 慣例 — 慳一個 CREATE TYPE，零鎖表）。
+// - graph = 唯讀顯示用 nodes/edges（由內建模板 buildGraph 生成）；params 先係實際生效參數。
+// - v1 執行器唔係 graph interpreter — 執行仍係現有 code path，每決策點讀 ACTIVE params。
+model WorkflowDefinition {
+  id          String    @id @default(cuid())
+  clinicId    String?                        // null = 全局；店行有自己 ACTIVE 就 override
+  key         String                         // "triage" | "booking-session" | "reminder"
+  version     Int
+  status      String                         // DRAFT / ACTIVE / ARCHIVED
+  graph       Json                           // { nodes, edges }（顯示用，由內建模板生成）
+  params      Json                           // 實際生效參數（見 src/lib/workflow/definitions.ts 每 key schema）
+  createdBy   String?
+  publishedAt DateTime? @db.Timestamptz
+  createdAt   DateTime  @db.Timestamptz @default(now())
+  @@unique([clinicId, key, version])
+  @@index([key, status])
 }
 
 model OpsReport {

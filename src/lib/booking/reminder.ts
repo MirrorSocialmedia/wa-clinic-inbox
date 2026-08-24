@@ -16,9 +16,10 @@ import log from "@/lib/log";
 import {
   buildTemplateComponents,
   reminderPreviewText,
-  reminderTemplateName,
-  reminderTemplateLang,
 } from "@/lib/wa/templates";
+// ★ Phase D（cwi-ai-20260825-t4）：reminder 窗口 + template 名/語言 由 WorkflowDefinition
+// 「reminder」params 讀（全局一份；env REMINDER_MIN/MAX_HOURS、TEMPLATE_REMINDER_NAME/LANG 保留做 defaults 底）
+import { getParams } from "@/lib/workflow/store";
 
 // ★ 延遲 import：outboundQueue/publishNotify 會拉起 Redis 連接（BullMQ module-level
 // instance）— unit test（零 Redis）import 呢個 module 時唔想連坐。生產路徑行為不變。
@@ -37,15 +38,6 @@ async function lazyNotify(clinicId: string, conversationId: string) {
 
 const ENQUEUE_TIMEOUT_MS = 1500;
 
-function windowHours(): { minH: number; maxH: number } {
-  const minH = Number(process.env.REMINDER_MIN_HOURS ?? 23);
-  const maxH = Number(process.env.REMINDER_MAX_HOURS ?? 25);
-  return {
-    minH: Number.isFinite(minH) && minH >= 0 ? minH : 23,
-    maxH: Number.isFinite(maxH) && maxH > 0 ? maxH : 25,
-  };
-}
-
 /** HK（UTC+8 固定無 DST）開診時刻 → epoch ms。 */
 export function hkApptEpochMs(dateStr: string, timeStr: string): number {
   return new Date(`${dateStr}T${timeStr}:00+08:00`).getTime();
@@ -63,7 +55,10 @@ export interface ReminderScanResult {
 }
 
 export async function runReminderScan(now: Date = new Date()): Promise<ReminderScanResult> {
-  const { minH, maxH } = windowHours();
+  // ★ Phase D：窗口 + template 參數由 workflow params 讀（fail-soft → env 底 defaults）
+  const reminderParams = await getParams("reminder", null);
+  const minH = reminderParams.minHours;
+  const maxH = reminderParams.maxHours;
 
   // 候選集細（CONFIRMED + 未提醒），日期粗篩今日/聽日/後日三個 HK 日字串（25h 窗口必喺其中一日），時刻精篩喺 JS 做
   const dayStrs = [0, 1, 2].map((d) => {
@@ -113,8 +108,8 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
           type: "template",
           body: reminderPreviewText(input),
           templateMeta: {
-            name: reminderTemplateName(),
-            language: reminderTemplateLang(),
+            name: reminderParams.templateName,
+            language: reminderParams.templateLang,
             components: buildTemplateComponents(input),
           } as unknown as Prisma.InputJsonValue,
           status: "QUEUED",

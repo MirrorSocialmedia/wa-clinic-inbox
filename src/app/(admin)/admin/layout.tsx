@@ -44,6 +44,9 @@ export default async function AdminLayout({
               <a href="/admin/templates" className="text-t2 hover:text-t1">
                 Templates
               </a>
+              <a href="/admin/workflows" className="text-t2 hover:text-t1">
+                Workflow
+              </a>
             </nav>
           </div>
           <span className="flex items-center gap-3">

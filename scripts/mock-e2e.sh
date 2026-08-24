@@ -1763,18 +1763,20 @@ h1_req() { # h1_req <cookie> <method> <url> [json-body] → $H1_CODE / $H1_OUT
   local cookie="$1" method="$2" url="$3" body="${4:-}"
   local code out attempt=0
   out=$(mktemp /tmp/e2e-h1-api.XXXXXX)
-  while [ "$attempt" -lt 2 ]; do
+  while [ "$attempt" -lt 3 ]; do
     if [ -n "$body" ]; then
       code=$(curl -s -o "$out" -w '%{http_code}' -b "$cookie" -X "$method" "$url" \
         -H 'Content-Type: application/json' -d "$body")
     else
       code=$(curl -s -o "$out" -w '%{http_code}' -b "$cookie" -X "$method" "$url")
     fi
-    if [ "$code" = "500" ] && [ "$attempt" = "0" ] && grep -q "Unexpected end of JSON input" "$out" 2>/dev/null; then
-      echo "    (dev manifest flake 500 → retry: ${method} ${url##*/})"
+    # ★ 2026-08-25 run2 教訓：dev manifest flake 除 500 外仲有 308 形態（body 冇 marker）；
+    #   API route 永遠唔應該 308 → 當 flake 重試（最多 3 次）
+    if { [ "$code" = "500" ] && grep -q "Unexpected end of JSON input" "$out" 2>/dev/null; } || [ "$code" = "308" ]; then
+      echo "    (dev manifest flake ${code} → retry: ${method} ${url##*/})"
       rm -f "$out"
       sleep 2
-      attempt=1
+      attempt=$((attempt+1))
       continue
     fi
     break
@@ -1782,6 +1784,19 @@ h1_req() { # h1_req <cookie> <method> <url> [json-body] → $H1_CODE / $H1_OUT
   sleep 1
   H1_CODE=$code
   H1_OUT=$out
+}
+
+patch_aimode() { # patch_aimode <clinicId> <mode> [out-file 可空] → $PAM_CODE
+  # ★ 2026-08-25 run4 教訓：T87 aiMode 還原 PATCH 撞 dev manifest flake（500）→ MF 遺留 AUTO 污染下次 run。
+  #   aiMode PATCH 冪等 → 非 200 重試（最多 3 次）
+  local cid="$1" mode="$2" out="${3:-/dev/null}" code=""
+  for _try in 1 2 3; do
+    code=$(curl -s -o "$out" -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$cid" \
+      -H 'Content-Type: application/json' -d "{\"aiMode\":\"$mode\"}")
+    [ "$code" = "200" ] && break
+    [ "$_try" -lt 3 ] && { echo "    (dev flake ${code} → aiMode PATCH retry)"; sleep 2; }
+  done
+  PAM_CODE=$code
 }
 
 # ── T56. unassigned 首發 → auto-claim ──────────────────────────────────
@@ -1992,13 +2007,22 @@ H2_C_ID=$(echo "$STAFF_OUT" | grep -oE 'STAFF_ID=[a-z0-9]+' | head -1 | cut -d= 
 [ -n "$H2_C_ID" ] || { echo "    ❌ H2 臨時 staff C 建立失敗"; H2=1; }
 
 # (2) B / C 登入（密碼 = H1 fixture — e2e:staff create 固定用 H1_B_PASSWORD）
-CODE=$(curl -s -o /dev/null -D /tmp/e2e-h2b-login-headers.txt -w '%{http_code}' -c /tmp/e2e-cookie-h2b.txt \
-  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$H2_B_EMAIL\",\"password\":\"$H1B_PASS\"}")
+# ★ 2026-08-25 run2 教訓：raw curl 無 flake retry → 一次 dev manifest 500 → B 無 cookie → 後續 ~10 項 401 連鎖。
+for _try in 1 2 3; do
+  CODE=$(curl -s -o /dev/null -D /tmp/e2e-h2b-login-headers.txt -w '%{http_code}' -c /tmp/e2e-cookie-h2b.txt \
+    -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$H2_B_EMAIL\",\"password\":\"$H1B_PASS\"}")
+  [ "$CODE" = "200" ] && break
+  [ "$_try" -lt 3 ] && { echo "    (dev flake ${CODE} → staff B login retry)"; sleep 2; }
+done
 check "H2-0 臨時 staff B 登入 → 200" "$CODE" "200"
-CODE=$(curl -s -o /dev/null -D /tmp/e2e-h2c-login-headers.txt -w '%{http_code}' -c /tmp/e2e-cookie-h2c.txt \
-  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$H2_C_EMAIL\",\"password\":\"$H1B_PASS\"}")
+for _try in 1 2 3; do
+  CODE=$(curl -s -o /dev/null -D /tmp/e2e-h2c-login-headers.txt -w '%{http_code}' -c /tmp/e2e-cookie-h2c.txt \
+    -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$H2_C_EMAIL\",\"password\":\"$H1B_PASS\"}")
+  [ "$CODE" = "200" ] && break
+  [ "$_try" -lt 3 ] && { echo "    (dev flake ${CODE} → staff C login retry)"; sleep 2; }
+done
 check "H2-0 臨時 staff C 登入 → 200" "$CODE" "200"
 COOKIE_H2B=/tmp/e2e-cookie-h2b.txt
 COOKIE_H2C=/tmp/e2e-cookie-h2c.txt
@@ -2278,7 +2302,7 @@ rm -f "$RET_MEDIA_KEEP" "$RET_MEDIA_OLD"
 # ── T83. A1 七閘：AUTO + assignee → 只出 draft 唔自動發（log assigned） ─────────
 echo "[AI-T1] T83: AUTO + assigned gate..."
 T83=0
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$MF_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"AUTO"}')
+patch_aimode "$MF_CLINIC_ID" AUTO; CODE=$PAM_CODE
 check "T83 MF→AUTO" "$CODE" "200"
 P_T83="8526101${EPOCH}"; WAMID_T83="wamid.E2E_T83_${EPOCH}"; C_T83="t83-c-${EPOCH}"; CONV_T83="t83-conv-${EPOCH}"
 q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_T83', '$MF_CLINIC_ID', '$P_T83', 'E2E T83', ARRAY[]::text[])" >/dev/null 2>&1
@@ -2394,7 +2418,7 @@ q "DELETE FROM \"Contact\" WHERE id='$C_T86'" >/dev/null 2>&1
 
 # ── T87. hermetic：MF 還原 DRAFT（T19 只改咗 TKW；MF 由 T83 起轉 AUTO） ────────
 echo "[AI-T1] T87: restore MF DRAFT (hermetic)..."
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$MF_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"DRAFT"}')
+patch_aimode "$MF_CLINIC_ID" DRAFT; CODE=$PAM_CODE
 check "T87 MF 還原 DRAFT" "$CODE" "200"
 
 # Phase R9 — Realtime P0 chaos e2e（cwi-rt-20260823；Kairo mt5w39ck5etgo）
@@ -2922,6 +2946,9 @@ if [ -n "$PC_SLOT1" ]; then
   check "PC-G1 confirmLine 逐字（engine 事實句）" "$(pc_sess_reply "$PC1_CONV" 3)" "收到！ 同你確認一次：${PC1_MO}月${PC1_DD}日 15:00 ${PC_S1_NAME}，啱唔啱？"
 
   # 訊息 4：確認 → COMPLETED + CREATE_CARD（L3）
+  # ★ 2026-08-25 run5 教訓：mock-inbound waTimestamp 只到秒級 — m3/m4 同一秒 → PatientFact writer 嘅
+  #   `waTimestamp < msg` strict lt 會漏咗 m3（同秒 tie）→ source 回退去 m2。sleep 1.1 保證秒級分離（deterministic）
+  sleep 1.1
   pnpm -s mock-inbound message --clinic TKW --from "$PC1_WA" --text "好呀" --wamid "wamid.E2E_PC1_4_${EPOCH}" --name "E2E PC1" >/dev/null 2>&1
   if wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$PC1_CONV'" '[{"s":"PENDING"}]' 45; then
     pass "PC-G1 綠色卡 PENDING（precheck 過）"
@@ -3160,6 +3187,276 @@ q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\" IN (SELECT id FROM \"Clin
 
 # ── PC summary ─────────────────────────────────────────────────────────
 [ "$PC_FAIL" = 0 ] && pass "R-PC Phase C e2e（G1-G5 + S1/S2 + PatientFact 全綠）" || fail "R-PC Phase C 有項失敗（見上 ❌）"
+
+# ── W 段：Phase D workflow 參數化 e2e（cwi-ai-20260825-t4）────────────────────
+#
+# W1: triage cooldown — v1（30min）發 1 次 → 職員覆核 → msg2 被 human-recent 擋（PROPOSED）
+#     → publish v2（cooldown 0）→ msg3 SENT_AUTO（即時生效，worker TTL=0）→ revert v1 → v3
+#     → msg4 再被擋（cooldown 還原）
+# W2: booking-session confirmText 改字 → golden 3 訊息重跑 → 新文案逐字 → revert 還原
+# W3: RBAC STAFF 403 + AuditLog WORKFLOW_DRAFT/PUBLISH 有 row（meta.key 可審）
+# W4: fail-soft — WorkflowDefinition 表 rename 走 → GET 200（defaults）+ 全鏈照行（SENT_AUTO）
+#
+# EPOCH-scoped：waId 8526901-3${EPOCH} / wamid.E2E_W*_${EPOCH} / policy id e2e-w2-tkw-l3-${EPOCH}
+W_FAIL=0
+WF_PATIENT_LOG=/tmp/e2e-worker-w.log
+
+# W 段用自己 worker：WORKFLOW_PARAMS_TTL_MS=0 — publish/revert 即刻生效（唔靠 5min TTL 倒數）
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+WORKFLOW_PARAMS_TTL_MS=0 nohup pnpm worker >/tmp/e2e-worker-w.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 60); do grep -q "all workers running" "$WF_PATIENT_LOG" 2>/dev/null && break; sleep 1; done
+
+# 乾淨起點：global WorkflowDefinition row 清走（殘留/上次 run — 版本編號要由 1 起）
+q "DELETE FROM \"WorkflowDefinition\" WHERE \"clinicId\" IS NULL" >/dev/null 2>&1
+
+wf_put() { # wf_put <key> <clinicId 可空> <params-json> → $W_CODE $W_OUT
+  local cid_json="null"
+  [ -n "$2" ] && cid_json="\"$2\""
+  W_CODE=$(curl -s -o /tmp/e2e-wf-put.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT "$BASE/api/admin/workflows/$1" \
+    -H 'Content-Type: application/json' -d "{\"clinicId\":$cid_json,\"params\":$3}")
+  W_OUT=$(cat /tmp/e2e-wf-put.json)
+}
+wf_publish() { # wf_publish <key> <defId> → $W_CODE $W_OUT
+  W_CODE=$(curl -s -o /tmp/e2e-wf-pub.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/workflows/$1/publish" \
+    -H 'Content-Type: application/json' -d "{\"defId\":\"$2\"}")
+  W_OUT=$(cat /tmp/e2e-wf-pub.json)
+}
+wf_revert() { # wf_revert <key> <clinicId 可空> <toVersion> → $W_CODE $W_OUT
+  local cid_json="null"
+  [ -n "$2" ] && cid_json="\"$2\""
+  W_CODE=$(curl -s -o /tmp/e2e-wf-rev.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/workflows/$1/revert" \
+    -H 'Content-Type: application/json' -d "{\"clinicId\":$cid_json,\"toVersion\":$3}")
+  W_OUT=$(cat /tmp/e2e-wf-rev.json)
+}
+wf_get() { # wf_get <out-file> → $W_CODE（JSON 有效先算成功）
+  # ★ 2026-08-25 run2/run3 教訓：dev manifest flake 會喺單次 GET 回 500/HTML（body 非 JSON）→ node -e 崩。
+  #   retry 條件 = body 可 JSON.parse（唔係 status code — flake 有時 200 都回 HTML 500 page）
+  local out="$1" code=""
+  for _try in 1 2 3; do
+    code=$(curl -s -o "$out" -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/api/admin/workflows")
+    if node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$out" 2>/dev/null; then
+      W_CODE=$code
+      return 0
+    fi
+    [ "$_try" -lt 3 ] && { echo "    (dev flake → workflows GET retry)"; sleep 2; }
+  done
+  W_CODE=$code
+  return 0
+}
+# defaults 原句（同 src/lib/workflow/definitions.ts — W2 v1 行用）
+WF_DEF_TRIAGE='{"humanCooldownMs":1800000,"confidenceFloor":0.6,"autoThanksReply":"唔緊要，祝你早日康復！"}'
+WF_DEF_SESSION='{"maxTurns":12,"maxNoProgress":3,"candidateCount":5,"askProviderText":"想約邊位醫生？我哋有：{providers}","candidateHeader":"而家有以下時段：","candidateFooter":"直接覆編號或者講你想要嘅時間就得🙂","confirmText":"同你確認一次：{date} {time} {provider}，啱唔啱？","slotTakenText":"唔好意思，呢個時段啱啱滿咗。","handoffText":"等我搵職員直接同你安排 🙏","staleDisclaimer":"（時段以最終確認為準）"}'
+
+# ── W1. triage cooldown：0 生效 + revert 還原 ────────────────────────────────────
+echo "[W/4] W1: triage cooldown 0 生效 + revert 還原..."
+patch_aimode "$TKW_CLINIC_ID" AUTO /tmp/e2e-w1-a.json; CODE=$PAM_CODE
+check "W1 PATCH aiMode=AUTO → 200" "$CODE" "200"
+
+wf_put triage "" "$WF_DEF_TRIAGE"
+check "W1 PUT triage v1（defaults 30min）→ 201" "$W_CODE" "201"
+WF_V1=$(echo "$W_OUT" | jf id)
+wf_publish triage "$WF_V1"
+check "W1 publish v1 → 200" "$W_CODE" "200"
+
+W1_WA="8526901${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$W1_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W1_1_${EPOCH}" --name "E2E W1" >/dev/null 2>&1 || fail "W1 mock-inbound msg1"
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_1_${EPOCH}'" '[{"c":"1"}]' 15
+W1_MSG1=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_1_${EPOCH}'" | jf id)
+W1_CONV=$(pc_conv_of "$W1_WA" "$TKW_CLINIC_ID")
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W1_MSG1'" '[{"s":"SENT_AUTO"}]' 30; then
+  pass "W1 msg1 SENT_AUTO（cooldown 30min 首發唔受影響）"
+else
+  fail "W1 msg1 未 SENT_AUTO（v1 參數未生效？）"; W_FAIL=1
+fi
+
+# 職員覆核（OUT + sentByStaffId 非空 → 第八閘 human-recent 觸發源）
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$W1_CONV\",\"body\":\"e2e W1 職員覆核\"}"
+check "W1 職員 send → 2xx" "$([ "${H1_CODE:0:1}" = "2" ] && echo y || echo n)" "y"
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W1_CONV' AND direction='OUT' AND \"sentByStaffId\" IS NOT NULL AND status='SENT'" '[{"c":"1"}]' 30
+
+pnpm -s mock-inbound message --clinic TKW --from "$W1_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W1_2_${EPOCH}" --name "E2E W1" >/dev/null 2>&1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_2_${EPOCH}'" '[{"c":"1"}]' 15
+W1_MSG2=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_2_${EPOCH}'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W1_MSG2'" '[{"s":"PROPOSED"}]' 45; then
+  pass "W1 msg2 PROPOSED（第八閘 human-recent 擋 auto）"
+else
+  fail "W1 msg2 未 PROPOSED（human-recent 閘失靈？）"; W_FAIL=1
+fi
+check "W1 msg2 無新 auto OUT（仍 1）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W1_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "1"
+if grep -F "wamid.E2E_W1_2_${EPOCH}" "$WF_PATIENT_LOG" 2>/dev/null | grep -q "human-recent"; then
+  pass "W1 worker log：msg2 block reasons 含 human-recent（metadata only）"
+else
+  fail "W1 worker log 無 msg2 human-recent 記錄"; W_FAIL=1
+fi
+
+# staff send 會 auto-assign 對話（send route：unassigned → sender 變 assignee）→ assignee gate 會永久擋 AUTO。
+# 純 cooldown 測試：unassign 清走 assignee gate，隔離測第八閘。
+h1_req "$COOKIE_TKW" POST "$BASE/api/conversations/$W1_CONV/assign" '{"toStaffId":null}'
+check "W1 unassign → 200（清 assignee gate）" "$H1_CODE" "200"
+check "W1 conv.assigneeId 已清" "$(q "SELECT (\"assigneeId\" IS NULL)::text n FROM \"Conversation\" WHERE id='$W1_CONV'" | jf n)" "true"
+
+wf_put triage "" '{"humanCooldownMs":0,"confidenceFloor":0.6,"autoThanksReply":"唔緊要，祝你早日康復！"}'
+check "W1 PUT triage v2（cooldown 0）→ 201" "$W_CODE" "201"
+WF_V2=$(echo "$W_OUT" | jf id)
+wf_publish triage "$WF_V2"
+check "W1 publish v2 → 200" "$W_CODE" "200"
+
+pnpm -s mock-inbound message --clinic TKW --from "$W1_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W1_3_${EPOCH}" --name "E2E W1" >/dev/null 2>&1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_3_${EPOCH}'" '[{"c":"1"}]' 15
+W1_MSG3=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_3_${EPOCH}'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W1_MSG3'" '[{"s":"SENT_AUTO"}]' 30; then
+  pass "W1 msg3 SENT_AUTO（cooldown 0 publish 後即時生效 — 唔使重啟）"
+else
+  fail "W1 msg3 未 SENT_AUTO（TTL/cache 唔係 0？）"; W_FAIL=1
+fi
+
+wf_revert triage "" 1
+check "W1 revert toVersion=1 → 200" "$W_CODE" "200"
+W1_NV=$(node -e 'const j=JSON.parse(require("fs").readFileSync("/tmp/e2e-wf-rev.json","utf8"));console.log(j.newVersion)')
+check "W1 revert newVersion=3（re-publish as v(n+1)）" "$W1_NV" "3"
+wf_get /tmp/e2e-w1-get.json
+W1_AV=$(node -e 'const j=JSON.parse(require("fs").readFileSync("/tmp/e2e-w1-get.json","utf8"));const w=j.workflows.find(x=>x.key==="triage");console.log(w.active.version+"|"+w.active.params.humanCooldownMs)')
+check "W1 GET workflows：triage ACTIVE v3 + cooldown 還原 30min" "$W1_AV" "3|1800000"
+
+pnpm -s mock-inbound message --clinic TKW --from "$W1_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W1_4_${EPOCH}" --name "E2E W1" >/dev/null 2>&1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_4_${EPOCH}'" '[{"c":"1"}]' 15
+W1_MSG4=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_4_${EPOCH}'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W1_MSG4'" '[{"s":"PROPOSED"}]' 45; then
+  pass "W1 msg4 PROPOSED（revert 後 cooldown 30min 還原生效）"
+else
+  fail "W1 msg4 未 PROPOSED（revert 未生效？）"; W_FAIL=1
+fi
+check "W1 msg4 無新 auto OUT（仍 2）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W1_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "2"
+
+# ── W2. booking-session confirmText 改字 → golden 重跑新文案 + revert ──────────
+echo "[W/4] W2: confirmText 改字 → golden 3 訊息重跑新文案 + revert..."
+wf_put booking-session "" "$WF_DEF_SESSION"
+check "W2 PUT booking-session v1（defaults）→ 201" "$W_CODE" "201"
+WF2_V1=$(echo "$W_OUT" | jf id)
+wf_publish booking-session "$WF2_V1"
+check "W2 publish v1 → 200" "$W_CODE" "200"
+
+WF2_P2=$(node -e 'const p=JSON.parse(process.argv[1]);p.confirmText="e2e-W2確認：{date} {time} {provider} OK未？";console.log(JSON.stringify(p))' "$WF_DEF_SESSION")
+wf_put booking-session "" "$WF2_P2"
+check "W2 PUT v2（confirmText 改字）→ 201" "$W_CODE" "201"
+WF2_V2=$(echo "$W_OUT" | jf id)
+wf_publish booking-session "$WF2_V2"
+check "W2 publish v2 → 200" "$W_CODE" "200"
+
+# L3 policy 重建（PC cleanup 清咗 — EPOCH-scoped id，raw INSERT 必帶 id）
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-w2-tkw-l3-${EPOCH}','$TKW_CLINIC_ID','BOOKING_REQUEST','L3',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\" RETURNING \"id\"" >/dev/null 2>&1
+
+W2_SLOT=""
+for OFF in 1 2 3; do
+  W2_SLOT=$(pc_pick "$TKW_CLINIC_ID" "" $OFF)
+  [ -n "$W2_SLOT" ] && break
+done
+if [ -z "$W2_SLOT" ]; then
+  fail "W2：TKW 無 15:00 空槽（offset 1-3 都冇）"; W_FAIL=1
+else
+  W2_P="${W2_SLOT%%|*}"; W2_D="${W2_SLOT##*|}"
+  W2_SUR=$(pc_surname "$W2_P")
+  W2_WA="8526902${EPOCH}"
+  pnpm -s mock-inbound message --clinic TKW --from "$W2_WA" --text "想約${W2_SUR}醫生洗牙" --wamid "wamid.E2E_W2_1_${EPOCH}" --name "E2E W2" >/dev/null 2>&1
+  wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W2_1_${EPOCH}'" '[{"c":"1"}]' 15
+  W2_CONV=$(pc_conv_of "$W2_WA" "$TKW_CLINIC_ID")
+  if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W2_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"1"}]' 45; then
+    pass "W2 r1 收到（候選 list）"
+  else
+    fail "W2 r1 未收到（session 未開？）"; W_FAIL=1
+  fi
+  W2_KW=$(pc_date_kw "$W2_D")
+  pnpm -s mock-inbound message --clinic TKW --from "$W2_WA" --text "$W2_KW" --wamid "wamid.E2E_W2_2_${EPOCH}" --name "E2E W2" >/dev/null 2>&1
+  if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W2_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"2"}]' 45; then
+    pass "W2 r2 收到（日期濾候選）"
+  else
+    fail "W2 r2 未收到"; W_FAIL=1
+  fi
+  pnpm -s mock-inbound message --clinic TKW --from "$W2_WA" --text "三點啦" --wamid "wamid.E2E_W2_3_${EPOCH}" --name "E2E W2" >/dev/null 2>&1
+  if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W2_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"3"}]' 45; then
+    pass "W2 r3 收到（confirmLine）"
+  else
+    fail "W2 r3 未收到"; W_FAIL=1
+  fi
+  W2_R3=$(pc_sess_reply "$W2_CONV" 3)
+  case "$W2_R3" in
+    *"e2e-W2確認："*"OK未？") pass "W2 confirmLine 用 v2 新文案（ACTIVE 生效）：${W2_R3:0:70}";;
+    *) fail "W2 confirmLine 未用新文案：${W2_R3:0:80}"; W_FAIL=1;;
+  esac
+  wf_revert booking-session "" 1
+  check "W2 revert toVersion=1 → 200" "$W_CODE" "200"
+  W2_NV=$(node -e 'const j=JSON.parse(require("fs").readFileSync("/tmp/e2e-wf-rev.json","utf8"));console.log(j.newVersion)')
+  check "W2 revert newVersion=3" "$W2_NV" "3"
+  wf_get /tmp/e2e-w2-get.json
+  W2_CT=$(node -e 'const j=JSON.parse(require("fs").readFileSync("/tmp/e2e-w2-get.json","utf8"));const w=j.workflows.find(x=>x.key==="booking-session");console.log(w.active.params.confirmText)')
+  check "W2 revert 後 confirmText 還原原句" "$W2_CT" "同你確認一次：{date} {time} {provider}，啱唔啱？"
+fi
+
+# ── W3. RBAC STAFF 403 + AuditLog ─────────────────────────────────────────
+echo "[W/4] W3: STAFF 403 + AuditLog..."
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X PUT "$BASE/api/admin/workflows/triage" -H 'Content-Type: application/json' -d '{"clinicId":null,"params":{}}')
+check "W3 STAFF PUT /workflows/triage → 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/admin/workflows")
+check "W3 STAFF GET /workflows → 403" "$CODE" "403"
+A_DRAFT=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='WORKFLOW_DRAFT'" | jf c)
+A_PUB=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='WORKFLOW_PUBLISH'" | jf c)
+if [ "$A_DRAFT" -ge 6 ] 2>/dev/null; then pass "W3 AuditLog WORKFLOW_DRAFT ≥6（實際 $A_DRAFT）"; else fail "W3 WORKFLOW_DRAFT=$A_DRAFT <6"; W_FAIL=1; fi
+if [ "$A_PUB" -ge 6 ] 2>/dev/null; then pass "W3 AuditLog WORKFLOW_PUBLISH ≥6（實際 $A_PUB）"; else fail "W3 WORKFLOW_PUBLISH=$A_PUB <6"; W_FAIL=1; fi
+A_PUB_BS=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='WORKFLOW_PUBLISH' AND \"meta\"->>'key'='booking-session'" | jf c)
+if [ "$A_PUB_BS" -ge 3 ] 2>/dev/null; then pass "W3 audit meta.key 可審（booking-session publish ≥3，實際 $A_PUB_BS）"; else fail "W3 audit meta.key booking-session=$A_PUB_BS <3"; W_FAIL=1; fi
+
+# ── W4. fail-soft：WorkflowDefinition 表 rename 走 → 全鏈照行 ─────────────────
+echo "[W/4] W4: fail-soft（表 rename 走 → defaults 底）..."
+# 冪等 pre-cleanup（上次 crash 殘留：broken 表存在而主表唔存在 → 還原）
+TBL_MAIN=$(q "SELECT count(*)::text c FROM information_schema.tables WHERE table_name='WorkflowDefinition'" | jf c)
+TBL_BROKEN=$(q "SELECT count(*)::text c FROM information_schema.tables WHERE table_name='WorkflowDefinition_e2eW4_broken'" | jf c)
+if [ "$TBL_MAIN" = "0" ] && [ "$TBL_BROKEN" = "1" ]; then
+  q 'ALTER TABLE "WorkflowDefinition_e2eW4_broken" RENAME TO "WorkflowDefinition"' >/dev/null 2>&1
+fi
+if q 'ALTER TABLE "WorkflowDefinition" RENAME TO "WorkflowDefinition_e2eW4_broken"' >/dev/null 2>&1; then
+  pass "W4 表 rename 走（模擬 drop/斷線）"
+else
+  fail "W4 rename 失敗"; W_FAIL=1
+fi
+wf_get /tmp/e2e-w4-a.json
+CODE=$W_CODE
+check "W4 GET workflows（表死）→ 200 fail-soft（零 5xx）" "$CODE" "200"
+check "W4 active source=defaults" "$(grep -oE '"source":"[a-z]+"' /tmp/e2e-w4-a.json | head -1)" '"source":"defaults"'
+
+W4_WA="8526903${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$W4_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W4_1_${EPOCH}" --name "E2E W4" >/dev/null 2>&1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W4_1_${EPOCH}'" '[{"c":"1"}]' 15
+W4_MSG1=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W4_1_${EPOCH}'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W4_MSG1'" '[{"s":"SENT_AUTO"}]' 30; then
+  pass "W4 表死仍 SENT_AUTO（fail-soft → code defaults 底，inbox 照行）"
+else
+  fail "W4 未 SENT_AUTO（fail-soft 失效？）"; W_FAIL=1
+fi
+if grep -q "fail-soft" "$WF_PATIENT_LOG" 2>/dev/null; then
+  pass "W4 worker log 有 fail-soft warn（metadata only）"
+else
+  fail "W4 worker log 無 fail-soft 記錄"; W_FAIL=1
+fi
+
+# 還原 + 斷言表返嚟後 API 照行
+q 'ALTER TABLE "WorkflowDefinition_e2eW4_broken" RENAME TO "WorkflowDefinition"' >/dev/null 2>&1
+wf_get /tmp/e2e-w4-b.json
+CODE=$W_CODE
+check "W4 表還原 → GET 200" "$CODE" "200"
+check "W4 還原後 source=global（row 返嚟）" "$(grep -oE '"source":"[a-z]+"' /tmp/e2e-w4-b.json | head -1)" '"source":"global"'
+
+# ── W cleanup：global row 清走（unit/下次 run 要乾淨空間）+ aiMode 還原 DRAFT ──
+q "DELETE FROM \"WorkflowDefinition\" WHERE \"clinicId\" IS NULL" >/dev/null 2>&1
+# ★ W2 插入咗 TKW L3 policy（e2e-w2-tkw-l3-<epoch>）— 必清，否則下次 run 嘅 T-section（T14/T19/T23/T25）
+#   撞 L3 session 路由 → legacy draft 斷言全爆（run2 教訓：run1 殘留 row 污染 run2）
+q "DELETE FROM \"AutomationPolicy\" WHERE id='e2e-w2-tkw-l3-${EPOCH}'" >/dev/null 2>&1
+patch_aimode "$TKW_CLINIC_ID" DRAFT; CODE=$PAM_CODE
+check "W cleanup aiMode → DRAFT" "$CODE" "200"
+
+# ── W summary ───────────────────────────────────────────────────────────
+[ "$W_FAIL" = 0 ] && pass "R-W Phase D e2e（W1-W4：cooldown/revert/confirmText/RBAC+audit/fail-soft 全綠）" || fail "R-W Phase D 有項失敗（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

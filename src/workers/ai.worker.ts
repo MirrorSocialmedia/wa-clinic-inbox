@@ -30,6 +30,8 @@ import {
   type StepCtx,
 } from "@/lib/booking/session-engine";
 import { confirmBookingCore } from "@/lib/booking/confirm-core";
+// ★ Phase D（cwi-ai-20260825-t4）：workflow 參數化 — 每決策點讀 ACTIVE definition（fail-soft → code defaults）
+import { getParams } from "@/lib/workflow/store";
 import { sendBookingFlow, WindowClosedError } from "@/lib/flows/send";
 
 /**
@@ -334,8 +336,10 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     if (updatedConv.status === "RESOLVED") blocks.push("resolved");
     // ★ Phase A (A2)：媒體訊息 — 唔覆客、唔出草稿、只通知職員
     if (isMedia) blocks.push("media");
-    // 可選第八閘：未 claim 但真人啱啱插咗嘴（30 分鐘冷靜期，env AI_HUMAN_COOLDOWN_MS 校）
-    const cooldownMs = Number(process.env.AI_HUMAN_COOLDOWN_MS ?? 30 * 60_000);
+    // 可選第八閘：未 claim 但真人啱啱插咗嘴（冷靜期 — ★ Phase D：params 由 WorkflowDefinition
+    // 「triage」ACTIVE row 讀（三級 fallback + fail-soft；env AI_HUMAN_COOLDOWN_MS 保留做底））
+    const triageParams = await getParams("triage", conv.clinicId);
+    const cooldownMs = triageParams.humanCooldownMs;
     const recentHuman = await prisma.message.findFirst({
       where: {
         conversationId: conv.id,
@@ -347,6 +351,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       select: { id: true },
     });
     if (recentHuman) blocks.push("human-recent");
+    // ★ Phase D 第九閘：confidence 低過 floor → low-confidence（floor 由 triage params 校）
+    if (result.confidence < triageParams.confidenceFloor) blocks.push("low-confidence");
     if (blocks.length > 0) {
       // metadata only（唔含 draft/summary 內容）
       log.info(
@@ -639,11 +645,13 @@ async function handleSessionTurn(
   await recordAiCall(true);
 
   // 4. engine step（pure — 所有事實句喺度砌）
+  // ★ Phase D：engine 保持 pure — params 由 runner 讀落（getParams 三級 fallback + fail-soft）
   const stepCtx: StepCtx = {
     todayHk,
     level: level === "L4" ? "L4" : "L3",
     providers,
     pinnedPatient: conv.pinnedPatientApricotId !== null,
+    params: await getParams("booking-session", conv.clinicId),
   };
   const out = sessionStep(
     { slots: slots0, status: session.status, turns: session.turns, noProgress: session.noProgress },

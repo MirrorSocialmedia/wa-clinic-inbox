@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import { ZodError } from "zod";
 import { RbacError } from "@/lib/rbac";
 import { AssignError } from "@/lib/assign";
+import { WorkflowError } from "@/lib/workflow/store";
 import log from "@/lib/log";
 
 /**
@@ -21,6 +22,13 @@ export function toResponse(err: unknown): NextResponse {
   }
   if (err instanceof AssignError) {
     return NextResponse.json({ error: err.code, message: err.message }, { status: err.status });
+  }
+  // Phase D：workflow store 業務錯誤（400 驗證失敗帶 field-level issues／404／409）
+  if (err instanceof WorkflowError) {
+    return NextResponse.json(
+      { error: err.message, ...(err.issues ? { issues: err.issues } : {}) },
+      { status: err.status }
+    );
   }
   if (err instanceof ZodError) {
     return NextResponse.json(

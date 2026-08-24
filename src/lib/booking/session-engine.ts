@@ -12,10 +12,13 @@
  */
 import type { GetSlotsResult } from "@/lib/availability";
 import type { SessionAiOutput, SessionSlots } from "@/lib/ai/session-types";
+import { SESSION_DEFAULTS, fillVars, type SessionParamsType } from "@/lib/workflow/definitions";
 
-export const MAX_TURNS = 12;
-export const MAX_NO_PROGRESS = 3;
-export const CANDIDATE_COUNT = 5;
+// ★ Phase D：以下常數 = code defaults（保留 export — unit 測試相容）；
+//   實際生效值由 StepCtx.params 傳入（runner 讀 WorkflowDefinition ACTIVE row）。
+export const MAX_TURNS = SESSION_DEFAULTS.maxTurns;
+export const MAX_NO_PROGRESS = SESSION_DEFAULTS.maxNoProgress;
+export const CANDIDATE_COUNT = SESSION_DEFAULTS.candidateCount;
 export const SESSION_TTL_MS = 24 * 3_600_000;
 
 export type Effect =
@@ -31,6 +34,9 @@ export interface StepCtx {
   level: "L3" | "L4";
   providers: { apricotId: string; name: string }[];
   pinnedPatient: boolean; // conv.pinnedPatientApricotId != null
+  // ★ Phase D：workflow 參數（runner 讀 getParams("booking-session", clinicId) 傳落）。
+  // optional — unit 測試唔傳 → SESSION_DEFAULTS（零改）。
+  params?: SessionParamsType;
 }
 
 export interface StepResult {
@@ -73,6 +79,7 @@ export function step(
   slotsData: GetSlotsResult,
   ctx: StepCtx
 ): StepResult {
+  const p = ctx.params ?? SESSION_DEFAULTS;
   const turns = session.turns + 1;
 
   // ── 0. 逃生口（優先序固定）─────────────────────────────
@@ -82,15 +89,15 @@ export function step(
     return end("HANDOFF", "收到，我哋職員好快覆你 🙏", [notify("病人要求真人／需要人手跟進（預約流程中）")], turns, session.slots);
   if (ai.action === "CANCEL")
     return end("CANCELLED", "冇問題，有需要隨時搵我哋預約 🙂", [], turns, session.slots);
-  if (turns >= MAX_TURNS)
-    return end("HANDOFF", "等我搵職員直接同你安排 🙏", [notify("預約 session 輪數超限 — 請人手接手")], turns, session.slots);
+  if (turns >= p.maxTurns)
+    return end("HANDOFF", p.handoffText, [notify("預約 session 輪數超限 — 請人手接手")], turns, session.slots);
 
   // ── 1. merge slotUpdates（medical-name→apricotId 對應係 deterministic）──
   const merged = mergeSlots(session.slots, ai.slotUpdates, ctx.providers);
   const progressed = didProgress(session.slots, merged);
   const noProgress = progressed ? 0 : session.noProgress + 1;
-  if (noProgress >= MAX_NO_PROGRESS)
-    return end("HANDOFF", "等我搵職員直接同你安排時間 🙏", [notify("預約 session 冇進展 — 請人手接手")], turns, merged);
+  if (noProgress >= p.maxNoProgress)
+    return end("HANDOFF", p.handoffText, [notify("預約 session 冇進展 — 請人手接手")], turns, merged);
 
   // ── 2. 源離線兜底 ───────────────────────────────────────
   if (slotsData.degraded === "NONE")
@@ -114,7 +121,7 @@ export function step(
   const v = validateSelection(merged, slotsData, ctx.todayHk);
   if (v.kind === "invalid-date")
     // 重列候選時清咗無效 date（唔清 → date filter 清晒 rows → 假象「暫無空餘時段」）
-    return cont("ACTIVE", merged, turns, noProgress, ai.reply, `唔好意思，${v.why}。${candidateText({ ...merged, date: null }, slotsData, ctx.providers)}`);
+    return cont("ACTIVE", merged, turns, noProgress, ai.reply, `唔好意思，${v.why}。${candidateText({ ...merged, date: null }, slotsData, ctx.providers, p)}`);
   if (v.kind === "slot-taken")
     return cont(
       "ACTIVE",
@@ -122,14 +129,14 @@ export function step(
       turns,
       noProgress,
       ai.reply,
-      `唔好意思，呢個時段啱啱滿咗。${candidateText({ ...merged, time: null }, slotsData, ctx.providers)}`
+      `${p.slotTakenText}${candidateText({ ...merged, time: null }, slotsData, ctx.providers, p)}`
     );
 
   // ── 5. 齊料 → 入 CONFIRMING；唔齊 → 問一樣 ──────────────
   if (merged.providerApricotId && merged.date && merged.time) {
-    return cont("CONFIRMING", merged, turns, 0, ai.reply, confirmLine(merged));
+    return cont("CONFIRMING", merged, turns, 0, ai.reply, confirmLine(merged, p));
   }
-  return cont("ACTIVE", merged, turns, noProgress, ai.reply, askNext(merged, slotsData, ctx));
+  return cont("ACTIVE", merged, turns, noProgress, ai.reply, askNext(merged, slotsData, ctx, p));
 }
 
 // ── helpers（pure，全部 unit 測）────────────────────────────────────────
@@ -207,37 +214,47 @@ export function validateSelection(slots: SessionSlots, data: GetSlotsResult, tod
 export function candidateText(
   slots: SessionSlots,
   data: GetSlotsResult,
-  providers: { apricotId: string; name: string }[]
+  providers: { apricotId: string; name: string }[],
+  p: SessionParamsType = SESSION_DEFAULTS
 ): string {
   const rows = data.slots ?? [];
-  const nameOf = (apricotId: string) => providers.find((p) => p.apricotId === apricotId)?.name ?? "";
+  const nameOf = (apricotId: string) => providers.find((pr) => pr.apricotId === apricotId)?.name ?? "";
   const cands = rows
     .filter((r) => r.isOpen && r.bookedCount === 0) // 已滿位（bookedCount>0）唔入候選 — 同 validateSelection/flow precheck 一致
     .filter((r) => !slots.providerApricotId || r.providerApricotId === slots.providerApricotId)
     .filter((r) => !slots.date || r.date === slots.date)
     .filter((r) => !slots.timeOfDay || timeOfDayOf(r.startTime) === slots.timeOfDay)
     .sort((a, b) => (a.date + a.startTime).localeCompare(b.date + b.startTime))
-    .slice(0, CANDIDATE_COUNT);
+    .slice(0, p.candidateCount);
   if (cands.length === 0) return "而家暫無空餘時段，你可以換一日，或者職員會跟你聯絡 🙏";
   const lines = cands.map((r, i) => `${NUM_EMOJI[i]} ${fmtDateFull(r.date)} ${r.startTime} ${nameOf(r.providerApricotId)}`);
   // degraded STALE_* → 照行 + 免責尾句（MD C4）
   const staleNote =
-    data.degraded === "STALE_SOURCE" || data.degraded === "STALE_CACHE" ? "（時段以最終確認為準）" : "";
-  return `而家有以下時段：\n${lines.join("\n")}\n直接覆編號或者講你想要嘅時間就得🙂${staleNote}`;
+    data.degraded === "STALE_SOURCE" || data.degraded === "STALE_CACHE" ? p.staleDisclaimer : "";
+  return `${p.candidateHeader}\n${lines.join("\n")}\n${p.candidateFooter}${staleNote}`;
 }
 
-/** 「同你確認一次：{M月D日} {HH:mm} {醫生名}，啱唔啱？」 */
-export function confirmLine(slots: SessionSlots): string {
-  return `同你確認一次：${fmtDateShort(slots.date ?? "")} ${slots.time ?? ""} ${slots.providerName ?? ""}，啱唔啱？`;
+/** 「同你確認一次：{M月D日} {HH:mm} {醫生名}，啱唔啱？」— 文案 params 化（fillVars deterministic）。 */
+export function confirmLine(slots: SessionSlots, p: SessionParamsType = SESSION_DEFAULTS): string {
+  return fillVars(p.confirmText, {
+    date: fmtDateShort(slots.date ?? ""),
+    time: slots.time ?? "",
+    provider: slots.providerName ?? "",
+  });
 }
 
 /** 缺 provider → 問醫生（附名單）；缺 date/time → 候選時段（有 timeOfDay 就 filter 時段）。 */
-export function askNext(slots: SessionSlots, data: GetSlotsResult, ctx: StepCtx): string {
+export function askNext(
+  slots: SessionSlots,
+  data: GetSlotsResult,
+  ctx: StepCtx,
+  p: SessionParamsType = ctx.params ?? SESSION_DEFAULTS
+): string {
   if (!slots.providerApricotId) {
-    const list = ctx.providers.map((p) => p.name).join("、");
-    return `想約邊位醫生？我哋有：${list || "（未設定）"}`;
+    const list = ctx.providers.map((pr) => pr.name).join("、");
+    return fillVars(p.askProviderText, { providers: list || "（未設定）" });
   }
-  return candidateText(slots, data, ctx.providers);
+  return candidateText(slots, data, ctx.providers, p);
 }
 
 /**

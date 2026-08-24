@@ -32,6 +32,8 @@
     "test:unit-templates": "tsx scripts/unit-templates.ts",
     "test:unit-reminder": "tsx scripts/unit-reminder.ts",
     "test:unit-session-engine": "tsx scripts/unit-session-engine.ts",
+    "test:unit-workflow-definitions": "tsx scripts/unit-workflow-definitions.ts",
+    "test:unit-workflow-store": "tsx scripts/unit-workflow-store.ts",
     "test:ordering": "tsx scripts/ordering-drift-guard.ts",
     "e2e:booking-ui": "tsx scripts/e2e-booking-ui.ts",
     "e2e:workforce-contract": "tsx scripts/workforce-contract.ts",
