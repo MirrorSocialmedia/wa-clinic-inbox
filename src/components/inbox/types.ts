@@ -287,6 +287,22 @@ export interface NoteReceipt {
   readAt: string;
 }
 
+/** ★ AI Workflow T1 (A2)：內部通知（staff notice）— 媒體/急症升級，同客戶 unread 完全分開 */
+export interface StaffNoticeItem {
+  id: string;
+  clinicId: string;
+  conversationId: string | null;
+  kind: string;
+  title: string;
+  createdAt: string;
+}
+
+/** ★ AI Workflow T1 (A2)：notice:new socket 事件（worker 落庫後推；client 收到就重拉 GET /api/notices） */
+export interface NoticeNewEvent {
+  conversationId: string;
+  kind: string;
+}
+
 /** ★ H2：INTERNAL note tick 語義（似 WhatsApp）：
  *  灰 ✓ = note 已發出；藍 ✓✓ = 全部被 mention 嘅 staff 已讀（無 mention → 現任 assignee 已讀）。
  *  requiredStaff 為空（unassigned + 無 mention）→ 永遠灰 ✓。 */

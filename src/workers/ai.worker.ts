@@ -59,6 +59,9 @@ interface AiJobData {
   clinicId: string;
 }
 
+// ★ AI Workflow T1 (A2)：media 類型（同 src/workers/inbound.worker.ts L90 一致）— 媒體走內部通知軌
+const MEDIA_TYPES = new Set(["image", "video", "audio", "document"]);
+
 async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>> {
   const data = job.data;
   if (!data?.conversationId || !data?.messageId || !data?.clinicId) {
@@ -96,6 +99,23 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   }
   // H-3：contact 身份（profileName/waId）— aiSummary 落庫前 deterministic scrub（去識別化）用
   const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
+
+  // ★ AI Workflow T1 (A2)：媒體訊息 → 內部通知軌（StaffNotice 落庫 + notice:new socket）。
+  //   客戶端零 AI 回覆（canDraft 限 text + AUTO media 閘）；職員 bell 提示人工處理。
+  //   R2 鐵律：commit-then-emit（create 已 commit 先發 socket）。
+  const isMedia = MEDIA_TYPES.has(msg.type);
+  if (isMedia) {
+    await prisma.staffNotice.create({
+      data: {
+        clinicId: conv.clinicId,
+        conversationId: conv.id,
+        kind: "MEDIA_RECEIVED",
+        title: `病人傳送咗${msg.type === "image" ? "相片" : "檔案"}，請職員查看處理`,
+        meta: { wamid: msg.waMessageId, msgType: msg.type },
+      },
+    });
+    publishNotify(conv.clinicId, "notice:new", { conversationId: conv.id, kind: "MEDIA_RECEIVED" });
+  }
 
   const recent = await prisma.message.findMany({
     where: { conversationId: conv.id },
@@ -173,7 +193,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   const canDraft =
     result.intent !== "URGENT_PAIN" &&
     result.urgency !== "HIGH" &&
-    result.draft !== null;
+    result.draft !== null &&
+    msg.type === "text"; // ★ AI Workflow T1 (A2)：媒體唔出草稿（只內部通知職員）
   if (canDraft) {
     // 冪等：unique(conversationId, inReplyToMessageId) + 前置查（retry 重跑唔會重複 draft）
     let existing = await prisma.aiDraft.findUnique({
@@ -229,6 +250,26 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     if (result.needsHuman) blocks.push("needsHuman");               // 鐵律：人工永遠唔自動發
     if (draft === null) blocks.push("no-draft");
     if (!win.open) blocks.push("window-closed");
+    // ★ Phase A：真人接手 = AI 收聲（Send Lock 語義補完 — 有負責人只佢可發 WhatsApp；
+    // messages/send route 有 423 擋人，AI auto-send 路徑一直冇呢重閘）
+    if (updatedConv.assigneeId !== null) blocks.push("assigned");
+    // RESOLVED 對話病人翻頭一句「唔該」唔應該觸發自動覆
+    if (updatedConv.status === "RESOLVED") blocks.push("resolved");
+    // ★ Phase A (A2)：媒體訊息 — 唔覆客、唔出草稿、只通知職員
+    if (isMedia) blocks.push("media");
+    // 可選第八閘：未 claim 但真人啱啱插咗嘴（30 分鐘冷靜期，env AI_HUMAN_COOLDOWN_MS 校）
+    const cooldownMs = Number(process.env.AI_HUMAN_COOLDOWN_MS ?? 30 * 60_000);
+    const recentHuman = await prisma.message.findFirst({
+      where: {
+        conversationId: conv.id,
+        direction: "OUT",
+        sentByStaffId: { not: null },
+        channel: { not: "INTERNAL" }, // ★ INTERNAL 備註（assign/transfer 自動落）唔係「覆病人」— 唔觸發冷靜期
+        waTimestamp: { gte: new Date(Date.now() - cooldownMs) },
+      },
+      select: { id: true },
+    });
+    if (recentHuman) blocks.push("human-recent");
     if (blocks.length > 0) {
       // metadata only（唔含 draft/summary 內容）
       log.info(
@@ -272,6 +313,16 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     autoSent,
   });
   if (urgent) {
+    // ★ AI Workflow T1 (A2)：急症升級持久化（離線 staff 漏咗 realtime toast 都唔漏）— commit-then-emit
+    await prisma.staffNotice.create({
+      data: {
+        clinicId: conv.clinicId,
+        conversationId: conv.id,
+        kind: "URGENT_ESCALATION",
+        title: "急症升級 — 病人劇痛/高危",
+        meta: { wamid: msg.waMessageId, intent: result.intent, urgency: result.urgency },
+      },
+    });
     // 鐵律：急症 = 實時升級通知（staff 側 toast + 隊列頂部紅標）
     publishNotify(conv.clinicId, "urgent:escalation", {
       conversationId: conv.id,

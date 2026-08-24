@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo } from "react";
-import { Bell, CalendarDays, MessageCircle, Search, X } from "lucide-react";
-import type { ClinicInfo, ConversationItem, ConvStatus } from "./types";
+import { useMemo, useState } from "react";
+import { Bell, BellRing, CalendarDays, MessageCircle, Search, X } from "lucide-react";
+import type { ClinicInfo, ConversationItem, ConvStatus, StaffNoticeItem } from "./types";
 import { relTime } from "./time";
 
 interface Props {
@@ -29,6 +29,10 @@ interface Props {
   mentionTotal: number;
   /** ★ H2：撳 bell → 跳到最近一個 mention 嘅 note */
   onBellClick: () => void;
+  /** ★ AI Workflow T1 (A2)：未讀內部通知（bell 2 — 同客戶 unread / H2 mention bell 分開） */
+  notices: StaffNoticeItem[];
+  /** ★ AI Workflow T1 (A2)：撳通知 → 標已讀 + 跳對話 */
+  onNoticeClick: (n: StaffNoticeItem) => void;
 }
 
 const STATUS_LABEL: Record<ConvStatus | "ALL", string> = {
@@ -76,6 +80,8 @@ function previewOf(c: ConversationItem): string {
  * - 排序邏輯不變：urgent 頂 → 一般 → RESOLVED 沉底；同級 lastMessageAt desc
  */
 export function ConversationList(p: Props) {
+  // ★ AI Workflow T1 (A2)：內部通知面板（bell 2 開/關）
+  const [noticeOpen, setNoticeOpen] = useState(false);
   const items = useMemo(() => {
     if (p.searchResults) return p.searchResults;
     let list = p.conversations;
@@ -128,8 +134,43 @@ export function ConversationList(p: Props) {
               </span>
             )}
           </button>
+          {/* ★ AI Workflow T1 (A2)：內部通知 bell（媒體/急症 — 同客戶 unread 分開） */}
+          <button
+            onClick={() => setNoticeOpen((v) => !v)}
+            aria-label={`內部通知（${p.notices.length} 未讀）`}
+            title={p.notices.length > 0 ? `${p.notices.length} 條未讀內部通知` : "內部通知"}
+            className="relative w-7 h-7 rounded-lg flex items-center justify-center text-t2 hover:bg-panel-2 hover:text-t1"
+          >
+            <BellRing size={15} />
+            {p.notices.length > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-0.5 rounded-full bg-brand text-white text-[9px] font-bold flex items-center justify-center">
+                {p.notices.length > 99 ? "99+" : p.notices.length}
+              </span>
+            )}
+          </button>
         </div>
       </div>
+
+      {/* ★ AI Workflow T1 (A2)：內部通知列（未讀；撳 = 標已讀 + 跳對話） */}
+      {noticeOpen && (
+        <div className="border-b border-line px-3 py-2 space-y-1 max-h-56 overflow-y-auto">
+          <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">內部通知</div>
+          {p.notices.length === 0 ? (
+            <div className="text-xs text-t3 py-1">冇未讀通知</div>
+          ) : (
+            p.notices.map((n) => (
+              <button
+                key={n.id}
+                onClick={() => p.onNoticeClick(n)}
+                className="w-full text-left rounded-md px-2 py-1.5 hover:bg-panel-2"
+              >
+                <div className="text-xs text-t1 truncate">{n.title}</div>
+                <div className="text-[10px] text-t3">{relTime(n.createdAt)}</div>
+              </button>
+            ))
+          )}
+        </div>
+      )}
 
       {/* search */}
       <div className="px-3">

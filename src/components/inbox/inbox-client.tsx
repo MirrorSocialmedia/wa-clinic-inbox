@@ -21,6 +21,7 @@ import type {
   NoteReadEvent,
   NoteReceipt,
   StaffInfo,
+  StaffNoticeItem,
   UrgentEscalationEvent,
   UserCtx,
 } from "./types";
@@ -121,6 +122,24 @@ export function InboxClient({
   mentionUnreadRef.current = mentionUnread;
 
   const mentionTotal = Object.values(mentionUnread).reduce((a, b) => a + b, 0);
+
+  // ★ AI Workflow T1 (A2)：內部通知（bell 2 — 媒體/急症；同客戶 unread 分開）
+  const [notices, setNotices] = useState<StaffNoticeItem[]>([]);
+  const fetchNotices = useCallback(async () => {
+    try {
+      const res = await fetch("/api/notices", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as { notices?: StaffNoticeItem[] };
+      setNotices(data.notices ?? []);
+    } catch {
+      /* 網絡抖動 — bell 唔更新得，唔阻主流程 */
+    }
+  }, []);
+  const fetchNoticesRef = useRef<typeof fetchNotices>(fetchNotices);
+  fetchNoticesRef.current = fetchNotices;
+  useEffect(() => {
+    void fetchNotices();
+  }, [fetchNotices]);
 
   // ── socket ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -249,6 +268,10 @@ export function InboxClient({
     });
 
     // 急症升級 → 隊列頂紅標 + toast（12s 自動消）
+    // ★ AI Workflow T1 (A2)：內部通知即時 +1（ref — 避 stale closure / deps warning）
+    socket.on("notice:new", () => {
+      void fetchNoticesRef.current();
+    });
     socket.on("urgent:escalation", (e: UrgentEscalationEvent) => {
       setConversations((prev) =>
         prev.map((c) => (c.id === e.conversationId ? { ...c, urgent: true, intent: e.intent, urgency: e.urgency } : c))
@@ -611,6 +634,23 @@ export function InboxClient({
     const lm = lastMentionRef.current;
     if (lm) void jumpToMention(lm.conversationId, lm.messageId);
   }, [jumpToMention]);
+
+  // ★ AI Workflow T1 (A2)：撳通知 → 標已讀 + 跳對話
+  const onNoticeClick = useCallback((n: StaffNoticeItem) => {
+    void (async () => {
+      try {
+        await fetch("/api/notices", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: [n.id] }),
+        });
+      } catch {
+        /* non-fatal — UI 先 optimistic 清 */
+      }
+      setNotices((prev) => prev.filter((x) => x.id !== n.id));
+      if (n.conversationId) setSelectedConvId(n.conversationId);
+    })();
+  }, []);
 
   // ── select conversation（markRead + 載入最新訊息） ───────────────────
   const selectConversation = useCallback(
@@ -1071,6 +1111,8 @@ export function InboxClient({
         mentionUnread={mentionUnread}
         mentionTotal={mentionTotal}
         onBellClick={() => void onBellClick()}
+        notices={notices}
+        onNoticeClick={onNoticeClick}
       />
 
       <ChatPane

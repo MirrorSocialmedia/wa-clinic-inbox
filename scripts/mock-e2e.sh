@@ -123,6 +123,12 @@
 #   T82 P0 retention-purge：超期 fixture（25/13/11mo 訊息 + 媒體檔 + 90d 邊界 draft/notice）→
 #       手動 enqueue → 24mo 全刪（連 NoteReadReceipt/PatientFact）/ 12mo 刪檔+清 mediaPath /
 #       AiDraft 90d（≠PROPOSED）/ StaffNotice 已讀 90d + 未到期零觸碰 + OpsReport + log metadata only
+#   T83 A1 七閘：AUTO + assignee → 只出 draft 唔自動發（log assigned — Send Lock 語義補完）
+#   T84 A1 七閘：AUTO + RESOLVED 對話病人再來訊 → 唔自動發（log resolved）
+#   T85 A1 第八閘：員工人手覆後 cooldown（AI_HUMAN_COOLDOWN_MS 預設 30 分鐘）內 AI 唔搶咪（log human-recent）
+#   T86 A2 媒體：send 相 → 客戶端零回覆 + StaffNotice(MEDIA_RECEIVED) 落庫 + /api/notices bell +1 +
+#       AiDraft 零新增（canDraft 限 text）+ 分類照行 + PATCH 標已讀
+#   T87 hermetic：MF 還原 DRAFT（T83 起轉 AUTO）
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -218,6 +224,7 @@ q "DELETE FROM \"AiDraft\"" >/dev/null 2>&1 || true
 q "DELETE FROM \"Message\"" >/dev/null 2>&1 || true
 q "DELETE FROM \"WebhookEvent\"" >/dev/null 2>&1 || true
 q "DELETE FROM \"Conversation\"" >/dev/null 2>&1 || true
+q "DELETE FROM \"StaffNotice\"" >/dev/null 2>&1 || true  # AI Workflow T1：新表（persistent DB 跨 run 殘留 hermetic）
 q "DELETE FROM \"Alert\" WHERE type='backup_failed'" >/dev/null 2>&1 || true  # T45 hermetic（persistent DB 累積舊行）
 # 清晒上次 run 殘留嘅 BullMQ job — 舊 job 會被新 worker redeliver → 舊 EPOCH 數據
 # 落咗新 run 嘅 DB 污染斷言（T41/T17 事故）
@@ -2256,6 +2263,128 @@ q "DELETE FROM \"Conversation\" WHERE id='$RET_CONV'" >/dev/null 2>&1
 q "DELETE FROM \"Contact\" WHERE id='$RET_C'" >/dev/null 2>&1
 rm -f "$RET_MEDIA_KEEP" "$RET_MEDIA_OLD"
 [ "$T82" = 0 ] && pass "T82 P0 retention-purge 全鏈（刪除 + 未到期零觸碰 + OpsReport）" || fail "T82 retention-purge 有項失敗（見上 ❌）"
+
+# ── T83. A1 七閘：AUTO + assignee → 只出 draft 唔自動發（log assigned） ─────────
+echo "[AI-T1] T83: AUTO + assigned gate..."
+T83=0
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$MF_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"AUTO"}')
+check "T83 MF→AUTO" "$CODE" "200"
+P_T83="8526101${EPOCH}"; WAMID_T83="wamid.E2E_T83_${EPOCH}"; C_T83="t83-c-${EPOCH}"; CONV_T83="t83-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_T83', '$MF_CLINIC_ID', '$P_T83', 'E2E T83', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CONV_T83', '$MF_CLINIC_ID', '$C_T83', 'OPEN', '$NOWISO')" >/dev/null 2>&1
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/conversations/$CONV_T83/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$MF_STAFF_ID\",\"assignVersion\":0}")
+check "T83 assign 俾 MF staff → 200" "$CODE" "200"
+pnpm -s mock-inbound message --clinic MF --from "$P_T83" --text "想預約下週有冇位" --wamid "$WAMID_T83" --name "E2E T83 assigned" >/dev/null || fail "T83 mock-inbound POST"
+M_T83=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T83'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T83'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T83 assigned：draft 照出（PROPOSED 俾 staff）"
+else
+  fail "T83 assigned draft"; T83=1
+fi
+sleep 2
+OUT_T83=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T83' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
+check "T83 assigned：唔自動發（0 OUT 訊息）" "$OUT_T83" "0"
+grep -F "$WAMID_T83" /tmp/e2e-worker*.log 2>/dev/null | grep -q "not eligible" && pass "T83 AUTO fallback log（not eligible）" || { fail "T83 not eligible log"; T83=1; }
+grep -F "$WAMID_T83" /tmp/e2e-worker*.log 2>/dev/null | grep -q '"assigned"' && pass "T83 log reasons 見 assigned（Send Lock 語義補完）" || { fail "T83 assigned log"; T83=1; }
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CONV_T83'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T83'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$CONV_T83'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id='$C_T83'" >/dev/null 2>&1
+[ "$T83" = 0 ] && pass "T83 A1 閘：assigned" || fail "T83 assigned 閘有項失敗（見上 ❌）"
+
+# ── T84. A1 七閘：RESOLVED 對話病人翻頭一句 → 唔自動發（log resolved） ──────
+echo "[AI-T1] T84: AUTO + resolved gate..."
+T84=0
+P_T84="8526102${EPOCH}"; WAMID_T84="wamid.E2E_T84_${EPOCH}"; C_T84="t84-c-${EPOCH}"; CONV_T84="t84-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_T84', '$MF_CLINIC_ID', '$P_T84', 'E2E T84', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CONV_T84', '$MF_CLINIC_ID', '$C_T84', 'RESOLVED', '$NOWISO')" >/dev/null 2>&1
+pnpm -s mock-inbound message --clinic MF --from "$P_T84" --text "想預約下週有冇位" --wamid "$WAMID_T84" --name "E2E T84 resolved" >/dev/null || fail "T84 mock-inbound POST"
+M_T84=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T84'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T84'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T84 resolved：draft 照出（PROPOSED）"
+else
+  fail "T84 resolved draft"; T84=1
+fi
+sleep 2
+OUT_T84=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T84' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
+check "T84 resolved：唔自動發（0 OUT 訊息）" "$OUT_T84" "0"
+grep -F "$WAMID_T84" /tmp/e2e-worker*.log 2>/dev/null | grep -q '"resolved"' && pass "T84 log reasons 見 resolved" || { fail "T84 resolved log"; T84=1; }
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CONV_T84'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T84'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$CONV_T84'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id='$C_T84'" >/dev/null 2>&1
+[ "$T84" = 0 ] && pass "T84 A1 閘：resolved" || fail "T84 resolved 閘有項失敗（見上 ❌）"
+
+# ── T85. A1 第八閘：員工人手覆完 cooldown 內 AI 唔搶咪（log human-recent） ──
+echo "[AI-T1] T85: AUTO + human-recent gate..."
+T85=0
+P_T85="8526103${EPOCH}"; WAMID_T85="wamid.E2E_T85_${EPOCH}"; C_T85="t85-c-${EPOCH}"; CONV_T85="t85-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_T85', '$MF_CLINIC_ID', '$P_T85', 'E2E T85', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CONV_T85', '$MF_CLINIC_ID', '$C_T85', 'OPEN', '$NOWISO')" >/dev/null 2>&1
+# 員工人手覆（直接落 DB：OUT + sentByStaffId 非 null — 唔經 send route 避免 auto-claim 混淆 assigned 閘）
+q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, \"mediaStatus\", status, \"sentByStaffId\", \"waTimestamp\") VALUES ('t85-staff-out-${EPOCH}', '$CONV_T85', 'OUT', 'API', 'text', 'e2e staff manual reply', 'READY', 'SENT', '$MF_STAFF_ID', '$NOWISO')" >/dev/null 2>&1
+pnpm -s mock-inbound message --clinic MF --from "$P_T85" --text "想預約下週有冇位" --wamid "$WAMID_T85" --name "E2E T85 human-recent" >/dev/null || fail "T85 mock-inbound POST"
+M_T85=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T85'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T85'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T85 human-recent：draft 照出（PROPOSED）"
+else
+  fail "T85 human-recent draft"; T85=1
+fi
+sleep 2
+OUT_T85=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T85' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)
+check "T85 human-recent：cooldown 內 AI 唔搶咪（0 自動發 OUT）" "$OUT_T85" "0"
+grep -F "$WAMID_T85" /tmp/e2e-worker*.log 2>/dev/null | grep -q '"human-recent"' && pass "T85 log reasons 見 human-recent（30 分鐘冷靜期）" || { fail "T85 human-recent log"; T85=1; }
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CONV_T85'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T85'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$CONV_T85'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id='$C_T85'" >/dev/null 2>&1
+[ "$T85" = 0 ] && pass "T85 A1 閘：human-recent" || fail "T85 human-recent 閘有項失敗（見上 ❌）"
+
+# ── T86. A2 媒體：客戶端零回覆 + StaffNotice 落庫 + bell +1 + AiDraft 零新增 ──
+echo "[AI-T1] T86: media → StaffNotice (no reply to client)..."
+T86=0
+P_T86="8526104${EPOCH}"; WAMID_T86="wamid.E2E_T86_${EPOCH}"; C_T86="t86-c-${EPOCH}"; CONV_T86="t86-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_T86', '$MF_CLINIC_ID', '$P_T86', 'E2E T86', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CONV_T86', '$MF_CLINIC_ID', '$C_T86', 'OPEN', '$NOWISO')" >/dev/null 2>&1
+# hermetic：T43（現有媒體測試）會落 MF MEDIA_RECEIVED 通知 — 清晒先確保 count 準確
+q "DELETE FROM \"StaffNotice\" WHERE \"clinicId\"='$MF_CLINIC_ID'" >/dev/null 2>&1
+pnpm -s mock-inbound message --clinic MF --from "$P_T86" --text "e2e T86 photo" --media image --wamid "$WAMID_T86" --name "E2E T86 media" >/dev/null || fail "T86 mock-inbound media POST"
+M_T86=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T86'" | jf id)
+check "T86 媒體訊息落庫 type=image" "$(q "SELECT \"type\"::text t FROM \"Message\" WHERE id='$M_T86'" | jf t)" "image"
+# 等 AI job 跑完（StaffNotice 落庫 = marker）
+if wait_for "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$CONV_T86' AND kind='MEDIA_RECEIVED'" '[{"c":"1"}]' 30; then
+  pass "T86 StaffNotice(MEDIA_RECEIVED) 落庫（bell +1 數據源）"
+else
+  fail "T86 StaffNotice 未落庫"; T86=1
+fi
+sleep 2
+OUT_T86=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T86' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
+check "T86 媒體訊息：客戶端零回覆（0 OUT）" "$OUT_T86" "0"
+check "T86 媒體訊息：AiDraft 零新增（canDraft 限 text）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T86'" | jf c)" "0"
+INT_T86=$(q "SELECT (\"intent\" IS NOT NULL)::text i FROM \"Conversation\" WHERE id='$CONV_T86'" | jf i)
+check "T86 分類照行（intent 欄照更新）" "$INT_T86" "true"
+NOTICE_JSON=$(curl -s -b "$COOKIE_MF" "$BASE/api/notices")
+NOTICE_CNT=$(echo "$NOTICE_JSON" | grep -oE '"count":[0-9]+' | head -1 | cut -d: -f2)
+check "T86 GET /api/notices（MF staff）未讀含呢條（bell +1）" "$NOTICE_CNT" "1"
+echo "$NOTICE_JSON" | grep -q "$CONV_T86" && pass "T86 /api/notices 回傳含該對話 id" || { fail "T86 /api/notices 內容"; T86=1; }
+# PATCH 標已讀 → 再 GET = 0
+NOTICE_ID_T86=$(q "SELECT id FROM \"StaffNotice\" WHERE \"conversationId\"='$CONV_T86' AND kind='MEDIA_RECEIVED'" | jf id)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X PATCH "$BASE/api/notices" -H 'Content-Type: application/json' -d "{\"ids\":[\"$NOTICE_ID_T86\"]}")
+check "T86 PATCH /api/notices 標已讀 → 200" "$CODE" "200"
+NOTICE_CNT2=$(curl -s -b "$COOKIE_MF" "$BASE/api/notices" | grep -oE '"count":[0-9]+' | head -1 | cut -d: -f2)
+check "T86 標已讀後未讀清零" "$NOTICE_CNT2" "0"
+check "T86 StaffNotice readAt 已落" "$(q "SELECT (\"readAt\" IS NOT NULL)::text r FROM \"StaffNotice\" WHERE id='$NOTICE_ID_T86'" | jf r)" "true"
+# hermetic 清理
+q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$CONV_T86'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T86'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$CONV_T86'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id='$C_T86'" >/dev/null 2>&1
+[ "$T86" = 0 ] && pass "T86 A2 媒體→StaffNotice 全鏈（零覆客 + 落庫 + bell + 標已讀）" || fail "T86 媒體通知有項失敗（見上 ❌）"
+
+# ── T87. hermetic：MF 還原 DRAFT（T19 只改咗 TKW；MF 由 T83 起轉 AUTO） ────────
+echo "[AI-T1] T87: restore MF DRAFT (hermetic)..."
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$MF_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"DRAFT"}')
+check "T87 MF 還原 DRAFT" "$CODE" "200"
 
 # Phase R9 — Realtime P0 chaos e2e（cwi-rt-20260823；Kairo mt5w39ck5etgo）
 #   T75 RT-IDEMPOTENT：3 次同 clientMessageId → DB 1 row（R1 驗收）
