@@ -116,6 +116,12 @@ export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
     }
     mediaFilesDeleted += deletedFiles;
     mediaPathsCleared += clearIds.length;
+    if (clearIds.length === 0) {
+      // ★ 零進度防無限循環：呢批全部 purgeMediaFile fail（EACCES 等）→ mediaPath 冇變 →
+      //   下次 findMany 取返同一批 → 無限 busy loop 打 DB。break 出 media step（Message 刪除 step 照行）。
+      log.warn({ batch: rows.length }, "retention-purge: media step 零進度（purgeMediaFile 全 fail）— abort media step");
+      break;
+    }
     if (rows.length < BATCH) break;
   }
 
