@@ -13,6 +13,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
+import { publishControl } from "@/lib/notify";
 import {
   asLevel,
   clearAutomationLevelCache,
@@ -71,7 +72,7 @@ export const GET = handle(async (req: NextRequest) => {
         const level = minLevel(resolveLevel(rows, cat, aiMode), cap);
         const last4 = weeks.map((w) => {
           const s = statsCell.get(`${c.id}|${cat}|${w}`);
-          return s ?? { weekStart: w, draftCount: 0, adoptedAsIs: 0, adoptedEdited: 0, complaints: 0, rollbacks: 0 };
+          return s ?? { weekStart: w, draftCount: 0, adoptedAsIs: 0, adoptedEdited: 0, autoSent: 0, complaints: 0, rollbacks: 0 }; // ★ Fix D（cwi-fix-20260825-f1）：StatLike 加 autoSent — fallback 零值 literal 補欄
         });
         const elig = isEligible(last4);
         cells[cat] = {
@@ -138,6 +139,7 @@ export const PATCH = handle(async (req: NextRequest) => {
     },
   });
   clearAutomationLevelCache(); // MD 個 bustLevelCache() = 現有 export
+  publishControl({ cmd: "cache:bust", scope: "automation" }); // ★ Fix B（cwi-fix-20260825-f1）：worker 側即時失效（唔使等 5 分鐘 TTL）
 
   log.info(
     { clinicId, clinicCode: clinic.code, category, from, to, staffId: ctx.staff.id },

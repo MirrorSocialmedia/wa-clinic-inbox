@@ -13,11 +13,12 @@ export const ELIGIBLE_ADOPT_RATE = 0.9;
 export const ELIGIBLE_MIN_DRAFTS = 20;
 
 /** isEligible 只需要呢幾個欄（unit 測可以用簡化 row）。 */
-export type StatLike = Pick<AutomationStat, "weekStart" | "draftCount" | "adoptedAsIs" | "adoptedEdited" | "complaints" | "rollbacks">;
+export type StatLike = Pick<AutomationStat, "weekStart" | "draftCount" | "adoptedAsIs" | "adoptedEdited" | "autoSent" | "complaints" | "rollbacks">;
 
-/** adoptRate = (asIs + edited) / draft；draftCount=0 → null（無樣本）。 */
+/** adoptRate = (asIs + edited + autoSent) / draft；draftCount=0 → null（無樣本）。
+ *  ★ Fix D（cwi-fix-20260825-f1）：autoSent 計入分子 — 自動發出且零投訴 = 採用（L1 店 autoSent=0 → 數字不變）。 */
 export function adoptRate(s: StatLike): number | null {
-  return s.draftCount > 0 ? (s.adoptedAsIs + s.adoptedEdited) / s.draftCount : null;
+  return s.draftCount > 0 ? (s.adoptedAsIs + s.adoptedEdited + s.autoSent) / s.draftCount : null;
 }
 
 export interface EligibilityResult {

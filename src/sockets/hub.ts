@@ -4,6 +4,7 @@ import prisma from "@/lib/prisma";
 import { getSocketSession, type SessionData } from "@/lib/session";
 import { isStaffActive, invalidateActiveCache, invalidateStaffSessions, isStaffSessionCurrent } from "@/lib/rbac";
 import { CONTROL_CHANNEL, type ControlMessage } from "@/lib/notify";
+import { applyCacheBust } from "@/lib/cache-bust";
 import log from "@/lib/log";
 
 /**
@@ -162,6 +163,9 @@ export function initControlBridge(sub: Redis): void {
         });
         const n = disconnectStaff(data.staffId);
         log.info({ staffId: data.staffId, sockets: n }, "control: staff:sessions-invalidated applied (password reset)");
+      } else if (data.cmd === "cache:bust") {
+        // ★ Fix B（cwi-fix-20260825-f1）：web process 側 automation/workflow cache 即時失效
+        applyCacheBust(data.scope);
       }
     } catch (err) {
       log.warn(

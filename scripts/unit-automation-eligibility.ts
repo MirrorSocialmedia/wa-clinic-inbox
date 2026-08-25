@@ -18,7 +18,8 @@ function check(name: string, ok: boolean, detail = ""): void {
 
 const WEEKS = ["2026-07-27", "2026-08-03", "2026-08-10", "2026-08-17"];
 function week(i: number, over: Partial<StatLike> = {}): StatLike {
-  return { weekStart: WEEKS[i], draftCount: 20, adoptedAsIs: 18, adoptedEdited: 2, complaints: 0, rollbacks: 0, ...over };
+  // ★ Fix D（cwi-fix-20260825-f1）：fixture 加 autoSent: 0 — 現有 case 結果不變 = L1 店 byte 兼容證明
+  return { weekStart: WEEKS[i], draftCount: 20, adoptedAsIs: 18, adoptedEdited: 2, autoSent: 0, complaints: 0, rollbacks: 0, ...over };
 }
 
 console.log("[0] adoptRate");
@@ -75,6 +76,23 @@ console.log("[6] 邊界：rate 恰好 0.9 過 / 18+1=19 過");
   check("17+1 = 0.9 → 過", r2.eligible, JSON.stringify(r2.reasons));
   const r3 = isEligible([week(0, { adoptedAsIs: 16, adoptedEdited: 1 }), week(1), week(2), week(3)]); // 17/20 = 0.85
   check("16+1 = 0.85 → 唔過", !r3.eligible);
+}
+
+// ★ Fix D（cwi-fix-20260825-f1）：autoSent 計入採用（L2+ 店先有真實 rate）
+console.log("[7] autoSent 計採用：2+1+20 / 25 = 0.92 → 過");
+{
+  const r = adoptRate(week(0, { draftCount: 25, adoptedAsIs: 2, adoptedEdited: 1, autoSent: 20 }));
+  check("adoptRate = 0.92", r === 0.92, String(r));
+  const rElig = isEligible([week(0, { draftCount: 25, adoptedAsIs: 2, adoptedEdited: 1, autoSent: 20 }), week(1), week(2), week(3)]);
+  check("eligible=true（L2 店真實 rate）", rElig.eligible, JSON.stringify(rElig.reasons));
+}
+
+console.log("[8] autoSent 高但 complaints 1 → 零容忍唔過");
+{
+  const rows = [week(0, { draftCount: 25, adoptedAsIs: 2, adoptedEdited: 1, autoSent: 20, complaints: 1 }), week(1), week(2), week(3)];
+  const r = isEligible(rows);
+  check("eligible=false", !r.eligible);
+  check("reasons 有 complaints 行", r.reasons.some((x) => x.includes("complaints+rollbacks = 1")), JSON.stringify(r.reasons));
 }
 
 console.log(failures === 0 ? "\n✅ unit-automation-eligibility 全過" : `\n❌ ${failures} 個 fail`);

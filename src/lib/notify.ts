@@ -60,7 +60,9 @@ export const CONTROL_CHANNEL = "wa-inbox:control";
 export type ControlMessage =
   | { cmd: "staff:changed"; staffId: string; active: boolean }
   // C-3 尾批：password reset → 踢晒該 staff 所有 session（hub 側設 cutoff + 斷已連 socket）
-  | { cmd: "staff:sessions-invalidated"; staffId: string };
+  | { cmd: "staff:sessions-invalidated"; staffId: string }
+  // ★ Fix B（cwi-fix-20260825-f1）：跨 process cache 失效（web ⇄ worker 各自持 in-memory TTL cache）
+  | { cmd: "cache:bust"; scope: "automation" | "workflow" };
 
 /**
  * 發控制指令（fire-and-forget）：Redis 故障時 log — API 側嘅 cache 失效已經做咗，
@@ -71,7 +73,8 @@ export function publishControl(msg: ControlMessage): void {
     .publish(CONTROL_CHANNEL, JSON.stringify(msg))
     .catch((err) => {
       log.warn(
-        { cmd: msg.cmd, staffId: msg.staffId, err: err instanceof Error ? err.message : String(err) },
+        // ★ Fix B：cache:bust 冇 staffId 欄 — 安全取值避免 undefined key 混入 log
+        { cmd: msg.cmd, staffId: "staffId" in msg ? msg.staffId : undefined, err: err instanceof Error ? err.message : String(err) },
         "control: publish failed（socket 斷線會延後到 active cache 到期）"
       );
     });

@@ -51,7 +51,8 @@ function notify(title: string): Effect {
 
 // ── 日期格式（pure）─────────────────────────────────────────────────────
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
-const NUM_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"];
+// ★ Fix C（cwi-fix-20260825-f1）：長度必須 ≥ SessionParams.candidateCount zod max(8) — 唔夠會出 "undefined" 行頭
+const NUM_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"];
 
 /** "2026-08-26" → "8月26日"（confirmLine 用，MD 格式 M月D日） */
 export function fmtDateShort(date: string): string {

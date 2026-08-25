@@ -12,8 +12,10 @@ import { startOutboundWorker } from "./outbound.worker";
 import { startAiWorker } from "./ai.worker";
 import { startCronWorker } from "./cron.worker";
 import { startMediaWorker } from "./media.worker";
-import { cronQueue } from "@/lib/queue";
+import { cronQueue, getRedis } from "@/lib/queue";
 import { refreshAllClinics } from "@/lib/availability";
+import { CONTROL_CHANNEL, type ControlMessage } from "@/lib/notify";
+import { applyCacheBust } from "@/lib/cache-bust";
 import log from "@/lib/log";
 
 async function registerSchedulers() {
@@ -70,6 +72,25 @@ async function main() {
   await startMediaWorker();
   await startCronWorker();
   await registerSchedulers();
+  // ★ Fix B（cwi-fix-20260825-f1）：worker process 訂閱 control channel —
+  //   automation/workflow cache 失效唔使等 5 分鐘 TTL（panic 降級要即時生效）。
+  //   subscribe 独占 connection → duplicate（同 hub.ts initControlBridge 一樣做法）。
+  const controlSub = getRedis().duplicate();
+  controlSub.on("error", (err) => {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "worker control subscriber error");
+  });
+  controlSub.subscribe(CONTROL_CHANNEL, (err) => {
+    if (err) log.error({ err: err.message }, "worker control subscribe failed（cache 退回 5 分鐘 TTL）");
+  });
+  controlSub.on("message", (_ch, raw) => {
+    try {
+      const data = JSON.parse(raw) as ControlMessage;
+      if (data.cmd === "cache:bust") applyCacheBust(data.scope);
+      // staff:* cmd 係 web/socket 事 — worker 唔理
+    } catch {
+      /* bad message ignored（同 hub 語義）*/
+    }
+  });
   log.info({}, "all workers running — waiting for jobs");
 
   // 啟動首跑（fire-and-forget — 失敗只 log，*/15 cron 會再試）

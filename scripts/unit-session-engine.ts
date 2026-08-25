@@ -33,6 +33,7 @@ import {
   type StepResult,
 } from "../src/lib/booking/session-engine";
 import { resolveLevel, globalCap, minLevel, asLevel } from "../src/lib/ai/automation";
+import { SESSION_DEFAULTS } from "../src/lib/workflow/definitions";
 import { parseSessionOutput } from "../src/lib/ai";
 import { AiCallError } from "../src/lib/ai/types";
 import type { SessionAiOutput, SessionSlots } from "../src/lib/ai/session-types";
@@ -327,6 +328,18 @@ console.log("[9] candidateText");
 
   const t4 = candidateText({ ...emptySlots, timeOfDay: "AFTERNOON" }, slotsData(), PROVIDERS);
   check("timeOfDay filter（只 15:00）", t4.includes("15:00") && !t4.includes("10:00"));
+
+  // ★ Fix C（cwi-fix-20260825-f1）：candidateCount=8（zod max）→ 行頭唔出 "undefined"、行數=8
+  //   修前 NUM_EMOJI 只 5 個 → 第 6 行起 `NUM_EMOJI[i]` = undefined → "undefined 9月..." 行頭。
+  const open8: SlotRow[] = [];
+  for (const d of ["2026-09-01", "2026-09-02"]) {
+    for (const t of ["10:00", "11:00", "14:00", "15:00"]) open8.push(row("p1", d, t));
+  }
+  const t8 = candidateText(emptySlots, slotsData({ slots: open8 }), PROVIDERS, { ...SESSION_DEFAULTS, candidateCount: 8 });
+  const lines8 = t8.split("\n").filter((l) => /^\d/.test(l));
+  check("candidateCount=8：零 undefined 字串", !t8.includes("undefined"), t8.slice(0, 200));
+  check("candidateCount=8：行數 = 8", lines8.length === 8, `got ${lines8.length}`);
+  check("candidateCount=8：第 8 行行頭 = 8️⃣", lines8[7]?.startsWith("8️⃣"), lines8[7] ?? "<missing>");
 }
 
 // ── 10. parseSessionOutput ────────────────────────────────────────────

@@ -94,7 +94,9 @@ function clinicBlock(clinic: AiClinicInfo): string {
   return lines.join("\n");
 }
 
-function msgLine(m: AiContextMessage): string {
+export function msgLine(m: AiContextMessage): string {
+  // ★ Fix A：INTERNAL（type=note）零內容出 prompt — 就算 caller 漏 filter 都只出占位
+  if (m.channel === "INTERNAL" || m.type === "note") return `[internal-note]`;
   const ts = m.waTimestamp.toISOString().slice(0, 16).replace("T", " ");
   const who = m.direction === "IN" ? "in" : "out";
   const body =

@@ -12,6 +12,7 @@
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import log from "@/lib/log";
+import { publishControl } from "@/lib/notify";
 import {
   PARAMS_DEFAULTS,
   PARAMS_SCHEMAS,
@@ -220,6 +221,7 @@ export async function publish(defId: string, staffId: string | null): Promise<vo
     });
   });
   bustParamsCache();
+  publishControl({ cmd: "cache:bust", scope: "workflow" }); // ★ Fix B（cwi-fix-20260825-f1）：web 其他 process 即時失效（revert 經 publish 亦覆蓋）
 }
 
 /**

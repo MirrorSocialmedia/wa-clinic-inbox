@@ -157,7 +157,10 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   }
 
   const recent = await prisma.message.findMany({
-    where: { conversationId: conv.id },
+    // ★ Fix A（cwi-fix-20260825-f1）：INTERNAL 備註（type=note）絕不入 LLM prompt —
+    //   msgLine 對非 text 類型會輸出 [type body]，唔 filter = 員工內部討論影響草稿/AUTO 覆文。
+    //   （同 line ~350 cooldown query 嘅 channel:{not:"INTERNAL"} 同一語義 — 嗰度做咗呢度漏咗。）
+    where: { conversationId: conv.id, channel: { not: "INTERNAL" } },
     orderBy: [{ waTimestamp: "desc" }, { createdAt: "desc" }], // 同秒 tie（WhatsApp ts 秒級）→ 落庫順序定，latest 必須係最新到
     take: PROMPT_CONTEXT_MESSAGES,
   });
@@ -319,11 +322,22 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     }
   }
 
-  // ── 4.5 AUTO 模式（Phase 2b 逐舖設定；default DRAFT = 舊行為完全唔變） ─────
-  // 全部滿足先自動發；任何一個唔滿足 → 退回 DRAFT（pending draft 俾 staff 處理）
+  // ── 4.5 AUTO 模式 ─────
+  // ★ Fix B（cwi-fix-20260825-f1）：自動覆資格由 resolver 決定（per intent），唔再直 key aiMode —
+  //   儀表板逐類 L1/L2 先真正生效；〔全店降 L1〕panic（"*"→L1 policy）即真停自動覆。
+  //   行為保證：冇 policy row 嘅店 = resolver fallback aiMode（AUTO→L2 / DRAFT→L1）→ byte 不變。
+  //   bonus：AI_GLOBAL_MAX_LEVEL=L1 而家連 L2 自動覆都壓到（env kill 全覆蓋）。
   const win = getWindowState(updatedConv.lastInboundAt);
   let autoSent = false;
-  if (clinic.aiMode === "AUTO") {
+  const autoLevel = await getAutomationLevel(conv.clinicId, result.intent);
+  if (clinic.aiMode === "AUTO" && autoLevel === "L1") {
+    // 舊行為會自動發、新 policy 壓咗落 L1 — log 一次俾 debug（metadata only）
+    log.info(
+      { clinic: clinic.code, wamid: msg.waMessageId, intent: result.intent, reasons: "policy-L1" },
+      "ai: AUTO mode — suppressed by AutomationPolicy L1 (draft only)"
+    );
+  }
+  if (autoLevel !== "L1") {
     const blocks: string[] = [];
     if (result.intent === "URGENT_PAIN") blocks.push("URGENT_PAIN"); // 鐵律：code 第二重擋
     if (result.intent === "COMPLAINT") blocks.push("COMPLAINT");     // ★ Phase C：投訴絕不自動發（要人講）
@@ -395,6 +409,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     aiSummary: safeSummary, // ★ H-3：同 DB 一致（scrub 後）— live push 亦唔帶身份資料
     hasDraft: draftId !== null,
     aiMode: clinic.aiMode,
+    autoLevel,
     autoSent,
   });
   if (urgent) {
@@ -432,6 +447,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       latencyMs: result.latencyMs,
       tokens: result.tokens,
       aiMode: clinic.aiMode,
+      autoLevel,
       draft: draftId !== null,
       autoSent,
     },

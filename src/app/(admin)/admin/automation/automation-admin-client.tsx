@@ -202,9 +202,10 @@ export default function AutomationAdmin() {
                       <div className="flex items-center gap-1.5">
                         <span className={`text-[11px] px-1.5 py-0.5 rounded-full font-semibold ${LEVEL_STYLE[cell.level] ?? ""}`}>{cell.level}</span>
                         {cell.eligible ? (
-                          <span className="text-green-600 text-xs" title="符合自動化資格">✓</span>
+                          // ★ Fix D（cwi-fix-20260825-f1）：hover 講明採用率語義（autoSent 計採用）
+                          <span className="text-green-600 text-xs" title={"符合自動化資格\n採用率 =（照用 + 修改後用 + 自動發出）÷ 草稿總數；自動發出計採用，投訴/回退零容忍"}>✓</span>
                         ) : (
-                          <span className="text-t3 text-xs" title={cell.reasons.join("\n")}>
+                          <span className="text-t3 text-xs" title={cell.reasons.join("\n") + "\n採用率 =（照用 + 修改後用 + 自動發出）÷ 草稿總數；自動發出計採用，投訴/回退零容忍"}>
                             {cell.reasons.length > 0 ? "✗" : "–"}
                           </span>
                         )}
@@ -212,7 +213,13 @@ export default function AutomationAdmin() {
                       <div className="mt-1">
                         <Trend rates={cell.adoptRateTrend} />
                       </div>
-                      <div className="mt-1" title={cell.stats.map((s) => `${s.weekStart}: n=${s.draftCount} 投訴=${s.complaints} 回退=${s.rollbacks}`).join("\n")}>
+                      <div
+                        className="mt-1"
+                        title={
+                          cell.stats.map((s) => `${s.weekStart}: n=${s.draftCount} 投訴=${s.complaints} 回退=${s.rollbacks}`).join("\n") +
+                          "\n採用率 =（照用 + 修改後用 + 自動發出）÷ 草稿總數；自動發出計採用，投訴/回退零容忍"
+                        }
+                      >
                         <LevelSelect clinicId={c.id} cat={cat} value={cell.level} disabled={!data.global.canPatch} onDone={load} />
                       </div>
                     </td>
