@@ -35,14 +35,24 @@ interface CacheRow {
 }
 const cache = new Map<string, CacheRow>();
 
-function cacheGet(clinicId: string, category: string): AutomationLevel | null {
-  const row = cache.get(`${clinicId}|${category}`);
+/**
+ * cache key（★ 含 aiMode — cwi-fix-20260825-f1 T83 事故）：fallback level 跟店模式走
+ *（AUTO→L2 / DRAFT→L1）；key 唔含 mode 嘅話，模式切換（DRAFT→AUTO）後 stale fallback
+ * 會住到 5 分鐘 TTL 到期，AUTO 店被 L1 誤壓（T22 DRAFT booking → T83 AUTO assigned 實測）。
+ */
+export function levelCacheKey(clinicId: string, aiMode: string | null, category: string): string {
+  return `${clinicId}|${aiMode ?? "NONE"}|${category}`;
+}
+
+/** test-only：cache 讀寫（unit 驗證 key 隔離）。 */
+export function cacheGet(clinicId: string, aiMode: string | null, category: string): AutomationLevel | null {
+  const row = cache.get(levelCacheKey(clinicId, aiMode, category));
   if (row && Date.now() - row.at < CACHE_TTL_MS) return row.level;
   return null;
 }
-function cacheSet(clinicId: string, category: string, level: AutomationLevel): void {
+export function cacheSet(clinicId: string, aiMode: string | null, category: string, level: AutomationLevel): void {
   if (cache.size > 500) cache.clear(); // 防 leak（店×類 組合唔多）
-  cache.set(`${clinicId}|${category}`, { at: Date.now(), level });
+  cache.set(levelCacheKey(clinicId, aiMode, category), { at: Date.now(), level });
 }
 
 /** test-only：清 TTL cache（e2e 改 level 唔使等 5 分鐘）。 */
@@ -69,19 +79,21 @@ export function resolveLevel(
 }
 
 export async function getAutomationLevel(clinicId: string, category: string): Promise<AutomationLevel> {
-  const cached = cacheGet(clinicId, category);
+  // 店模式（cache key 依賴佢）— PK select 輕；cache hit 路徑多呢一次輕查詢，換 aiMode 切換即時正確
+  const clinic = await prisma.clinic.findUnique({ where: { id: clinicId }, select: { aiMode: true } }).catch(() => null);
+  const aiMode = clinic?.aiMode ?? null;
+  const cached = cacheGet(clinicId, aiMode, category);
   if (cached) return minLevel(cached, globalCap());
   try {
     const rows = await prisma.automationPolicy.findMany({
       where: { clinicId, category: { in: [category, "*"] } },
     });
-    const clinic = await prisma.clinic.findUnique({ where: { id: clinicId }, select: { aiMode: true } });
     const level = resolveLevel(
       rows.map((r) => ({ category: r.category, level: r.level })),
       category,
-      clinic?.aiMode ?? null
+      aiMode
     );
-    cacheSet(clinicId, category, level);
+    cacheSet(clinicId, aiMode, category, level);
     return minLevel(level, globalCap());
   } catch (err) {
     // fail-soft：DB 錯 → legacy 保守級（L1）— session 唔開，唔阻 AI 主流程

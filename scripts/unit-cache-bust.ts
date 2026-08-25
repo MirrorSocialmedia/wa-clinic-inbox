@@ -20,7 +20,7 @@ try {
 }
 
 import { prisma } from "../src/lib/prisma";
-import { getAutomationLevel, clearAutomationLevelCache } from "../src/lib/ai/automation";
+import { getAutomationLevel, clearAutomationLevelCache, levelCacheKey, cacheGet, cacheSet } from "../src/lib/ai/automation";
 import { getParams, saveDraft, publish, bustParamsCache } from "../src/lib/workflow/store";
 import { PARAMS_DEFAULTS } from "../src/lib/workflow/definitions";
 import { applyCacheBust } from "../src/lib/cache-bust";
@@ -84,6 +84,19 @@ void (async () => {
         const fresh = await getParams("triage", CLINIC);
         check("G2-4 applyCacheBust('workflow') 後即刻落 DB → 2222", fresh.humanCooldownMs === 2222, String(fresh.humanCooldownMs));
       }
+    }
+    // ── G3 cache key 含 aiMode（T83 事故：DRAFT→AUTO 切換後 stale L1 fallback 住 5 分鐘誤壓 AUTO 店）──
+    console.log("G3 cache key 含 aiMode（模式切換無 cross-talk）");
+    {
+      const kD = levelCacheKey("c1", "DRAFT", "X");
+      const kA = levelCacheKey("c1", "AUTO", "X");
+      const kN = levelCacheKey("c1", null, "X");
+      const kO = levelCacheKey("c2", "AUTO", "X");
+      check("G3-1 DRAFT/AUTO/null/跨店 key 互異", new Set([kD, kA, kN, kO]).size === 4, [kD, kA, kN, kO].join(" / "));
+      cacheSet("c1", "DRAFT", "X", "L1");
+      check("G3-2 DRAFT 条目唔漏去 AUTO key", cacheGet("c1", "AUTO", "X") === null, String(cacheGet("c1", "AUTO", "X")));
+      check("G3-3 DRAFT key 本尊照讀（L1）", cacheGet("c1", "DRAFT", "X") === "L1", String(cacheGet("c1", "DRAFT", "X")));
+      clearAutomationLevelCache();
     }
   } finally {
     // 清晒（policy row 按 clinicId；workflow row 按 createdBy marker）

@@ -3761,11 +3761,16 @@ CODE=$(curl -s -o /tmp/e2e-t90-p0.json -w '%{http_code}' -b "$COOKIE_EADM2" \
   -d "{\"clinicId\":\"$TKW_CLINIC_ID\",\"category\":\"*\",\"level\":\"L3\"}")
 check "T90 baseline TKW '*'=L3 → 200" "$CODE" "200"
 T90_C1="e2e-t90-c1-${EPOCH}"; T90_V1="e2e-t90-v1-${EPOCH}"; T90_PAT1="8526202${EPOCH}"
-q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\") VALUES ('$T90_C1','$TKW_CLINIC_ID','$T90_PAT1','E2E T90 b')" >/dev/null
-q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$T90_V1','$TKW_CLINIC_ID','$T90_C1',now())" >/dev/null
+# ★ raw INSERT 必帶必填欄：Contact.labels（無 default）/ Conversation.status — 漏咗 = 靜默失敗（q 吞 stderr）
+#   → worker 自建新 contact/conv → 斷言盯住預建 id 失明（run3 實測：session 其實開咗喺 worker 個 conv）
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T90_C1','$TKW_CLINIC_ID','$T90_PAT1','E2E T90 b', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$T90_V1','$TKW_CLINIC_ID','$T90_C1','OPEN',now())" >/dev/null 2>&1
 T90_W0="wamid.E2E_T90_0_${EPOCH}"
 pnpm -s mock-inbound message --clinic TKW --from "$T90_PAT1" --text "想預約下週有冇位" --wamid "$T90_W0" --name "E2E T90 booking" >/dev/null || fail "T90 mock-inbound baseline"
-if wait_for "SELECT count(*)::text c FROM \"BookingSession\" WHERE \"conversationId\"='$T90_V1'" '[{"c":"1"}]' 30; then
+# ★ 斷言跟訊息實際落喺邊個 conversation（預建行萬一唔喺，worker 會建新 conv — 唔死盯預建 id）
+T90_M0=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$T90_W0'" | jf id)
+T90_B0V=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE id='$T90_M0'" | jf conversationId)
+if wait_for "SELECT count(*)::text c FROM \"BookingSession\" WHERE \"conversationId\"='$T90_B0V'" '[{"c":"1"}]' 30; then
   pass "T90 baseline：L3 店 BOOKING_REQUEST 開 session"
 else
   fail "T90 baseline session 未開"; T90=1
@@ -3780,8 +3785,8 @@ CODE=$(curl -s -o /tmp/e2e-t90-p2.json -w '%{http_code}' -b "$COOKIE_EADM2" \
 check "T90 panic TKW '*'→L1 → 200" "$CODE" "200"
 # MF（AUTO — T89 轉咗）：QUESTION 唔再自動發
 T90_CM="e2e-t90-cm-${EPOCH}"; T90_VM="e2e-t90-vm-${EPOCH}"; T90_PATM="8526204${EPOCH}"
-q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\") VALUES ('$T90_CM','$MF_CLINIC_ID','$T90_PATM','E2E T90 q')" >/dev/null
-q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$T90_VM','$MF_CLINIC_ID','$T90_CM',now())" >/dev/null
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T90_CM','$MF_CLINIC_ID','$T90_PATM','E2E T90 q', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$T90_VM','$MF_CLINIC_ID','$T90_CM','OPEN',now())" >/dev/null 2>&1
 T90_W1="wamid.E2E_T90_1_${EPOCH}"
 pnpm -s mock-inbound message --clinic MF --from "$T90_PATM" --text "你哋幾點開門" --wamid "$T90_W1" --name "E2E T90 q" >/dev/null || fail "T90 mock-inbound MF"
 T90_M1=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$T90_W1'" | jf id)
@@ -3791,36 +3796,37 @@ else
   fail "T90 MF draft 未出"; T90=1
 fi
 sleep 2
-check "T90 panic：MF AUTO 店 0 aiAutoSent" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T90_VM' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+T90_B1V=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE id='$T90_M1'" | jf conversationId)
+check "T90 panic：MF AUTO 店 0 aiAutoSent" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T90_B1V' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
 grep -F "$T90_W1" /tmp/e2e-worker*.log 2>/dev/null | grep -q "policy-L1" && pass "T90 MF log 見 policy-L1" || { fail "T90 MF policy-L1 唔見"; T90=1; }
 # TKW（L3 店）：新 BOOKING_REQUEST 唔再開 session，只出 draft
 T90_C2="e2e-t90-c2-${EPOCH}"; T90_V2="e2e-t90-v2-${EPOCH}"; T90_PAT2="8526203${EPOCH}"
-q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\") VALUES ('$T90_C2','$TKW_CLINIC_ID','$T90_PAT2','E2E T90 b2')" >/dev/null
-q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$T90_V2','$TKW_CLINIC_ID','$T90_C2',now())" >/dev/null
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T90_C2','$TKW_CLINIC_ID','$T90_PAT2','E2E T90 b2', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$T90_V2','$TKW_CLINIC_ID','$T90_C2','OPEN',now())" >/dev/null 2>&1
 T90_W2="wamid.E2E_T90_2_${EPOCH}"
 pnpm -s mock-inbound message --clinic TKW --from "$T90_PAT2" --text "想預約下週有冇位" --wamid "$T90_W2" --name "E2E T90 b2" >/dev/null || fail "T90 mock-inbound TKW2"
 T90_M2=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$T90_W2'" | jf id)
+T90_B2V=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE id='$T90_M2'" | jf conversationId)
 if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$T90_M2'" '[{"s":"PROPOSED"}]' 30; then
   pass "T90 panic：L3 店 BOOKING_REQUEST 跌落 draft 行為（PROPOSED）"
 else
   fail "T90 TKW draft 未出"; T90=1
 fi
-check "T90 panic：L3 店 session 唔開（0 BookingSession）" "$(q "SELECT count(*)::text c FROM \"BookingSession\" WHERE \"conversationId\"='$T90_V2'" | jf c)" "0"
-# hermetic cleanup
-q "DELETE FROM \"BookingSession\" WHERE \"conversationId\" IN ('$T90_V1','$T90_V2')" >/dev/null 2>&1
-q "DELETE FROM \"BookingRequest\" WHERE \"conversationId\" IN ('$T90_V1','$T90_V2')" >/dev/null 2>&1
+check "T90 panic：L3 店 session 唔開（0 BookingSession）" "$(q "SELECT count(*)::text c FROM \"BookingSession\" WHERE \"conversationId\"='$T90_B2V'" | jf c)" "0"
+# hermetic cleanup（waId 為本：預建行萬一靜默失敗，worker 會自建 cuid contact/conv — 殘留要 sweep）
+for pat in "$T90_PAT1" "$T90_PATM" "$T90_PAT2"; do
+  CONV_SUB="SELECT id FROM \"Conversation\" cv JOIN \"Contact\" ct ON ct.id=cv.\"contactId\" WHERE ct.\"waId\"='$pat'"
+  q "DELETE FROM \"BookingSession\" WHERE \"conversationId\" IN ($CONV_SUB)" >/dev/null 2>&1
+  q "DELETE FROM \"BookingRequest\" WHERE \"conversationId\" IN ($CONV_SUB)" >/dev/null 2>&1
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN ($CONV_SUB)" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ($CONV_SUB)" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" cv USING \"Contact\" ct WHERE ct.id=cv.\"contactId\" AND ct.\"waId\"='$pat'" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE \"waId\"='$pat'" >/dev/null 2>&1
+done
 q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND category='*'" >/dev/null 2>&1
 q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$MF_CLINIC_ID' AND category='*'" >/dev/null 2>&1
 patch_aimode "$MF_CLINIC_ID" DRAFT; CODE=$PAM_CODE
 check "T90 MF 還原 DRAFT" "$CODE" "200"
-for v in "$T90_V1" "$T90_VM" "$T90_V2"; do
-  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$v'" >/dev/null 2>&1
-  q "DELETE FROM \"Message\" WHERE \"conversationId\"='$v'" >/dev/null 2>&1
-  q "DELETE FROM \"Conversation\" WHERE id='$v'" >/dev/null 2>&1
-done
-for c in "$T90_C1" "$T90_CM" "$T90_C2"; do
-  q "DELETE FROM \"Contact\" WHERE id='$c'" >/dev/null 2>&1
-done
 [ "$T90" = 0 ] && pass "T90 Fix B：panic 全店降 L1 全鏈" || { fail "T90 有項失敗（見上 ❌）"; E_FAIL=1; }
 
 # ── R-E cleanup（持久 DB 衞生 — 所有 fixture / 副作用全清）───────────────
