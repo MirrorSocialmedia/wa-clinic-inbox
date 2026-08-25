@@ -129,6 +129,13 @@
 #   T86 A2 媒體：send 相 → 客戶端零回覆 + StaffNotice(MEDIA_RECEIVED) 落庫 + /api/notices bell +1 +
 #       AiDraft 零新增（canDraft 限 text）+ 分類照行 + PATCH 標已讀
 #   T87 hermetic：MF 還原 DRAFT（T83 起轉 AUTO）
+#   T88 Fix A canary（cwi-fix-20260825-f1）：INTERNAL 備註含「投訴」→ 病人下條 QUESTION 唔被污染（intent=QUESTION + 零 HANDOFF_REQUEST）
+#
+# Phase E 尾部（cwi-fix-20260825-f1，Fix B）：
+#   T89 policy 壓 AUTO + cache broadcast：MF→AUTO + PATCH QUESTION=L1 → draft 照出 + 0 自動發 + log policy-L1；
+#       PATCH QUESTION=L2（唔手動 clear cache — control channel 廣播）→ 同類訊息即刻自動發（aiAutoSent=1）
+#   T90 panic 全店降 L1：TKW "*"=L3 baseline（BOOKING_REQUEST 開 session）→ 兩店 "*"→L1 →
+#       AUTO 店（MF）文字唔再自動發 + L3 店（TKW）session 唔開（只出 draft）
 #
 # Phase C（slot-filling 對話式預約，cwi-ai-20260824-t3）：
 #   PC-G1 L3 全鏈：4 條訊息 slot-filling（provider→相對日期→15:00→確認）→ 綠色卡 PENDING
@@ -237,6 +244,11 @@ q "DELETE FROM \"WebhookEvent\"" >/dev/null 2>&1 || true
 q "DELETE FROM \"Conversation\"" >/dev/null 2>&1 || true
 q "DELETE FROM \"StaffNotice\"" >/dev/null 2>&1 || true  # AI Workflow T1：新表（persistent DB 跨 run 殘留 hermetic）
 q "DELETE FROM \"Alert\" WHERE type='backup_failed'" >/dev/null 2>&1 || true  # T45 hermetic（persistent DB 累積舊行）
+# cwi-fix-20260825-f1 hermetic：PC 段殘留測試 row（L3 policy / session / booking）—
+#   不清會污染下一 run 嘅 T14/T19/T23/T25 BOOKING_REQUEST 路由（run5 殘留 L3 row 實測 16 項紅事故）
+q "DELETE FROM \"BookingSession\"" >/dev/null 2>&1 || true
+q "DELETE FROM \"BookingRequest\"" >/dev/null 2>&1 || true
+q "DELETE FROM \"AutomationPolicy\"" >/dev/null 2>&1 || true
 # 清晒上次 run 殘留嘅 BullMQ job — 舊 job 會被新 worker redeliver → 舊 EPOCH 數據
 # 落咗新 run 嘅 DB 污染斷言（T41/T17 事故）
 pnpm e2e:queue-clear >/dev/null 2>&1 || echo "  WARN: queue clear failed（繼續，留意 T17/T41）"
@@ -2421,6 +2433,40 @@ echo "[AI-T1] T87: restore MF DRAFT (hermetic)..."
 patch_aimode "$MF_CLINIC_ID" DRAFT; CODE=$PAM_CODE
 check "T87 MF 還原 DRAFT" "$CODE" "200"
 
+# ── T88. Fix A canary（cwi-fix-20260825-f1）：INTERNAL 備註含「投訴」唔污染病人下條訊息 intent ─
+#   canary 法（唔 introspect prompt）：mock RE_COMPLAINT（/投訴|退款|.../）係分類觸發器 —
+#   修前備註「投訴」入 prompt → mock regex 掃中 → COMPLAINT（HANDOFF_REQUEST 誤觸）；
+#   修後（context query filter + msgLine guard 雙重）→ 病人「幾點開門」照判 QUESTION。
+#   ★ 注：現 mock classify 只掃 last IN body — 呢 canary 喺真 AI 模式先係真探針；
+#     mock 模式係行為守護（+ unit-prompts 做直接 regression probe）。
+echo "[AI-T1] T88: INTERNAL note must not pollute AI context (Fix A)..."
+T88=0
+P_T88="8526105${EPOCH}"; WAMID_T88="wamid.E2E_T88_${EPOCH}"; C_T88="t88-c-${EPOCH}"; CONV_T88="t88-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_T88', '$MF_CLINIC_ID', '$P_T88', 'E2E T88', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CONV_T88', '$MF_CLINIC_ID', '$C_T88', 'OPEN', '$NOWISO')" >/dev/null 2>&1
+# 1. 內部備註（含 mock 投訴詞）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X POST "$BASE/api/conversations/$CONV_T88/notes" -H 'Content-Type: application/json' -d '{"body":"e2e T88 內部備註：該患者曾投訴服務態度，注意處理"}')
+check "T88 內部備註 POST → 201" "$CODE" "201"
+check "T88 note row 形態（INTERNAL/note/OUT）" "$(q "SELECT (channel='INTERNAL' AND type='note' AND direction='OUT')::text ok FROM \"Message\" WHERE \"conversationId\"='$CONV_T88'" | jf ok)" "true"
+# 2. 病人跟住發普通問題（唔含任何分類觸發詞）
+pnpm -s mock-inbound message --clinic MF --from "$P_T88" --text "你哋幾點開門" --wamid "$WAMID_T88" --name "E2E T88 question" >/dev/null || fail "T88 mock-inbound POST"
+M_T88=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T88'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T88'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T88 QUESTION draft 照出（PROPOSED）"
+else
+  fail "T88 QUESTION draft"; T88=1
+fi
+sleep 2
+# 3. intent 斷言（修前 mock 若掃中備註「投訴」→ COMPLAINT）
+check "T88 intent = QUESTION（備註「投訴」唔污染分類）" "$(q "SELECT \"intent\"::text i FROM \"Conversation\" WHERE id='$CONV_T88'" | jf i)" "QUESTION"
+# 4. COMPLAINT 通知唔被誤觸
+check "T88 零 HANDOFF_REQUEST（COMPLAINT 軌未誤觸）" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$CONV_T88' AND kind='HANDOFF_REQUEST'" | jf c)" "0"
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CONV_T88'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T88'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$CONV_T88'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id='$C_T88'" >/dev/null 2>&1
+[ "$T88" = 0 ] && pass "T88 Fix A canary：INTERNAL 備註唔入 prompt（intent 唔受污染）" || fail "T88 Fix A canary 有項失敗（見上 ❌）"
+
 # Phase R9 — Realtime P0 chaos e2e（cwi-rt-20260823；Kairo mt5w39ck5etgo）
 #   T75 RT-IDEMPOTENT：3 次同 clientMessageId → DB 1 row（R1 驗收）
 #   T76 RT-ORDER：20 對話 × 3 訊息壓測 → 每對話 DB 順序 = 發送順序（R4 驗收）
@@ -3647,6 +3693,136 @@ check "E6 AutomationPolicy 零變化" "$(q "SELECT count(*)::text c FROM \"Autom
 E6_AUDIT=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='SUGGESTION_DECIDE' AND \"entityId\"='$E6_CARD'" | jf c)
 check "E6 audit SUGGESTION_DECIDE = 1" "$E6_AUDIT" "1"
 
+# ── E7 (T89). Fix B（cwi-fix-20260825-f1）：policy 壓 AUTO + 跨 process cache broadcast ──────
+#   MF→AUTO + PATCH QUESTION=L1（白名單 admin eadm2）→ 病人 QUESTION → draft 照出 + 0 自動發 + log policy-L1；
+#   PATCH QUESTION=L2（唔手動 clear cache — worker 靠 control channel 廣播即時失效）
+#   → 同類訊息 → 自動發（aiAutoSent=1）。broadcast 唔通 → 第二項會 0（5 分鐘 TTL cache 遮住）。
+echo "[E/6] T89: policy L1 suppresses AUTO + cache broadcast (Fix B)..."
+# ★ hermetic：PC-G5 之後嘅 worker 仲帶 AI_GLOBAL_MAX_LEVEL=L2（cap 壓 L3 — T90 baseline session 唔會開）—
+#   照 T77/PC-G5 既有 pattern 用乾淨 env 重啟 worker（無 global cap）
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-t89w.log 2>&1 &
+WORKER_PID=$!
+T89W=0
+for i in $(seq 1 60); do grep -q "all workers running" /tmp/e2e-worker-t89w.log 2>/dev/null && { T89W=1; break; }; sleep 1; done
+check "T89 worker 重啟（乾淨 env，無 global cap）" "$T89W" "1"
+T89=0
+patch_aimode "$MF_CLINIC_ID" AUTO; CODE=$PAM_CODE
+check "T89 MF→AUTO" "$CODE" "200"
+T89_C="e2e-t89-c-${EPOCH}"; T89_V="e2e-t89-v-${EPOCH}"; T89_PAT="8526201${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\") VALUES ('$T89_C','$MF_CLINIC_ID','$T89_PAT','E2E T89')" >/dev/null
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$T89_V','$MF_CLINIC_ID','$T89_C',now())" >/dev/null
+CODE=$(curl -s -o /tmp/e2e-t89-p1.json -w '%{http_code}' -b "$COOKIE_EADM2" \
+  -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$MF_CLINIC_ID\",\"category\":\"QUESTION\",\"level\":\"L1\"}")
+check "T89 PATCH QUESTION=L1 (eadm2) → 200" "$CODE" "200"
+T89_W1="wamid.E2E_T89_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic MF --from "$T89_PAT" --text "你哋幾點開門" --wamid "$T89_W1" --name "E2E T89 q1" >/dev/null || fail "T89 mock-inbound 1"
+T89_M1=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$T89_W1'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$T89_M1'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T89 L1 壓 AUTO：draft 照出（PROPOSED）"
+else
+  fail "T89 draft 未出"; T89=1
+fi
+sleep 2
+check "T89 L1 壓 AUTO：0 aiAutoSent OUT" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T89_V' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+grep -F "$T89_W1" /tmp/e2e-worker*.log 2>/dev/null | grep -q "policy-L1" && pass "T89 log 見 policy-L1" || { fail "T89 policy-L1 log 唔見"; T89=1; }
+CODE=$(curl -s -o /tmp/e2e-t89-p2.json -w '%{http_code}' -b "$COOKIE_EADM2" \
+  -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$MF_CLINIC_ID\",\"category\":\"QUESTION\",\"level\":\"L2\"}")
+check "T89 PATCH QUESTION=L2（broadcast，唔手動 clear）→ 200" "$CODE" "200"
+T89_W2="wamid.E2E_T89_2_${EPOCH}"
+pnpm -s mock-inbound message --clinic MF --from "$T89_PAT" --text "你哋幾點收門" --wamid "$T89_W2" --name "E2E T89 q2" >/dev/null || fail "T89 mock-inbound 2"
+if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T89_V' AND direction='OUT' AND \"aiAutoSent\"=true" '[{"c":"1"}]' 30; then
+  pass "T89 broadcast 即刻生效：同類訊息自動發（aiAutoSent=1）"
+else
+  fail "T89 自動發未發生（broadcast 未通？）"; T89=1
+fi
+# hermetic：末態 = 冇 row + worker cache L1（= DRAFT fallback，harmless）
+curl -s -o /dev/null -b "$COOKIE_EADM2" -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$MF_CLINIC_ID\",\"category\":\"QUESTION\",\"level\":\"L1\"}" >/dev/null 2>&1
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$MF_CLINIC_ID' AND category='QUESTION'" >/dev/null 2>&1
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$T89_V'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$T89_V'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$T89_V'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id='$T89_C'" >/dev/null 2>&1
+[ "$T89" = 0 ] && pass "T89 Fix B：policy 壓 AUTO + cache broadcast 全鏈" || { fail "T89 有項失敗（見上 ❌）"; E_FAIL=1; }
+
+# ── E8 (T90). Fix B（cwi-fix-20260825-f1）：panic 全店降 L1 — 文字自動覆 + L3 session 全停 ────
+#   Baseline：TKW "*"=L3 → BOOKING_REQUEST 解到 L3 → session 開；
+#   panic：MF "*"→L1（AUTO 店文字唔再自動發 + policy-L1）/ TKW "*"→L1（L3 店 session 唔開，只出 draft）。
+#   ★ resolver 語義（現有設計，unit-session-engine [12]）：exact row > star row —
+#     panic 降嘅係店 star level；店自設 exact L2+ row 嘅類別保持原 level（儀表板文案同語義）。
+echo "[E/6] T90: panic '*'→L1 full chain (Fix B)..."
+T90=0
+CODE=$(curl -s -o /tmp/e2e-t90-p0.json -w '%{http_code}' -b "$COOKIE_EADM2" \
+  -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$TKW_CLINIC_ID\",\"category\":\"*\",\"level\":\"L3\"}")
+check "T90 baseline TKW '*'=L3 → 200" "$CODE" "200"
+T90_C1="e2e-t90-c1-${EPOCH}"; T90_V1="e2e-t90-v1-${EPOCH}"; T90_PAT1="8526202${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\") VALUES ('$T90_C1','$TKW_CLINIC_ID','$T90_PAT1','E2E T90 b')" >/dev/null
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$T90_V1','$TKW_CLINIC_ID','$T90_C1',now())" >/dev/null
+T90_W0="wamid.E2E_T90_0_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$T90_PAT1" --text "想預約下週有冇位" --wamid "$T90_W0" --name "E2E T90 booking" >/dev/null || fail "T90 mock-inbound baseline"
+if wait_for "SELECT count(*)::text c FROM \"BookingSession\" WHERE \"conversationId\"='$T90_V1'" '[{"c":"1"}]' 30; then
+  pass "T90 baseline：L3 店 BOOKING_REQUEST 開 session"
+else
+  fail "T90 baseline session 未開"; T90=1
+fi
+CODE=$(curl -s -o /tmp/e2e-t90-p1.json -w '%{http_code}' -b "$COOKIE_EADM2" \
+  -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$MF_CLINIC_ID\",\"category\":\"*\",\"level\":\"L1\"}")
+check "T90 panic MF '*'→L1 → 200" "$CODE" "200"
+CODE=$(curl -s -o /tmp/e2e-t90-p2.json -w '%{http_code}' -b "$COOKIE_EADM2" \
+  -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$TKW_CLINIC_ID\",\"category\":\"*\",\"level\":\"L1\"}")
+check "T90 panic TKW '*'→L1 → 200" "$CODE" "200"
+# MF（AUTO — T89 轉咗）：QUESTION 唔再自動發
+T90_CM="e2e-t90-cm-${EPOCH}"; T90_VM="e2e-t90-vm-${EPOCH}"; T90_PATM="8526204${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\") VALUES ('$T90_CM','$MF_CLINIC_ID','$T90_PATM','E2E T90 q')" >/dev/null
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$T90_VM','$MF_CLINIC_ID','$T90_CM',now())" >/dev/null
+T90_W1="wamid.E2E_T90_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic MF --from "$T90_PATM" --text "你哋幾點開門" --wamid "$T90_W1" --name "E2E T90 q" >/dev/null || fail "T90 mock-inbound MF"
+T90_M1=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$T90_W1'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$T90_M1'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T90 panic：MF QUESTION draft 照出"
+else
+  fail "T90 MF draft 未出"; T90=1
+fi
+sleep 2
+check "T90 panic：MF AUTO 店 0 aiAutoSent" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T90_VM' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+grep -F "$T90_W1" /tmp/e2e-worker*.log 2>/dev/null | grep -q "policy-L1" && pass "T90 MF log 見 policy-L1" || { fail "T90 MF policy-L1 唔見"; T90=1; }
+# TKW（L3 店）：新 BOOKING_REQUEST 唔再開 session，只出 draft
+T90_C2="e2e-t90-c2-${EPOCH}"; T90_V2="e2e-t90-v2-${EPOCH}"; T90_PAT2="8526203${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\") VALUES ('$T90_C2','$TKW_CLINIC_ID','$T90_PAT2','E2E T90 b2')" >/dev/null
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$T90_V2','$TKW_CLINIC_ID','$T90_C2',now())" >/dev/null
+T90_W2="wamid.E2E_T90_2_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$T90_PAT2" --text "想預約下週有冇位" --wamid "$T90_W2" --name "E2E T90 b2" >/dev/null || fail "T90 mock-inbound TKW2"
+T90_M2=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$T90_W2'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$T90_M2'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T90 panic：L3 店 BOOKING_REQUEST 跌落 draft 行為（PROPOSED）"
+else
+  fail "T90 TKW draft 未出"; T90=1
+fi
+check "T90 panic：L3 店 session 唔開（0 BookingSession）" "$(q "SELECT count(*)::text c FROM \"BookingSession\" WHERE \"conversationId\"='$T90_V2'" | jf c)" "0"
+# hermetic cleanup
+q "DELETE FROM \"BookingSession\" WHERE \"conversationId\" IN ('$T90_V1','$T90_V2')" >/dev/null 2>&1
+q "DELETE FROM \"BookingRequest\" WHERE \"conversationId\" IN ('$T90_V1','$T90_V2')" >/dev/null 2>&1
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND category='*'" >/dev/null 2>&1
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$MF_CLINIC_ID' AND category='*'" >/dev/null 2>&1
+patch_aimode "$MF_CLINIC_ID" DRAFT; CODE=$PAM_CODE
+check "T90 MF 還原 DRAFT" "$CODE" "200"
+for v in "$T90_V1" "$T90_VM" "$T90_V2"; do
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$v'" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\"='$v'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id='$v'" >/dev/null 2>&1
+done
+for c in "$T90_C1" "$T90_CM" "$T90_C2"; do
+  q "DELETE FROM \"Contact\" WHERE id='$c'" >/dev/null 2>&1
+done
+[ "$T90" = 0 ] && pass "T90 Fix B：panic 全店降 L1 全鏈" || { fail "T90 有項失敗（見上 ❌）"; E_FAIL=1; }
+
 # ── R-E cleanup（持久 DB 衞生 — 所有 fixture / 副作用全清）───────────────
 q "DELETE FROM \"SuggestionCard\" WHERE id IN ('$E5_CARD','$E6_CARD')" >/dev/null 2>&1
 q "DELETE FROM \"StaffNotice\" WHERE kind='SUGGESTION_READY' AND \"meta\"->>'cardId' IN ('$E5_CARD','$E6_CARD')" >/dev/null 2>&1
@@ -3668,7 +3844,7 @@ q "UPDATE \"Clinic\" SET \"greetingConfig\" = jsonb_set(\"greetingConfig\", '{fa
 q "DELETE FROM \"StaffUser\" WHERE email='$E2E_ADM2_EMAIL'" >/dev/null 2>&1
 
 # ── R-E summary ───────────────────────────────────────────────────────
-[ "$E_FAIL" = 0 ] && pass "R-E Phase E e2e（E1-E6：eligible/PATCH/cache-bust/403/flag/rollback/FAQ 全鏈/REJECT snapshot 全綠）" || fail "R-E Phase E 有項失敗（見上 ❌）"
+[ "$E_FAIL" = 0 ] && pass "R-E Phase E e2e（E1-E8：eligible/PATCH/cache-bust/403/flag/rollback/FAQ 全鏈/REJECT snapshot/T89 policy 壓 AUTO/T90 panic 全停 全綠）" || fail "R-E Phase E 有項失敗（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
