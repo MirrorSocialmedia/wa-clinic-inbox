@@ -292,6 +292,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
             draftText: result.draft as string,
             model: result.model,
             latencyMs: result.latencyMs,
+            // ★ Phase E（cwi-ai-20260825-t5）：per-draft intent 快照（統計「當時」值；歷史 row null → UNKNOWN）
+            intent: result.intent,
           },
         });
       } catch (err) {

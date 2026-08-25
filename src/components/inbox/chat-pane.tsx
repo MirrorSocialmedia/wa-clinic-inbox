@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   Lock,
   MessageCircle,
+  MoreHorizontal,
   Paperclip,
   Send,
   Sparkles,
@@ -153,6 +154,10 @@ export function ChatPane(p: Props) {
   // Phase B：過窗 422 後嘅 template 揀選（server 回嘅 APPROVED+UTILITY 名單）
   const [templateOptions, setTemplateOptions] = useState<{ name: string; language: string }[] | null>(null);
   const [templateBusy, setTemplateBusy] = useState(false);
+  // ★ Phase E（cwi-ai-20260825-t5）：header「⋯」menu — 標記投訴 / AI 錯誤（即時記帳；STAFF 可用）
+  const [flagMenuOpen, setFlagMenuOpen] = useState(false);
+  const [flagBusy, setFlagBusy] = useState(false);
+  const [flagMsg, setFlagMsg] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(false);
   const autoFilledDraftRef = useRef<string | null>(null);
@@ -314,6 +319,27 @@ export function ChatPane(p: Props) {
     setTemplateBusy(false);
   }
 
+  // ★ Phase E：標記投訴 / AI 錯誤 → POST /flag（24h 內冪等 no-op）
+  async function flag(kind: "COMPLAINT" | "AI_ERROR") {
+    if (!c) return;
+    setFlagBusy(true);
+    setFlagMsg(null);
+    try {
+      const res = await fetch(`/api/conversations/${c.id}/flag`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) setFlagMsg(j.message ?? `標記失敗（HTTP ${res.status}）`);
+      else setFlagMsg(j.counted ? "已標記（計入本週統計）" : "24h 內已標記（冇重複計）");
+    } catch {
+      setFlagMsg("網絡錯誤");
+    } finally {
+      setFlagBusy(false);
+    }
+  }
+
   return (
     <section className="flex-1 min-w-0 flex flex-col min-h-0 bg-canvas">
       {/* header：avatar + contact + 窗口 chip */}
@@ -342,6 +368,41 @@ export function ChatPane(p: Props) {
             )}
           </div>
         </button>
+        {/* ★ Phase E：「⋯」menu — 標記投訴 / 標記 AI 錯誤（前線先見到問題） */}
+        <div className="relative">
+          <button
+            onClick={() => {
+              setFlagMenuOpen(!flagMenuOpen);
+              setFlagMsg(null);
+            }}
+            aria-label="更多操作"
+            className="p-1.5 rounded-md text-t2 hover:bg-panel-2"
+          >
+            <MoreHorizontal size={16} />
+          </button>
+          {flagMenuOpen ? (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setFlagMenuOpen(false)} />
+              <div className="absolute right-0 top-9 z-20 w-44 bg-panel border border-line rounded-lg shadow-lg py-1">
+                {flagMsg ? <p className="px-3 py-1 text-[11px] text-t3">{flagMsg}</p> : null}
+                <button
+                  disabled={flagBusy}
+                  onClick={() => void flag("COMPLAINT")}
+                  className="w-full text-left px-3 py-1.5 text-sm text-t1 hover:bg-panel-2 disabled:opacity-50"
+                >
+                  標記投訴
+                </button>
+                <button
+                  disabled={flagBusy}
+                  onClick={() => void flag("AI_ERROR")}
+                  className="w-full text-left px-3 py-1.5 text-sm text-t1 hover:bg-panel-2 disabled:opacity-50"
+                >
+                  標記 AI 錯誤
+                </button>
+              </div>
+            </>
+          ) : null}
+        </div>
         <span
           className={`ml-auto text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${windowChipCls}`}
           title="24 小時客服窗口倒數"

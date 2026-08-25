@@ -47,6 +47,8 @@ export default async function AdminLayout({
               <a href="/admin/workflows" className="text-t2 hover:text-t1">
                 Workflow
               </a>
+              <a href="/admin/automation" className="text-t2 hover:text-t1">AI 自動化</a>
+              <a href="/admin/suggestions" className="text-t2 hover:text-t1">AI 建議</a>
             </nav>
           </div>
           <span className="flex items-center gap-3">

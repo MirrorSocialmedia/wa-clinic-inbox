@@ -39,6 +39,12 @@ async function registerSchedulers() {
     name: "weekly-report",
     data: {},
   });
+  // Phase E（cwi-ai-20260825-t5）：週統計 + mining — 週一 05:00 HK（早過 weekly-report 07:00，
+  // 等佢可以引用自動化摘要）
+  await cronQueue.upsertJobScheduler("sched-stats-weekly", { pattern: "0 5 * * 1" }, {
+    name: "stats-weekly",
+    data: {},
+  });
   // AI Workflow T1（cwi-ai-20260824-t1）：P0 retention purge — 每日 04:00（HK；跟其他 job 一樣用
   // process 本地時區 — 部署 host TZ=Asia/Hong_Kong）
   await cronQueue.upsertJobScheduler("sched-retention-purge", { pattern: "0 4 * * *" }, {
@@ -53,7 +59,7 @@ async function registerSchedulers() {
   });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m)"
   );
 }
 

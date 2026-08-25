@@ -286,6 +286,9 @@ model AiDraft {
   latencyMs          Int
   status             DraftStatus @default(PROPOSED)
   finalText          String?                  // 員工改完實際發出嘅版本 → 攞嚟計採用率+做微調數據
+  // ★ Phase E（cwi-ai-20260825-t5）：per-draft intent 快照（統計要「當時」intent —
+  //   Conversation.intent 係「最新」會漂移）。歷史 row null → 統計歸 UNKNOWN（唔 backfill）。
+  intent             String?
   createdAt          DateTime @db.Timestamptz    @default(now())
   // Phase 2 冪等：同一條 inbound Message 只可有一條 draft。
   // AI job 重試（attempts 3）或部分失敗重跑時，唯一約束 + findUnique 前置檢查
@@ -515,4 +518,38 @@ model OpsReport {
   createdAt   DateTime @db.Timestamptz @default(now())
   @@unique([periodStart, clinicId])
   @@index([periodStart])
+}
+
+// ★ AI Workflow Phase E（cwi-ai-20260825-t5）：學習迴路建議卡（D-6 人審）。
+// kind：FAQ / TEMPLATE / WORKFLOW_DIFF。evidence 全部過 scrubAiSummary（PII 鐵律）；
+// wamid 只做 reference（UI 撳先跳 inbox 睇原文 — 卡唔複製原文）。
+model SuggestionCard {
+  id        String    @id @default(cuid())
+  clinicId  String?                          // null = 全局建議
+  kind      String                           // FAQ / TEMPLATE / WORKFLOW_DIFF
+  title     String
+  payload   Json                             // 建議內容（每 kind shape 見 mining.ts）
+  evidence  Json                             // { counts, samples: [{...}] } — 全 scrub
+  status    String    @default("PROPOSED")   // PROPOSED / APPROVED / REJECTED
+  decidedBy String?
+  decidedAt DateTime? @db.Timestamptz
+  createdAt DateTime  @db.Timestamptz @default(now())
+  @@index([status, createdAt])
+}
+
+// ★ Phase E：週統計（stats-weekly cron 冪等 upsert；complaints/rollbacks 由即時路徑 increment —
+//   聚合 update 白名單唔郁呢兩欄）。
+model AutomationStat {
+  id            String @id @default(cuid())
+  clinicId      String
+  category      String                       // intent；draft 冇 intent 記錄嘅落 "UNKNOWN"
+  weekStart     String                       // YYYY-MM-DD（HK 週一）
+  draftCount    Int    @default(0)
+  adoptedAsIs   Int    @default(0)
+  adoptedEdited Int    @default(0)
+  discarded     Int    @default(0)
+  autoSent      Int    @default(0)
+  complaints    Int    @default(0)
+  rollbacks     Int    @default(0)
+  @@unique([clinicId, category, weekStart])
 }

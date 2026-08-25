@@ -3458,6 +3458,218 @@ check "W cleanup aiMode → DRAFT" "$CODE" "200"
 # ── W summary ───────────────────────────────────────────────────────────
 [ "$W_FAIL" = 0 ] && pass "R-W Phase D e2e（W1-W4：cooldown/revert/confirmText/RBAC+audit/fail-soft 全綠）" || fail "R-W Phase D 有項失敗（見上 ❌）"
 
+# ═══ R-E: Phase E — 學習迴路 + 成熟度儀表板 + 級別開關 ═════════════════════
+echo "[E/6] R-E: Phase E (stats / mining / flag / rollback / review / automation)..."
+E_FAIL=0
+COOKIE_EADM2=/tmp/e2e-cookie-eadm2.txt
+E_START=$(date -u +%FT%TZ)
+
+# ── E0. setup：第二 ADMIN + 白名單 env 重啟 server ───────────────────
+# session secret 固定喺 .env — 重啟後 cookie 依然有效（SESSION_SECRET 唔變）
+E2E_ADM2_EMAIL="e2e-adm2-${EPOCH}@e2e.local"
+CODE=$(curl -s -o /tmp/e2e-e-adm2.json -w '%{http_code}' -b "$COOKIE_ADMIN" \
+  -X POST "$BASE/api/admin/staff" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$E2E_ADM2_EMAIL\",\"name\":\"E2E Admin2\",\"role\":\"ADMIN\",\"clinicId\":null,\"password\":\"e2e-admin2-pass-123\"}")
+check "E0 create 2nd ADMIN → 201" "$CODE" "201"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_EADM2" \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$E2E_ADM2_EMAIL\",\"password\":\"e2e-admin2-pass-123\"}")
+check "E0 login eadm2 → 200" "$CODE" "200"
+EADM2_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$E2E_ADM2_EMAIL'" | jf id)
+[ -n "$EADM2_ID" ] || { echo "FATAL: eadm2 id 搵唔到"; exit 1; }
+
+kill "$SERVER_PID" 2>/dev/null || true
+pkill -f " server.ts" 2>/dev/null || true
+sleep 2
+lsof -ti:"$PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+AUTOMATION_ADMIN_STAFF_IDS="$EADM2_ID" nohup pnpm dev >/tmp/e2e-server-e.log 2>&1 &
+SERVER_PID=$!
+EUP=0
+for i in $(seq 1 90); do
+  if curl -sf "$BASE/healthz" >/dev/null 2>&1; then EUP=1; break; fi
+  sleep 1
+done
+check "E0 server 重啟（AUTOMATION_ADMIN_STAFF_IDS=eadm2）" "$EUP" "1"
+
+# 四個完整週（升序：最舊 → 最近）— 同 production 同一個 pure 函數算
+E_WEEKS=($($TSX -e "import {lastFourCompleteWeeks} from './src/lib/ops/automation-stats'; console.log(lastFourCompleteWeeks().join(' '))" 2>/dev/null | tail -1))
+[ "${#E_WEEKS[@]}" = "4" ] || { echo "FATAL: lastFourCompleteWeeks 回唔啱（${#E_WEEKS[@]} 個）"; exit 1; }
+E_CURW=$($TSX -e "import {hkWeekStart} from './src/lib/ops/automation-stats'; console.log(hkWeekStart())" 2>/dev/null | tail -1)
+[ -n "$E_CURW" ] || { echo "FATAL: E_CURW 計算失敗（hkWeekStart）"; exit 1; }
+E_PREVWK="${E_WEEKS[3]}"   # 最近一個完整週 = mining 目標週
+
+# ── E1. eligible 矩陣 + PATCH 白名單 + cache bust ────────────────────
+# seed 四完整週（TKW·QUESTION）：draft=20 / 18+2（rate=1.0）/ 0 complaint / 0 rollback → eligible
+for ws in "${E_WEEKS[@]}"; do
+  q "INSERT INTO \"AutomationStat\" (id, \"clinicId\", category, \"weekStart\", \"draftCount\", \"adoptedAsIs\", \"adoptedEdited\", complaints, rollbacks) VALUES ('e2e-e-stat-${ws}-${EPOCH}', '$TKW_CLINIC_ID', 'QUESTION', '${ws}', 20, 18, 2, 0, 0) ON CONFLICT (\"clinicId\", category, \"weekStart\") DO UPDATE SET \"draftCount\"=20, \"adoptedAsIs\"=18, \"adoptedEdited\"=2, complaints=0, rollbacks=0" >/dev/null
+done
+CODE=$(curl -s -o /tmp/e2e-e-auto.json -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/api/admin/automation")
+check "E1 GET /admin/automation → 200" "$CODE" "200"
+E_ELIG=$(node -e "const d=require('/tmp/e2e-e-auto.json');const c=d.clinics.find(x=>x.id==='$TKW_CLINIC_ID');console.log(c?c.cells.QUESTION.eligible:'NOCLINIC')")
+check "E1 TKW·QUESTION eligible=true（四週 seed）" "$E_ELIG" "true"
+E_ELIG_MF=$(node -e "const d=require('/tmp/e2e-e-auto.json');const c=d.clinics.find(x=>x.id==='$MF_CLINIC_ID');console.log(c?c.cells.QUESTION.eligible:'NOCLINIC')")
+check "E1 MF·QUESTION eligible=false（零數據）" "$E_ELIG_MF" "false"
+
+APL_BEFORE=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='SET_AUTOMATION_LEVEL'" | jf c)
+CODE=$(curl -s -o /tmp/e2e-e-patch.json -w '%{http_code}' -b "$COOKIE_EADM2" \
+  -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$TKW_CLINIC_ID\",\"category\":\"QUESTION\",\"level\":\"L3\"}")
+check "E1 PATCH L3（eadm2 喺白名單）→ 200" "$CODE" "200"
+curl -s -b "$COOKIE_ADMIN" "$BASE/api/admin/automation" -o /tmp/e2e-e-auto2.json
+E_LVL=$(node -e "const d=require('/tmp/e2e-e-auto2.json');const c=d.clinics.find(x=>x.id==='$TKW_CLINIC_ID');console.log(c?c.cells.QUESTION.level:'NOCLINIC')")
+check "E1 GET 矩陣即時 level=L3（cache bust）" "$E_LVL" "L3"
+E_RES=$($TSX -e "import {getAutomationLevel} from './src/lib/ai/automation'; getAutomationLevel('$TKW_CLINIC_ID','QUESTION').then(l=>console.log(l)).catch(e=>console.log('ERR'))" 2>/dev/null | tail -1)
+check "E1 resolver getAutomationLevel = L3" "$E_RES" "L3"
+APL_AFTER=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='SET_AUTOMATION_LEVEL'" | jf c)
+check "E1 AuditLog SET_AUTOMATION_LEVEL +1" "$((APL_AFTER - APL_BEFORE))" "1"
+
+# ── E2. 403 白名單外 + locked 400 ─────────────────────────────────────
+CODE=$(curl -s -o /tmp/e2e-e-403.json -w '%{http_code}' -b "$COOKIE_ADMIN" \
+  -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$MF_CLINIC_ID\",\"category\":\"QUESTION\",\"level\":\"L2\"}")
+check "E2 主 admin（白名單外）PATCH → 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_EADM2" \
+  -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$TKW_CLINIC_ID\",\"category\":\"URGENT_PAIN\",\"level\":\"L3\"}")
+check "E2 URGENT_PAIN PATCH → 400（locked）" "$CODE" "400"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_EADM2" \
+  -X PATCH "$BASE/api/admin/automation" -H 'Content-Type: application/json' \
+  -d "{\"clinicId\":\"$TKW_CLINIC_ID\",\"category\":\"COMPLAINT\",\"level\":\"L3\"}")
+check "E2 COMPLAINT PATCH → 400（locked）" "$CODE" "400"
+
+# ── E3. flag → complaints+1 → eligible 熄 ─────────────────────────────
+# hermetic fixture：自建乾淨對話（intent NULL → UNKNOWN row；唔依賴前段殘留狀態）
+E3_C="e2e-e3-c1-${EPOCH}"; E3_V="e2e-e3-v1-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\") VALUES ('$E3_C','$TKW_CLINIC_ID','8526088${EPOCH}')" >/dev/null
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$E3_V','$TKW_CLINIC_ID','$E3_C',now())" >/dev/null
+E_FLAG_INTENT="UNKNOWN"   # conversation.intent NULL → 記帳落 UNKNOWN
+CODE=$(curl -s -o /tmp/e2e-e-flag.json -w '%{http_code}' -b "$COOKIE_TKW" \
+  -X POST "$BASE/api/conversations/$E3_V/flag" -H 'Content-Type: application/json' -d '{"kind":"COMPLAINT"}')
+check "E3 flag COMPLAINT → 200" "$CODE" "200"
+check "E3 counted=true" "$(grep -o '"counted":true' /tmp/e2e-e-flag.json)" '"counted":true'
+E_COMP=$(q "SELECT complaints::text c FROM \"AutomationStat\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND category='$E_FLAG_INTENT' AND \"weekStart\"='$E_CURW'" | jf c)
+check "E3 本週（未完成）complaints=1（即時記帳）" "$E_COMP" "1"
+CODE=$(curl -s -o /tmp/e2e-e-flag2.json -w '%{http_code}' -b "$COOKIE_TKW" \
+  -X POST "$BASE/api/conversations/$E3_V/flag" -H 'Content-Type: application/json' -d '{"kind":"COMPLAINT"}')
+check "E3 重複 flag → 200" "$CODE" "200"
+check "E3 24h 冪等 counted=false" "$(grep -o '"counted":false' /tmp/e2e-e-flag2.json)" '"counted":false'
+# 偏離註：eligibility 窗口只用「四個完整週」；flag 按設計計落本週（未完成週）。
+#   要驗證「complaint → eligible 熄」聯動，直接 UPDATE 一個已 seed 嘅完整週 row。
+q "UPDATE \"AutomationStat\" SET complaints=1 WHERE id='e2e-e-stat-${E_WEEKS[1]}-${EPOCH}'" >/dev/null
+curl -s -b "$COOKIE_ADMIN" "$BASE/api/admin/automation" -o /tmp/e2e-e-auto3.json
+E_ELIG2=$(node -e "const d=require('/tmp/e2e-e-auto3.json');const c=d.clinics.find(x=>x.id==='$TKW_CLINIC_ID');console.log(c?c.cells.QUESTION.eligible:'NOCLINIC')")
+check "E3 完整週 complaints=1 → eligible=false" "$E_ELIG2" "false"
+E_REASONS=$(node -e "const d=require('/tmp/e2e-e-auto3.json');const c=d.clinics.find(x=>x.id==='$TKW_CLINIC_ID');console.log(c&&c.cells.QUESTION.reasons.length>0)")
+check "E3 reasons 非空" "$E_REASONS" "true"
+
+# ── E4. autoBooked rollback 記帳（manual 唔計）────────────────────────
+# hermetic fixture：自建未分配對話（rollback 會 423 非負責人 — 自建 = 零 assignee）
+E4_C="e2e-e4-c1-${EPOCH}"; E4_V="e2e-e4-v1-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\") VALUES ('$E4_C','$TKW_CLINIC_ID','8526087${EPOCH}')" >/dev/null
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$E4_V','$TKW_CLINIC_ID','$E4_C',now())" >/dev/null
+E_ROLL_CONV="$E4_V"
+E_BK1="e2e-e4-bk1-${EPOCH}"; E_BK2="e2e-e4-bk2-${EPOCH}"
+E_TODAY=$(date +%F)
+q "INSERT INTO \"BookingRequest\" (id, \"conversationId\", \"clinicId\", \"flowToken\", \"providerApricotId\", \"providerName\", \"requestedDate\", \"requestedTime\", status, \"handledByStaffId\", \"handledAt\", \"apricotApptId\", \"autoBooked\") VALUES ('$E_BK1','$E_ROLL_CONV','$TKW_CLINIC_ID','e2e-e4-ft1-${EPOCH}','mock-pract-tkw-1','e2e doc','${E_TODAY}','10:30','CONFIRMED',(SELECT id FROM \"StaffUser\" WHERE email='$TKW_EMAIL'),now(),'e2e-e4-appt-${EPOCH}',true)" >/dev/null
+CODE=$(curl -s -o /tmp/e2e-e-rb1.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/$E_BK1/rollback")
+check "E4 autoBooked rollback → 200" "$CODE" "200"
+E_RB=$(q "SELECT rollbacks::text c FROM \"AutomationStat\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND category='BOOKING_REQUEST' AND \"weekStart\"='$E_CURW'" | jf c)
+check "E4 rollbacks=1（autoBooked 記帳）" "$E_RB" "1"
+q "INSERT INTO \"BookingRequest\" (id, \"conversationId\", \"clinicId\", \"flowToken\", \"providerApricotId\", \"providerName\", \"requestedDate\", \"requestedTime\", status, \"handledByStaffId\", \"handledAt\", \"apricotApptId\", \"autoBooked\") VALUES ('$E_BK2','$E_ROLL_CONV','$TKW_CLINIC_ID','e2e-e4-ft2-${EPOCH}','mock-pract-tkw-1','e2e doc','${E_TODAY}','11:00','CONFIRMED',(SELECT id FROM \"StaffUser\" WHERE email='$TKW_EMAIL'),now(),'e2e-e4-appt2-${EPOCH}',false)" >/dev/null
+CODE=$(curl -s -o /tmp/e2e-e-rb2.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/$E_BK2/rollback")
+check "E4 manual rollback → 200" "$CODE" "200"
+E_RB2=$(q "SELECT rollbacks::text c FROM \"AutomationStat\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND category='BOOKING_REQUEST' AND \"weekStart\"='$E_CURW'" | jf c)
+check "E4 rollbacks 仍然 1（manual 唔計）" "$E_RB2" "1"
+
+# ── E5. FAQ 卡全鏈：mining → 通知 → review → APPROVED → prompt 斷言 ──
+# fixture：上週（= 最近完整週）5 條 SENT_EDITED QUESTION（evidence 塞 bait）
+E5_C="e2e-e5-c1-${EPOCH}"; E5_V="e2e-e5-v1-${EPOCH}"
+E5_TAIL=$(node -e "console.log(String((Date.now()*7919)%100000000).padStart(8,'0'))")
+E5_WA="8526099${E5_TAIL}"
+E5_BAIT="E2E採名丙"
+E5_DRAFTAT=$($TSX -e "import {hkWeekStart,weekRangeUtc} from './src/lib/ops/automation-stats'; const ws=hkWeekStart(new Date(Date.now()-7*86400000)); const [lo]=weekRangeUtc(ws); console.log(new Date(lo.getTime()+2*86400000+8*3600000).toISOString())" 2>/dev/null | tail -1)
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\") VALUES ('$E5_C','$TKW_CLINIC_ID','$E5_WA','$E5_BAIT')" >/dev/null
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", \"lastMessageAt\") VALUES ('$E5_V','$TKW_CLINIC_ID','$E5_C','$E5_DRAFTAT')" >/dev/null
+for i in 1 2 3 4 5; do
+  q "INSERT INTO \"AiDraft\" (id, \"conversationId\", \"inReplyToMessageId\", \"draftText\", model, \"latencyMs\", status, intent, \"finalText\", \"createdAt\") VALUES ('e2e-e5-d${i}-${EPOCH}','$E5_V','e2e-e5-m${i}-${EPOCH}','草稿版本${i}：病人 ${E5_BAIT} 電話尾 ${E5_TAIL} 問埋位','unit',1,'SENT_EDITED','QUESTION','人手改寫版本${i}（已答覆）','$E5_DRAFTAT')" >/dev/null
+done
+# stats-weekly job：runWeeklyStats（上週）+ runMining（上週）— 全鏈
+pnpm -s e2e:cron stats-weekly >/dev/null 2>&1
+if wait_for "SELECT count(*)::text c FROM \"SuggestionCard\" WHERE kind='FAQ' AND \"clinicId\"='$TKW_CLINIC_ID' AND \"payload\"->>'fingerprint'='faq:${TKW_CLINIC_ID}:QUESTION:${E_PREVWK}'" '[{"c":"1"}]' 60; then
+  pass "E5 mining 出 FAQ 卡（stats-weekly 全鏈，fingerprint 冪等）"
+else
+  fail "E5 mining 未出 FAQ 卡"; E_FAIL=1
+fi
+E5_CARD=$(q "SELECT id FROM \"SuggestionCard\" WHERE \"payload\"->>'fingerprint'='faq:${TKW_CLINIC_ID}:QUESTION:${E_PREVWK}'" | jf id)
+E5_NOTE=$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE kind='SUGGESTION_READY' AND \"meta\"->>'cardId'='$E5_CARD'" | jf c)
+check "E5 StaffNotice SUGGESTION_READY = 1" "$E5_NOTE" "1"
+E5_BLOB=$(q "SELECT \"title\" t, \"evidence\"::text e FROM \"SuggestionCard\" WHERE id='$E5_CARD'")
+echo "$E5_BLOB" | grep -q "$E5_BAIT" && { fail "E5 PII：title/evidence 含假名"; E_FAIL=1; } || pass "E5 PII：title/evidence 零假名"
+echo "$E5_BLOB" | grep -q "$E5_TAIL" && { fail "E5 PII：title/evidence 含電話尾號"; E_FAIL=1; } || pass "E5 PII：title/evidence 零電話尾號"
+CODE=$(curl -s -o /tmp/e2e-e-sugg.json -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/api/admin/suggestions?status=PROPOSED")
+check "E5 GET /admin/suggestions → 200" "$CODE" "200"
+check "E5 卡喺 PROPOSED 列表" "$(grep -c "$E5_CARD" /tmp/e2e-e-sugg.json)" "1"
+E5_Q="e2e-e5-q-${EPOCH}"; E5_A="e2e-e5-a-${EPOCH}"
+CODE=$(curl -s -o /tmp/e2e-e-decide.json -w '%{http_code}' -b "$COOKIE_ADMIN" \
+  -X POST "$BASE/api/admin/suggestions/$E5_CARD/decide" -H 'Content-Type: application/json' \
+  -d "{\"decision\":\"APPROVED\",\"edits\":{\"faq\":{\"q\":\"$E5_Q\",\"a\":\"$E5_A\"}}}")
+check "E5 APPROVED（FAQ edits）→ 200" "$CODE" "200"
+E5_FAQ=$(q "SELECT count(*)::text c FROM \"Clinic\" WHERE code='TKW' AND \"greetingConfig\"->'faq' @> '[{\"q\":\"$E5_Q\"}]'" | jf c)
+check "E5 greetingConfig.faq 已 append" "$E5_FAQ" "1"
+E5_PROMPT_HIT=$($TSX -e "
+import { PrismaClient } from '@prisma/client';
+import { buildUserPrompt } from './src/lib/ai/prompts';
+(async () => {
+  const p = new PrismaClient();
+  const c = await p.clinic.findUnique({ where: { code: 'TKW' } });
+  await p.\$disconnect();
+  const prompt = buildUserPrompt({ messages: [], clinic: { name: c.name, greetingConfig: c.greetingConfig } });
+  console.log(prompt.includes('$E5_A') ? 'HIT' : 'MISS');
+})().catch((e) => { console.error(e); process.exit(1); });
+" 2>/dev/null | tail -1)
+check "E5 mock prompt 含已批准 FAQ A（學習迴路閉環）" "$E5_PROMPT_HIT" "HIT"
+
+# ── E6. REJECT 零變化 snapshot ─────────────────────────────────────────
+E6_CARD="e2e-e6-card-${EPOCH}"
+q "INSERT INTO \"SuggestionCard\" (id, \"clinicId\", kind, title, payload, evidence) VALUES ('$E6_CARD','$TKW_CLINIC_ID','TEMPLATE','e2e-e6 模板建議','{\"fingerprint\":\"template:e2e-e6-${EPOCH}\"}','{\"counts\":{},\"samples\":[]}')" >/dev/null
+SNAP_GC=$(q "SELECT coalesce(\"greetingConfig\"::text,'') gc FROM \"Clinic\" ORDER BY id" | md5sum | cut -d' ' -f1)
+SNAP_WF=$(q "SELECT count(*)::text c FROM \"WorkflowDefinition\"" | jf c)
+SNAP_POL=$(q "SELECT count(*)::text c FROM \"AutomationPolicy\"" | jf c)
+CODE=$(curl -s -o /tmp/e2e-e-rej.json -w '%{http_code}' -b "$COOKIE_ADMIN" \
+  -X POST "$BASE/api/admin/suggestions/$E6_CARD/decide" -H 'Content-Type: application/json' \
+  -d '{"decision":"REJECTED"}')
+check "E6 REJECTED → 200" "$CODE" "200"
+check "E6 card status=REJECTED" "$(q "SELECT status::text c FROM \"SuggestionCard\" WHERE id='$E6_CARD'" | jf c)" "REJECTED"
+SNAP_GC2=$(q "SELECT coalesce(\"greetingConfig\"::text,'') gc FROM \"Clinic\" ORDER BY id" | md5sum | cut -d' ' -f1)
+check "E6 greetingConfig 零變化（snapshot）" "$SNAP_GC2" "$SNAP_GC"
+check "E6 WorkflowDefinition 零變化" "$(q "SELECT count(*)::text c FROM \"WorkflowDefinition\"" | jf c)" "$SNAP_WF"
+check "E6 AutomationPolicy 零變化" "$(q "SELECT count(*)::text c FROM \"AutomationPolicy\"" | jf c)" "$SNAP_POL"
+E6_AUDIT=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='SUGGESTION_DECIDE' AND \"entityId\"='$E6_CARD'" | jf c)
+check "E6 audit SUGGESTION_DECIDE = 1" "$E6_AUDIT" "1"
+
+# ── R-E cleanup（持久 DB 衞生 — 所有 fixture / 副作用全清）───────────────
+q "DELETE FROM \"SuggestionCard\" WHERE id IN ('$E5_CARD','$E6_CARD')" >/dev/null 2>&1
+q "DELETE FROM \"StaffNotice\" WHERE kind='SUGGESTION_READY' AND \"meta\"->>'cardId' IN ('$E5_CARD','$E6_CARD')" >/dev/null 2>&1
+q "DELETE FROM \"AiDraft\" WHERE id LIKE 'e2e-e5-%'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id IN ('$E5_V','$E3_V','$E4_V')" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id IN ('$E5_C','$E3_C','$E4_C')" >/dev/null 2>&1
+q "DELETE FROM \"BookingRequest\" WHERE id IN ('$E_BK1','$E_BK2')" >/dev/null 2>&1
+q "DELETE FROM \"AutomationStat\" WHERE id LIKE 'e2e-e-stat-%'" >/dev/null 2>&1
+# 本週 bump row：冇其他數據 → 整行清；有 → 只歸零 complaints/rollbacks
+for cat in "$E_FLAG_INTENT" "BOOKING_REQUEST"; do
+  q "DELETE FROM \"AutomationStat\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND category='$cat' AND \"weekStart\"='$E_CURW' AND \"draftCount\"=0 AND \"adoptedAsIs\"=0 AND \"adoptedEdited\"=0 AND \"autoSent\"=0" >/dev/null 2>&1
+  q "UPDATE \"AutomationStat\" SET complaints=0, rollbacks=0 WHERE \"clinicId\"='$TKW_CLINIC_ID' AND category='$cat' AND \"weekStart\"='$E_CURW'" >/dev/null 2>&1
+done
+# E1 PATCH 建嘅 (TKW, QUESTION) policy — 必須清，否則污染下次 run 嘅 T-section 路由
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND category='QUESTION'" >/dev/null 2>&1
+# E5 APPROVED 落嘅 FAQ 還原出 greetingConfig
+q "UPDATE \"Clinic\" SET \"greetingConfig\" = jsonb_set(\"greetingConfig\", '{faq}', (SELECT coalesce(jsonb_agg(x), '[]'::jsonb) FROM jsonb_array_elements(\"greetingConfig\"->'faq') x WHERE x->>'q' <> '$E5_Q')) WHERE code='TKW'" >/dev/null 2>&1
+# eadm2 staff 清走（hermetic）
+q "DELETE FROM \"StaffUser\" WHERE email='$E2E_ADM2_EMAIL'" >/dev/null 2>&1
+
+# ── R-E summary ───────────────────────────────────────────────────────
+[ "$E_FAIL" = 0 ] && pass "R-E Phase E e2e（E1-E6：eligible/PATCH/cache-bust/403/flag/rollback/FAQ 全鏈/REJECT snapshot 全綠）" || fail "R-E Phase E 有項失敗（見上 ❌）"
+
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

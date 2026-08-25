@@ -19,6 +19,7 @@
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
+import { hkWeekStart } from "./automation-stats";
 
 export interface PeriodMetrics {
   period: { start: string; end: string };
@@ -291,13 +292,26 @@ export async function runWeeklyReport(period?: Period): Promise<{ text: string; 
     scopes.push(c.code);
   }
 
+  // ★ Phase E（cwi-ai-20260825-t5）：automation 摘要段（每店 autoSent / complaints / rollbacks 三個數）
+  //   — 只追加喺推送 text；OpsReport 存檔 text 維持原樣（數字的權威來源係 /admin/automation 儀表板）。
+  const ws = hkWeekStart(p.start);
+  const weekStats = await prisma.automationStat.findMany({ where: { weekStart: ws } }).catch(() => []);
+  const autoLines: string[] = [];
+  for (const c of clinics) {
+    const rs = weekStats.filter((s) => s.clinicId === c.id);
+    autoLines.push(
+      `${c.code}: autoSent=${rs.reduce((a, s) => a + s.autoSent, 0)} complaints=${rs.reduce((a, s) => a + s.complaints, 0)} rollbacks=${rs.reduce((a, s) => a + s.rollbacks, 0)}`
+    );
+  }
+  const text = autoLines.length > 0 ? `${all.text}\n\n[自動化]\n${autoLines.join("\n")}` : all.text;
+
   // 通知（metadata only — 報表本身零病人資料）
   const { notifyAlert } = await import("@/lib/health/notify");
   await notifyAlert({
     type: "weekly_report",
     severity: "INFO",
     clinicCode: null,
-    detail: { period: all.metrics.period, text: all.text },
+    detail: { period: all.metrics.period, text },
   });
-  return { text: all.text, scopes };
+  return { text, scopes };
 }

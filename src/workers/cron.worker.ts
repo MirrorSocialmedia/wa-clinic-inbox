@@ -29,6 +29,8 @@ import { runQualityCheck } from "@/lib/quality/check";
 import { runWeeklyReport } from "@/lib/ops/report";
 import { runRetentionPurge } from "@/lib/ops/retention-purge";
 import { runReminderScan } from "@/lib/booking/reminder";
+import { runWeeklyStats } from "@/lib/ops/automation-stats";
+import { runMining } from "@/lib/ops/mining";
 
 export async function startCronWorker(): Promise<Worker | null> {
   const worker = new Worker(
@@ -60,6 +62,13 @@ export async function startCronWorker(): Promise<Worker | null> {
         case "weekly-report": {
           const r = await runWeeklyReport();
           return { ok: true, scopes: r.scopes };
+        }
+        case "stats-weekly": {
+          // Phase E（cwi-ai-20260825-t5）：週一 05:00 HK — 先統計（上週），接住 mining 出建議卡。
+          // 早過 weekly-report 07:00（report 可以引用自動化摘要）。
+          const s = await runWeeklyStats();
+          const m = await runMining(s.weekStart);
+          return { ok: true, weekStart: s.weekStart, statRows: s.rows, miningCards: m.cards };
         }
         case "retention-purge": {
           // P0（§6.0）：每日 04:00 HK；E2E 可手動 enqueue（pnpm e2e:cron retention-purge）

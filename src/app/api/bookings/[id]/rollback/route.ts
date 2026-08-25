@@ -19,6 +19,7 @@ import { handle } from "@/lib/api-error";
 import { publishNotify } from "@/lib/notify";
 import { afterBookingWrite, rollbackWindowOpen } from "@/lib/booking/booking-ops";
 import { WorkforceApiError, removeBooking } from "@/lib/workforce/client";
+import { bumpStat } from "@/lib/ops/automation-stats";
 
 export const dynamic = "force-dynamic";
 
@@ -117,6 +118,17 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
       },
     })
     .catch(() => undefined);
+
+  // ★ Phase E（cwi-ai-20260825-t5）：AI 自動單被撤 → 該店 BOOKING_REQUEST 週統計 rollbacks++
+  //   （人手落嘅單 rollback 唔計 — 只計 AI 自動單被撤）
+  if (booking.autoBooked) {
+    await bumpStat(booking.clinicId, "BOOKING_REQUEST", "rollbacks").catch((err) =>
+      log.warn(
+        { bookingId: booking.id, err: err instanceof Error ? err.message : String(err) },
+        "bookings: rollback — rollbacks 記帳失敗（不阻撤單）"
+      )
+    );
+  }
 
   await afterBookingWrite(booking.clinicId, [booking.requestedDate], booking.conversationId, "ROLLED_BACK", booking.requestedDate);
 
