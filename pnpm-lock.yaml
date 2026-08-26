@@ -59,6 +59,9 @@ importers:
       '@eslint/eslintrc':
         specifier: ^3
         version: 3.3.6(supports-color@7.2.0)
+      '@next/env':
+        specifier: 15.5.23
+        version: 15.5.23
       '@tailwindcss/postcss':
         specifier: ^4
         version: 4.3.3

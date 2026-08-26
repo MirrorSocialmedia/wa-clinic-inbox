@@ -7,6 +7,7 @@
  * 啟動首跑：refreshAllClinics()（fire-and-forget）— 立即填 L2 cache + WorkforceSyncState，
  * 唔使等首個 15 分鐘 cron boundary（health check 嘅 workforce_api_degraded 判斷要咁先正確）。
  */
+import "./env";
 import { startInboundWorker } from "./inbound.worker";
 import { startOutboundWorker } from "./outbound.worker";
 import { startAiWorker } from "./ai.worker";
