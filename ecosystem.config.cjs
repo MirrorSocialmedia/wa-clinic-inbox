@@ -14,7 +14,7 @@ module.exports = {
   apps: [
     {
       name: "wa-inbox",
-      script: "node_modules/.bin/tsx",
+      script: "node_modules/tsx/dist/cli.mjs",
       args: "server.ts",
       cwd: __dirname,
       instances: 1,
@@ -37,7 +37,7 @@ module.exports = {
     },
     {
       name: "wa-worker",
-      script: "node_modules/.bin/tsx",
+      script: "node_modules/tsx/dist/cli.mjs",
       args: "src/workers/index.ts",
       cwd: __dirname,
       instances: 1,
