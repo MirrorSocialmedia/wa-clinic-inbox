@@ -557,7 +557,7 @@ export function DetailPane({
         {assignError && <div className="text-[10px] text-danger-text mt-1">{assignError}</div>}
       </div>
 
-      {/* Phase 4：今日當值（link 去 /schedule — 頁面下一階段先有，之前 404） */}
+      {/* Phase 4：今日當值（link 去 /schedule 七日週表頁 — cwi-r1close §C 落地） */}
       {duty && duty.entries.length > 0 && (
         <div>
           <h3 className="text-[11px] text-t3 font-semibold mb-2 inline-flex items-center gap-1">

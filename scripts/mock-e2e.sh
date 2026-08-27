@@ -137,6 +137,12 @@
 #   T90 panic 全店降 L1：TKW "*"=L3 baseline（BOOKING_REQUEST 開 session）→ 兩店 "*"→L1 →
 #       AUTO 店（MF）文字唔再自動發 + L3 店（TKW）session 唔開（只出 draft）
 #
+# R11 輪一收尾（cwi-r1close-20260827）：
+#   T93 Flow 發送失敗（WA_GRAPH_MOCK_FAIL）→ Message FAILED + FlowSession 回滾 FAILED →
+#       重按 = 新發送（唔謊報「已發咗」）+ 成功 case 重按照舊 reused（防連撳保留）
+#   T94 /schedule 七日週表頁：STAFF 自己店 / ADMIN ?clinicId= 選店 / STAFF 跨店 param fail-closed / 搵唔到店 / workforce 離線 fail-soft
+#   T95 §B2 今日當值卡 client 端刷新（browser：mock duty 變更 → 換對話卡更新，零 reload）
+#
 # Phase C（slot-filling 對話式預約，cwi-ai-20260824-t3）：
 #   PC-G1 L3 全鏈：4 條訊息 slot-filling（provider→相對日期→15:00→確認）→ 綠色卡 PENDING
 #       + 相對日期實證（聽日/後日/大後日 → +1/+2/+3 日）+ PatientFact（provider 模板 row，model=null，source=provider 訊息）
@@ -3851,6 +3857,142 @@ q "DELETE FROM \"StaffUser\" WHERE email='$E2E_ADM2_EMAIL'" >/dev/null 2>&1
 
 # ── R-E summary ───────────────────────────────────────────────────────
 [ "$E_FAIL" = 0 ] && pass "R-E Phase E e2e（E1-E8：eligible/PATCH/cache-bust/403/flag/rollback/FAQ 全鏈/REJECT snapshot/T89 policy 壓 AUTO/T90 panic 全停 全綠）" || fail "R-E Phase E 有項失敗（見上 ❌）"
+
+# ══════════════ R11：輪一收尾（cwi-r1close-20260827）═══════════════════
+
+# ── T93. Flow 發送失敗（WA_GRAPH_MOCK_FAIL）→ Message FAILED + FlowSession 回滾 → 重按 = 新發送；成功 case 重按照 reused ──
+echo "[R11] T93: flow graph fail → FlowSession rollback + re-press new send..."
+T93=0
+R11_FAIL=0
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+WA_GRAPH_MOCK_FAIL=1 nohup pnpm worker >/tmp/e2e-worker-t93.log 2>&1 &
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t93.log 2>/dev/null && break; sleep 1; done
+PAT_T93="8526301${EPOCH}"; WAMID_T93="wamid.E2E_T93_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PAT_T93" --text "你好，我想預約下週" --wamid "$WAMID_T93" --name "E2E T93 flowfail" >/dev/null || T93=1
+CONV_T93=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T93'" | jf conversationId)
+[ -n "$CONV_T93" ] || { fail "T93 conversation 未入庫"; T93=1; }
+# 1a) auto-claim 可能分畀其他臨時 staff（e2e 後半段 TKW 有多 staff — 本 run 實測分咗 T79 D）→
+#     A（COOKIE_TKW）先 takeover 到自己（同店 self-claim 路徑）保證有 send 權（否則 flow POST 423）
+STAFF_A_ID=$(q "SELECT id::text id FROM \"StaffUser\" WHERE email='$TKW_EMAIL'" | jf id)
+wait_for "SELECT (\"assigneeId\" IS NOT NULL)::text a FROM \"Conversation\" WHERE id='$CONV_T93'" '[{"a":"true"}]' 15 || true
+ASGN_T93=$(q "SELECT \"assigneeId\" FROM \"Conversation\" WHERE id='$CONV_T93'" | jf assigneeId)
+if [ -n "$ASGN_T93" ] && [ "$ASGN_T93" != "$STAFF_A_ID" ]; then
+  curl -s -o /dev/null -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_T93/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$STAFF_A_ID\"}"
+  sleep 1
+fi
+if [ "$T93" = 0 ]; then
+  # 1) staff 發 Flow（mock-inbound 後 24h 窗口開）
+  CODE93=$(curl -s -o /tmp/e2e-t93-1.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_T93/flows" -H 'Content-Type: application/json')
+  check "T93 flow send → 200" "$CODE93" "200"
+  M93_1=$(jf messageId < /tmp/e2e-t93-1.json)
+  [ -n "$M93_1" ] || { fail "T93 messageId 空"; T93=1; }
+  # 2) worker WA_GRAPH_MOCK_FAIL → 重試 3 次 exhausted → Message FAILED + FlowSession 回滾 FAILED
+  if wait_for "SELECT m.\"status\"::text ms, f.\"status\"::text fs FROM \"Message\" m JOIN \"FlowSession\" f ON f.\"messageId\"=m.id WHERE m.id='$M93_1'" '[{"ms":"FAILED","fs":"FAILED"}]' 90; then
+    pass "T93 graph fail → Message FAILED + FlowSession 回滾 FAILED（dedup 不再中）"
+  else
+    fail "T93 未達 FAILED+FAILED（actual=$(q "SELECT m.\"status\"::text ms, f.\"status\"::text fs FROM \"Message\" m JOIN \"FlowSession\" f ON f.\"messageId\"=m.id WHERE m.id='$M93_1'" | tr -d '\n')）"
+    T93=1
+  fi
+  # 3) 重按 → 唔係 reused（舊 bug：SENT 未回滾 → reused=true 謊報「已發咗」）
+  curl -s -o /tmp/e2e-t93-2.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_T93/flows" -H 'Content-Type: application/json' > /dev/null
+  M93_2=$(jf messageId < /tmp/e2e-t93-2.json)
+  check "T93 重按 reused=false" "$(grep -oE '"reused":[a-z]+' /tmp/e2e-t93-2.json | head -1 | cut -d: -f2)" "false"
+  [ -n "$M93_2" ] && [ "$M93_2" != "$M93_1" ] || { fail "T93 重按未開新 message"; T93=1; }
+  FS93_2=$(q "SELECT id FROM \"FlowSession\" WHERE \"messageId\"='$M93_2'" | jf id)
+  check "T93 新 session 已寫 messageId" "$(q "SELECT (\"messageId\" IS NOT NULL)::text n FROM \"FlowSession\" WHERE id='$FS93_2'" | jf n)" "true"
+  # 4) 恢復正常 worker → 第 2 條 message SENT（新發送真送到）
+  pkill -f "src/workers/index.ts" 2>/dev/null || true
+  sleep 1
+  nohup pnpm worker >/tmp/e2e-worker-t93r.log 2>&1 &
+  for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t93r.log 2>/dev/null && break; sleep 1; done
+  if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE id='$M93_2'" '[{"s":"SENT"}]' 45; then
+    pass "T93 恢復後 → 第 2 條 flow message SENT（重按 = 真新發送）"
+  else
+    fail "T93 第 2 條 message 未 SENT"; T93=1
+  fi
+  # 5) 成功 case 重按 → 照舊 reused（防連撳語義保留）
+  curl -s -o /tmp/e2e-t93-3.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_T93/flows" -H 'Content-Type: application/json' > /dev/null
+  check "T93 成功 case 重按 reused=true" "$(grep -oE '"reused":[a-z]+' /tmp/e2e-t93-3.json | head -1 | cut -d: -f2)" "true"
+  check "T93 重用同一 session（唯一 SENT session 嘅 messageId 未變）" "$(q "SELECT \"messageId\" FROM \"FlowSession\" WHERE \"conversationId\"='$CONV_T93' AND status='SENT'" | jf messageId)" "$M93_2"
+  check "T93 interactive message 總數 = 2（零重發）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T93' AND type='interactive'" | jf c)" "2"
+fi
+# hermetic cleanup（waId sweep — 預建行萬一靜默失敗，worker 自建 cuid contact/conv）
+q "DELETE FROM \"FlowSession\" WHERE \"conversationId\"='$CONV_T93'" >/dev/null 2>&1
+q "DELETE FROM \"BookingRequest\" WHERE \"conversationId\"='$CONV_T93'" >/dev/null 2>&1
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CONV_T93'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T93'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$CONV_T93'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$PAT_T93'" >/dev/null 2>&1
+[ "$T93" = 0 ] && pass "T93 Flow fail 回滾全鏈（重按唔謊報「已發咗」+ 防連撳保留）" || { fail "T93 有項失敗（見上 ❌）"; R11_FAIL=1; }
+
+# ── T94. /schedule 七日週表頁（STAFF 自己店 / ADMIN 選店 / fail-closed / 空參數） ──
+echo "[R11] T94: /schedule 7-day roster page..."
+T94=0
+MF_NAME=$(q "SELECT name FROM \"Clinic\" WHERE code='MF'" | jf name)
+TKW_NAME=$(q "SELECT name FROM \"Clinic\" WHERE code='TKW'" | jf name)
+# (1) STAFF：自己店七日表（fixture A — DUTY_MOCK 預設 1）
+CODE94=$(curl -s -o /tmp/e2e-sched-staff.html -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/schedule")
+check "T94 STAFF GET /schedule → 200" "$CODE94" "200"
+grep -qF "當值週表" /tmp/e2e-sched-staff.html && pass "T94 頁標題" || { fail "T94 頁標題缺失"; T94=1; }
+grep -qF "林小曼" /tmp/e2e-sched-staff.html && pass "T94 七日 entries（fixture）" || { fail "T94 七日 entries 冇（fixture 林小曼）"; T94=1; }
+[ "$(grep -oF "今日" /tmp/e2e-sched-staff.html | wc -l)" -ge 1 ] && pass "T94 今日 badge" || { fail "T94 今日 badge 缺失"; T94=1; }
+check "T94 STAFF 見自己店名" "$(grep -cF "$TKW_NAME" /tmp/e2e-sched-staff.html)" "1"
+# (2) STAFF 跨店 param → fail-closed（照舊自己店 — MF 名唔出現）
+curl -s -o /tmp/e2e-sched-staff-mf.html -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/schedule?clinicId=MF" > /dev/null
+if grep -qF "$MF_NAME" /tmp/e2e-sched-staff-mf.html; then fail "T94 STAFF 跨店 param 撈咗 MF（scope 漏洞）"; T94=1;
+else pass "T94 STAFF 跨店 param → fail-closed（照舊自己店）"; fi
+# (3) ADMIN 唔帶 param → 店選單（零數據 fetch — fixture 名唔出現）
+CODE94B=$(curl -s -o /tmp/e2e-sched-admin.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule")
+check "T94 ADMIN GET /schedule（無 param）→ 200" "$CODE94B" "200"
+grep -qF "揀一間店" /tmp/e2e-sched-admin.html && pass "T94 ADMIN 店選單" || { fail "T94 ADMIN 店選單缺失"; T94=1; }
+if grep -qF "林小曼" /tmp/e2e-sched-admin.html; then fail "T94 ADMIN 無 param 已 fetch 數據"; T94=1; else pass "T94 ADMIN 無 param 零數據"; fi
+# (4) ADMIN ?clinicId=TKW → TKW 七日
+CODE94C=$(curl -s -o /tmp/e2e-sched-admin-tkw.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule?clinicId=TKW")
+check "T94 ADMIN ?clinicId=TKW → 200" "$CODE94C" "200"
+grep -qF "林小曼" /tmp/e2e-sched-admin-tkw.html && pass "T94 ADMIN TKW 七日 entries" || { fail "T94 ADMIN TKW entries 冇"; T94=1; }
+# (5) ADMIN ?clinicId=MF → MF 店名 + 七日
+CODE94D=$(curl -s -o /tmp/e2e-sched-admin-mf.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule?clinicId=MF")
+check "T94 ADMIN ?clinicId=MF → 200" "$CODE94D" "200"
+grep -qF "$MF_NAME" /tmp/e2e-sched-admin-mf.html && pass "T94 ADMIN MF 店名" || { fail "T94 ADMIN MF 店名冇"; T94=1; }
+grep -qF "林小曼" /tmp/e2e-sched-admin-mf.html && pass "T94 ADMIN MF 七日 entries" || { fail "T94 ADMIN MF entries 冇"; T94=1; }
+# (6) ADMIN ?clinicId=NOPE → 搵唔到店（唔 500）
+CODE94E=$(curl -s -o /tmp/e2e-sched-admin-nope.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule?clinicId=NOPE")
+check "T94 ADMIN ?clinicId=NOPE → 200（錯誤狀態唔 500）" "$CODE94E" "200"
+grep -qF "搵唔到店" /tmp/e2e-sched-admin-nope.html && pass "T94 搵唔到店狀態" || { fail "T94 搵唔到店狀態缺失"; T94=1; }
+# (7) workforce 離線 → fetchDutyRoster fail-soft（in-process — 頁層 allEmpty 分支渲染「未有資料」×7）
+DOWN_OUT=$(pnpm -s e2e:duty --cookie "$COOKIE_TKW" --down 2>&1)
+echo "$DOWN_OUT" | grep -q "DUTY-DOWN-OK" && pass "T94 workforce 離線 → duty null 唔 crash（數據層）" || { fail "T94 workforce 離線 fail-soft"; T94=1; }
+[ "$T94" = 0 ] && pass "T94 /schedule 週表頁全鏈" || { fail "T94 有項失敗（見上 ❌）"; R11_FAIL=1; }
+
+# ── T95. §B2 今日當值卡 client 端刷新（browser-level — mock duty 變更 → 卡更新唔使 reload） ──
+echo "[R11] T95: duty card client refresh (browser)..."
+T95=0
+PAT_T95A="8526302${EPOCH}"; PAT_T95B="8526303${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PAT_T95A" --text "你哋幾點開門" --wamid "wamid.E2E_T95A_${EPOCH}" --name "E2E-DUTY-A" >/dev/null || T95=1
+pnpm -s mock-inbound message --clinic TKW --from "$PAT_T95B" --text "你哋做幾日" --wamid "wamid.E2E_T95B_${EPOCH}" --name "E2E-DUTY-B" >/dev/null || T95=1
+CONV_T95A=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_T95A_${EPOCH}'" | jf conversationId)
+CONV_T95B=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_T95B_${EPOCH}'" | jf conversationId)
+[ -n "$CONV_T95A" ] && [ -n "$CONV_T95B" ] || { fail "T95 conversation 未入庫"; T95=1; }
+if [ "$T95" = 0 ]; then
+  OUT95=$(pnpm -s e2e:duty-refresh --base "$BASE" --cookie "$COOKIE_TKW" --conv1 "$CONV_T95A" --conv2 "$CONV_T95B" 2>&1)
+  echo "$OUT95" | tail -3
+  echo "$OUT95" | grep -q "DUTY-REFRESH-OK" && pass "T95 duty 卡 client 端刷新（mock 變更 → 換對話卡更新，零 reload）" \
+    || { fail "T95 duty 卡刷新失敗"; T95=1; }
+fi
+# hermetic cleanup（waId sweep）
+for pat in "$PAT_T95A" "$PAT_T95B"; do
+  CONV_SUB="SELECT id FROM \"Conversation\" cv JOIN \"Contact\" ct ON ct.id=cv.\"contactId\" WHERE ct.\"waId\"='$pat'"
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN ($CONV_SUB)" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ($CONV_SUB)" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" cv USING \"Contact\" ct WHERE ct.id=cv.\"contactId\" AND ct.\"waId\"='$pat'" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE \"waId\"='$pat'" >/dev/null 2>&1
+done
+rm -f .dev/duty-mock-override.json
+[ "$T95" = 0 ] && pass "T95 §B2 client 端刷新 browser e2e" || { fail "T95 有項失敗（見上 ❌）"; R11_FAIL=1; }
+
+# ── R11 summary ─────────────────────────────────────────────────────────────
+[ "$R11_FAIL" = 0 ] && pass "R11 輪一收尾 e2e（T93 Flow 回滾 / T94 週表頁 / T95 duty 卡刷新）" || fail "R11 有項失敗（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

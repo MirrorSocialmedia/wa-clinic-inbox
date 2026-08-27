@@ -22,6 +22,9 @@
  */
 import log from "@/lib/log";
 import { fetchDutyRoster as wfFetchDutyRoster } from "@/lib/workforce/client";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import path from "node:path";
 
 export interface DutyEntry {
   staffName: string;
@@ -43,6 +46,25 @@ const MOCK_FIXTURE: DutyEntry[] = [
   { staffName: "黃詩韻", role: "前台", shiftStart: "13:00", shiftEnd: "21:00" },
   { staffName: "張美玲", role: "護士", shiftStart: "10:00", shiftEnd: "18:00" },
 ];
+
+/**
+ * E2E hook（cwi-r1close-20260827 §B2）：.dev/duty-mock-override.json = { staff: [...] }
+ * → 取代 MOCK_FIXTURE（v1 shape — 過同一 sanitize 白名單）。flag 內容變（sha256）自動清 5 分鐘
+ * cache — 令「mock duty 變更 → client 卡刷新」e2e 決定性可重現。删 flag → 還原 fixture。
+ * 只喺 DUTY_MOCK=1 分支生效；production（DUTY_MOCK=0）永遠唔讀呢個檔。
+ */
+const DUTY_MOCK_OVERRIDE_FLAG = path.join(process.cwd(), ".dev", "duty-mock-override.json");
+let lastOverrideHash = "";
+function readDutyMockOverride(): { hash: string; staff: DutyEntry[] } | null {
+  try {
+    const raw = readFileSync(DUTY_MOCK_OVERRIDE_FLAG, "utf8");
+    const staff = sanitizeDutyPayload((JSON.parse(raw) as { staff?: unknown }).staff);
+    if (!staff) return null; // 壞 shape → 當冇 flag（fixture 兜底）
+    return { hash: createHash("sha256").update(raw).digest("hex"), staff };
+  } catch {
+    return null; // 檔唔存在 / 讀唔到 → fixture
+  }
+}
 
 interface CacheRow {
   at: number;
@@ -85,6 +107,24 @@ export async function fetchDutyRoster(
   clinicCode: string,
   date: string = hkToday()
 ): Promise<DutyEntry[] | null> {
+  // ★ E2E override（DUTY_MOCK=1 only；production DUTY_MOCK=0 → 零開銷）：
+  //   flag 存在/內容變 → 先清 cache 再入 mock 分支 — 否則 5 分鐘 TTL cache hit 會
+  //   瞓過 override（§B2 e2e「mock duty 變更 → 卡刷新」決定性要求）。
+  let override: DutyEntry[] | null = null;
+  if ((process.env.DUTY_MOCK ?? "1") === "1") {
+    const o = readDutyMockOverride();
+    if (o) {
+      if (o.hash !== lastOverrideHash) {
+        cache.clear(); // flag 內容變 → 舊 cache 必須清
+        lastOverrideHash = o.hash;
+      }
+      override = o.staff;
+    } else if (lastOverrideHash) {
+      cache.clear(); // flag 刪除 → 還原 fixture + 清 cache
+      lastOverrideHash = "";
+    }
+  }
+
   const cacheKey = `${clinicCode}|${date}`;
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.entries;
@@ -92,9 +132,14 @@ export async function fetchDutyRoster(
   let entries: DutyEntry[] | null;
 
   if ((process.env.DUTY_MOCK ?? "1") === "1") {
-    // sandbox 預設 mock — 決定性 fixture（E2E T38 斷言用）
-    entries = MOCK_FIXTURE.map((e) => ({ ...e }));
-    log.debug({ clinic: clinicCode, date, count: entries.length, mock: true }, "duty fetched (MOCK), count");
+    // sandbox 預設 mock — 決定性 fixture（E2E T38 斷言用）；flag override 可換名單（§B2 e2e）
+    if (override) {
+      entries = override.map((e) => ({ ...e }));
+      log.debug({ clinic: clinicCode, date, count: entries.length, mock: true, override: true }, "duty fetched (MOCK override), count");
+    } else {
+      entries = MOCK_FIXTURE.map((e) => ({ ...e }));
+      log.debug({ clinic: clinicCode, date, count: entries.length, mock: true }, "duty fetched (MOCK), count");
+    }
   } else {
     entries = await fetchReal(clinicCode, date);
   }

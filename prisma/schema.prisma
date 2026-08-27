@@ -371,11 +371,14 @@ model FlowSession {
   clinicId         String
   flowToken        String    @unique        // 簽咗 conversationId+clinicId 嘅 JWT
   flowMessageWamid String?                   // 發出嘅 interactive flow 訊息 wamid（metadata）
+  messageId        String?                   // cwi-r1close (D)：對應 interactive Message 內部 id —
+                                             // 發送最終 FAILED 時回滾本 session（防 dedup 誤中 → UI 謊報「已發咗」）
   status           String    @default("SENT")
   createdAt        DateTime  @db.Timestamptz @default(now())
   completedAt      DateTime? @db.Timestamptz
   @@index([conversationId, status])
   @@index([status, createdAt])
+  @@index([messageId])
 }
 
 model AvailabilitySlot {                       // workforce API 嘅 L2 cache（switch 後來源 = clinic-workforce /api/external/v1/availability）

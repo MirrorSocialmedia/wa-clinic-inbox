@@ -108,6 +108,10 @@ export async function sendBookingFlow(opts: {
     },
   });
 
+  // ★ cwi-r1close (D)：link FlowSession → 對應 interactive Message —
+  //   發送最終 FAILED 時 worker 依 messageId 回滾 session（防 dedup 誤中 → UI 謊報「已發咗」）。
+  await prisma.flowSession.update({ where: { id: session.id }, data: { messageId: msg.id } });
+
   await prisma.$executeRaw`
     UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
 

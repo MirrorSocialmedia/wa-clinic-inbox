@@ -300,6 +300,12 @@ export async function sendFlowMessage(opts: {
   const { phoneNumberId, to, flow } = opts;
 
   if (waMock()) {
+    // ★ cwi-r1close (D)：mock fail 注入（同 sendTextMessage/sendTemplateMessage 語義一致）—
+    //   worker 以 WA_GRAPH_MOCK_FAIL=1 啟動 → send throw → retry 3 次 exhausted →
+    //   Message FAILED + FlowSession 回滾 FAILED（e2e T93 用）。production WA_MOCK=0 → 呢段唔會行到。
+    if (process.env.WA_GRAPH_MOCK_FAIL === "1") {
+      throw new Error("MOCK_GRAPH_TIMEOUT: simulated Graph API failure (WA_GRAPH_MOCK_FAIL=1)");
+    }
     await new Promise((r) => setTimeout(r, 10));
     const wamid = `mock-wamid-${randomBytes(10).toString("hex")}`;
     log.info(

@@ -24,6 +24,7 @@
     "e2e:quality": "tsx scripts/e2e-quality.ts",
     "e2e:weekly": "tsx scripts/e2e-weekly-fixtures.ts",
     "e2e:duty": "tsx scripts/e2e-duty.ts",
+    "e2e:duty-refresh": "tsx scripts/e2e-duty-refresh.ts",
     "e2e:socket": "tsx scripts/e2e-socket.ts",
     "e2e:socket-events": "tsx scripts/e2e-socket-events.ts",
     "e2e:staff": "tsx scripts/e2e-staff.ts",

@@ -159,6 +159,17 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
           },
         })
         .catch(() => undefined);
+      // ★ cwi-r1close (D)：interactive（flow）訊息最終失敗 → 回滾對應 FlowSession SENT → FAILED。
+      //   唔回滾時 dedup（status=SENT findFirst）會再中 → reused:true → UI 彈「已經發咗」而病人乜都冇收過。
+      //   回滾後重按 = 開新 session 重發；成功 case 照舊 reused（防連撳語義保留）。
+      if (msg.type === "interactive") {
+        await prisma.flowSession
+          .updateMany({
+            where: { messageId: msg.id, status: "SENT" },
+            data: { status: "FAILED" },
+          })
+          .catch(() => undefined);
+      }
       publishNotify(clinic.id, "message:status", {
         conversationId: conv.id,
         clinicId: clinic.id,
