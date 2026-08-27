@@ -11,6 +11,7 @@
  * - end() 加 turns/slots 參（MD 簽名 3 參冇法帶 patch 數據 — 補上）
  */
 import type { GetSlotsResult } from "@/lib/availability";
+import { slotAvailable } from "@/lib/availability";
 import type { SessionAiOutput, SessionSlots } from "@/lib/ai/session-types";
 import { SESSION_DEFAULTS, fillVars, type SessionParamsType } from "@/lib/workflow/definitions";
 
@@ -199,8 +200,7 @@ export function validateSelection(slots: SessionSlots, data: GetSlotsResult, tod
       (r) =>
         r.date === slots.date &&
         r.startTime === slots.time &&
-        r.isOpen &&
-        r.bookedCount === 0 && // MD C4：對 SlotRow(isOpen, bookedCount) — 同 flow precheck（bookedCount>0 = 滿）一致；mock 填位 = isOpen:true+bookedCount:1
+        slotAvailable(r) && // §D（cwi-r2）：capacity-aware（缺欄 fallback bookedCount===0 舊語義）— 同 flow precheck 一致；checkClash 係寫入時最終防線
         (!slots.providerApricotId || r.providerApricotId === slots.providerApricotId)
     );
     if (!open) return { kind: "slot-taken" };
@@ -221,7 +221,7 @@ export function candidateText(
   const rows = data.slots ?? [];
   const nameOf = (apricotId: string) => providers.find((pr) => pr.apricotId === apricotId)?.name ?? "";
   const cands = rows
-    .filter((r) => r.isOpen && r.bookedCount === 0) // 已滿位（bookedCount>0）唔入候選 — 同 validateSelection/flow precheck 一致
+    .filter(slotAvailable) // §D（cwi-r2）：已滿位/容量 0 唔入候選 — 同 validateSelection/flow precheck 一致
     .filter((r) => !slots.providerApricotId || r.providerApricotId === slots.providerApricotId)
     .filter((r) => !slots.date || r.date === slots.date)
     .filter((r) => !slots.timeOfDay || timeOfDayOf(r.startTime) === slots.timeOfDay)

@@ -33,6 +33,8 @@ export interface SlotRow {
   endTime: string; // HH:mm
   bookedCount: number;
   isOpen: boolean;
+  /** §D（cwi-r2）：workforce 回報「仲收幾多病人」；null = 缺欄（workforce 未上 capacity）→ fallback 當 1 */
+  remainingCapacity: number | null;
 }
 
 export interface GetSlotsResult {
@@ -92,6 +94,7 @@ async function readL2(clinicId: string, from: string, to: string): Promise<L2Rea
       endTime: true,
       bookedCount: true,
       isOpen: true,
+      remainingCapacity: true,
       syncedAt: true,
     },
   });
@@ -106,6 +109,7 @@ async function readL2(clinicId: string, from: string, to: string): Promise<L2Rea
       endTime: r.endTime,
       bookedCount: r.bookedCount,
       isOpen: r.isOpen,
+      remainingCapacity: r.remainingCapacity,
     });
   }
   return { rows: out, maxSyncedAt };
@@ -128,6 +132,7 @@ async function upsertL2(clinicId: string, resp: WorkforceAvailability, fetchedAt
           endTime: s.end,
           bookedCount: s.bookedCount,
           isOpen: s.isOpen,
+          remainingCapacity: s.remainingCapacity ?? null,
           syncedAt,
         })),
       ),
@@ -218,6 +223,7 @@ export async function getSlots(
           endTime: s.end,
           bookedCount: s.bookedCount,
           isOpen: s.isOpen,
+          remainingCapacity: s.remainingCapacity ?? null,
         })),
       ),
     );
@@ -269,9 +275,20 @@ export async function refreshAllClinics(): Promise<{ total: number; ok: number; 
 
 // ── 消費端 helper（Flow endpoint / precheck 共用） ───────────────────────────
 
-/** 空 slot（開診 + 未滿）。 */
+/**
+ * §D（cwi-r2）：「空 slot」統一 predicate。
+ * - remainingCapacity 有欄 → 以佢為準（>0 = 仲收得；workforce 已計入併诊規則）
+ * - remainingCapacity 缺欄（null）→ 舊語義 bookedCount===0（fallback 當 capacity=1，向後兼容）
+ * capacity 係候選過濾層；checkClash / precheck 係寫入時防線（兩層唔合併）。
+ */
+export function slotAvailable(r: SlotRow): boolean {
+  if (!r.isOpen) return false;
+  return r.remainingCapacity != null ? r.remainingCapacity > 0 : r.bookedCount === 0;
+}
+
+/** 空 slot（開診 + 未滿 — §D capacity-aware）。 */
 export function openSlots(rows: SlotRow[]): SlotRow[] {
-  return rows.filter((r) => r.isOpen && r.bookedCount === 0);
+  return rows.filter(slotAvailable);
 }
 
 /** 有空 slot 嘅日期集合（決定性升冪）。 */

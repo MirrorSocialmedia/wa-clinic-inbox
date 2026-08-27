@@ -391,6 +391,7 @@ model AvailabilitySlot {                       // workforce API 嘅 L2 cache（s
   endTime           String
   bookedCount       Int
   isOpen            Boolean                    // workforce response slot.isOpen
+  remainingCapacity Int?                       // §D（cwi-r2）：workforce「仲收幾多」（併诊規則後）；null = 缺欄 → fallback 當 1
   syncedAt          DateTime @db.Timestamptz   // 用 response 嘅 syncedAt（source 新鮮度）
   @@unique([clinicId, providerApricotId, date, startTime])
 }

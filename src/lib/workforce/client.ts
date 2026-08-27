@@ -28,13 +28,20 @@
  *      BOOKING_DEFAULT_VISIT_REASON_CODE（預設 visit reason；空 = 無預設，UI/staff 必揀）
  */
 import { z } from "zod";
-import { readFileSync, appendFileSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import log from "@/lib/log";
 
 // ── zod contract（§2 原樣）───────────────────────────────────────────────
 
-const SlotSchema = z.object({ start: z.string(), end: z.string(), isOpen: z.boolean(), bookedCount: z.number().int() });
+const SlotSchema = z.object({
+  start: z.string(),
+  end: z.string(),
+  isOpen: z.boolean(),
+  bookedCount: z.number().int(),
+  // §D（cwi-r2）：「仲收幾多病人」（併诊規則後）— optional = workforce 未上 capacity 前缺欄照行（fallback=1）
+  remainingCapacity: z.number().int().optional(),
+});
 const ProviderSchema = z.object({ providerApricotId: z.string(), providerName: z.string(), slots: z.array(SlotSchema) });
 // ★ export：contract 執行點 — pii-scan contract-strip 層 + scripts/workforce-contract.test.ts 對佢斷言
 export const AvailabilityResponse = z.object({
@@ -371,8 +378,9 @@ export function defaultVisitReasonCode(): string | null {
 // - 控制旗（flag file — E2E 運行時切換，唔使重啟 process）：
 //   .dev/workforce-mock-fail.json   { clinicCode }        → 該店 mock 直接 throw（測 §3 層 3/4）
 //   .dev/workforce-mock-stale.json  { clinicCode }        → 該店 mock 回 stale=true + 舊 syncedAt
-//   .dev/workforce-mock-fill.json   [ {clinicCode, providerApricotId, date, startTime} ]
-//                                       → 指定 slot 標滿（測「flow 中途變滿」precheck 路徑）
+//   .dev/workforce-mock-fill.json   [ {clinicCode, providerApricotId, date, startTime, remainingCapacity?} ]
+//                                       → 指定 slot 標滿（測「flow 中途變滿」precheck 路徑）；
+//                                       §D（cwi-r2）：帶 remainingCapacity = 該 slot base 容量（唔標滿，純容量治理 → 遞減測試用）
 //   寫入端點旗（booking-ui MD §1）：
 //   .dev/workforce-mock-write-disabled.json  { clinicCode? }  → 該店（或全店）POST/PUT → 503 WRITE_DISABLED
 //   .dev/workforce-mock-newpatient.json      { on: true }     → 允許 {name,phone} 新客 body（Stage 1 預設 off → 422）
@@ -393,6 +401,8 @@ export const MOCK_WRITE_DISABLED_FLAG = ".dev/workforce-mock-write-disabled.json
 export const MOCK_NEW_PATIENT_FLAG = ".dev/workforce-mock-newpatient.json";
 export const MOCK_SLOT_TAKEN_FLAG = ".dev/workforce-mock-slot-taken.json";
 export const MOCK_PATIENTS_FILE = ".dev/workforce-mock-patients.json";
+// §D（cwi-r2）：mock booking store（create 後 capacity 遞減 / remove 還原）— 決定性，e2e cleanup 清檔
+export const MOCK_BOOKED_FILE = ".dev/workforce-mock-booked.json";
 const FIXTURE_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-availability.json");
 const FIXTURE_DICTIONARIES_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-dictionaries.json");
 const FIXTURE_PATIENT_LOOKUP_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-patient-lookup.json");
@@ -406,6 +416,54 @@ function djb2(s: string): number {
   return h;
 }
 
+// ── §D（cwi-r2）mock booking store（capacity 遞減）─────────────────────
+
+interface MockBookedEntry {
+  apricotApptId: string;
+  clinicCode: string;
+  providerApricotId: string;
+  date: string;
+  start: string;
+}
+
+function readBookedStore(): MockBookedEntry[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path.resolve(process.cwd(), MOCK_BOOKED_FILE), "utf8"));
+    return Array.isArray(parsed) ? parsed.filter((e) => e && typeof e.apricotApptId === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeBookedStore(entries: MockBookedEntry[]): void {
+  try {
+    writeFileSync(path.resolve(process.cwd(), MOCK_BOOKED_FILE), JSON.stringify(entries, null, 1));
+  } catch {
+    /* best-effort — 寫唔到 = 無遞減（e2e 斷言會 red） */
+  }
+}
+
+/** create 成功 → 記 store（同 apricotApptId 冪等重放唔重複計）。 */
+function recordBooked(e: MockBookedEntry): void {
+  const store = readBookedStore();
+  if (store.some((x) => x.apricotApptId === e.apricotApptId)) return;
+  writeBookedStore([...store, e]);
+}
+
+/** remove/reschedule → 清該 booking。 */
+function forgetBooked(apricotApptId: string): void {
+  const store = readBookedStore();
+  const next = store.filter((x) => x.apricotApptId !== apricotApptId);
+  if (next.length !== store.length) writeBookedStore(next);
+}
+
+/** 該 slot 已被 mock book 幾多次（capacity 遞減用）。 */
+function bookedCountAt(clinicCode: string, providerApricotId: string, date: string, start: string): number {
+  return readBookedStore().filter(
+    (b) => b.clinicCode === clinicCode && b.providerApricotId === providerApricotId && b.date === date && b.start === start
+  ).length;
+}
+
 function readFlag<T>(rel: string, pred: (f: T) => boolean): T | null {
   try {
     const parsed = JSON.parse(readFileSync(path.resolve(process.cwd(), rel), "utf8"));
@@ -417,18 +475,21 @@ function readFlag<T>(rel: string, pred: (f: T) => boolean): T | null {
   }
 }
 
-function readFillFlags(): { clinicCode: string; providerApricotId: string; date: string; startTime: string }[] {
+function readFillFlags(): { clinicCode: string; providerApricotId: string; date: string; startTime: string; remainingCapacity?: number }[] {
   try {
     const parsed = JSON.parse(readFileSync(path.resolve(process.cwd(), MOCK_FILL_FLAG), "utf8"));
     const arr = Array.isArray(parsed) ? parsed : [parsed];
-    return arr.filter(
-      (f) =>
-        f &&
-        typeof f.clinicCode === "string" &&
-        typeof f.providerApricotId === "string" &&
-        typeof f.date === "string" &&
-        typeof f.startTime === "string"
-    );
+    return arr
+      .filter(
+        (f) =>
+          f &&
+          typeof f.clinicCode === "string" &&
+          typeof f.providerApricotId === "string" &&
+          typeof f.date === "string" &&
+          typeof f.startTime === "string"
+      )
+      // §D：flag 可帶 remainingCapacity（base 容量）— 非數字忽略（視為無）
+      .map((f) => ({ ...f, remainingCapacity: typeof f.remainingCapacity === "number" ? f.remainingCapacity : undefined }));
   } catch {
     return [];
   }
@@ -595,6 +656,8 @@ function mockCreateBooking(bodyIn: unknown): unknown {
     typeof b.patient.patientApricotId === "string"
       ? b.patient.patientApricotId
       : `mock-pat-${djb2(`${b.patient?.name}|${b.patient?.phone}`).toString(16).padStart(8, "0")}`;
+  // §D：記 mock booking store（之後 availability sync 會遞減該 slot 嘅 remainingCapacity）
+  recordBooked({ apricotApptId, clinicCode: b.clinicCode, providerApricotId: b.providerApricotId, date: b.date, start: b.start });
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking created");
   return {
     v: 1,
@@ -623,6 +686,7 @@ function mockBookingRemove(id: string, params: Record<string, string>): unknown 
   const path = `/api/external/v1/bookings/${encodeURIComponent(id)}/remove`;
   if (!params.date || !params.clinicCode) throw new WorkforceApiError(400, path, "BAD_REQUEST");
   mockWriteDisabled(path, params.clinicCode);
+  forgetBooked(id); // §D：remove → capacity 還原
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking removed");
   return { v: 1, removed: true, dayRefreshed: true, syncedAt: new Date().toISOString() };
 }
@@ -642,6 +706,9 @@ function mockReschedule(id: string, bodyIn: unknown): unknown {
   mockSlotTaken(path, b);
 
   const newApptId = `mock-appt-${djb2(`resched|${id}|${b.date}|${b.start}`).toString(16).padStart(8, "0")}`;
+  // §D：reschedule → 舊 slot 釋放（id）+ 新 slot 計一筆
+  forgetBooked(id);
+  recordBooked({ apricotApptId: newApptId, clinicCode: b.clinicCode, providerApricotId: b.providerApricotId, date: b.date, start: b.start });
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking rescheduled");
   return { v: 1, oldApptId: id, newApptId, dayRefreshed: true, syncedAt: new Date().toISOString() };
 }
@@ -790,15 +857,30 @@ async function mockAvailability(params: Record<string, string>): Promise<unknown
     const dayProviders = providers
       .map((p) => {
         if (djb2(`${clinicCode}|${p.apricotId}|${date}`) % 7 === 0) return null; // 閉诊日
-        const slots: { start: string; end: string; isOpen: boolean; bookedCount: number }[] = [];
+        const slots: { start: string; end: string; isOpen: boolean; bookedCount: number; remainingCapacity?: number }[] = [];
         for (const sch of openSchs) {
           let t = sch.startTime;
           while (t < sch.endTime) {
             const t2 = addMin(t, 30);
-            const filled =
-              djb2(`${clinicCode}|${p.apricotId}|${date}|${t}`) % 4 === 0 ||
-              fillFlags.some((f) => f.providerApricotId === p.apricotId && f.date === date && f.startTime === t);
-            slots.push({ start: t, end: t2, isOpen: true, bookedCount: filled ? 1 : 0 });
+            const flag = fillFlags.find(
+              (f) => f.providerApricotId === p.apricotId && f.date === date && f.startTime === t
+            );
+            // 舊 flag（無 remainingCapacity）= 標滿（bookedCount=1）行為不變；
+            // §D：flag 帶 remainingCapacity = 容量治理（唔改 bookedCount — 純 rc 測試）
+            const filled = djb2(`${clinicCode}|${p.apricotId}|${date}|${t}`) % 4 === 0 || (flag !== undefined && flag.remainingCapacity == null);
+            // §D：flag 帶 base 容量 → 回 remainingCapacity = max(0, base − 已 mock book 數)（遞減測試）；
+            // 無 flag / 無 remainingCapacity 欄 = 缺欄（workforce 未上 capacity）→ 唔回欄（fallback=1 迴歸）
+            let remainingCapacity: number | undefined;
+            if (flag?.remainingCapacity != null) {
+              remainingCapacity = Math.max(0, flag.remainingCapacity - bookedCountAt(clinicCode, p.apricotId, date, t));
+            }
+            slots.push({
+              start: t,
+              end: t2,
+              isOpen: true,
+              bookedCount: filled ? 1 : 0,
+              ...(remainingCapacity !== undefined ? { remainingCapacity } : {}),
+            });
             t = t2;
           }
         }

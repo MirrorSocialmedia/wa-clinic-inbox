@@ -66,6 +66,7 @@ function row(providerApricotId: string, date: string, startTime: string, over: P
     endTime: "10:30",
     bookedCount: 0,
     isOpen: true,
+    remainingCapacity: null, // §D（cwi-r2）：缺欄 = fallback bookedCount 語義
     ...over,
   };
 }
