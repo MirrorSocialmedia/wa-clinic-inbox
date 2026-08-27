@@ -14,7 +14,11 @@
  *   pnpm flow-client step ... --bad-token        # T27：壞 token → 401
  *   pnpm flow-client complete --clinic TKW --conv <convId> --token <jwt> \
  *     --provider <id> --providerName <name> --date <YYYY-MM-DD> --time <HH:mm> \
- *     --wa-id <W> [--wamid <unique>]
+ *     --wa-id <W> [--wamid <unique>] [--name <姓名>] [--notes <備註>]
+ *   pnpm flow-client stepx --clinic TKW --token <jwt> --action INIT|data_exchange|BACK \
+ *     [--screen SCR_DATE|SCR_SLOT|SCR_CONFIRM] [--data '<json>'] [--bad-token]
+ *     # cwi-r2：生產真 spec 信封（{encrypted_flow_data, encrypted_aes_key, initial_vector}）round-trip；
+ *     # response = text/plain base64，解密後 = {version:"3.0", screen, data}
  *
  * 輸出（俾 bash assert）：
  *   step:     HTTP=<code> DATA=<json>   /   HTTP=<code> ERROR=<code>
@@ -188,6 +192,9 @@ async function complete(): Promise<void> {
   };
   if (time) replyPayload.time = time;
   if (timeOfDay) replyPayload.timeOfDay = timeOfDay; // self-describing：endpoint 由 shape 分變體
+  // §D/cwi-r2：真 Flow 確認屏嘅新 params（姓名/備註）— flow-reply 會容納（extra 欄忽略，唔碎寫入路徑）
+  if (opts.name) replyPayload.name = opts.name;
+  if (opts.notes) replyPayload.notes = opts.notes;
   const { payload, iv: payloadIv } = encryptGcm(aesKey, iv, replyPayload);
 
   const bizNumber = (clinic.waDisplayNumber ?? "").replace(/\D/g, "");
@@ -250,13 +257,57 @@ async function complete(): Promise<void> {
   }
 }
 
+// ── stepx（生產真 spec 信封 round-trip — cwi-r2） ──────────────────
+
+async function stepx(): Promise<void> {
+  await loadClinic(requireOpt("clinic"));
+  let token = requireOpt("token");
+  if (opts["bad-token"]) token = `${token.slice(0, Math.max(1, token.length - 4))}xxxx`;
+  const action = requireOpt("action");
+  const screen = opts.screen ?? "";
+  const data = opts.data ? (JSON.parse(opts.data) as Record<string, unknown>) : {};
+
+  const kp = ensureKeypair();
+  const aesKey = randomBytes(16);
+  const iv = randomBytes(12);
+  const plain: Record<string, unknown> = { version: "3.0", action, screen, data, flow_token: token };
+
+  // 生產真 spec 信封（無 key_id / 無 wa_id / 無 phone_number_id）
+  const body = {
+    encrypted_flow_data: encryptGcm(aesKey, iv, plain).payload,
+    encrypted_aes_key: wrapAesKey(kp.publicPem, aesKey),
+    initial_vector: iv.toString("base64"),
+  };
+  const raw = JSON.stringify(body);
+  const res = await fetch(ENDPOINT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: raw });
+  const text = await res.text();
+
+  if (res.status >= 200 && res.status < 300 && (res.headers.get("content-type") ?? "").includes("text/plain")) {
+    // 解密 response（★ 反轉 IV — 同 server 端 reversedIv 一致）— 明文 = {version, screen, data}
+    const respIvB64 = Buffer.from(iv).reverse().toString("base64");
+    const respPlain = JSON.parse(decryptGcm(aesKey, respIvB64, text)) as Record<string, unknown>;
+    console.log(`HTTP=${res.status} DATA=${JSON.stringify(respPlain)}`);
+    return;
+  }
+  // 4xx/5xx plaintext JSON（認證/結構錯誤）
+  let code = "unknown";
+  try {
+    code = String((JSON.parse(text) as { error?: string }).error ?? "unknown");
+  } catch {
+    /* keep unknown */
+  }
+  console.log(`HTTP=${res.status} ERROR=${code}`);
+  process.exit(1);
+}
+
 // ── main ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   if (cmd === "step") await step();
+  else if (cmd === "stepx") await stepx();
   else if (cmd === "complete") await complete();
   else {
-    console.error("usage: flow-client <step|complete> [options]");
+    console.error("usage: flow-client <step|stepx|complete> [options]");
     process.exit(2);
   }
 }

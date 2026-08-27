@@ -1,0 +1,189 @@
+{
+  "version": "7.3",
+  "data_api_version": "3.0",
+  "routing_model": {
+    "SCR_DATE": ["SCR_SLOT"],
+    "SCR_SLOT": ["SCR_CONFIRM", "SCR_DATE"],
+    "SCR_CONFIRM": []
+  },
+  "screens": [
+    {
+      "id": "SCR_DATE",
+      "title": "揀日期",
+      "data": {
+        "dates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" }
+            }
+          }
+        },
+        "has_error": { "type": "boolean", "__example__": false },
+        "error_message": { "type": "string", "__example__": "呢日冇空檔，請揀其他日期" }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextHeading", "text": "預約日期" },
+          { "type": "TextBody", "text": "請揀你想預約嘅日期（今日起 30 日內）。" },
+          {
+            "type": "If",
+            "condition": "${data.has_error}",
+            "then": [{ "type": "TextBody", "text": "${data.error_message}" }],
+            "else": []
+          },
+          {
+            "type": "Dropdown",
+            "name": "date",
+            "label": "預約日期",
+            "data-source": "${data.dates}"
+          },
+          {
+            "type": "Footer",
+            "label": "下一步",
+            "on-click-action": {
+              "name": "data_exchange",
+              "payload": { "user_action": "submit_date", "date": "${form.date}" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "SCR_SLOT",
+      "title": "揀醫生同時間",
+      "data": {
+        "date_display": { "type": "string", "__example__": "日期：8月28日(五)" },
+        "date": { "type": "string", "__example__": "2026-08-28" },
+        "has_error": { "type": "boolean", "__example__": false },
+        "error_message": { "type": "string", "__example__": "呢個時間該醫生冇開診，請揀其他時間" },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" }
+            }
+          }
+        },
+        "times": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" }
+            }
+          }
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextHeading", "text": "預約詳情" },
+          { "type": "TextBody", "text": "${data.date_display}" },
+          {
+            "type": "If",
+            "condition": "${data.has_error}",
+            "then": [{ "type": "TextBody", "text": "${data.error_message}" }],
+            "else": []
+          },
+          {
+            "type": "RadioButtonsGroup",
+            "name": "provider_id",
+            "label": "醫生",
+            "data-source": "${data.providers}",
+            "required": true
+          },
+          {
+            "type": "RadioButtonsGroup",
+            "name": "time",
+            "label": "時間",
+            "data-source": "${data.times}",
+            "required": true
+          },
+          {
+            "type": "Footer",
+            "label": "下一步",
+            "on-click-action": {
+              "name": "data_exchange",
+              "payload": {
+                "user_action": "submit_slot",
+                "date": "${data.date}",
+                "provider_id": "${form.provider_id}",
+                "time": "${form.time}"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "SCR_CONFIRM",
+      "title": "確認預約",
+      "terminal": true,
+      "sensitive": ["name", "notes"],
+      "data": {
+        "summary_date": { "type": "string", "__example__": "日期：8月28日(五)" },
+        "summary_provider": { "type": "string", "__example__": "醫生：陳醫生" },
+        "summary_time": { "type": "string", "__example__": "時間：10:00" },
+        "profile_name": { "type": "string", "__example__": "王小明" },
+        "date": { "type": "string", "__example__": "2026-08-28" },
+        "provider_id": { "type": "string", "__example__": "mock-pract-tkw-1" },
+        "time": { "type": "string", "__example__": "10:00" },
+        "has_error": { "type": "boolean", "__example__": false },
+        "error_message": { "type": "string", "__example__": "呢個時段剛好被人預約咗，請返回重揀" }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          { "type": "TextHeading", "text": "確認預約資料" },
+          { "type": "TextBody", "text": "${data.summary_date}" },
+          { "type": "TextBody", "text": "${data.summary_provider}" },
+          { "type": "TextBody", "text": "${data.summary_time}" },
+          {
+            "type": "If",
+            "condition": "${data.has_error}",
+            "then": [{ "type": "TextBody", "text": "${data.error_message}" }],
+            "else": []
+          },
+          {
+            "type": "TextInput",
+            "name": "name",
+            "label": "病人姓名",
+            "init-value": "${data.profile_name}",
+            "max-chars": 40,
+            "required": true,
+            "helper-text": "請輸入預約姓名"
+          },
+          {
+            "type": "TextArea",
+            "name": "notes",
+            "label": "備註（選填）",
+            "max-length": 200,
+            "helper-text": "例如症狀、特殊需要"
+          },
+          {
+            "type": "Footer",
+            "label": "確認預約",
+            "on-click-action": {
+              "name": "data_exchange",
+              "payload": {
+                "user_action": "submit_confirm",
+                "date": "${data.date}",
+                "provider_id": "${data.provider_id}",
+                "time": "${data.time}",
+                "name": "${form.name}",
+                "notes": "${form.notes}"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1730,7 +1730,7 @@ echo "[H1] H1: handoff / send lock / internal notes..."
 # ★ dev-mode pre-compile：warm up H1 routes — Next dev 首訪即編譯；快速串行打多 route 會令
 #   並行 webpack compilation 搶寫 app manifest → loadManifest JSON.parse 空檔 → 500
 #   （非 app bug；用 dummy request 順向編譯完先跑快速斷言序列）
-for _WARM in "/api/conversations/warmup-h1/assign" "/api/conversations/warmup-h1/notes" "/api/conversations/warmup-h1/flows" "/api/messages/send" "/api/bookings/warmup-h1/create"; do
+for _WARM in "/api/conversations/warmup-h1/assign" "/api/conversations/warmup-h1/notes" "/api/conversations/warmup-h1/flows" "/api/messages/send" "/api/bookings/warmup-h1/create" "/api/admin/workflows/triage/publish" "/api/admin/workflows/booking-session/publish" "/api/admin/workflows/reminder/publish" "/api/flows/endpoint"; do
   curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE$_WARM" \
     -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 || true
 done
@@ -3990,6 +3990,243 @@ for pat in "$PAT_T95A" "$PAT_T95B"; do
 done
 rm -f .dev/duty-mock-override.json
 [ "$T95" = 0 ] && pass "T95 §B2 client 端刷新 browser e2e" || { fail "T95 有項失敗（見上 ❌）"; R11_FAIL=1; }
+
+# ══════════════ R12：真 Flow v7.3 + §D remainingCapacity（cwi-r2-20260827）══════════════
+#   T96 §D：capacity=0 唔入候選 + 缺欄 fallback=1 迴歸
+#   T98 生產信封真 Flow 握手（stepx：INIT→SCR_DATE→SCR_SLOT→SCR_CONFIRM→SUCCESS + 401 + legacy 契約）
+#   T97 §D：confirm 後 sync capacity 遞減（2→1→0，mock stateful store）
+#   T99 nfm_reply（帶新 params name/notes）→ BookingRequest PENDING + 三掣卡（寫入路徑照舊）
+R12=0
+
+# ── T96. §D：remainingCapacity=0 唔入候選 + 缺欄 → fallback=1 ──────────────
+echo "[R12] T96: remainingCapacity=0 hidden + missing-field fallback=1..."
+T96=0
+T96_S1=$(q "SELECT \"date\"||'|'||\"startTime\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 ORDER BY \"date\",\"startTime\" LIMIT 1" | jf v)
+T96_S2=$(q "SELECT \"date\"||'|'||\"startTime\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 ORDER BY \"date\",\"startTime\" LIMIT 1 OFFSET 1" | jf v)
+[ -n "$T96_S1" ] && [ -n "$T96_S2" ] || { echo "    ❌ T96 fixture：DOC_A 空 slot 唔夠 2 個"; T96=1; }
+T96_S1D=${T96_S1%%|*}; T96_S1T=${T96_S1##*|}
+T96_S2D=${T96_S2%%|*}; T96_S2T=${T96_S2##*|}
+# S2 = capacity 0（flag 帶 remainingCapacity → 唔標滿，純容量治理）；S1 = 無 flag（缺欄 fallback 對照）
+printf '[{"clinicCode":"TKW","providerApricotId":"%s","date":"%s","startTime":"%s","remainingCapacity":0}]' "$DOC_A" "$T96_S2D" "$T96_S2T" > .dev/workforce-mock-fill.json
+q "UPDATE \"AvailabilitySlot\" SET \"syncedAt\"=\"syncedAt\"-interval '1 hour' WHERE \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null
+pnpm -s e2e:cron sync-availability >/dev/null 2>&1 || { echo "    ❌ T96 sync-availability fail"; T96=1; }
+if wait_for "SELECT \"remainingCapacity\"::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"date\"='$T96_S2D' AND \"startTime\"='$T96_S2T'" '[{"c":"0"}]' 60; then
+  pass "T96 S2 sync → remainingCapacity=0 入 L2"
+else
+  echo "    ❌ T96 S2 rc=0 未入 L2"; T96=1
+fi
+check "T96 S1 缺欄 → rc=NULL（workforce 未回欄，行為不變）" "$(q "SELECT (\"remainingCapacity\" IS NULL)::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"date\"='$T96_S1D' AND \"startTime\"='$T96_S1T'" | jf c)" "true"
+check "T96 capacity=0 slot 唔入候選集（slotAvailable 語義）" "$(q "SELECT count(*)::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"date\"='$T96_S2D' AND \"startTime\"='$T96_S2T' AND \"isOpen\" AND ((\"remainingCapacity\" IS NULL AND \"bookedCount\"=0) OR \"remainingCapacity\">0)" | jf c)" "0"
+check "T96 fallback slot（缺欄+bookedCount=0）照入候選集" "$(q "SELECT count(*)::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"date\"='$T96_S1D' AND \"startTime\"='$T96_S1T' AND \"isOpen\" AND ((\"remainingCapacity\" IS NULL AND \"bookedCount\"=0) OR \"remainingCapacity\">0)" | jf c)" "1"
+[ "$T96" = 0 ] && pass "T96 §D capacity=0 隱藏 + 缺欄 fallback=1 迴歸" || { fail "T96 有項失敗（見上 ❌）"; R12=1; }
+
+# ── T98. 生產信封真 Flow 握手（stepx）：INIT→SCR_DATE→SCR_SLOT→SCR_CONFIRM→SUCCESS + 401 ──
+echo "[R12] T98: prod-envelope flow handshake (3 screens → SUCCESS)..."
+T98=0
+t98_setup_pat() { # t98_setup_pat <pat> <name> → 設 T98_CONV / T98_TOK（0/1）
+  local pat="$1" nm="$2"
+  pnpm -s mock-inbound message --clinic TKW --from "$pat" --text "預約" --wamid "wamid.E2E_T98_${pat}_${EPOCH}" --name "$nm" >/dev/null 2>&1 || return 1
+  wait_for "SELECT (c.\"lastInboundAt\" IS NOT NULL)::text ok FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" '[{"ok":"true"}]' 15 || return 1
+  T98_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" | jf id)
+  [ -n "$T98_CONV" ] || return 1
+  curl -s -o /tmp/e2e-t98-flow.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$T98_CONV/flows" -H 'Content-Type: application/json'
+  T98_TOK=$(jf flowToken < /tmp/e2e-t98-flow.json)
+  [ -n "$T98_TOK" ] || return 1
+  return 0
+}
+stepx_parse() { # stepx_parse <out> <file> → 提 HTTP= 行（容許 pnpm 命令回顯行）→ 200 時寫 plaintext 去 file
+  local line
+  line=$(printf '%s\n' "$1" | grep -E '^HTTP=' | head -1)
+  [ -n "$line" ] || return 1
+  case "$line" in
+    HTTP=200*) printf '%s' "${line#HTTP=200 DATA=}" > "$2"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+t98_pat_sweep() { # waId sweep（同 R11 模式）
+  local pat="$1"
+  CONV_SUB="SELECT id FROM \"Conversation\" cv JOIN \"Contact\" ct ON ct.id=cv.\"contactId\" WHERE ct.\"waId\"='$pat'"
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN ($CONV_SUB)" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ($CONV_SUB)" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" cv USING \"Contact\" ct WHERE ct.id=cv.\"contactId\" AND ct.\"waId\"='$pat'" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE \"waId\"='$pat'" >/dev/null 2>&1
+}
+if t98_setup_pat "8526903${EPOCH}" "E2E T98"; then
+  # (a) INIT → SCR_DATE（v2：dates[] = 30 日內有空檔日 + has_error=false）
+  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action INIT 2>&1 || true)
+  if stepx_parse "$OUT" /tmp/e2e-t98-init.json; then
+    check "T98 INIT → SCR_DATE" "$(jf screen < /tmp/e2e-t98-init.json)" "SCR_DATE"
+    T98_HE=$(grep -oE '"has_error":(true|false)' /tmp/e2e-t98-init.json | head -1 | cut -d: -f2)
+    check "T98 INIT has_error=false（v2 明確 boolean）" "$T98_HE" "false"
+    grep -qF "\"id\":\"$T96_S1D\"" /tmp/e2e-t98-init.json && pass "T98 INIT dates[] 含 $T96_S1D（v2 Dropdown options）" || { echo "    ❌ T98 INIT dates[] 冇 $T96_S1D（已知有空檔日）"; T98=1; }
+  else
+    echo "    ❌ T98 INIT fail（=${OUT%%$'\n'*}）"; T98=1
+  fi
+  # (a2) v2 error 路徑：超範圍日期 → 留 SCR_DATE + has_error=true + error_message 非空（同送規則）
+  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_DATE --data '{"user_action":"submit_date","date":"2030-01-01"}' 2>&1 || true)
+  if stepx_parse "$OUT" /tmp/e2e-t98-err.json; then
+    T98_HEE=$(grep -oE '"has_error":(true|false)' /tmp/e2e-t98-err.json | head -1 | cut -d: -f2)
+    { [ "$(jf screen < /tmp/e2e-t98-err.json)" = "SCR_DATE" ] && [ "$T98_HEE" = "true" ] && grep -qE '"error_message":"[^"]+"' /tmp/e2e-t98-err.json; } \
+      && pass "T98 v2 error 路徑：超範圍日 → 留 SCR_DATE + has_error=true + error_message 非空" \
+      || { echo "    ❌ T98 v2 error 路徑（screen=$(jf screen < /tmp/e2e-t98-err.json) has_error=${T98_HEE:-?}）"; T98=1; }
+  else
+    echo "    ❌ T98 v2 error 路徑 stepx fail（=${OUT%%$'\n'*}）"; T98=1
+  fi
+  # (b) submit_date → SCR_SLOT（providers+times；capacity=0 嘅 S2 唔喺 times — 若其他 provider 無同時段）
+  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_DATE --data "{\"user_action\":\"submit_date\",\"date\":\"$T96_S1D\"}" 2>&1 || true)
+  if stepx_parse "$OUT" /tmp/e2e-t98-slot.json; then
+    check "T98 submit_date → SCR_SLOT" "$(jf screen < /tmp/e2e-t98-slot.json)" "SCR_SLOT"
+    grep -qF "\"id\":\"$DOC_A\"" /tmp/e2e-t98-slot.json || { echo "    ❌ T98 providers 冇 DOC_A"; T98=1; }
+    grep -qF "\"$T96_S1T\"" /tmp/e2e-t98-slot.json || { echo "    ❌ T98 times 冇 $T96_S1T"; T98=1; }
+    T98_OTHER=$(q "SELECT count(*)::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"date\"='$T96_S2D' AND \"startTime\"='$T96_S2T' AND \"providerApricotId\"<> '$DOC_A' AND \"isOpen\" AND ((\"remainingCapacity\" IS NULL AND \"bookedCount\"=0) OR \"remainingCapacity\">0)" | jf c)
+    [ "$T98_OTHER" = "0" ] && grep -qF "\"$T96_S2T\"" /tmp/e2e-t98-slot.json && { echo "    ❌ T98 capacity=0 slot（$T96_S2T）出現喺 times"; T98=1; }
+  else
+    echo "    ❌ T98 submit_date fail（=${OUT%%$'\n'*}）"; T98=1
+  fi
+  # (c) submit_slot → SCR_CONFIRM（summary + profile_name 預填 = Contact profileName）
+  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_SLOT --data "{\"user_action\":\"submit_slot\",\"date\":\"$T96_S1D\",\"provider_id\":\"$DOC_A\",\"time\":\"$T96_S1T\"}" 2>&1 || true)
+  if stepx_parse "$OUT" /tmp/e2e-t98-confirm.json; then
+    check "T98 submit_slot → SCR_CONFIRM" "$(jf screen < /tmp/e2e-t98-confirm.json)" "SCR_CONFIRM"
+    check "T98 confirm profile_name 預填（Contact profileName）" "$(jf profile_name < /tmp/e2e-t98-confirm.json)" "E2E T98"
+    check "T98 confirm time（轉發欄）" "$(jf time < /tmp/e2e-t98-confirm.json)" "$T96_S1T"
+    T98_HE3=$(grep -oE '"has_error":(true|false)' /tmp/e2e-t98-confirm.json | head -1 | cut -d: -f2)
+    check "T98 confirm has_error=false（v2 三屏同送規則）" "$T98_HE3" "false"
+  else
+    echo "    ❌ T98 submit_slot fail（=${OUT%%$'\n'*}）"; T98=1
+  fi
+  # (d) submit_confirm → SUCCESS（params = nfm_reply 契約）
+  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_CONFIRM --data "{\"user_action\":\"submit_confirm\",\"date\":\"$T96_S1D\",\"provider_id\":\"$DOC_A\",\"time\":\"$T96_S1T\",\"name\":\"E2E T98\",\"notes\":\"e2e note\"}" 2>&1 || true)
+  if stepx_parse "$OUT" /tmp/e2e-t98-success.json; then
+    check "T98 submit_confirm → SUCCESS" "$(jf screen < /tmp/e2e-t98-success.json)" "SUCCESS"
+    check "T98 SUCCESS params.providerId" "$(jf providerId < /tmp/e2e-t98-success.json)" "$DOC_A"
+    check "T98 SUCCESS params.date" "$(jf date < /tmp/e2e-t98-success.json)" "$T96_S1D"
+    check "T98 SUCCESS params.time" "$(jf time < /tmp/e2e-t98-success.json)" "$T96_S1T"
+  else
+    echo "    ❌ T98 submit_confirm fail（=${OUT%%$'\n'*}）"; T98=1
+  fi
+  # (e) 壞 token → 401（生產信封認證）
+  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action INIT --bad-token 2>&1 || true)
+  case "$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)" in
+    HTTP=401*) pass "T98 壞 token → 401";;
+    *) echo "    ❌ T98 壞 token 應該 401（=$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)）"; T98=1;;
+  esac
+  # (f) legacy 契約迴歸：同 token 舊 canvas 三 action 照行
+  OUT=$(pnpm -s flow-client step --clinic TKW --conv "$T98_CONV" --token "$T98_TOK" --action SCREEN_PROVIDER 2>&1 || true)
+  F_HTTP=$(printf '%s' "$OUT" | grep -oE 'HTTP=[0-9]+' | head -1 | cut -d= -f2)
+  [ "$F_HTTP" = "200" ] || { echo "    ❌ T98 legacy SCREEN_PROVIDER 迴歸（HTTP=${F_HTTP:-?}）"; T98=1; }
+  OUT=$(pnpm -s flow-client step --clinic TKW --conv "$T98_CONV" --token "$T98_TOK" --action SCREEN_DATE --provider "$DOC_A" 2>&1 || true)
+  F_HTTP=$(printf '%s' "$OUT" | grep -oE 'HTTP=[0-9]+' | head -1 | cut -d= -f2)
+  { [ "$F_HTTP" = "200" ] && printf '%s' "$OUT" | grep -qF "\"$T96_S1D\""; } || { echo "    ❌ T98 legacy SCREEN_DATE 迴歸（HTTP=${F_HTTP:-?}，dates 應含 $T96_S1D）"; T98=1; }
+  # cleanup（SUCCESS 無 nfm_reply → 無 BookingRequest）
+  q "DELETE FROM \"FlowSession\" WHERE \"flowToken\"='$T98_TOK'" >/dev/null 2>&1
+  t98_pat_sweep "8526903${EPOCH}"
+  [ "$T98" = 0 ] && pass "T98 真 Flow v7.3 握手（三屏 → SUCCESS）+ 壞 token 401 + legacy 契約唔變" || { fail "T98 有項失敗（見上 ❌）"; R12=1; }
+else
+  echo "    ❌ T98 setup fail（mock-inbound / flow token）"; T98=1; fail "T98 有項失敗（見上 ❌）"; R12=1
+fi
+
+# ── T97. §D：confirm 後 sync capacity 遞減（base 2 → 1 → 0，mock stateful） ────────
+echo "[R12] T97: capacity decrement after confirm (2→1→0)..."
+T97=0
+T97_S3=$(q "SELECT \"date\"||'|'||\"startTime\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 ORDER BY \"date\",\"startTime\" LIMIT 1 OFFSET 2" | jf v)
+[ -n "$T97_S3" ] || { echo "    ❌ T97 fixture：DOC_A 空 slot 唔夠 3 個"; T97=1; }
+T97_S3D=${T97_S3%%|*}; T97_S3T=${T97_S3##*|}
+# flag：S2 rc=0（繼承 T96）+ S3 base=2（遞減測試）
+printf '[{"clinicCode":"TKW","providerApricotId":"%s","date":"%s","startTime":"%s","remainingCapacity":0},{"clinicCode":"TKW","providerApricotId":"%s","date":"%s","startTime":"%s","remainingCapacity":2}]' "$DOC_A" "$T96_S2D" "$T96_S2T" "$DOC_A" "$T97_S3D" "$T97_S3T" > .dev/workforce-mock-fill.json
+q "UPDATE \"AvailabilitySlot\" SET \"syncedAt\"=\"syncedAt\"-interval '1 hour' WHERE \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null
+pnpm -s e2e:cron sync-availability >/dev/null 2>&1
+if wait_for "SELECT \"remainingCapacity\"::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"date\"='$T97_S3D' AND \"startTime\"='$T97_S3T'" '[{"c":"2"}]' 60; then
+  pass "T97 S3 base capacity=2 入 L2"
+else
+  echo "    ❌ T97 S3 rc=2 未入 L2"; T97=1
+fi
+# booking cycle：新病人 → flow → complete（nfm_reply）→ PENDING → 釘病人+代落單 create（workforce 寫入 → mock store）→ CONFIRMED → re-sync
+# ★ 用 /create（代落單）唔係 /confirm：confirm = staff 已喺醫生系統落單（唔 call workforce）；
+#   create 先會行 confirmBookingCore → workforce createBooking（mock recordBooked → capacity 遞減）
+t97_book_cycle() { # t97_book_cycle <pat> <suf> → 設 T97_BOOK_ID；回 0/1（fail 時 echo 原因）
+  local pat="$1" suf="$2"
+  local t97dbg="/tmp/e2e-t97-dbg-${suf}.txt"
+  : > "$t97dbg"
+  pnpm -s mock-inbound message --clinic TKW --from "$pat" --text "預約" --wamid "wamid.E2E_T97_${suf}_${EPOCH}" --name "E2E T97 $suf" >/dev/null 2>&1 || { echo "    ❌ T97 $suf step=mock-inbound"; return 1; }
+  wait_for "SELECT (c.\"lastInboundAt\" IS NOT NULL)::text ok FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" '[{"ok":"true"}]' 20 || { echo "    ❌ T97 $suf step=lastInboundAt"; return 1; }
+  local conv; conv=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" | jf id)
+  [ -n "$conv" ] || { echo "    ❌ T97 $suf step=conv"; return 1; }
+  curl -s -o /tmp/e2e-t97-flow-${suf}.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$conv/flows" -H 'Content-Type: application/json'
+  local tok; tok=$(jf flowToken < /tmp/e2e-t97-flow-${suf}.json)
+  [ -n "$tok" ] || { echo "    ❌ T97 $suf step=flowtoken（=$(head -c 200 /tmp/e2e-t97-flow-${suf}.json)）"; return 1; }
+  pnpm -s flow-client complete --clinic TKW --conv "$conv" --token "$tok" --provider "$DOC_A" --providerName "$NAME_A" --date "$T97_S3D" --time "$T97_S3T" --wamid "wamid.E2E_T97_DONE_${suf}_${EPOCH}" >/dev/null 2>&1 || { echo "    ❌ T97 $suf step=complete"; return 1; }
+  wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$conv'" '[{"s":"PENDING"}]' 45 || { echo "    ❌ T97 $suf step=pending（nfm_reply 未落單）"; return 1; }
+  T97_BOOK_ID=$(q "SELECT id FROM \"BookingRequest\" WHERE \"conversationId\"='$conv'" | jf id)
+  [ -n "$T97_BOOK_ID" ] || { echo "    ❌ T97 $suf step=bookingId"; return 1; }
+  # 代落單前置（鐵律 A：pinned 舊客 + Send Lock：assignee=自己）
+  q "UPDATE \"Conversation\" SET \"assigneeId\"='$TKW_STAFF_ID', \"pinnedPatientApricotId\"='e2e-t97-pat-${suf}', \"pinnedPatientName\"='E2E T97 ${suf}' WHERE id='$conv'" >/dev/null 2>&1
+  local code; code=$(curl -s -o /tmp/e2e-t97-create-${suf}.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/$T97_BOOK_ID/create" -H 'Content-Type: application/json' -d '{"visitReasonId":"vr-0010"}')
+  [ "$code" = "200" ] || { echo "    ❌ T97 $suf step=create（HTTP=$code body=$(head -c 200 /tmp/e2e-t97-create-${suf}.json)）"; return 1; }
+  wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$T97_BOOK_ID'" '[{"s":"CONFIRMED"}]' 20 || { echo "    ❌ T97 $suf step=confirmed"; return 1; }
+  # create 成功（mock recordBooked 已寫 store）→ re-sync → rc 遞減
+  q "UPDATE \"AvailabilitySlot\" SET \"syncedAt\"=\"syncedAt\"-interval '1 hour' WHERE \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null
+  pnpm -s e2e:cron sync-availability >/dev/null 2>&1
+  return 0
+}
+T97_BOOK_1=""; T97_BOOK_2=""
+if t97_book_cycle "8526904${EPOCH}" "A"; then
+  T97_BOOK_1="$T97_BOOK_ID"
+  if wait_for "SELECT \"remainingCapacity\"::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"date\"='$T97_S3D' AND \"startTime\"='$T97_S3T'" '[{"c":"1"}]' 60; then
+    pass "T97 第 1 次 confirm + sync → capacity 2→1（遞減）"
+  else
+    echo "    ❌ T97 rc 未遞減到 1"; T97=1
+  fi
+else
+  echo "    ❌ T97 booking cycle #1 fail"; T97=1
+fi
+if t97_book_cycle "8526905${EPOCH}" "B"; then
+  T97_BOOK_2="$T97_BOOK_ID"
+  if wait_for "SELECT \"remainingCapacity\"::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"date\"='$T97_S3D' AND \"startTime\"='$T97_S3T'" '[{"c":"0"}]' 60; then
+    pass "T97 第 2 次 confirm + sync → capacity 1→0"
+  else
+    echo "    ❌ T97 rc 未遞減到 0"; T97=1
+  fi
+  check "T97 rc=0 後 S3 消失喺候選集" "$(q "SELECT count(*)::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"date\"='$T97_S3D' AND \"startTime\"='$T97_S3T' AND \"isOpen\" AND ((\"remainingCapacity\" IS NULL AND \"bookedCount\"=0) OR \"remainingCapacity\">0)" | jf c)" "0"
+else
+  echo "    ❌ T97 booking cycle #2 fail"; T97=1
+fi
+# cleanup：mock store/flag 清掉 + bookings + convs
+rm -f .dev/workforce-mock-booked.json .dev/workforce-mock-fill.json
+[ -n "$T97_BOOK_1" ] && q "DELETE FROM \"BookingRequest\" WHERE id='$T97_BOOK_1'" >/dev/null 2>&1
+[ -n "$T97_BOOK_2" ] && q "DELETE FROM \"BookingRequest\" WHERE id='$T97_BOOK_2'" >/dev/null 2>&1
+t98_pat_sweep "8526904${EPOCH}"
+t98_pat_sweep "8526905${EPOCH}"
+[ "$T97" = 0 ] && pass "T97 §D confirm 後 capacity 遞減全鏈（2→1→0 → 唔入候選）" || { fail "T97 有項失敗（見上 ❌）"; R12=1; }
+
+# ── T99. nfm_reply（帶新 params name/notes）→ BookingRequest PENDING + 三掣卡 ────
+echo "[R12] T99: nfm_reply with name/notes → BookingRequest + 3-button card..."
+T99=0
+if t98_setup_pat "8526906${EPOCH}" "E2E T99"; then
+  pnpm -s flow-client complete --clinic TKW --conv "$T98_CONV" --token "$T98_TOK" --provider "$DOC_A" --providerName "$NAME_A" --date "$T96_S1D" --time "$T96_S1T" --name "E2E T99 name" --notes "e2e T99 notes" --wamid "wamid.E2E_T99_DONE_${EPOCH}" >/dev/null 2>&1 || { echo "    ❌ T99 complete webhook"; T99=1; }
+  if wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$T98_CONV'" '[{"s":"PENDING"}]' 30; then
+    pass "T99 BookingRequest PENDING（name/notes extras 唔碎寫入路徑）"
+  else
+    echo "    ❌ T99 BookingRequest 未 PENDING"; T99=1
+  fi
+  BOOK_T99=$(q "SELECT id FROM \"BookingRequest\" WHERE \"conversationId\"='$T98_CONV'" | jf id)
+  FS=$(q "SELECT \"status\"::text s FROM \"FlowSession\" WHERE \"flowToken\"='$T98_TOK'" | jf s)
+  [ "$FS" = "COMPLETED" ] || { echo "    ❌ T99 FlowSession 未 COMPLETED（=$FS）"; T99=1; }
+  curl -s -b "$COOKIE_TKW" "$BASE/api/conversations" -o /tmp/e2e-t99-conv-list.json
+  grep -qF "\"pendingBooking\":{\"id\":\"$BOOK_T99\"" /tmp/e2e-t99-conv-list.json || { echo "    ❌ T99 三掣卡（pendingBooking）冇喺 conversations API"; T99=1; }
+  # cleanup
+  [ -n "$BOOK_T99" ] && q "DELETE FROM \"BookingRequest\" WHERE id='$BOOK_T99'" >/dev/null 2>&1
+  q "DELETE FROM \"FlowSession\" WHERE \"flowToken\"='$T98_TOK'" >/dev/null 2>&1
+  t98_pat_sweep "8526906${EPOCH}"
+  [ "$T99" = 0 ] && pass "T99 nfm_reply（新 params）→ PENDING + 三掣卡，寫入路徑照舊" || { fail "T99 有項失敗（見上 ❌）"; R12=1; }
+else
+  echo "    ❌ T99 setup fail"; T99=1; fail "T99 有項失敗（見上 ❌）"; R12=1
+fi
+
+# R12 最終 cleanup：fill flag / booked store / rc 欄重置（避免殘留污染下次 run 早期測試）
+rm -f .dev/workforce-mock-fill.json .dev/workforce-mock-booked.json
+q "UPDATE \"AvailabilitySlot\" SET \"remainingCapacity\"=NULL" >/dev/null 2>&1
+
+[ "$R12" = 0 ] && pass "R12 真 Flow v7.3 + §D remainingCapacity e2e（T96-T99）" || fail "R12 有項失敗（見上 ❌）"
 
 # ── R11 summary ─────────────────────────────────────────────────────────────
 [ "$R11_FAIL" = 0 ] && pass "R11 輪一收尾 e2e（T93 Flow 回滾 / T94 週表頁 / T95 duty 卡刷新）" || fail "R11 有項失敗（見上 ❌）"
