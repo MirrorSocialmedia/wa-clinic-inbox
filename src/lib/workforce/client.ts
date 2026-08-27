@@ -48,7 +48,7 @@ export const AvailabilityResponse = z.object({
 export type WorkforceAvailability = z.infer<typeof AvailabilityResponse>;
 
 const DutySchema = z.object({ v: z.literal(1), staff: z.array(z.object({
-  staffName: z.string(), role: z.string(), shiftStart: z.string(), shiftEnd: z.string() })) });
+  staffName: z.string(), role: z.string().nullable(), shiftStart: z.string(), shiftEnd: z.string() })) });
 export type WorkforceDuty = z.infer<typeof DutySchema>;
 
 // ── 寫入 + patient-context contract（booking-ui MD §1 — 同 clinic-workforce 源碼一字一樣）──
