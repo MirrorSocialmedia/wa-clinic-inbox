@@ -118,7 +118,8 @@ export function encryptGcm(key16: Buffer, iv: Buffer, json: unknown): { payload:
 /** ★ MD §8.2：response IV = reverse(request IV) */
 export function reversedIv(reqIvB64: string): Buffer {
   const iv = Buffer.from(reqIvB64, "base64");
-  if (iv.length !== 12) throw new Error("FLOW_BAD_IV_LEN");
+  // Meta 真 spec：request IV = 16 bytes；12 bytes 保留俾 legacy 信封（mock step/complete）
+  if (iv.length !== 12 && iv.length !== 16) throw new Error("FLOW_BAD_IV_LEN");
   return Buffer.from(iv.reverse());
 }
 

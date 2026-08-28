@@ -272,7 +272,7 @@ async function stepx(): Promise<void> {
 
   const kp = ensureKeypair();
   const aesKey = randomBytes(16);
-  const iv = randomBytes(12);
+  const iv = randomBytes(16); // ★ Meta 真 spec IV = 16 bytes（生產 ping 500 根因對齊 — cwi-ivlen-20260829）
   const plain: Record<string, unknown> = { version: "3.0", action, screen, data };
   if (token) plain.flow_token = token;
 
