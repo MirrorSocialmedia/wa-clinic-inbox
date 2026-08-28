@@ -17,6 +17,7 @@
  *     --wa-id <W> [--wamid <unique>] [--name <姓名>] [--notes <備註>]
  *   pnpm flow-client stepx --clinic TKW --token <jwt> --action INIT|data_exchange|BACK \
  *     [--screen SCR_DATE|SCR_SLOT|SCR_CONFIRM] [--data '<json>'] [--bad-token]
+ *     [--no-token]（ping / error_notification：平台層 action，payload 唔帶 flow_token — cwi-flowping-20260828）
  *     # cwi-r2：生產真 spec 信封（{encrypted_flow_data, encrypted_aes_key, initial_vector}）round-trip；
  *     # response = text/plain base64，解密後 = {version:"3.0", screen, data}
  *
@@ -261,7 +262,9 @@ async function complete(): Promise<void> {
 
 async function stepx(): Promise<void> {
   await loadClinic(requireOpt("clinic"));
-  let token = requireOpt("token");
+  // --no-token：ping / error_notification 平台層 action（cwi-flowping-20260828）— payload 唔帶 flow_token
+  const noToken = !!opts["no-token"];
+  let token = noToken ? "" : requireOpt("token");
   if (opts["bad-token"]) token = `${token.slice(0, Math.max(1, token.length - 4))}xxxx`;
   const action = requireOpt("action");
   const screen = opts.screen ?? "";
@@ -270,7 +273,8 @@ async function stepx(): Promise<void> {
   const kp = ensureKeypair();
   const aesKey = randomBytes(16);
   const iv = randomBytes(12);
-  const plain: Record<string, unknown> = { version: "3.0", action, screen, data, flow_token: token };
+  const plain: Record<string, unknown> = { version: "3.0", action, screen, data };
+  if (token) plain.flow_token = token;
 
   // 生產真 spec 信封（無 key_id / 無 wa_id / 無 phone_number_id）
   const body = {

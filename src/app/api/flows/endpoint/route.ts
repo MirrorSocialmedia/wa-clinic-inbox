@@ -187,6 +187,13 @@ export async function POST(req: NextRequest) {
     const action = plain.action;
     if (!action) return err(400, "bad_action");
 
+    // 2a) ping / error_notification：WhatsApp 平台層心跳／錯誤通知 — 無 flow_token 放行
+    //     （靜態 data 回應：零 PII / 零寫入 / 零 DB — by design；screen 欄 = action 名自描述）
+    if (action === "ping" || action === "error_notification") {
+      const data = action === "ping" ? { status: "active" } : { acknowledged: true };
+      return prodResp(key16, reqIvB64, action, data);
+    }
+
     // 2) flow_token 驗證（簽 conversationId+clinicId 嘅 JWT — 防別店/別對話用）
     let secret: string;
     try {

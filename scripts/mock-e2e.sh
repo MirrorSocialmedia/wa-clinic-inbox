@@ -3996,6 +3996,7 @@ rm -f .dev/duty-mock-override.json
 #   T98 生產信封真 Flow 握手（stepx：INIT→SCR_DATE→SCR_SLOT→SCR_CONFIRM→SUCCESS + 401 + legacy 契約）
 #   T97 §D：confirm 後 sync capacity 遞減（2→1→0，mock stateful store）
 #   T99 nfm_reply（帶新 params name/notes）→ BookingRequest PENDING + 三掣卡（寫入路徑照舊）
+#   T100 ping / error_notification：解密後 token 驗證前放行（靜態回應無 PII，零 DB — cwi-flowping-20260828）
 R12=0
 
 # ── T96. §D：remainingCapacity=0 唔入候選 + 缺欄 → fallback=1 ──────────────
@@ -4222,11 +4223,47 @@ else
   echo "    ❌ T99 setup fail"; T99=1; fail "T99 有項失敗（見上 ❌）"; R12=1
 fi
 
+# ── T100. ping / error_notification：無 flow_token 放行（解密後 token 驗證前 — cwi-flowping-20260828）──
+echo "[R12] T100: ping / error_notification no-token passthrough (static, zero DB)..."
+T100=0
+# (a) ping（無 token）→ 200 + 加密回應解密後 data.status="active"
+OUT=$(pnpm -s flow-client stepx --clinic TKW --no-token --action ping 2>&1 || true)
+if stepx_parse "$OUT" /tmp/e2e-t100-ping.json; then
+  check "T100 ping data.status=active" "$(jf status < /tmp/e2e-t100-ping.json)" "active"
+else
+  echo "    ❌ T100 ping fail（=${OUT%%$'\n'*}）"; T100=1
+fi
+# (b) error_notification（無 token）→ 200 + data.acknowledged=true
+OUT=$(pnpm -s flow-client stepx --clinic TKW --no-token --action error_notification 2>&1 || true)
+if stepx_parse "$OUT" /tmp/e2e-t100-errnoti.json; then
+  grep -qE '"acknowledged":true' /tmp/e2e-t100-errnoti.json && pass "T100 error_notification data.acknowledged=true" \
+    || { echo "    ❌ T100 error_notification acknowledged 唔係 true（=$(cat /tmp/e2e-t100-errnoti.json)）"; T100=1; }
+else
+  echo "    ❌ T100 error_notification fail（=${OUT%%$'\n'*}）"; T100=1
+fi
+# (c) 迴歸：其他 action（INIT）無 token 照 401 invalid_flow_token（放行唔洩漏）
+OUT=$(pnpm -s flow-client stepx --clinic TKW --no-token --action INIT 2>&1 || true)
+case "$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)" in
+  HTTP=401*ERROR=invalid_flow_token) pass "T100 迴歸：INIT 無 token 照 401 invalid_flow_token";;
+  *) echo "    ❌ T100 迴歸：INIT 無 token 應該 401 invalid_flow_token（=$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)）"; T100=1;;
+esac
+# (d) 零 DB：ping / error_notification 前後 FlowSession / Conversation count 唔變
+T100_FS=$(q "SELECT count(*)::text c FROM \"FlowSession\"" | jf c)
+T100_CONV=$(q "SELECT count(*)::text c FROM \"Conversation\"" | jf c)
+pnpm -s flow-client stepx --clinic TKW --no-token --action ping >/dev/null 2>&1 || true
+pnpm -s flow-client stepx --clinic TKW --no-token --action error_notification >/dev/null 2>&1 || true
+T100_FS2=$(q "SELECT count(*)::text c FROM \"FlowSession\"" | jf c)
+T100_CONV2=$(q "SELECT count(*)::text c FROM \"Conversation\"" | jf c)
+{ [ "$T100_FS" = "$T100_FS2" ] && [ "$T100_CONV" = "$T100_CONV2" ]; } \
+  && pass "T100 零 DB（FlowSession/Conversation count 前後一致）" \
+  || { echo "    ❌ T100 零 DB（FlowSession $T100_FS→$T100_FS2 / Conversation $T100_CONV→$T100_CONV2）"; T100=1; }
+[ "$T100" = 0 ] && pass "T100 ping/error_notification 無 token 放行 + INIT 照 401 + 零 DB" || { fail "T100 有項失敗（見上 ❌）"; R12=1; }
+
 # R12 最終 cleanup：fill flag / booked store / rc 欄重置（避免殘留污染下次 run 早期測試）
 rm -f .dev/workforce-mock-fill.json .dev/workforce-mock-booked.json
 q "UPDATE \"AvailabilitySlot\" SET \"remainingCapacity\"=NULL" >/dev/null 2>&1
 
-[ "$R12" = 0 ] && pass "R12 真 Flow v7.3 + §D remainingCapacity e2e（T96-T99）" || fail "R12 有項失敗（見上 ❌）"
+[ "$R12" = 0 ] && pass "R12 真 Flow v7.3 + §D remainingCapacity e2e（T96-T100）" || fail "R12 有項失敗（見上 ❌）"
 
 # ── R11 summary ─────────────────────────────────────────────────────────────
 [ "$R11_FAIL" = 0 ] && pass "R11 輪一收尾 e2e（T93 Flow 回滾 / T94 週表頁 / T95 duty 卡刷新）" || fail "R11 有項失敗（見上 ❌）"
