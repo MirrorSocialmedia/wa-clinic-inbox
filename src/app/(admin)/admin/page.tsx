@@ -1,6 +1,7 @@
 import { getAiStatusSnapshot } from "@/lib/ai/status";
 import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
+import { relTime } from "@/components/inbox/time";
 import { AlertsPanel, type AlertItem } from "./alerts-panel";
 import { TotpCard } from "./totp-card";
 
@@ -12,6 +13,11 @@ import { TotpCard } from "./totp-card";
  * 同近 24h 自動發數量/成功率。
  * Phase 4：加 警報（alerts）區塊 + 各號 quality_rating 健康表。
  * 安全審計 H-2：加 TOTP 兩步驟卡片（enroll QR/secret + 啟用狀態）。
+ *
+ * ★ 2026-08-29 Organic P2（cwi-uiredesign-20260829-P2，README 第 5 步）：
+ *   頂部 KPI 四格（今日訊息 / FRT 中位數 / 草稿採用率 / 未處理急症）+ 警報區陶土橙化 +
+ *   表格 Organic 樣式。KPI 數據源：Message 表（今日實時）+ 最新 OpsReport（週報值，
+ *   同 /ops 頁同源）+ Alert 表（HIGH 未解決）— 全部純讀。
  */
 export const metadata = { title: "總覽 — WA Clinic Inbox" };
 
@@ -20,6 +26,14 @@ const QUALITY_CLS: Record<string, string> = {
   YELLOW: "bg-warn-soft text-warn-text border-warn/40",
   RED: "bg-danger-soft text-danger-text border-danger/40",
 };
+
+/** FRT 中位數（秒）→ 3m 12s 格式（同 /ops minHm 對齊） */
+function fmtFrt(sec: number | null): string {
+  if (sec === null) return "—";
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return m > 0 ? `${m}m${s > 0 ? ` ${s}s` : ""}` : `${s}s`;
+}
 
 function Row({ label, value, tone }: { label: string; value: string; tone?: "ok" | "warn" | "bad" }) {
   const toneCls =
@@ -49,7 +63,10 @@ export default async function AdminOverviewPage() {
     : null;
   const totpEnabled = adminUser?.totpSecretEnc != null;
 
-  const [ai, alerts, clinics] = await Promise.all([
+  // KPI 四格數據（Organic P2）：今日訊息（實時）/ 未處理急症（HIGH 未解決）/ 最新週報（FRT+採用率，同 /ops 同源）
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const [ai, alerts, clinics, msgToday, urgentCount, urgentOldest, latestReport] = await Promise.all([
     getAiStatusSnapshot(),
     prisma.alert.findMany({ where: { resolvedAt: null }, orderBy: { createdAt: "desc" }, take: 50 }),
     prisma.clinic.findMany({
@@ -63,7 +80,23 @@ export default async function AdminOverviewPage() {
         lastWebhookEventAt: true,
       },
     }),
+    prisma.message.count({ where: { createdAt: { gte: todayStart } } }),
+    prisma.alert.count({ where: { resolvedAt: null, severity: "HIGH" } }),
+    prisma.alert.findFirst({
+      where: { resolvedAt: null, severity: "HIGH" },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.opsReport.findFirst({ where: { clinicId: "" }, orderBy: { periodEnd: "desc" } }),
   ]);
+  const reportMetrics = latestReport?.metrics as
+    | { frt?: { medianSec?: number }; draftAdoption?: { rate?: number } }
+    | null
+    | undefined;
+  const frtSec = reportMetrics?.frt?.medianSec ?? null;
+  const draftRate = reportMetrics?.draftAdoption?.rate ?? null;
+  const reportPeriod = latestReport
+    ? `週報 ${latestReport.periodStart.toISOString().slice(5, 10).replace("-", "/")}`
+    : "未生成週報";
   const alertItems: AlertItem[] = alerts.map((a) => ({
     id: a.id,
     type: a.type,
@@ -84,16 +117,44 @@ export default async function AdminOverviewPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold text-t1">總覽</h1>
+        <h1 className="text-[25px] font-normal text-t1">總覽</h1>
         <p className="text-sm text-t2 mt-1">
           AI triage 狀態（真數據）＋ 管理入口。AI 永遠本地 vLLM（D4）；斷線 = 降級，inbox 照常。
         </p>
       </div>
 
+      {/* ── KPI 四格（Organic P2：數字 Caprasimo 30px；急症格底色換 danger-soft，唯一一格變色） ── */}
+      <section className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+        <div className="bg-panel-2 rounded-[24px] p-4">
+          <div className="text-[10px] tracking-[0.1em] uppercase text-t2 mb-1.5">今日訊息</div>
+          <div className="font-display text-[30px] leading-none text-t1">{msgToday.toLocaleString()}</div>
+          <div className="text-[11px] text-t3 mt-1.5">全部店 · 實時</div>
+        </div>
+        <div className="bg-panel-2 rounded-[24px] p-4">
+          <div className="text-[10px] tracking-[0.1em] uppercase text-t2 mb-1.5">FRT 中位數</div>
+          <div className="font-display text-[30px] leading-none text-t1">{fmtFrt(frtSec)}</div>
+          <div className="text-[11px] text-t3 mt-1.5">{reportPeriod}</div>
+        </div>
+        <div className="bg-panel-2 rounded-[24px] p-4">
+          <div className="text-[10px] tracking-[0.1em] uppercase text-t2 mb-1.5">草稿採用率</div>
+          <div className="font-display text-[30px] leading-none text-t1">
+            {draftRate === null ? "—" : `${Math.round(draftRate * 100)}%`}
+          </div>
+          <div className="text-[11px] text-t3 mt-1.5">{reportPeriod}</div>
+        </div>
+        <div className="bg-danger-soft rounded-[24px] p-4">
+          <div className="text-[10px] tracking-[0.1em] uppercase text-danger-text mb-1.5">未處理急症</div>
+          <div className="font-display text-[30px] leading-none text-danger-text">{urgentCount}</div>
+          <div className="text-[11px] text-danger-text/80 mt-1.5">
+            {urgentOldest ? `最舊 ${relTime(urgentOldest.createdAt.toISOString())}` : "全部已處理"}
+          </div>
+        </div>
+      </section>
+
       {/* ── AI 狀態卡 ── */}
-      <section className="bg-panel rounded-lg border border-line p-5">
+      <section className="bg-panel rounded-[26px] border border-line p-5">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="font-medium text-t1">AI Triage 狀態</h2>
+          <h2 className="text-[18px] font-normal text-t1">AI Triage 狀態</h2>
           {degraded ? (
             <span className="text-xs px-2 py-1 rounded bg-danger-soft text-danger-text border border-danger/40">
               ⚠ degraded — inbox 照常運作，AI 欄位顯示「—」
@@ -153,15 +214,15 @@ export default async function AdminOverviewPage() {
       </section>
 
       {/* ── 各舖 AI 模式（Phase 2b：DRAFT/AUTO + 近 24h 自動發統計） ── */}
-      <section className="bg-panel rounded-lg border border-line p-5">
-        <h2 className="font-medium text-t1 mb-3">各舖 AI 模式（近 24h）</h2>
+      <section className="bg-panel rounded-[26px] border border-line p-5">
+        <h2 className="text-[18px] font-normal text-t1 mb-3">各舖 AI 模式（近 24h）</h2>
         <table className="w-full text-sm">
-          <thead className="text-left text-t2 border-b border-line">
+          <thead className="text-left border-b border-line">
             <tr>
-              <th className="py-2 font-medium">店舖</th>
-              <th className="py-2 font-medium">模式</th>
-              <th className="py-2 font-medium">24h 自動發</th>
-              <th className="py-2 font-medium">成功率</th>
+              <th className="py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">店舖</th>
+              <th className="py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">模式</th>
+              <th className="py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">24h 自動發</th>
+              <th className="py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">成功率</th>
             </tr>
           </thead>
           <tbody>
@@ -169,7 +230,7 @@ export default async function AdminOverviewPage() {
               const rate24 =
                 c.successRate24h === null ? null : Math.round(c.successRate24h * 100);
               return (
-                <tr key={c.id} className="border-b border-line last:border-0">
+                <tr key={c.id} className="border-b border-line last:border-0 hover:bg-black/[.04]">
                   <td className="py-2">
                     {c.code}
                     <span className="text-t3 ml-2 text-xs">{c.name}</span>
@@ -206,31 +267,32 @@ export default async function AdminOverviewPage() {
         </p>
       </section>
 
-      {/* ── Phase 4：警報（未解決；health-check 每 5 分鐘 / quality-check 每日） ── */}
-      <section className="bg-panel rounded-lg border border-line p-5">
+      {/* ── Phase 4：警報（未解決；health-check 每 5 分鐘 / quality-check 每日） ──
+          Organic P2：整區換陶土橙（急症色），每條警報 = bg-panel 圓角行 ── */}
+      <section className="bg-danger-soft border-[1.5px] border-warn rounded-[26px] p-5">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="font-medium text-t1">警報（未解決）</h2>
+          <h2 className="text-[18px] font-normal text-t1">警報（未解決）</h2>
           <span className="text-xs text-t2">health-check 每 5 分鐘 · quality-check 每日 · 恢復自動 resolve</span>
         </div>
         <AlertsPanel alerts={alertItems} />
       </section>
 
       {/* ── Phase 4：各號 quality_rating（被 ban 前哨指標 — MD §9.3） ── */}
-      <section className="bg-panel rounded-lg border border-line p-5">
-        <h2 className="font-medium text-t1 mb-3">WhatsApp 號健康（quality_rating）</h2>
+      <section className="bg-panel rounded-[26px] border border-line p-5">
+        <h2 className="text-[18px] font-normal text-t1 mb-3">WhatsApp 號健康（quality_rating）</h2>
         <table className="w-full text-sm">
-          <thead className="text-left text-t2 border-b border-line">
+          <thead className="text-left border-b border-line">
             <tr>
-              <th className="py-2 font-medium">店舖</th>
-              <th className="py-2 font-medium">號</th>
-              <th className="py-2 font-medium">quality_rating</th>
-              <th className="py-2 font-medium">上次檢查</th>
-              <th className="py-2 font-medium">最後 webhook 事件</th>
+              <th className="py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">店舖</th>
+              <th className="py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">號</th>
+              <th className="py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">quality_rating</th>
+              <th className="py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">上次檢查</th>
+              <th className="py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">最後 webhook 事件</th>
             </tr>
           </thead>
           <tbody>
             {clinics.map((c) => (
-              <tr key={c.code} className="border-b border-line last:border-0">
+              <tr key={c.code} className="border-b border-line last:border-0 hover:bg-black/[.04]">
                 <td className="py-2">
                   {c.code}
                   <span className="text-t3 ml-2 text-xs">{c.name}</span>
@@ -267,21 +329,21 @@ export default async function AdminOverviewPage() {
       <section className="grid grid-cols-2 gap-4">
         <a
           href="/admin/clinics"
-          className="bg-panel rounded-lg border border-line p-4 hover:border-brand transition-colors"
+          className="bg-panel rounded-[26px] border border-line p-4 hover:border-brand transition-colors"
         >
           <div className="font-medium text-t1">診所</div>
           <div className="text-sm text-t2 mt-1">店舖 / WhatsApp 號碼 / greeting 配置</div>
         </a>
         <a
           href="/admin/staff"
-          className="bg-panel rounded-lg border border-line p-4 hover:border-brand transition-colors"
+          className="bg-panel rounded-[26px] border border-line p-4 hover:border-brand transition-colors"
         >
           <div className="font-medium text-t1">員工</div>
           <div className="text-sm text-t2 mt-1">帳號 / 角色（ADMIN / STAFF）</div>
         </a>
         <a
           href="/ops"
-          className="bg-panel rounded-lg border border-line p-4 hover:border-brand transition-colors"
+          className="bg-panel rounded-[26px] border border-line p-4 hover:border-brand transition-colors"
         >
           <div className="font-medium text-t1">營運週報</div>
           <div className="text-sm text-t2 mt-1">最近 8 週趨勢 + 本期指標（FRT / 採用率 / 轉化率）</div>

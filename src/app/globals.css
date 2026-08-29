@@ -131,17 +131,23 @@ body {
 }
 
 /* ★ Caprasimo 只上 h1–h4 與 .font-display（按鈕、數字指標手動加 class）。
-   絕對不要落到列表行 —— 它太重，14px 以下會糊。 */
-h1, h2, h3, h4 {
-  font-family: "Caprasimo", var(--font-noto-tc), system-ui, sans-serif;
-  font-weight: 400;
-  line-height: 1.12;
-  letter-spacing: -0.015em;
+   絕對不要落到列表行 —— 它太重，14px 以下會糊。
+   ★ P2 fix（cwi-uiredesign-20260829-P2）：包入 @layer base — Tailwind v4 utilities 喺
+     @layer utilities，unlayered 作者 CSS 會蓋過所有 utility（cascade layer 規則），
+     唔包嘅話 h1 + text-[25px] 永遠渲染 42px。包咗之後：冇 text-* class 嘅 heading
+     保持呢度嘅預設 size，有嘅就由 utility 決定（原本意圖）。 */
+@layer base {
+  h1, h2, h3, h4 {
+    font-family: "Caprasimo", var(--font-noto-tc), system-ui, sans-serif;
+    font-weight: 400;
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+  }
+  h1 { font-size: 42px; }
+  h2 { font-size: 32px; }
+  h3 { font-size: 25px; }
+  h4 { font-size: 20px; }
 }
-h1 { font-size: 42px; }
-h2 { font-size: 32px; }
-h3 { font-size: 25px; }
-h4 { font-size: 20px; }
 
 /* ★ 主題化 focus ring —— 取代所有 focus:ring-brand（藍圈）。 */
 :focus { outline: none; }
@@ -150,6 +156,48 @@ h4 { font-size: 20px; }
   outline-offset: 2px;
 }
 ::selection { background: color-mix(in srgb, var(--brand) 30%, transparent); }
+
+/* ── .dialog modal（2026-08-29 P2：confirm() 換裝，Organic 設計系統對照）
+   backdrop blur + 面板 26px 圓角（浮起面板 = bg-panel，唔係純白）+ 右對齊按鈕排布 ── */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--t1) 55%, transparent);
+  backdrop-filter: blur(3px);
+}
+.dialog {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 26px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 32px color-mix(in srgb, #2e2b25 22%, transparent);
+}
+.dialog-title {
+  font-family: "Caprasimo", var(--font-noto-tc), system-ui, sans-serif;
+  font-weight: 400;
+  font-size: 20px;
+  line-height: 1.12;
+  color: var(--t1);
+}
+.dialog-body {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--t2);
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 4px;
+}
 
 /* ★ H2：@mention jump — 撳 bell / browser Notification 後定位到該 note 嘅短暫高亮 */
 @keyframes msg-flash-kf {

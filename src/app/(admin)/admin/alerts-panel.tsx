@@ -17,10 +17,11 @@ export interface AlertItem {
 }
 
 const SEV_CLS: Record<string, string> = {
-  HIGH: "bg-danger-soft text-danger-text border-danger/40",
-  MEDIUM: "bg-warn-soft text-warn-text border-warn/40",
-  LOW: "bg-panel-2 text-t2 border-line-strong",
-  INFO: "bg-brand-soft text-brand-text border-brand/40",
+  // Organic P2（README 第 5 步）：severity 膠囊 — HIGH 陶土橙實底、MEDIUM 淺橙底
+  HIGH: "bg-danger text-panel",
+  MEDIUM: "bg-warn text-warn-text",
+  LOW: "bg-panel-2 text-t2",
+  INFO: "bg-brand-soft text-brand-text",
 };
 
 function fmtTime(iso: string | null): string {
@@ -57,10 +58,10 @@ export function AlertsPanel({ alerts }: { alerts: AlertItem[] }) {
   return (
     <ul className="space-y-2">
       {list.map((a) => (
-        <li key={a.id} className="flex items-start justify-between gap-3 border border-line rounded p-3 bg-panel">
+        <li key={a.id} className="flex items-start justify-between gap-3 border border-line rounded-[20px] p-3.5 bg-panel">
           <div className="min-w-0 text-sm">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded border ${SEV_CLS[a.severity] ?? SEV_CLS.LOW}`}>
+              <span className={`text-[10.5px] font-semibold px-2 py-0.5 rounded-full ${SEV_CLS[a.severity] ?? SEV_CLS.LOW}`}>
                 {a.severity}
               </span>
               <span className="font-mono text-t1">{a.type}</span>
@@ -80,7 +81,7 @@ export function AlertsPanel({ alerts }: { alerts: AlertItem[] }) {
             <button
               onClick={() => void resolve(a.id)}
               disabled={busy === a.id}
-              className="shrink-0 text-xs px-2.5 py-1 rounded bg-t1 text-canvas disabled:opacity-50"
+              className="shrink-0 text-xs px-2.5 py-1 rounded-full bg-t1 text-canvas disabled:opacity-50"
             >
               {busy === a.id ? "處理中…" : "標記已處理"}
             </button>
