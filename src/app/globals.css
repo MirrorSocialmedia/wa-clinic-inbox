@@ -1,40 +1,62 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   globals.css — Organic 配色版（2026-08-29 交接 cwi-uiredesign-20260829）
+
+   ★ 全部 class 名（bg-panel / text-t1 / border-line / bg-brand …）一個都不用改 —
+     `@theme inline` 的映射照舊，換 token 值就整個 app 換色。
+   ───────────────────────────────────────────────────────────────────────────── */
+
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Caprasimo&family=Figtree:wght@400;600;700&display=swap');
 
 /* ── 手動 dark variant（如果個別位真係要 per-theme 微調先用；一般用 semantic token 就夠） */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-/* ── Light（default） ─────────────────────────────────── */
+/* ── Light（default）— Organic ────────────────────────────────────────────── */
 :root {
-  --canvas: #F6F7FB;
-  --panel: #FFFFFF;
-  --panel-2: #F1F3F9;
-  --line: #E6E8F0;
-  --line-strong: #D3D7E3;
-  --t1: #171A26;
-  --t2: #5A6072;
-  --t3: #9AA1B2;
+  /* 底 / 面板：暖米色地，面板比地更淺（浮起），凹入用沙色 */
+  --canvas: #f5ead8;        /* was #F6F7FB — Organic color-bg */
+  --panel: #f9f4ed;         /* was #FFFFFF — neutral-100（★ 不要用純白，會跳出暖調） */
+  --panel-2: #ebddc5;       /* was #F1F3F9 — color-surface */
+  --line: #d3c9ba;          /* was #E6E8F0 — ink 16% over bg */
+  --line-strong: #c0b6a5;   /* was #D3D7E3 — neutral-400 */
+  --t1: #201e1d;            /* was #171A26 — color-text */
+  --t2: #645c50;            /* was #5A6072 — neutral-700 */
+  --t3: #a19786;            /* was #9AA1B2 — neutral-500 */
 
-  --brand: #4F46E5;
-  --brand-hover: #4338CA;
-  --brand-soft: #EEF2FF;
-  --brand-text: #4338CA;
+  /* chrome：indigo → 鼠尾草綠。導航、選中、主要按鈕、連結全部走這隻 */
+  --brand: #7a8a5e;         /* was #4F46E5 — color-accent-2 */
+  --brand-hover: #56633f;   /* was #4338CA — accent-2-700 */
+  --brand-soft: #f0fae1;    /* was #EEF2FF — accent-2-100 */
+  --brand-text: #3d472b;    /* was #4338CA — accent-2-800 */
 
-  --wa: #25D366;
-  --ok: #059669;
-  --ok-soft: #D8F5E7;
-  --ok-text: #047857;
-  --warn: #D97706;
-  --warn-soft: #FEF3C7;
-  --warn-text: #B45309;
-  --danger: #DC2626;
-  --danger-soft: #FEE2E2;
-  --danger-text: #B91C1C;
+  /* WhatsApp 渠道識別 — 設計系統以外唯一例外色，只用在頭像綠點與未讀數 */
+  --wa: #25D366;            /* 不變 */
 
-  --bubble-in: #FFFFFF;
-  --bubble-out: #DCF5E4;
+  /* 正向：沿用鼠尾草的深步（成功與 chrome 同族，正常做法） */
+  --ok: #728157;            /* was #059669 — accent-2-600 */
+  --ok-soft: #e1eecc;       /* was #D8F5E7 — accent-2-200（比 brand-soft 深一步以區分） */
+  --ok-text: #3d472b;       /* was #047857 — accent-2-800 */
+
+  /* 提醒：陶土橙的淺步（窗口將過 / AUTO 模式 / PENDING template） */
+  --warn: #f6a06b;          /* was #D97706 — accent-400 */
+  --warn-soft: #ffe1d0;     /* was #FEF3C7 — accent-200 */
+  --warn-text: #643312;     /* was #B45309 — accent-800 */
+
+  /* 急症：陶土橙的中深步 — 全 app 最搶眼的顏色，只給急症與過窗 */
+  --danger: #b2622d;        /* was #DC2626 — accent-600 */
+  --danger-soft: #fff2eb;   /* was #FEE2E2 — accent-100 */
+  --danger-text: #8c491a;   /* was #B91C1C — accent-700 */
+
+  /* 氣泡 */
+  --bubble-in: #f9f4ed;     /* was #FFFFFF — neutral-100 */
+  --bubble-out: #e1eecc;    /* was #DCF5E4 — accent-2-200 */
 }
 
-/* ── Dark ─────────────────────────────────────────────── */
+/* ★ warn 與 danger 同屬陶土家族（warn = 淺步、danger = 深步）。
+   兩者同時出現時靠邊框分辨 —— 現有 code 已經在做（border-warn/40 vs border-danger/40），
+   保留即可；不要把 warn-soft 與 danger-soft 疊在一起用。 */
+
+/* ── Dark（照舊未改 — 今輪唔出暗色 token，ThemeToggle 唔 render） ─────────── */
 [data-theme="dark"] {
   --canvas: #0E1015;
   --panel: #171A21;
@@ -65,7 +87,7 @@
   --bubble-out: #134534;
 }
 
-/* ── 映射成 Tailwind utility（bg-panel / text-t1 / border-line …） */
+/* ── 映射成 Tailwind utility（bg-panel / text-t1 / border-line …） ───────── */
 @theme inline {
   --color-canvas: var(--canvas);
   --color-panel: var(--panel);
@@ -91,16 +113,43 @@
   --color-danger-text: var(--danger-text);
   --color-bubble-in: var(--bubble-in);
   --color-bubble-out: var(--bubble-out);
-  --font-sans: var(--font-geist-sans), var(--font-noto-tc), system-ui, sans-serif;
-  --font-mono: var(--font-geist-mono), monospace;
+
+  /* ★ Figtree 取代 Geist Sans 做內文；Caprasimo 做展示字 */
+  --font-sans: "Figtree", var(--font-noto-tc), system-ui, -apple-system,
+    "PingFang HK", "Microsoft JhengHei", sans-serif;
+  --font-display: "Caprasimo", var(--font-noto-tc), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, Menlo, monospace;
 }
 
 body {
   background: var(--canvas);
   color: var(--t1);
-  font-family: var(--font-geist-sans), var(--font-noto-tc), system-ui, -apple-system,
+  font-family: "Figtree", var(--font-noto-tc), system-ui, -apple-system,
     "PingFang HK", "Microsoft JhengHei", sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
 }
+
+/* ★ Caprasimo 只上 h1–h4 與 .font-display（按鈕、數字指標手動加 class）。
+   絕對不要落到列表行 —— 它太重，14px 以下會糊。 */
+h1, h2, h3, h4 {
+  font-family: "Caprasimo", var(--font-noto-tc), system-ui, sans-serif;
+  font-weight: 400;
+  line-height: 1.12;
+  letter-spacing: -0.015em;
+}
+h1 { font-size: 42px; }
+h2 { font-size: 32px; }
+h3 { font-size: 25px; }
+h4 { font-size: 20px; }
+
+/* ★ 主題化 focus ring —— 取代所有 focus:ring-brand（藍圈）。 */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+::selection { background: color-mix(in srgb, var(--brand) 30%, transparent); }
 
 /* ★ H2：@mention jump — 撳 bell / browser Notification 後定位到該 note 嘅短暫高亮 */
 @keyframes msg-flash-kf {
@@ -109,7 +158,7 @@ body {
 }
 .msg-flash {
   animation: msg-flash-kf 0.8s ease-out 2;
-  border-radius: 12px;
+  border-radius: 22px; /* was 12px — 配合新圓角 */
 }
 
 /* theme 切換時全局顏色過渡（respect reduced motion） */

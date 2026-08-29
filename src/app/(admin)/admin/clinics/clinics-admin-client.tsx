@@ -198,7 +198,7 @@ export default function ClinicsAdmin() {
   }
 
   const input =
-    "mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand";
+    "mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm";
   const label = "block text-sm text-t2";
 
   return (

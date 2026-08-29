@@ -59,7 +59,7 @@ export default function LoginPage() {
               onChange={(e) => setEmail(e.target.value)}
               required
               autoComplete="username"
-              className="mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm text-t1 focus:outline-none focus:ring-2 focus:ring-brand"
+              className="mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm text-t1"
               placeholder="name@wa-clinic.local"
             />
           </label>
@@ -71,7 +71,7 @@ export default function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
               required
               autoComplete="current-password"
-              className="mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm text-t1 focus:outline-none focus:ring-2 focus:ring-brand"
+              className="mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm text-t1"
               placeholder="••••••••"
             />
           </label>

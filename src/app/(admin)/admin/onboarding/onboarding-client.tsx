@@ -237,7 +237,7 @@ export function OnboardingClient({ clinics }: { clinics: OnboardingClinic[] }) {
     );
   }, [configId, onAuthCode]);
 
-  const sel = "mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand";
+  const sel = "mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm";
   const phaseCls: Record<Phase, string> = {
     idle: "bg-panel-2 text-t2",
     "loading-sdk": "bg-panel-2 text-t2",

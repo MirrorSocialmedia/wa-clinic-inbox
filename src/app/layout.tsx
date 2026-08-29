@@ -1,10 +1,19 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono, Noto_Sans_TC } from "next/font/google";
+import { Caprasimo, Figtree, Geist_Mono, Noto_Sans_TC } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+/* Organic（cwi-uiredesign-20260829）：內文 Figtree 取代 Geist Sans，展示字 Caprasimo。
+   同時 globals.css 有 Google Fonts @import 做雙保險（build 失敗時報告實錘）。 */
+const figtree = Figtree({
+  variable: "--font-figtree",
   subsets: ["latin"],
+  weight: ["400", "600", "700"],
+});
+
+const caprasimo = Caprasimo({
+  variable: "--font-caprasimo",
+  subsets: ["latin"],
+  weight: "400", // Caprasimo 只有單一 weight 400 — next/font 要求明言
 });
 
 const geistMono = Geist_Mono({
@@ -38,7 +47,7 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
       </head>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} ${notoTC.variable} antialiased`}
+        className={`${figtree.variable} ${caprasimo.variable} ${geistMono.variable} ${notoTC.variable} antialiased`}
       >
         {children}
       </body>
