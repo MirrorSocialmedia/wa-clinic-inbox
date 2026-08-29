@@ -25,6 +25,10 @@ interface Clinic {
   aiMode: "DRAFT" | "AUTO";
   conversationCount: number;
   contactCount: number;
+  // 近 24h AUTO 自動發統計（GET /api/admin/clinics；rate = 整數百分比，total=0 → null）
+  autoSent24h: number;
+  autoSentOk24h: number;
+  autoSentRate24h: number | null;
   // API 係 clinic 全 row spread（...c）— 呢兩欄已經喺 response 度（JSON = ISO string）
   qualityRating: string | null; // GREEN / YELLOW / RED（null = 未檢查）
   lastWebhookEventAt: string | null;
@@ -327,6 +331,12 @@ export default function ClinicsAdmin() {
                       {c.lastWebhookEventAt
                         ? ` · 最後事件 ${relTime(c.lastWebhookEventAt)}`
                         : " · 無事件"}
+                    </div>
+                    {/* 近 24h 自動發（設計稿行；total=0 顯示真實狀態，唔係假數） */}
+                    <div className="text-[11.5px] text-t2 mt-0.5">
+                      {c.autoSent24h > 0
+                        ? `近 24h 自動發 ${c.autoSentOk24h}/${c.autoSent24h} 則 · 成功率 ${c.autoSentRate24h}%`
+                        : "近 24h 無自動發送"}
                     </div>
                   </div>
                   {/* 右：AI 模式 segmented + 編輯/接入 + 刪除 */}

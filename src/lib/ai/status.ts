@@ -45,27 +45,35 @@ export interface AiStatusSnapshot {
   }[];
 }
 
-export async function getAiStatusSnapshot(): Promise<AiStatusSnapshot> {
+/**
+ * 近 24h 逐舖 AUTO 自動發統計（單一事實來源：/api/admin/ai-status + /api/admin/clinics 共用）。
+ * total = aiAutoSent=true + direction=OUT + createdAt>=now-24h（raw SQL join — Message 無 clinicId，經 Conversation）；
+ * ok = 其中成功（status IN SENT/DELIVERED/READ — 已交 Meta Graph，tick 未回前已算成功）。
+ */
+export async function autoSent24hByClinic(): Promise<Map<string, { total: number; ok: number }>> {
   const since = new Date(Date.now() - 24 * 3600 * 1000);
-  const [probe, stats, clinics, autoRows] = await Promise.all([
+  const rows = await prisma.$queryRaw<Array<{ clinicId: string; total: number; ok: number }>>`
+    SELECT c."clinicId" AS "clinicId", COUNT(*)::int AS "total",
+           COUNT(*) FILTER (WHERE m."status" IN ('SENT','DELIVERED','READ'))::int AS "ok"
+    FROM "Message" m
+    JOIN "Conversation" c ON c."id" = m."conversationId"
+    WHERE m."aiAutoSent" = true AND m."direction" = 'OUT' AND m."createdAt" >= ${since}
+    GROUP BY c."clinicId"
+  `;
+  return new Map(rows.map((r) => [r.clinicId, r]));
+}
+
+export async function getAiStatusSnapshot(): Promise<AiStatusSnapshot> {
+  const [probe, stats, clinics, autoByClinic] = await Promise.all([
     checkAiHealth(),
     getAiCallStats(),
     prisma.clinic.findMany({
       orderBy: { code: "asc" },
       select: { id: true, code: true, name: true, aiMode: true },
     }),
-    // 近 24h AUTO 自動發統計（raw SQL join — Message 無 clinicId，經 Conversation）
-    prisma.$queryRaw<Array<{ clinicId: string; total: number; ok: number }>>`
-      SELECT c."clinicId" AS "clinicId", COUNT(*)::int AS "total",
-             COUNT(*) FILTER (WHERE m."status" IN ('SENT','DELIVERED','READ'))::int AS "ok"
-      FROM "Message" m
-      JOIN "Conversation" c ON c."id" = m."conversationId"
-      WHERE m."aiAutoSent" = true AND m."direction" = 'OUT' AND m."createdAt" >= ${since}
-      GROUP BY c."clinicId"
-    `,
+    autoSent24hByClinic(),
   ]);
   const runtime = getAiRuntimeInfo();
-  const autoByClinic = new Map(autoRows.map((r) => [r.clinicId, r]));
   return {
     mode: runtime.mode,
     mockFail: runtime.mockFail,

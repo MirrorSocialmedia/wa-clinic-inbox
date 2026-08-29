@@ -629,6 +629,17 @@ check "T19 AuditLog 登記 AI_AUTO_SEND（可審計）" "$AUDIT_T19" "1"
 AUDIT_NO_PII=$(q "SELECT (meta->>'conversationId')::text c FROM \"AuditLog\" WHERE action='AI_AUTO_SEND' AND \"entityId\"='$AUTO1_OUT_ID'" | jf c)
 check "T19 AuditLog meta 帶 conversationId（metadata only，無原文）" "$AUDIT_NO_PII" "$AUTO1_CONV"
 
+# ── T19b. /api/admin/clinics 列表：近 24h 自動發統計（API 值 == DB 同式；cwi-clinic24h）──
+T19B_CODE=$(curl -s -o /tmp/e2e-t19b.json -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/api/admin/clinics")
+T19B_PRESENT=$(node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const c=Array.isArray(j)?j.find(x=>x.id===process.argv[2]):null;console.log(c&&typeof c.autoSent24h==="number"&&typeof c.autoSentOk24h==="number"&&(c.autoSentRate24h===null||typeof c.autoSentRate24h==="number")?"ok":"missing")}catch{console.log("badjson")}' /tmp/e2e-t19b.json "$TKW_CLINIC_ID" 2>/dev/null)
+check "T19b admin clinics list 200 + TKW 近 24h 自動發三欄存在（autoSent24h/Ok/Rate）" "${T19B_CODE}_${T19B_PRESENT}" "200_ok"
+DB_24H_TOTAL=$(q "SELECT COUNT(*)::text c FROM \"Message\" m JOIN \"Conversation\" cv ON cv.\"id\"=m.\"conversationId\" WHERE m.\"aiAutoSent\"=true AND m.\"direction\"='OUT' AND m.\"createdAt\">= now() - interval '24 hours' AND cv.\"clinicId\"='$TKW_CLINIC_ID'" | jf c)
+DB_24H_OK=$(q "SELECT COUNT(*)::text c FROM \"Message\" m JOIN \"Conversation\" cv ON cv.\"id\"=m.\"conversationId\" WHERE m.\"aiAutoSent\"=true AND m.\"direction\"='OUT' AND m.\"status\" IN ('SENT','DELIVERED','READ') AND m.\"createdAt\">= now() - interval '24 hours' AND cv.\"clinicId\"='$TKW_CLINIC_ID'" | jf c)
+API_24H_TO=$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const c=j.find(x=>x.id===process.argv[2]);console.log(c.autoSent24h+"|"+c.autoSentOk24h)' /tmp/e2e-t19b.json "$TKW_CLINIC_ID" 2>/dev/null)
+API_24H_RATE=$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const c=j.find(x=>x.id===process.argv[2]);console.log(c.autoSentRate24h)' /tmp/e2e-t19b.json "$TKW_CLINIC_ID" 2>/dev/null)
+check "T19b TKW autoSent24h/autoSentOk24h == DB 同式（近 24h 自動發/其中成功）" "$API_24H_TO" "$DB_24H_TOTAL|$DB_24H_OK"
+check "T19b TKW autoSentRate24h == round(ok/total*100)（DB 基準；total=0→null）" "$API_24H_RATE" "$(node -e 'const t=+process.argv[1],o=+process.argv[2];console.log(t>0?Math.round(o/t*100):"null")' "$DB_24H_TOTAL" "$DB_24H_OK")"
+
 # ── T20. AUTO + URGENT_PAIN → 鐵律：永不自動發 ──────────────────────────
 echo "[10/10] T20: AUTO + URGENT_PAIN (iron rule)..."
 PATIENT_AUTO2="8526012${EPOCH}"
