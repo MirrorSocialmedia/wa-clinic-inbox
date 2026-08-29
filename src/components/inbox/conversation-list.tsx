@@ -45,7 +45,7 @@ const STATUS_LABEL: Record<ConvStatus | "ALL", string> = {
 // Phase 2：intent 標籤（AI 分類；未分類 = 不顯示）
 const INTENT_META: Record<string, { label: string; cls: string }> = {
   BOOKING_REQUEST: { label: "預約", cls: "bg-ok-soft text-ok-text" },
-  URGENT_PAIN: { label: "急症", cls: "bg-danger text-white" },
+  URGENT_PAIN: { label: "急症", cls: "bg-danger text-panel" },
   OUT_OF_SCOPE: { label: "離題", cls: "bg-panel-2 text-t3" },
   QUESTION: { label: "查詢", cls: "bg-brand-soft text-brand-text" },
   OTHER: { label: "其他", cls: "bg-panel-2 text-t3" },
@@ -98,19 +98,19 @@ export function ConversationList(p: Props) {
 
   return (
     <aside
-      className={`w-full md:w-80 shrink-0 md:border-r border-line bg-panel flex-col min-h-0 ${
+      className={`w-full md:w-[324px] shrink-0 md:border-r border-line bg-panel flex-col min-h-0 ${
         p.hidden ? "hidden md:flex" : "flex"
       }`}
     >
       {/* header：標題 + clinic dropdown（ADMIN only）+ ★ H2 bell badge */}
       <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-2">
-        <span className="text-[15px] font-semibold text-t1">收件箱</span>
+        <span className="font-display text-[19px] text-t1">收件箱</span>
         <div className="flex items-center gap-1.5">
           {p.userRole === "ADMIN" && (
             <select
               value={p.activeClinicId}
               onChange={(e) => p.onActiveClinic(e.target.value as string | "all")}
-              className="text-xs rounded-full bg-brand-soft text-brand-text border-0 pl-3 pr-7 py-1 focus:outline-none focus:ring-1 focus:ring-brand appearance-none bg-no-repeat bg-[right_0.5rem_center] bg-[length:0.7rem] bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%234338CA%22 stroke-width=%223%22><path d=%22m6 9 6 6 6-6%22/></svg>')]"
+              className="text-xs rounded-full bg-panel-2 text-t1 border-0 pl-3 pr-7 py-1 focus:outline-none appearance-none bg-no-repeat bg-[right_0.5rem_center] bg-[length:0.7rem] bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%23645c50%22 stroke-width=%223%22><path d=%22m6 9 6 6 6-6%22/></svg>')]"
             >
               <option value="all">全部診所</option>
               {p.clinics.map((c) => (
@@ -125,11 +125,11 @@ export function ConversationList(p: Props) {
             onClick={p.onBellClick}
             aria-label={`Mention 通知（${p.mentionTotal} 未讀）`}
             title={p.mentionTotal > 0 ? `${p.mentionTotal} 個未讀 @mention — 撳跳到最近一個` : "Mention 通知"}
-            className="relative w-7 h-7 rounded-lg flex items-center justify-center text-t2 hover:bg-panel-2 hover:text-t1"
+            className="relative w-7 h-7 rounded-full flex items-center justify-center text-t2 hover:bg-black/[.04] hover:text-t1"
           >
-            <Bell size={15} />
+            <Bell size={15} strokeWidth={2.75} />
             {p.mentionTotal > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-0.5 rounded-full bg-warn text-white text-[9px] font-bold flex items-center justify-center">
+              <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-0.5 rounded-full bg-warn text-warn-text text-[9px] font-bold flex items-center justify-center">
                 {p.mentionTotal > 99 ? "99+" : p.mentionTotal}
               </span>
             )}
@@ -139,9 +139,9 @@ export function ConversationList(p: Props) {
             onClick={() => setNoticeOpen((v) => !v)}
             aria-label={`內部通知（${p.notices.length} 未讀）`}
             title={p.notices.length > 0 ? `${p.notices.length} 條未讀內部通知` : "內部通知"}
-            className="relative w-7 h-7 rounded-lg flex items-center justify-center text-t2 hover:bg-panel-2 hover:text-t1"
+            className="relative w-7 h-7 rounded-full flex items-center justify-center text-t2 hover:bg-black/[.04] hover:text-t1"
           >
-            <BellRing size={15} />
+            <BellRing size={15} strokeWidth={2.75} />
             {p.notices.length > 0 && (
               <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-0.5 rounded-full bg-brand text-white text-[9px] font-bold flex items-center justify-center">
                 {p.notices.length > 99 ? "99+" : p.notices.length}
@@ -162,7 +162,7 @@ export function ConversationList(p: Props) {
               <button
                 key={n.id}
                 onClick={() => p.onNoticeClick(n)}
-                className="w-full text-left rounded-md px-2 py-1.5 hover:bg-panel-2"
+                className="w-full text-left rounded-full px-2.5 py-1.5 hover:bg-black/[.04]"
               >
                 <div className="text-xs text-t1 truncate">{n.title}</div>
                 <div className="text-[10px] text-t3">{relTime(n.createdAt)}</div>
@@ -175,12 +175,12 @@ export function ConversationList(p: Props) {
       {/* search */}
       <div className="px-3">
         <div className="relative">
-          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-t3" />
+          <Search size={14} strokeWidth={2.75} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-t3" />
           <input
             value={p.search}
             onChange={(e) => p.onSearch(e.target.value)}
             placeholder="搜尋病人姓名或號碼"
-            className="w-full text-sm rounded-lg bg-panel-2 border border-transparent pl-8 pr-8 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
+            className="w-full text-sm rounded-full bg-panel-2 border border-transparent pl-8 pr-8 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
           />
           {p.search && (
             <button
@@ -188,7 +188,7 @@ export function ConversationList(p: Props) {
               aria-label="清除搜尋"
               className="absolute right-2 top-1/2 -translate-y-1/2 text-t3 hover:text-t1"
             >
-              <X size={14} />
+              <X size={14} strokeWidth={2.75} />
             </button>
           )}
         </div>
@@ -216,11 +216,11 @@ export function ConversationList(p: Props) {
         ))}
       </div>
 
-      {/* list */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      {/* list — 卡片式行（66px 行高 / 38px 頭像 / gap 分隔，無 border-b） */}
+      <div className="flex-1 overflow-y-auto min-h-0 px-2.5 pb-3 flex flex-col gap-[3px]">
         {items.length === 0 && (
           <div className="flex flex-col items-center gap-2 py-10 text-t3">
-            <MessageCircle size={28} strokeWidth={1.5} />
+            <MessageCircle size={28} strokeWidth={2.75} />
             <div className="text-sm">{p.search ? "冇搜到相關病人" : "冇對話"}</div>
           </div>
         )}
@@ -238,27 +238,33 @@ export function ConversationList(p: Props) {
             <button
               key={c.id}
               onClick={() => p.onSelect(c.id)}
-              className={`w-full text-left px-3 py-2.5 border-b border-line/60 flex gap-2.5 ${
-                selected
-                  ? "bg-brand-soft/60"
-                  : urgentRow
-                    ? "bg-danger-soft/50 hover:bg-danger-soft"
-                    : "hover:bg-panel-2"
-              } ${urgentRow ? "border-l-2 border-l-danger" : "border-l-2 border-l-transparent"} ${
-                c.status === "RESOLVED" ? "opacity-60" : ""
-              }`}
+              className={`w-full text-left flex gap-3 p-3.5 rounded-[20px] border-[1.5px] ${
+                urgentRow
+                  ? "bg-danger-soft border-warn"
+                  : selected
+                    ? "bg-brand-soft border-transparent"
+                    : "border-transparent hover:bg-black/[.04]"
+              } ${c.status === "RESOLVED" ? "opacity-50" : ""}`}
             >
-              {/* avatar + WA channel badge */}
-              <div className="relative shrink-0 self-start mt-0.5">
+              {/* avatar + WA channel badge（急症行 avatar 轉陶土橙；外圈跟行底色） */}
+              <div className="relative shrink-0 self-start">
                 <div
-                  className={`w-9 h-9 rounded-full flex items-center justify-center text-[13px] font-medium ${avatarCls(
-                    c.contact?.waId ?? c.id
-                  )}`}
+                  className={`w-[38px] h-[38px] rounded-full flex items-center justify-center text-[14px] font-medium ${
+                    urgentRow
+                      ? "bg-danger text-panel"
+                      : selected
+                        ? "bg-brand text-panel"
+                        : avatarCls(c.contact?.waId ?? c.id)
+                  }`}
                 >
                   {avatarChar(c)}
                 </div>
-                <span className="absolute -right-0.5 -bottom-0.5 w-3.5 h-3.5 rounded-full bg-panel flex items-center justify-center">
-                  <span className="w-2.5 h-2.5 rounded-full bg-wa" title="WhatsApp" />
+                <span
+                  className={`absolute -right-0.5 -bottom-0.5 w-[13px] h-[13px] rounded-full flex items-center justify-center ${
+                    urgentRow ? "bg-danger-soft" : selected ? "bg-brand-soft" : "bg-panel"
+                  }`}
+                >
+                  <span className="w-[9px] h-[9px] rounded-full bg-wa" title="WhatsApp" />
                 </span>
               </div>
 
@@ -266,8 +272,8 @@ export function ConversationList(p: Props) {
                 {/* row 1：名 + 時間（窗口 tone 變色）+ ★ H2 黃點（未讀 mention） */}
                 <div className="flex items-center gap-1.5">
                   <span
-                    className={`text-sm truncate ${
-                      c.unreadCount > 0 ? "font-semibold text-t1" : "text-t1"
+                    className={`text-[13.5px] truncate font-bold ${
+                      urgentRow ? "text-danger-text" : selected ? "text-brand-text" : "text-t1"
                     }`}
                   >
                     {c.contact?.profileName || c.contact?.waId || "（未知聯絡人）"}
@@ -279,17 +285,29 @@ export function ConversationList(p: Props) {
                     />
                   )}
                   <span
-                    className={`ml-auto text-[11px] shrink-0 ${timeCls}`}
+                    className={`ml-auto text-[11px] shrink-0 ${
+                      urgentRow
+                        ? "text-danger-text font-semibold"
+                        : selected
+                          ? "text-brand-text"
+                          : timeCls
+                    }`}
                     title="24h 窗口狀態：黃 <6h / 紅 已過窗"
                   >
                     {relTime(c.lastMessageAt)}
                   </span>
                 </div>
-                {/* row 2：preview + unread */}
+                {/* row 2：preview + unread（WhatsApp 官方綠 badge） */}
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <span
                     className={`text-xs truncate flex-1 min-w-0 ${
-                      c.unreadCount > 0 ? "text-t2" : "text-t3"
+                      urgentRow
+                        ? "text-danger-text"
+                        : selected
+                          ? "text-brand-text"
+                          : c.unreadCount > 0
+                            ? "text-t2"
+                            : "text-t3"
                     }`}
                   >
                     {previewOf(c)}
@@ -300,39 +318,44 @@ export function ConversationList(p: Props) {
                     </span>
                   )}
                 </div>
-                {/* row 3：badges */}
+                {/* row 3：badges（急症行加「AI 未出草稿」— 鐵律 3：URGENT_PAIN 永不生成 draft） */}
                 {(urgentRow || c.pendingBooking || intentMeta || c.assigneeName || c.status === "PENDING") && (
                   <div className="flex items-center gap-1 mt-1 flex-wrap">
                     {urgentRow && (
-                      <span className="text-[10px] px-1.5 py-px rounded bg-danger text-white font-semibold">
-                        急症
-                      </span>
+                      <>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-danger text-panel font-semibold">
+                          急症
+                        </span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-panel text-t2">
+                          AI 未出草稿
+                        </span>
+                      </>
                     )}
                     {c.pendingBooking && (
                       <span
-                        className="text-[10px] px-1.5 py-px rounded bg-ok-soft text-ok-text font-medium inline-flex items-center gap-0.5"
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-ok-soft text-ok-text font-medium inline-flex items-center gap-0.5"
                         title={`新預約請求：${c.pendingBooking.providerName} ${c.pendingBooking.requestedDate} ${c.pendingBooking.requestedTime ?? (c.pendingBooking.timeOfDay ?? "")}`}
                       >
-                        <CalendarDays size={10} /> 預約請求
+                        <CalendarDays size={10} strokeWidth={2.75} /> 預約請求
                       </span>
                     )}
                     {intentMeta && !urgentRow && (
                       <span
-                        className={`text-[10px] px-1.5 py-px rounded ${intentMeta.cls}`}
+                        className={`text-[10px] px-2 py-0.5 rounded-full ${intentMeta.cls}`}
                         title={`AI intent: ${c.intent}`}
                       >
                         {intentMeta.label}
                       </span>
                     )}
                     {c.status === "PENDING" && (
-                      <span className="text-[10px] px-1.5 py-px rounded bg-warn-soft text-warn-text">
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-warn-soft text-warn-text">
                         等回覆
                       </span>
                     )}
                     {/* ★ H1 負責人 chip：自己=綠「你」/ 別人=琥珀（Send Lock 中）/ unassigned=無 */}
                     {c.assigneeName && (
                       <span
-                        className={`ml-auto text-[10px] px-1.5 py-px rounded-full font-medium inline-flex items-center gap-0.5 ${
+                        className={`ml-auto text-[10px] px-2 py-0.5 rounded-full font-medium inline-flex items-center gap-0.5 ${
                           c.assigneeId === p.myStaffId
                             ? "bg-ok-soft text-ok-text"
                             : "bg-warn-soft text-warn-text"

@@ -4,7 +4,6 @@ import { useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { CalendarDays, LogOut, MessageCircle, Settings, Stethoscope } from "lucide-react";
-import { ThemeToggle } from "@/components/theme-toggle";
 
 /**
  * 左邊 icon rail（SleekFlow 式），取代舊 TopBar。
@@ -34,18 +33,18 @@ export function NavRail({
   }
 
   const items: { href: string; label: string; icon: React.ReactNode; adminOnly?: boolean }[] = [
-    { href: "/inbox", label: "收件箱", icon: <MessageCircle size={18} /> },
-    { href: "/bookings", label: "預約", icon: <CalendarDays size={18} /> },
-    { href: "/schedule", label: "醫生時間表", icon: <Stethoscope size={18} /> },
-    { href: "/admin", label: "管理", icon: <Settings size={18} />, adminOnly: true },
+    { href: "/inbox", label: "收件箱", icon: <MessageCircle size={18} strokeWidth={2.75} /> },
+    { href: "/bookings", label: "預約", icon: <CalendarDays size={18} strokeWidth={2.75} /> },
+    { href: "/schedule", label: "醫生時間表", icon: <Stethoscope size={18} strokeWidth={2.75} /> },
+    { href: "/admin", label: "管理", icon: <Settings size={18} strokeWidth={2.75} />, adminOnly: true },
   ];
 
   const initials = (name || email || "?").trim().charAt(0).toUpperCase();
 
   return (
-    <nav className="w-[46px] shrink-0 h-full bg-panel border-r border-line hidden md:flex flex-col items-center py-2.5 gap-1.5">
-      {/* logo */}
-      <div className="w-[30px] h-[30px] rounded-lg bg-brand text-white flex items-center justify-center text-[13px] font-semibold mb-2 select-none">
+    <nav className="w-[58px] shrink-0 h-full bg-panel-2 hidden md:flex flex-col items-center py-3.5 gap-1.5">
+      {/* logo（34px 圓形品牌記號 — Organic） */}
+      <div className="w-[34px] h-[34px] rounded-full bg-brand text-panel flex items-center justify-center font-display text-[16px] mb-2.5 select-none">
         W
       </div>
 
@@ -60,10 +59,10 @@ export function NavRail({
               title={it.label}
               aria-label={it.label}
               aria-current={active ? "page" : undefined}
-              className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+              className={`w-[38px] h-[38px] rounded-full flex items-center justify-center ${
                 active
                   ? "bg-brand-soft text-brand-text"
-                  : "text-t2 hover:bg-panel-2 hover:text-t1"
+                  : "text-t2 hover:bg-black/[.04] hover:text-t1"
               }`}
             >
               {it.icon}
@@ -72,7 +71,7 @@ export function NavRail({
         })}
 
       <div className="mt-auto flex flex-col items-center gap-2">
-        <ThemeToggle />
+        {/* ThemeToggle 唔 render（Organic 呢輪無暗色 — 老細指令；[data-theme=dark] block 保留） */}
         <div
           title={`${name}\n${email}\n${role === "ADMIN" ? "管理員" : "店員"}`}
           className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-semibold select-none ${
@@ -86,9 +85,9 @@ export function NavRail({
           disabled={busy}
           title="登出"
           aria-label="登出"
-          className="w-8 h-8 rounded-lg flex items-center justify-center text-t3 hover:bg-danger-soft hover:text-danger-text disabled:opacity-50"
+          className="w-[38px] h-[38px] rounded-full flex items-center justify-center text-t3 hover:bg-danger-soft hover:text-danger-text disabled:opacity-50"
         >
-          <LogOut size={16} />
+          <LogOut size={16} strokeWidth={2.75} />
         </button>
       </div>
     </nav>

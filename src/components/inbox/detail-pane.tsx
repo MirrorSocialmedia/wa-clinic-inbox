@@ -42,7 +42,7 @@ const INTENT_LABEL: Record<string, string> = {
   OTHER: "其他",
 };
 const URGENCY_META: Record<string, { label: string; cls: string }> = {
-  LOW: { label: "緊急度 低", cls: "bg-panel-2 text-t2" },
+  LOW: { label: "緊急度 低", cls: "bg-panel text-t2" },
   MED: { label: "緊急度 中", cls: "bg-warn-soft text-warn-text" },
   HIGH: { label: "緊急度 高", cls: "bg-danger-soft text-danger-text font-semibold" },
 };
@@ -141,7 +141,7 @@ export function DetailPane({
 
   if (!conversation) {
     return (
-      <aside className="w-72 shrink-0 border-l border-line bg-panel hidden lg:flex flex-col items-center justify-center text-t3 gap-2">
+      <aside className="w-[302px] shrink-0 border-l border-line bg-panel hidden lg:flex flex-col items-center justify-center text-t3 gap-2">
         <div className="w-12 h-12 rounded-full bg-panel-2" />
         <div className="text-xs">揀一個對話先見到聯絡人資料</div>
       </aside>
@@ -284,21 +284,22 @@ export function DetailPane({
 
   // 共用內容（桌面側欄 + 手機 bottom sheet 各渲染一次；state 喺呢個 component 層，兩份同步）
   const content = (
-    <div className="p-4 space-y-5">
-      {/* contact 頂部：大 avatar 居中 */}
-      <div className="flex flex-col items-center gap-1">
-        <div className="w-14 h-14 rounded-full bg-brand-soft text-brand-text flex items-center justify-center text-lg font-medium">
+    <div className="p-[18px] space-y-3">
+      {/* contact 頂部：大 avatar 居中（Organic：62px brand 圓 + Caprasimo） */}
+      <div className="flex flex-col items-center gap-1.5 pt-1">
+        <div className="w-[62px] h-[62px] rounded-full bg-brand text-panel flex items-center justify-center font-display text-[26px]">
           {(c.contact?.profileName?.trim() || "?").charAt(0)}
         </div>
-        <div className="text-sm font-medium text-t1">
+        <div className="font-display text-[18px] text-t1">
           {c.contact?.profileName || "未命名聯絡人"}
         </div>
         <div className="text-[11px] text-t3 font-mono">{c.contact?.waId ?? "—"}</div>
       </div>
 
-      {/* contact 編輯 */}
-      <div>
-        <label className="block mb-2">
+      {/* contact 編輯（獨立卡） */}
+      <div className="bg-panel-2 rounded-[22px] p-4">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2.5">聯絡人</div>
+        <label className="block mb-2.5">
           <span className="text-[11px] text-t3">姓名（可編輯）</span>
           <input
             value={name}
@@ -307,7 +308,7 @@ export function DetailPane({
               setDirty(true);
             }}
             placeholder="未設姓名"
-            className="mt-1 w-full text-sm rounded-lg bg-panel-2 border border-transparent px-2.5 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
+            className="mt-1 w-full text-sm rounded-full bg-panel border border-line px-3.5 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand"
           />
         </label>
         <div>
@@ -327,7 +328,7 @@ export function DetailPane({
                   aria-label={`移除標籤 ${l}`}
                   className="text-brand-text/60 hover:text-danger-text"
                 >
-                  <X size={11} />
+                  <X size={11} strokeWidth={2.75} />
                 </button>
               </span>
             ))}
@@ -346,32 +347,32 @@ export function DetailPane({
                 setNewLabel("");
               }
             }}
-            placeholder="新增標籤，Enter 確認"
-            className="mt-1.5 w-full text-xs rounded-lg bg-panel-2 border border-transparent px-2.5 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
+            placeholder="+ 標籤（Enter 確認）"
+            className="mt-1.5 w-full text-xs rounded-full border border-dashed border-line-strong bg-transparent px-3.5 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand"
           />
         </div>
         {dirty && (
           <button
             onClick={() => void saveContact()}
             disabled={saving}
-            className="mt-2 w-full text-xs px-3 py-1.5 rounded-lg bg-brand hover:bg-brand-hover text-white font-medium disabled:opacity-50"
+            className="mt-2.5 w-full text-xs px-3 py-1.5 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-50"
           >
             {saving ? "儲存中…" : "儲存聯絡人"}
           </button>
         )}
       </div>
 
-      {/* ★ booking-ui（A）：Apricot patient-context — 釘住舊客 + 三欄（姓名/最近就診/預約狀態）+ （E）預約卡兩新掣 */}
-      <div>
-        <h3 className="text-[11px] text-t3 font-semibold mb-2 inline-flex items-center gap-1">
-          <CalendarClock size={11} /> Apricot 病人 context
-        </h3>
+      {/* ★ booking-ui（A）：病人 context — 獨立卡 + 18px 內卡（Organic） */}
+      <div className="bg-panel-2 rounded-[22px] p-4">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2.5 inline-flex items-center gap-1.5">
+          <CalendarClock size={12} strokeWidth={2.75} /> 病人 context
+        </div>
         {ctxError && <div className="text-[10px] text-danger-text mb-1.5">⚠ {ctxError}</div>}
         {ctxLoading && !ctx && <div className="text-[11px] text-t3">載入中…</div>}
         {ctx && (
           <>
             {ctx.pinned ? (
-              <div className="rounded-xl bg-panel-2 p-3 text-xs space-y-1.5">
+              <div className="rounded-[18px] bg-panel border border-line p-3 text-xs space-y-1.5">
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="text-[10px] text-t3">姓名（已釘住）</div>
@@ -403,12 +404,12 @@ export function DetailPane({
                 </div>
               </div>
             ) : ctx.degraded || (ctx.matches && ctx.matches.length === 0) ? (
-              <div className="rounded-xl bg-panel-2 p-3 text-[11px] text-t3 space-y-1">
+              <div className="rounded-[18px] bg-panel border border-line p-3 text-[11px] text-t3 space-y-1">
                 <div>{ctx.degraded ? "⚠ 資料源離線（稍後重試）" : "查唔到匹配舊客（Apricot 無此電話記錄）"}</div>
                 {!ctx.degraded && <div>新客請人手喺 Apricot 落單（第一期不支援代落單）</div>}
               </div>
             ) : (
-              <div className="rounded-xl bg-panel-2 p-3 text-xs space-y-2">
+              <div className="rounded-[18px] bg-panel border border-line p-3 text-xs space-y-2">
                 <div className="text-[10px] text-t3">查到匹配舊客 — 撳〔釘住〕先可以用代落單</div>
                 {(ctx.matches ?? []).map((m) => (
                   <div key={m.patientApricotId} className="flex items-center justify-between gap-2">
@@ -421,7 +422,7 @@ export function DetailPane({
                     <button
                       onClick={() => void pinPatient(m)}
                       disabled={pinBusy !== null}
-                      className="shrink-0 text-[11px] px-2.5 py-1 rounded-lg bg-brand hover:bg-brand-hover text-white font-medium disabled:opacity-50"
+                      className="shrink-0 text-[11px] px-2.5 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-50"
                     >
                       {pinBusy === m.patientApricotId ? "釘住中…" : "釘住"}
                     </button>
@@ -437,12 +438,12 @@ export function DetailPane({
                 {[...(ctx.upcomingAppointments ?? [])]
                   .sort((a, b) => `${a.date}${a.start}`.localeCompare(`${b.date}${b.start}`))
                   .map((a) => (
-                    <div key={a.apricotApptId} className="rounded-xl border border-line bg-panel p-2.5 text-xs space-y-1.5">
+                    <div key={a.apricotApptId} className="rounded-[18px] border border-line bg-panel p-3 text-xs space-y-1.5">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-t1 font-medium truncate">{a.providerName}</span>
                         <span
-                          className={`shrink-0 px-1.5 py-px rounded text-[10px] ${
-                            a.bookingStatus === 0 ? "bg-ok-soft text-ok-text" : "bg-warn-soft text-warn-text"
+                          className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] ${
+                            a.bookingStatus === 0 ? "bg-brand-soft text-brand-text" : "bg-warn-soft text-warn-text"
                           }`}
                         >
                           {a.bookingStatus === 0 ? "已確認" : "待確認"}
@@ -455,17 +456,17 @@ export function DetailPane({
                         <button
                           onClick={() => void startReschedule(a)}
                           disabled={!canManage || apptBusy !== null}
-                          className="flex-1 text-[11px] px-2 py-1.5 rounded-lg border border-line text-t1 hover:bg-panel-2 disabled:opacity-50"
+                          className="flex-1 text-[11px] px-2 py-1.5 rounded-full border border-line text-t1 hover:bg-panel-2 disabled:opacity-50"
                         >
                           {apptBusy === a.apricotApptId ? "處理中…" : "改期"}
                         </button>
                         <button
                           onClick={() => void cancelAppointment(a)}
                           disabled={!canManage || apptBusy !== null}
-                          className={`flex-1 text-[11px] px-2 py-1.5 rounded-lg border disabled:opacity-50 ${
+                          className={`flex-1 text-[11px] px-2 py-1.5 rounded-full border disabled:opacity-50 ${
                             confirmCancelId === a.apricotApptId
                               ? "border-danger-text bg-danger-soft text-danger-text font-semibold"
-                              : "border-line text-danger-text hover:bg-danger-soft"
+                              : "border-warn text-danger-text hover:bg-danger-soft"
                           }`}
                         >
                           {confirmCancelId === a.apricotApptId ? "再撳一次確認取消" : "取消預約"}
@@ -482,19 +483,19 @@ export function DetailPane({
         )}
       </div>
 
-      {/* AI 分析（Phase 2） */}
-      <div>
-        <h3 className="text-[11px] text-t3 font-semibold mb-2 inline-flex items-center gap-1">
-          <Sparkles size={11} /> AI 分析
-        </h3>
-        <div className="rounded-xl bg-panel-2 p-3 text-xs space-y-2">
+      {/* AI 分析（Phase 2）— 獨立卡 */}
+      <div className="bg-panel-2 rounded-[22px] p-4">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2.5 inline-flex items-center gap-1.5">
+          <Sparkles size={12} strokeWidth={2.75} /> AI 分析
+        </div>
+        <div className="text-xs space-y-2">
           <div className="text-t2 leading-relaxed">{c.aiSummary ?? "—"}</div>
           <div className="flex gap-1.5 flex-wrap">
-            <span className="px-1.5 py-px rounded bg-ok-soft text-ok-text">
+            <span className="px-2 py-0.5 rounded-full bg-brand-soft text-brand-text">
               {c.intent ? INTENT_LABEL[c.intent] ?? c.intent : "意圖 —"}
             </span>
             <span
-              className={`px-1.5 py-px rounded ${
+              className={`px-2 py-0.5 rounded-full ${
                 c.urgency ? URGENCY_META[c.urgency]?.cls ?? "bg-panel text-t2" : "bg-panel text-t3"
               }`}
             >
@@ -504,7 +505,7 @@ export function DetailPane({
           {c.urgent && (
             <button
               onClick={() => void onPatch({ urgent: false })}
-              className="w-full text-xs px-2 py-1.5 rounded-lg bg-danger hover:opacity-90 text-white font-medium"
+              className="w-full text-xs px-2 py-1.5 rounded-full bg-danger hover:opacity-90 text-panel font-medium"
             >
               急症中 — 處理完後點擊清紅標
             </button>
@@ -512,18 +513,18 @@ export function DetailPane({
         </div>
       </div>
 
-      {/* status：segmented control */}
+      {/* status：segmented control（Organic 圓形分段） */}
       <div>
-        <h3 className="text-[11px] text-t3 font-semibold mb-2">狀態</h3>
-        <div className="flex rounded-lg border border-line overflow-hidden text-xs text-center">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2">狀態</div>
+        <div className="flex bg-panel-2 rounded-full p-[3px] text-xs text-center">
           {STATUS_SEG.map((s) => (
             <button
               key={s.key}
               onClick={() => void setStatus(s.key)}
-              className={`flex-1 py-1.5 ${
+              className={`flex-1 py-1.5 rounded-full ${
                 c.status === s.key
-                  ? "bg-brand text-white font-medium"
-                  : "bg-panel text-t2 hover:bg-panel-2"
+                  ? "bg-brand text-panel font-semibold shadow-sm"
+                  : "text-t2 hover:bg-black/[.04]"
               }`}
             >
               {s.label}
@@ -534,12 +535,12 @@ export function DetailPane({
 
       {/* assignee */}
       <div>
-        <h3 className="text-[11px] text-t3 font-semibold mb-2">負責員工</h3>
+        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2">負責員工</div>
         <select
           value={c.assigneeId ?? ""}
           onChange={(e) => void onAssign(e.target.value || null)}
           disabled={!canManage || assignBusy}
-          className="w-full text-sm rounded-lg bg-panel-2 border border-transparent px-2.5 py-1.5 text-t1 focus:outline-none focus:border-brand focus:bg-panel disabled:opacity-50"
+          className="w-full text-sm rounded-full bg-panel-2 border border-line px-3.5 py-1.5 text-t1 focus:outline-none focus:border-brand disabled:opacity-50"
         >
           <option value="">（未分配 — 放返隊列）</option>
           {clinicStaff.map((s) => (
@@ -557,23 +558,27 @@ export function DetailPane({
         {assignError && <div className="text-[10px] text-danger-text mt-1">{assignError}</div>}
       </div>
 
-      {/* Phase 4：今日當值（link 去 /schedule 七日週表頁 — cwi-r1close §C 落地） */}
+      {/* Phase 4：今日當值（link 去 /schedule 七日週表頁）— brand-soft 強調卡 */}
       {duty && duty.entries.length > 0 && (
-        <div>
-          <h3 className="text-[11px] text-t3 font-semibold mb-2 inline-flex items-center gap-1">
-            <Stethoscope size={11} /> 今日當值（{duty.date}）
-            <Link href="/schedule" className="ml-1 text-brand-text font-normal hover:underline">
+        <div className="bg-brand-soft rounded-[22px] p-4">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-brand-text mb-2.5 inline-flex items-center gap-1.5">
+            <Stethoscope size={12} strokeWidth={2.75} />
+            當值（{duty.date}）
+            <Link href="/schedule" className="ml-1 text-brand-text font-semibold normal-case tracking-normal hover:underline">
               睇成週 →
             </Link>
-          </h3>
-          <div className="rounded-xl bg-panel-2 p-3 text-xs space-y-1.5">
+          </div>
+          <div className="space-y-1.5">
             {duty.entries.map((e) => (
-              <div key={`${e.staffName}-${e.shiftStart}`} className="flex justify-between gap-2">
-                <span className="text-t1">
-                  {e.staffName}
-                  {e.role ? <span className="text-t3 ml-1">（{e.role}）</span> : null}
+              <div key={`${e.staffName}-${e.shiftStart}`} className="flex items-center gap-2">
+                <span className="w-[26px] h-[26px] rounded-full bg-panel text-brand-text flex items-center justify-center text-[11px] font-semibold shrink-0">
+                  {(e.staffName?.trim() || "?").charAt(0)}
                 </span>
-                <span className="text-t2 font-mono">
+                <span className="text-xs font-semibold text-t1 flex-1 truncate">
+                  {e.staffName}
+                  {e.role ? <span className="text-t2 font-normal ml-1">（{e.role}）</span> : null}
+                </span>
+                <span className="text-[10.5px] text-brand-text shrink-0 font-mono">
                   {e.shiftStart}–{e.shiftEnd}
                 </span>
               </div>
@@ -593,7 +598,7 @@ export function DetailPane({
   return (
     <>
       {/* 桌面側欄（lg+，同 v2 一樣） */}
-      <aside className="w-72 shrink-0 border-l border-line bg-panel hidden lg:flex flex-col min-h-0 overflow-y-auto">
+      <aside className="w-[302px] shrink-0 border-l border-line bg-panel hidden lg:flex flex-col min-h-0 overflow-y-auto">
         {content}
       </aside>
 
