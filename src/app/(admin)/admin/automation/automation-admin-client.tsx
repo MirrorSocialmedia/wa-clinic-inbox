@@ -35,10 +35,10 @@ interface Matrix {
 }
 
 const LEVEL_STYLE: Record<string, string> = {
-  L1: "bg-gray-200 text-gray-700",
-  L2: "bg-blue-100 text-blue-700",
-  L3: "bg-purple-100 text-purple-700",
-  L4: "bg-green-100 text-green-700",
+  L1: "bg-line text-t2",
+  L2: "bg-brand-soft text-brand-text",
+  L3: "bg-ok-soft text-ok-text",
+  L4: "bg-brand text-panel font-semibold",
 };
 
 function Trend({ rates }: { rates: (number | null)[] }) {
@@ -48,7 +48,7 @@ function Trend({ rates }: { rates: (number | null)[] }) {
       {rates.map((r, i) => (
         <span
           key={i}
-          className={`w-1.5 rounded-sm ${r === null ? "bg-gray-200" : r >= 0.9 ? "bg-green-500" : r >= 0.7 ? "bg-amber-400" : "bg-red-400"}`}
+          className={`w-1.5 rounded-sm ${r === null ? "bg-line" : r >= 0.9 ? "bg-brand" : r >= 0.7 ? "bg-warn" : "bg-danger"}`}
           style={{ height: r === null ? "20%" : `${Math.max(20, r * 100)}%` }}
         />
       ))}
@@ -82,7 +82,7 @@ function LevelSelect({ clinicId, cat, value, disabled, onDone }: { clinicId: str
           setBusy(false);
         }
       }}
-      className={`text-xs rounded-md border border-line bg-panel px-1 py-0.5 ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
+      className={`text-xs rounded-full border border-line bg-panel px-2 py-1 ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
     >
       {["L1", "L2", "L3", "L4"].map((l) => (
         <option key={l} value={l}>
@@ -134,7 +134,7 @@ export default function AutomationAdmin() {
     }
   }, [data, load]);
 
-  if (error) return <p className="text-sm text-red-500">{error}</p>;
+  if (error) return <p className="text-sm text-danger-text">{error}</p>;
   if (!data) return <p className="text-sm text-t3">載入中…</p>;
 
   return (
@@ -146,19 +146,19 @@ export default function AutomationAdmin() {
       </p>
 
       {/* 全局 kill 狀態 */}
-      <div className="bg-panel rounded-lg border border-line px-4 py-3 mb-4 flex items-center justify-between">
+      <div className="bg-panel rounded-[22px] border border-line px-4 py-3 mb-4 flex items-center justify-between">
         <div className="text-sm">
           <span className="text-t3">全局天花板（AI_GLOBAL_MAX_LEVEL）：</span>
           <span className={`ml-1 text-xs px-2 py-0.5 rounded-full font-semibold ${LEVEL_STYLE[data.global.maxLevel] ?? ""}`}>
             {data.global.maxLevel}
           </span>
-          {data.global.maxLevel === "L1" ? <span className="ml-2 text-red-600 font-semibold">（kill 狀態生效中）</span> : null}
+          {data.global.maxLevel === "L1" ? <span className="ml-2 text-danger-text font-semibold">（kill 狀態生效中）</span> : null}
         </div>
         <button
           disabled={!data.global.canPatch || killBusy}
           onClick={killAll}
-          className={`text-sm px-3 py-1.5 rounded-md font-semibold ${
-            data.global.canPatch ? "bg-red-600 text-white hover:bg-red-700" : "bg-gray-200 text-gray-400 cursor-not-allowed"
+          className={`text-sm px-4 py-2 rounded-full font-semibold ${
+            data.global.canPatch ? "bg-danger text-panel hover:bg-danger/90" : "bg-line text-t3 cursor-not-allowed"
           }`}
           title={data.global.canPatch ? "全部店預設級降 L1" : "你唔喺調級白名單"}
         >
@@ -167,22 +167,22 @@ export default function AutomationAdmin() {
       </div>
 
       {/* 矩陣 */}
-      <div className="bg-panel rounded-lg border border-line overflow-x-auto">
+      <div className="bg-panel rounded-[22px] border border-line overflow-x-auto">
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="border-b border-line">
-              <th className="text-left px-3 py-2 text-t3 font-normal">店</th>
+              <th className="text-left px-3 py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">店</th>
               {data.categories.map((c) => (
-                <th key={c} className="text-left px-2 py-2 text-t3 font-normal">
+                <th key={c} className="text-left px-2 py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">
                   {c}
-                  {data.lockedCategories.includes(c) ? <span className="ml-1 text-red-500">🔒</span> : null}
+                  {data.lockedCategories.includes(c) ? <span className="ml-1 text-danger-text">🔒</span> : null}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {data.clinics.map((c) => (
-              <tr key={c.id} className="border-b border-line last:border-0">
+              <tr key={c.id} className="border-b border-line last:border-0 hover:bg-black/[.04]">
                 <td className="px-3 py-2 align-top">
                   <div className="font-semibold text-t1">{c.code}</div>
                   <div className="text-xs text-t3">{c.name}</div>
@@ -193,7 +193,7 @@ export default function AutomationAdmin() {
                   if (cell.locked) {
                     return (
                       <td key={cat} className="px-2 py-2 align-top">
-                        <span className="text-xs px-2 py-1 rounded-md bg-gray-100 text-gray-500">永遠人手</span>
+                        <span className="text-xs px-2 py-1 rounded-full bg-line text-t3">永遠人手</span>
                       </td>
                     );
                   }
@@ -203,7 +203,7 @@ export default function AutomationAdmin() {
                         <span className={`text-[11px] px-1.5 py-0.5 rounded-full font-semibold ${LEVEL_STYLE[cell.level] ?? ""}`}>{cell.level}</span>
                         {cell.eligible ? (
                           // ★ Fix D（cwi-fix-20260825-f1）：hover 講明採用率語義（autoSent 計採用）
-                          <span className="text-green-600 text-xs" title={"符合自動化資格\n採用率 =（照用 + 修改後用 + 自動發出）÷ 草稿總數；自動發出計採用，投訴/回退零容忍"}>✓</span>
+                          <span className="text-ok-text text-xs" title={"符合自動化資格\n採用率 =（照用 + 修改後用 + 自動發出）÷ 草稿總數；自動發出計採用，投訴/回退零容忍"}>✓</span>
                         ) : (
                           <span className="text-t3 text-xs" title={cell.reasons.join("\n") + "\n採用率 =（照用 + 修改後用 + 自動發出）÷ 草稿總數；自動發出計採用，投訴/回退零容忍"}>
                             {cell.reasons.length > 0 ? "✗" : "–"}

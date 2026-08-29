@@ -152,7 +152,7 @@ export default function StaffAdmin() {
   }
 
   const input =
-    "mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm";
+    "mt-1 w-full rounded-full border border-line-strong bg-panel px-4 py-2.5 text-sm";
   const label = "block text-sm text-t2";
 
   return (
@@ -161,7 +161,7 @@ export default function StaffAdmin() {
         <h1 className="text-lg font-semibold text-t1">員工管理</h1>
         <button
           onClick={openCreate}
-          className="rounded-md bg-brand text-white text-sm px-4 py-2 hover:bg-brand-hover"
+          className="rounded-full bg-brand text-panel text-sm font-semibold px-4 py-2 hover:bg-brand-hover"
         >
           + 新增員工
         </button>
@@ -170,28 +170,28 @@ export default function StaffAdmin() {
       {loading ? (
         <p className="text-sm text-t2">載入中…</p>
       ) : (
-        <table className="w-full text-sm bg-panel rounded-lg border border-line overflow-hidden">
+        <table className="w-full text-sm bg-panel rounded-[22px] border border-line overflow-hidden">
           <thead className="bg-panel-2 text-left text-t2">
             <tr>
-              <th className="px-4 py-2">Email</th>
-              <th className="px-4 py-2">姓名</th>
-              <th className="px-4 py-2">角色</th>
-              <th className="px-4 py-2">診所</th>
-              <th className="px-4 py-2">狀態</th>
-              <th className="px-4 py-2 text-right">操作</th>
+              <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">Email</th>
+              <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">姓名</th>
+              <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">角色</th>
+              <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">診所</th>
+              <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">狀態</th>
+              <th className="px-4 py-2.5 text-right text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">操作</th>
             </tr>
           </thead>
           <tbody>
             {staff.map((u) => (
-              <tr key={u.id} className="border-t border-line">
+              <tr key={u.id} className="border-b border-line last:border-0 hover:bg-black/[.04]">
                 <td className="px-4 py-2">{u.email}</td>
                 <td className="px-4 py-2">{u.name}</td>
                 <td className="px-4 py-2">
                   <span
                     className={
                       u.role === "ADMIN"
-                        ? "px-2 py-0.5 rounded text-xs bg-brand-soft text-brand-text"
-                        : "px-2 py-0.5 rounded text-xs bg-panel-2 text-t2"
+                        ? "px-2 py-0.5 rounded-full text-xs font-semibold bg-brand-soft text-brand-text"
+                        : "px-2 py-0.5 rounded-full text-xs font-semibold bg-panel-2 text-t2"
                     }
                   >
                     {u.role}
@@ -223,7 +223,7 @@ export default function StaffAdmin() {
       )}
 
       {(creating || editing) && (
-        <div className="bg-panel rounded-lg border border-line p-6 space-y-4 max-w-2xl">
+        <div className="bg-panel rounded-[26px] border border-line p-6 space-y-4 max-w-2xl">
           <h2 className="font-medium text-t1">
             {creating ? "新增員工" : `編輯 ${editing?.email}`}
           </h2>
@@ -293,11 +293,11 @@ export default function StaffAdmin() {
             <button
               onClick={() => void save()}
               disabled={busy}
-              className="rounded-md bg-brand text-white text-sm px-4 py-2 hover:bg-brand-hover disabled:opacity-50"
+              className="rounded-full bg-brand text-panel text-sm font-semibold px-4 py-2 hover:bg-brand-hover disabled:opacity-50"
             >
               {busy ? "保存中…" : "保存"}
             </button>
-            <button onClick={closeForm} className="rounded-md border border-line-strong text-sm px-4 py-2">
+            <button onClick={closeForm} className="rounded-full border border-line-strong bg-panel text-t1 text-sm px-4 py-2 hover:bg-panel-2">
               取消
             </button>
           </div>

@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { io } from "socket.io-client";
 import Link from "next/link";
+import { Clock } from "lucide-react";
+import { relTime } from "./time";
 
 /**
  * /bookings 預約隊列 client（MD §8.3）。
@@ -152,31 +154,54 @@ export function BookingsClient({ user }: { user: UserCtx }) {
     return <div className="p-8 text-sm text-t3">載入中…</div>;
   }
 
+  // 「9/1」+ 星期（清單式日期欄）
+  const fmtDay = (dateStr: string): { md: string; weekday: string } => {
+    const d = new Date(`${dateStr}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return { md: dateStr, weekday: "" };
+    return {
+      md: `${d.getMonth() + 1}/${d.getDate()}`,
+      weekday: d.toLocaleDateString("zh-Hant-HK", { weekday: "short" }),
+    };
+  };
+  // remainingHours（小數）→ "18h 42m"
+  const fmtWindow = (h: number): string => {
+    const hh = Math.floor(h);
+    const mm = Math.round((h - hh) * 60);
+    return mm > 0 ? `${hh}h ${String(mm).padStart(2, "0")}m` : `${hh}h`;
+  };
+
   return (
     <div className="h-full overflow-y-auto">
-      <div className="max-w-3xl mx-auto p-4 space-y-3">
-        <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold text-t1">📅 預約隊列</h1>
-          <div className="ml-auto flex gap-1 text-xs">
-            {(["PENDING", "ALL"] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className={`px-2.5 py-1 rounded ${
-                  filter === f ? "bg-t1 text-canvas" : "bg-panel-2 text-t2 hover:bg-line"
-                }`}
-              >
-                {f === "PENDING" ? `等處理 (${bookings?.length ?? 0})` : "全部"}
-              </button>
-            ))}
+      <div className="max-w-4xl mx-auto p-5">
+        {/* 頁頭（Organic 1e） */}
+        <div className="flex items-end justify-between gap-4 flex-wrap">
+          <div>
+            <h1 className="text-[22px] text-t1">預約請求</h1>
+            <p className="mt-1 text-[12.5px] text-t2">
+              病人在 WhatsApp Flow 揀好醫生日期時間後入這裡。你去醫生系統落單後返嚟按確認，系統自動覆病人。48 小時無人處理自動過期。
+            </p>
+          </div>
+          <div className="flex gap-1.5 flex-none">
+            <button
+              onClick={() => setFilter("PENDING")}
+              className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
+                filter === "PENDING" ? "bg-t1 text-canvas" : "border border-line text-t2 hover:bg-black/[.04]"
+              }`}
+            >
+              待處理 {bookings.length}
+            </button>
+            <button
+              onClick={() => setFilter("ALL")}
+              className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
+                filter === "ALL" ? "bg-t1 text-canvas" : "border border-line text-t2 hover:bg-black/[.04]"
+              }`}
+            >
+              全部
+            </button>
           </div>
         </div>
 
-        <p className="text-xs text-t2">
-          流程：病人 Flow 揀好 → 卡出現（precheck 已對過空檔）→ 你去醫生系統人手落單 → 返嚟撳〔已喺醫生系統落單〕→
-          系統自動覆病人。48 小時冇人處理會自動過期。
-          灰字「未經空檔核對」= 資料源離線時嘅純收需求卡（只係日期 + 時段偏好）— 照樣人手對醫生系統落單。
-        </p>
+        <div className="h-px bg-line my-5" />
 
         {bookings.length === 0 && (
           <div className="text-center text-t3 text-sm py-16">
@@ -185,87 +210,107 @@ export function BookingsClient({ user }: { user: UserCtx }) {
           </div>
         )}
 
-        {bookings.map((b) => (
-          <div
-            key={b.id}
-            className={`rounded-lg border bg-panel shadow-sm p-4 space-y-2 ${
-              b.status === "PENDING" ? "border-warn/40 ring-1 ring-warn/30" : "border-line"
-            }`}
-          >
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className={`text-[11px] px-2 py-0.5 rounded-full border font-medium ${STATUS_STYLE[b.status]}`}>
-                {STATUS_LABEL[b.status]}
-              </span>
-              <span className="text-sm font-semibold text-t1">
-                {b.providerName} · {b.requestedDate} {b.requestedTime ?? (b.timeOfDay ? TIME_OF_DAY_LABEL[b.timeOfDay] ?? b.timeOfDay : "")}
-              </span>
-              {b.precheckPassed === true && <span className="text-[10px] text-ok-text">✓ precheck 過</span>}
-              {b.precheckPassed === null && (
-                <span className="text-[10px] text-t3">未經空檔核對（資料源離線）</span>
-              )}
-              {b.precheckPassed === false && <span className="text-[10px] text-danger-text">✗ precheck 未過</span>}
-              <span className="ml-auto text-[11px] text-t3">{new Date(b.createdAt).toLocaleString()}</span>
-            </div>
+        {/* 清單式：一行一單（桌面掃得快） */}
+        <div className="flex flex-col gap-2">
+          {bookings.map((b) => {
+            const pending = b.status === "PENDING";
+            const day = fmtDay(b.requestedDate);
+            const time = b.requestedTime ?? (b.timeOfDay ? TIME_OF_DAY_LABEL[b.timeOfDay] ?? b.timeOfDay : "");
+            return (
+              <div
+                key={b.id}
+                className={`flex items-center gap-4 px-5 py-4 rounded-[26px] ${pending ? "bg-ok-soft" : "bg-panel-2"}`}
+              >
+                {/* 日期欄（Caprasimo） */}
+                <div className="flex-none text-center min-w-[58px]">
+                  <div className={`font-display text-[24px] leading-none ${pending ? "text-brand-text" : "text-t2"}`}>
+                    {day.md}
+                  </div>
+                  <div className={`text-[11px] font-semibold mt-1 ${pending ? "text-brand-text" : "text-t3"}`}>{day.weekday}</div>
+                </div>
+                <div className="w-px h-[38px] bg-line flex-none" />
 
-            <div className="flex items-center gap-3 text-xs text-t2 flex-wrap">
-              {b.conversation ? (
-                <>
-                  <span>
-                    病人：{b.conversation.contact.profileName ?? "未命名"}（{b.conversation.contact.waId ?? "-"}）
-                  </span>
-                  <Link
-                    href={`/inbox?conv=${b.conversation.id}`}
-                    className="text-brand-text underline underline-offset-2"
-                  >
-                    開對話 →
-                  </Link>
-                  <span
-                    className={`px-1.5 py-0.5 rounded-full border ${
-                      b.conversation.window.open
-                        ? "bg-ok-soft text-ok-text border-ok/40"
-                        : "bg-danger-soft text-danger-text border-danger/40"
-                    }`}
-                  >
-                    {b.conversation.window.open
-                      ? `窗口 ${Math.floor(b.conversation.window.remainingHours)}h`
-                      : "窗口已過"}
-                  </span>
-                </>
-              ) : (
-                <span className="text-t3">（對話已刪除）</span>
-              )}
-              {b.handledByStaffName && (
-                <span className="text-t3">
-                  處理：{b.handledByStaffName}
-                  {b.handledAt ? ` · ${new Date(b.handledAt).toLocaleString()}` : ""}
-                </span>
-              )}
-            </div>
+                {/* 時間欄 */}
+                <div className="flex-none min-w-[64px]">
+                  <div className="font-display text-[18px] leading-none text-t1">{time || "—"}</div>
+                  <div className="text-[10.5px] text-t3 mt-1">
+                    {b.precheckPassed === true && "✓ 空檔初驗過"}
+                    {b.precheckPassed === null && "空檔未核對"}
+                    {b.precheckPassed === false && <span className="text-danger-text">✗ 空檔初驗未過</span>}
+                  </div>
+                </div>
 
-            {b.status === "PENDING" && (
-              <div className="flex gap-2 pt-1">
-                <button
-                  onClick={() => void confirm(b.id)}
-                  disabled={busyId === b.id}
-                  className="text-xs px-3 py-1.5 rounded bg-ok hover:opacity-90 text-white font-medium disabled:opacity-40"
-                >
-                  {busyId === b.id ? "處理中…" : "✓ 已喺醫生系統落單"}
-                </button>
-                <button
-                  onClick={() => void reschedule(b.id)}
-                  disabled={busyId === b.id}
-                  className="text-xs px-3 py-1.5 rounded border border-line-strong bg-panel text-t2 hover:bg-panel-2 disabled:opacity-40"
-                >
-                  改期（重出 Flow）
-                </button>
+                {/* 病人 + 醫生 + 開對話 */}
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13.5px] font-semibold text-t1 truncate">
+                    {b.conversation?.contact.profileName ?? "（對話已刪除）"}
+                    {!pending && (
+                      <span className={`ml-2 inline-flex items-center rounded-full border px-2 py-0.5 text-[10.5px] font-medium align-middle ${STATUS_STYLE[b.status]}`}>
+                        {STATUS_LABEL[b.status]}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11.5px] text-t2 mt-1 truncate">
+                    {b.providerName}
+                    {b.conversation ? (
+                      <>
+                        {" · "}
+                        <Link href={`/inbox?conv=${b.conversation.id}`} className="text-brand-text underline underline-offset-2">
+                          開對話
+                        </Link>
+                      </>
+                    ) : null}
+                    {b.handledByStaffName && <span className="text-t3"> · 處理：{b.handledByStaffName}</span>}
+                  </div>
+                </div>
+
+                {/* 窗口倒數 */}
+                <div className="flex-none text-right">
+                  {b.conversation ? (
+                    b.conversation.window.open ? (
+                      <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-brand-text justify-end">
+                        <Clock size={12} strokeWidth={2.75} /> 窗口 {fmtWindow(b.conversation.window.remainingHours)}
+                      </div>
+                    ) : (
+                      <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-danger-text justify-end">
+                        <Clock size={12} strokeWidth={2.75} /> 窗口已過
+                      </div>
+                    )
+                  ) : (
+                    <div className="text-[11px] text-t3">—</div>
+                  )}
+                  <div className="text-[10.5px] text-t3 mt-1">請求於 {relTime(b.createdAt)}</div>
+                </div>
+
+                {/* 操作（只 PENDING） */}
+                <div className="flex gap-2 flex-none">
+                  {pending && (
+                    <>
+                      <button
+                        onClick={() => void reschedule(b.id)}
+                        disabled={busyId === b.id}
+                        className="text-xs px-3.5 py-1.5 rounded-full border border-line bg-panel text-t2 hover:bg-panel-2 disabled:opacity-40"
+                      >
+                        改期
+                      </button>
+                      <button
+                        onClick={() => void confirm(b.id)}
+                        disabled={busyId === b.id}
+                        className="text-xs px-3.5 py-1.5 rounded-full bg-brand hover:bg-brand-hover text-panel font-semibold disabled:opacity-40"
+                      >
+                        {busyId === b.id ? "處理中…" : "✓ 已喺醫生系統落單"}
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
-            )}
-          </div>
-        ))}
+            );
+          })}
+        </div>
       </div>
 
       {notice && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-t1 text-canvas text-sm px-4 py-2 rounded-xl shadow-lg z-50">
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-t1 text-canvas text-sm px-4 py-2 rounded-full shadow-lg z-50">
           {notice}
         </div>
       )}

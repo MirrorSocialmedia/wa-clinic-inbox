@@ -48,30 +48,30 @@ export default async function TemplatesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-panel rounded-lg border border-line p-5 text-sm text-t2">
+      <div className="bg-panel rounded-[26px] border border-line p-5 text-sm text-t2">
         <h2 className="text-lg font-semibold text-t1">WhatsApp Templates</h2>
         <p className="mt-1">
           Template 喺 <span className="text-t1">WhatsApp Manager</span> 建立，此處監察審批狀態（read-only，零寫入）。
         </p>
         {!wabaId && (
-          <p className="mt-3 rounded-md bg-warn-soft border border-warn/40 px-3 py-2 text-warn-text">
+          <p className="mt-3 rounded-[18px] bg-warn-soft border border-warn/40 px-3 py-2 text-warn-text">
             未設 <span className="font-mono">WA_WABA_ID</span>（.env）— FB Dashboard → WhatsApp → API Setup 攞 test WABA id 填入。
           </p>
         )}
         {error && (
-          <p className="mt-3 rounded-md bg-danger-soft border border-danger/40 px-3 py-2 text-danger-text">
+          <p className="mt-3 rounded-[18px] bg-danger-soft border border-danger/40 px-3 py-2 text-danger-text">
             載入失敗：{error}
           </p>
         )}
       </div>
 
-      <table className="w-full text-sm bg-panel rounded-lg border border-line overflow-hidden">
+      <table className="w-full text-sm bg-panel rounded-[22px] border border-line overflow-hidden">
         <thead>
-          <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-t3">
-            <th className="px-4 py-2.5">Name</th>
-            <th className="px-4 py-2.5">Language</th>
-            <th className="px-4 py-2.5">Category</th>
-            <th className="px-4 py-2.5">Status</th>
+          <tr className="border-b border-line text-left">
+            <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">Name</th>
+            <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">Language</th>
+            <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">Category</th>
+            <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">Status</th>
           </tr>
         </thead>
         <tbody>
@@ -83,7 +83,7 @@ export default async function TemplatesPage() {
             </tr>
           ) : (
             templates.map((t) => (
-              <tr key={`${t.name}-${t.language}`} className="border-b border-line last:border-0">
+              <tr key={`${t.name}-${t.language}`} className="border-b border-line last:border-0 hover:bg-black/[.04]">
                 <td className="px-4 py-2.5 font-mono text-xs">{t.name}</td>
                 <td className="px-4 py-2.5">{t.language}</td>
                 <td className="px-4 py-2.5">{t.category}</td>

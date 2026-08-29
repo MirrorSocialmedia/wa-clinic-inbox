@@ -290,13 +290,13 @@ function KeyCard({
   const maxVersion = versions.length > 0 ? Math.max(...versions.map((v) => v.version)) : 0;
 
   return (
-    <div className="bg-panel rounded-lg border border-line">
+    <div className="bg-panel rounded-[22px] border border-line">
       {/* 卡頭：key + override badge */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-line">
         <div className="flex items-center gap-2">
           <span className="font-semibold text-t1">{wf.key}</span>
           {clinicId && wf.active.source === "clinic" ? (
-            <span className="text-[11px] px-2 py-0.5 rounded-full bg-brand text-white">本舖 override</span>
+            <span className="text-[11px] px-2 py-0.5 rounded-full bg-brand text-panel font-semibold">本舖 override</span>
           ) : null}
           <span className="text-xs text-t3">
             {wf.active.source === "defaults"
@@ -309,7 +309,7 @@ function KeyCard({
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={`text-xs px-3 py-1.5 rounded-md ${tab === t ? "bg-brand text-white" : "text-t2 hover:bg-panel-2"}`}
+              className={`text-xs px-3 py-1.5 rounded-full ${tab === t ? "bg-brand text-panel font-semibold" : "text-t2 hover:bg-panel-2"}`}
             >
               {t === "params" ? "參數" : t === "graph" ? "流程圖" : `版本（${versions.length}）`}
             </button>
@@ -318,8 +318,8 @@ function KeyCard({
       </div>
 
       <div className="p-4">
-        {error ? <p className="text-sm text-red-500 mb-3">{error}</p> : null}
-        {notice ? <p className="text-sm text-green-600 mb-3">{notice}</p> : null}
+        {error ? <p className="text-sm text-danger-text mb-3">{error}</p> : null}
+        {notice ? <p className="text-sm text-ok-text mb-3">{notice}</p> : null}
 
         {tab === "params" ? (
           <div className="space-y-3">
@@ -337,7 +337,7 @@ function KeyCard({
                         value={form[h.name] ?? ""}
                         maxLength={h.maxLength}
                         onChange={(e) => setForm((f) => ({ ...f, [h.name]: e.target.value }))}
-                        className="w-full text-sm bg-canvas border border-line rounded-md px-3 py-1.5 text-t1"
+                        className="w-full text-sm bg-panel border border-line rounded-full px-3 py-2 text-t1"
                       />
                     ) : (
                       <input
@@ -345,7 +345,7 @@ function KeyCard({
                         value={form[h.name] ?? ""}
                         maxLength={h.maxLength}
                         onChange={(e) => setForm((f) => ({ ...f, [h.name]: e.target.value }))}
-                        className="w-full text-sm bg-canvas border border-line rounded-md px-3 py-1.5 text-t1"
+                        className="w-full text-sm bg-panel border border-line rounded-full px-3 py-2 text-t1"
                       />
                     )
                   ) : (
@@ -356,11 +356,11 @@ function KeyCard({
                       max={h.max}
                       step={h.type === "int" ? 1 : 0.1}
                       onChange={(e) => setForm((f) => ({ ...f, [h.name]: e.target.value }))}
-                      className="w-48 text-sm bg-canvas border border-line rounded-md px-3 py-1.5 text-t1 font-mono"
+                      className="w-48 text-sm bg-panel border border-line rounded-full px-3 py-2 text-t1 font-mono"
                     />
                   )}
                   {fieldErrors[h.name] ? (
-                    <p className="text-xs text-red-500 mt-1">{fieldErrors[h.name]}</p>
+                    <p className="text-xs text-danger-text mt-1">{fieldErrors[h.name]}</p>
                   ) : null}
                   {fieldErrors[h.name] === undefined && String(active[h.name] ?? "") !== (form[h.name] ?? "") ? (
                     <p className="text-[11px] text-t3 mt-1">default：{String(wf.defaults[h.name] ?? "—")}</p>
@@ -371,14 +371,14 @@ function KeyCard({
 
             {/* 發佈前 diff（紅 = 現行 ACTIVE 值，綠 = 新值） */}
             {dirty && diff && diff.length > 0 ? (
-              <div className="mt-4 border border-line rounded-md p-3 bg-panel-2">
+              <div className="mt-4 border border-line rounded-[18px] p-3 bg-panel-2">
                 <div className="text-xs font-semibold text-t2 mb-2">發佈前 diff（紅 = 現行 → 綠 = 新值）</div>
                 {diff.map((d) => (
                   <div key={d.name} className="text-xs font-mono py-0.5">
                     <span className="text-t2">{d.label}：</span>
-                    <span className="text-red-500">{d.oldV || "∅"}</span>
+                    <span className="text-danger-text">{d.oldV || "∅"}</span>
                     <span className="text-t3"> → </span>
-                    <span className="text-green-600">{d.newV || "∅"}</span>
+                    <span className="text-ok-text">{d.newV || "∅"}</span>
                   </div>
                 ))}
               </div>
@@ -388,7 +388,7 @@ function KeyCard({
               <button
                 onClick={saveDraft}
                 disabled={busy || !dirty}
-                className="rounded-md bg-panel-2 border border-line text-t1 text-sm px-4 py-2 hover:border-brand disabled:opacity-40"
+                className="rounded-full bg-panel-2 border border-line text-t1 text-sm px-4 py-2 hover:border-brand disabled:opacity-40"
               >
                 儲存草稿
               </button>
@@ -396,7 +396,7 @@ function KeyCard({
                 <button
                   onClick={publish}
                   disabled={busy}
-                  className="rounded-md bg-brand text-white text-sm px-4 py-2 hover:bg-brand-hover disabled:opacity-40"
+                  className="rounded-full bg-brand text-panel text-sm font-semibold px-4 py-2 hover:bg-brand-hover disabled:opacity-40"
                 >
                   發佈 v{pendingDraft.version}
                 </button>
@@ -429,22 +429,22 @@ function KeyCard({
               呢個 scope（{clinicId ? "本舖" : "全局"}）未有任何版本 — 喺「參數」tab 存草稿 + 發佈先有。
             </p>
           ) : (
-            <table className="w-full text-sm bg-panel-2 rounded-lg border border-line overflow-hidden">
+            <table className="w-full text-sm bg-panel-2 rounded-[18px] border border-line overflow-hidden">
               <thead className="bg-panel text-left text-t2">
                 <tr>
-                  <th className="px-4 py-2">版本</th>
-                  <th className="px-4 py-2">狀態</th>
-                  <th className="px-4 py-2">建立者</th>
-                  <th className="px-4 py-2">發佈時間</th>
-                  <th className="px-4 py-2 text-right">操作</th>
+                  <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">版本</th>
+                  <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">狀態</th>
+                  <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">建立者</th>
+                  <th className="px-4 py-2.5 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">發佈時間</th>
+                  <th className="px-4 py-2.5 text-right text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">操作</th>
                 </tr>
               </thead>
               <tbody>
                 {versions.map((v) => (
-                  <tr key={v.id} className="border-t border-line">
+                  <tr key={v.id} className="border-b border-line last:border-0 hover:bg-black/[.04]">
                     <td className="px-4 py-2 font-mono">
                       v{v.version}
-                      {v.status === "ACTIVE" ? <span className="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-green-600 text-white">ACTIVE</span> : null}
+                      {v.status === "ACTIVE" ? <span className="ml-2 text-[11px] px-1.5 py-0.5 rounded-full bg-ok text-panel font-semibold">ACTIVE</span> : null}
                     </td>
                     <td className="px-4 py-2 text-t2">{v.status}</td>
                     <td className="px-4 py-2 text-t3 font-mono text-xs">{v.createdBy ?? "—"}</td>
@@ -456,7 +456,7 @@ function KeyCard({
                         <button
                           onClick={() => doRevert(v)}
                           disabled={busy}
-                          className="text-xs px-2.5 py-1 rounded-md border border-line hover:border-brand text-t1 disabled:opacity-40"
+                          className="text-xs px-2.5 py-1 rounded-full border border-line bg-panel hover:border-brand text-t1 disabled:opacity-40"
                         >
                           回退到此版（→ v{maxVersion + 1}）
                         </button>
@@ -522,7 +522,7 @@ export default function WorkflowsAdmin() {
           <select
             value={clinicId ?? ""}
             onChange={(e) => setClinicId(e.target.value || null)}
-            className="text-sm bg-canvas border border-line rounded-md px-3 py-1.5 text-t1"
+            className="text-sm bg-panel border border-line rounded-full px-3 py-2 text-t1"
           >
             <option value="">全局（default）</option>
             {clinics.map((c) => (
@@ -533,7 +533,7 @@ export default function WorkflowsAdmin() {
           </select>
         </div>
       </div>
-      {error ? <p className="text-sm text-red-500">{error}</p> : null}
+      {error ? <p className="text-sm text-danger-text">{error}</p> : null}
       {loading ? (
         <p className="text-sm text-t2">載入中…</p>
       ) : (

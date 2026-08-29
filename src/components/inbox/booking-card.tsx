@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, CalendarDays, Lock, RotateCcw } from "lucide-react";
+import { AlertTriangle, CalendarDays, Check, Lock, RotateCcw } from "lucide-react";
 import type { BookingInfo, ConversationItem } from "./types";
 
 /**
@@ -51,6 +51,15 @@ export function rollbackButtonVisible(handledAt: string | null | undefined, now:
   if (Number.isNaN(t)) return false;
   const elapsed = now - t;
   return elapsed >= 0 && elapsed <= ROLLBACK_WINDOW_MS;
+}
+
+/** pure："YYYY-MM-DD" → 收據卡頭大字（9月1日）+ 星期（zh-Hant short） */
+export function fmtRequestDay(dateStr: string): { main: string; weekday: string } {
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return { main: dateStr, weekday: "" };
+  const main = `${d.getMonth() + 1}月${d.getDate()}日`;
+  const weekday = d.toLocaleDateString("zh-Hant-HK", { weekday: "short" });
+  return { main, weekday };
 }
 
 export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDone }: Props) {
@@ -248,186 +257,249 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
     }
   }
 
-  // ── PENDING 態 ─────────────────────────────────────────────────
+  // ── PENDING 態（Organic 1e 收據式：預設鼠尾草；slot_taken = 整卡陶土）────────────
   if (b.status === "PENDING") {
+    const slotTaken = createError?.kind === "slot_taken";
+    const day = fmtRequestDay(b.requestedDate);
     return (
-      <div className="mb-2 rounded-xl border border-ok/40 bg-ok-soft p-2.5">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-ok-text inline-flex items-center gap-1 shrink-0">
-            <CalendarDays size={13} /> 新預約請求
-          </span>
-          <span className="text-sm text-t1 font-medium truncate">
-            {b.providerName} · {b.requestedDate} {slotText}
-          </span>
-          {/* 空檔初驗 */}
-          {b.precheckPassed === true && <span className="text-[10px] text-ok-text shrink-0">✓ 空檔初驗過</span>}
-          {b.precheckPassed === null && <span className="text-[10px] text-t3 shrink-0">空檔未核對（資料源離線）</span>}
-          {b.precheckPassed === false && <span className="text-[10px] text-danger-text shrink-0">✗ 空檔初驗未過</span>}
-          <a href="/bookings" className="ml-auto shrink-0 text-xs px-2.5 py-1 rounded-lg bg-ok text-white font-medium hover:opacity-90">
-            去 /bookings 處理 →
-          </a>
-        </div>
-
-        {/* 病人 + 主訴 */}
-        <div className="mt-1.5 text-xs text-t2">
-          病人：<span className="text-t1">{c.contact?.profileName ?? "—"}</span>
-          {b.chiefComplaint && <span className="text-t3"> ｜ 主訴：{b.chiefComplaint}</span>}
-        </div>
-
-        {/* visitReason 下拉 + 三掣 */}
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <select
-            value={selectedId ?? ""}
-            onChange={(e) => setSelectedId(e.target.value || null)}
-            disabled={creating || dictError !== null}
-            className="text-xs px-2 py-1.5 rounded-lg border border-line bg-panel text-t1 max-w-[220px]"
-            title="Visit reason（寫入 Apricot remarks + payload）"
-          >
-            {dictError ? (
-              <option value="">dictionaries 載入失敗（{dictError}）</option>
-            ) : dictItems === null ? (
-              <option value="">載入 visit reason…</option>
-            ) : (
-              <>
-                {selectedId === null && <option value="">— 揀 visit reason —</option>}
-                {dictItems.map((i) => (
-                  <option key={i.apricotId} value={i.apricotId}>
-                    {i.code} {i.des}
-                    {i.code === defaultCode ? "（預設）" : ""}
-                  </option>
-                ))}
-              </>
-            )}
-          </select>
-          {pinned ? (
-            <button
-              onClick={() => void doCreate()}
-              disabled={creating || selectedId === null}
-              title={selectedId === null ? "先揀 visit reason" : undefined}
-              className="text-xs px-3 py-1.5 rounded-lg bg-brand hover:bg-brand-hover text-white font-medium disabled:opacity-40 inline-flex items-center gap-1"
-            >
-              {creating ? "代落單中…" : "幫我喺 Apricot 落單"}
-            </button>
-          ) : (
-            <span className="text-[10px] text-t3 inline-flex items-center gap-1">
-              <Lock size={10} /> 未釘住舊客 — 先喺右側欄釘住先可以代落單
+      <div
+        className={`mb-2 rounded-[26px] overflow-hidden ${
+          slotTaken
+            ? "bg-danger-soft border-[1.5px] border-warn"
+            : "bg-ok-soft border-[1.5px] border-brand"
+        }`}
+      >
+        {/* 卡頭 */}
+        <div className={`px-4 pt-3 pb-3 text-panel ${slotTaken ? "bg-danger" : "bg-ok"}`}>
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold tracking-[0.1em] uppercase opacity-90">
+              {slotTaken ? (
+                <AlertTriangle size={12} strokeWidth={2.75} />
+              ) : (
+                <CalendarDays size={12} strokeWidth={2.75} />
+              )}
+              {slotTaken ? "撞單 · 位已滿" : "新預約請求"}
             </span>
+            <a href="/bookings" className="ml-auto text-[11px] opacity-90 hover:opacity-100 whitespace-nowrap">
+              去 /bookings 處理 →
+            </a>
+          </div>
+          <div className="font-display text-[25px] leading-[1.15] mt-1.5">
+            {day.main} {slotText}
+          </div>
+          <div className="text-xs opacity-90 mt-0.5">
+            {day.weekday}
+            {day.weekday ? " · " : ""}
+            {b.providerName}
+          </div>
+        </div>
+
+        {/* 卡身 */}
+        <div className="px-4 py-3 flex flex-col gap-2.5">
+          <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
+            <span className="text-t2 shrink-0">病人</span>
+            <span className="font-semibold text-t1 text-right">{c.contact?.profileName ?? "—"}</span>
+          </div>
+          {b.chiefComplaint && (
+            <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
+              <span className="text-t2 shrink-0">主訴</span>
+              <span className="text-t1 text-right">{b.chiefComplaint}</span>
+            </div>
           )}
-          <button
-            onClick={() => void doConfirm()}
-            disabled={confirmBusy || creating}
-            className="text-xs px-3 py-1.5 rounded-lg border border-line bg-panel text-t1 hover:bg-panel-2 disabled:opacity-40"
-          >
-            {confirmBusy ? "處理中…" : "已人手落單"}
-          </button>
-          <button
-            onClick={() => void doResendFlow()}
-            disabled={resendBusy || creating}
-            className="text-xs px-3 py-1.5 rounded-lg border border-line bg-panel text-t1 hover:bg-panel-2 disabled:opacity-40"
-          >
-            {resendBusy ? "發送中…" : "改期 · 重發 Flow"}
-          </button>
-        </div>
+          {/* 空檔初驗 */}
+          <div className="border-t border-line pt-2">
+            {b.precheckPassed === true && <span className="text-[10.5px] text-ok-text">✓ 空檔初驗過</span>}
+            {b.precheckPassed === null && <span className="text-[10.5px] text-t3">空檔未核對（資料源離線）</span>}
+            {b.precheckPassed === false && <span className="text-[10.5px] text-danger-text">✗ 空檔初驗未過</span>}
+          </div>
 
-        {/* 409 紅字 / 422/503 人手指示 / 其他提示 */}
-        {createError?.kind === "slot_taken" && (
-          <div className="mt-2 flex items-center gap-2 text-xs">
-            <span className="text-danger-text font-medium inline-flex items-center gap-1">
-              <AlertTriangle size={12} /> {createError.message}
-            </span>
-            <button
-              onClick={() => void doResendFlow()}
-              disabled={resendBusy}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-danger-text text-danger-text hover:bg-danger-soft disabled:opacity-40"
+          {slotTaken ? (
+            <>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-danger-text font-medium inline-flex items-center gap-1">
+                  <AlertTriangle size={12} strokeWidth={2.75} /> {createError?.message ?? "時段啱啱滿咗"}
+                </span>
+                <button
+                  onClick={() => void doResendFlow()}
+                  disabled={resendBusy}
+                  className="inline-flex items-center gap-1 rounded-full border border-danger-text text-danger-text px-2.5 py-1 hover:bg-danger-soft disabled:opacity-40"
+                >
+                  <RotateCcw size={11} strokeWidth={2.75} /> {resendBusy ? "發送中…" : "重發 Flow"}
+                </button>
+              </div>
+              <p className="text-[10.5px] leading-relaxed text-danger-text">
+                目標時段已唔再可落單 — 可重發 Flow 俾病人重新揾時間，或者直接開對話跟進。
+              </p>
+            </>
+          ) : (
+            <>
+              {/* visitReason 下拉 + 三掣（Organic：全部 rounded-full，主掣 brand-hover） */}
+              <select
+                value={selectedId ?? ""}
+                onChange={(e) => setSelectedId(e.target.value || null)}
+                disabled={creating || dictError !== null}
+                className="w-full text-xs px-3 py-2 rounded-full border border-line-strong bg-panel text-t1"
+                title="Visit reason（寫入 Apricot remarks + payload）"
+              >
+                {dictError ? (
+                  <option value="">dictionaries 載入失敗（{dictError}）</option>
+                ) : dictItems === null ? (
+                  <option value="">載入 visit reason…</option>
+                ) : (
+                  <>
+                    {selectedId === null && <option value="">— 揀 visit reason —</option>}
+                    {dictItems.map((i) => (
+                      <option key={i.apricotId} value={i.apricotId}>
+                        {i.code} {i.des}
+                        {i.code === defaultCode ? "（預設）" : ""}
+                      </option>
+                    ))}
+                  </>
+                )}
+              </select>
+              {pinned ? (
+                <button
+                  onClick={() => void doCreate()}
+                  disabled={creating || selectedId === null}
+                  title={selectedId === null ? "先揀 visit reason" : undefined}
+                  className="w-full rounded-full bg-brand-hover text-panel text-[13px] font-semibold px-3.5 py-2.5 hover:opacity-90 disabled:opacity-40"
+                >
+                  {creating ? "代落單中…" : "幫我喺 Apricot 落單"}
+                </button>
+              ) : (
+                <span className="text-[10.5px] text-t3 inline-flex items-center gap-1">
+                  <Lock size={10} strokeWidth={2.75} /> 未釘住舊客 — 先喺右側欄釘住先可以代落單
+                </span>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => void doConfirm()}
+                  disabled={confirmBusy || creating}
+                  className="flex-1 rounded-full border border-line bg-panel text-t1 text-xs px-3 py-2 hover:bg-panel-2 disabled:opacity-40"
+                >
+                  {confirmBusy ? "處理中…" : "已人手落單"}
+                </button>
+                <button
+                  onClick={() => void doResendFlow()}
+                  disabled={resendBusy || creating}
+                  className="flex-1 rounded-full border border-line bg-panel text-t1 text-xs px-3 py-2 hover:bg-panel-2 disabled:opacity-40"
+                >
+                  {resendBusy ? "發送中…" : "改期 · 重發 Flow"}
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* 422/503 人手指示 / 其他提示（slot_taken 已在上面整卡陶土處理） */}
+          {createError && createError.kind !== "slot_taken" && (
+            <div
+              className={`text-xs inline-flex items-center gap-1 ${
+                createError.kind === "manual" ? "text-warn-text" : "text-danger-text"
+              }`}
             >
-              <RotateCcw size={11} /> {resendBusy ? "發送中…" : "重發 Flow"}
-            </button>
-          </div>
-        )}
-        {createError && createError.kind !== "slot_taken" && (
-          <div
-            className={`mt-2 text-xs inline-flex items-center gap-1 ${
-              createError.kind === "manual" ? "text-warn-text" : "text-danger-text"
-            }`}
-          >
-            <AlertTriangle size={12} /> {createError.message}
-          </div>
-        )}
-        {confirmMsg && (
-          <div className={`mt-2 text-xs ${confirmMsg.tone === "ok" ? "text-ok-text" : "text-warn-text"}`}>{confirmMsg.text}</div>
-        )}
-        {resendMsg && (
-          <div className={`mt-2 text-xs ${resendMsg.tone === "ok" ? "text-ok-text" : "text-warn-text"}`}>{resendMsg.text}</div>
-        )}
+              <AlertTriangle size={12} strokeWidth={2.75} /> {createError.message}
+            </div>
+          )}
+          {confirmMsg && (
+            <div className={`text-xs ${confirmMsg.tone === "ok" ? "text-ok-text" : "text-warn-text"}`}>{confirmMsg.text}</div>
+          )}
+          {resendMsg && (
+            <div className={`text-xs ${resendMsg.tone === "ok" ? "text-ok-text" : "text-warn-text"}`}>{resendMsg.text}</div>
+          )}
+        </div>
       </div>
     );
   }
 
-  // ── CONFIRMED 態 ───────────────────────────────────────────────
+  // ── CONFIRMED 態（卡頭 brand-hover，大字 Caprasimo；撤銷窗口邏輯照舊）────────────
   if (b.status === "CONFIRMED") {
     const countdown = b.handledAt ? Math.max(0, Date.parse(b.handledAt) + ROLLBACK_WINDOW_MS - now) : 0;
+    const day = fmtRequestDay(b.requestedDate);
     return (
-      <div className="mb-2 rounded-xl border-2 border-ok/50 bg-ok-soft p-2.5">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-ok-text inline-flex items-center gap-1 shrink-0">✓ 已確認（Apricot）</span>
-          <span className="text-sm text-t1 font-medium truncate">
-            {b.providerName} · {b.requestedDate} {slotText}
-          </span>
-          <a href="/bookings" className="ml-auto shrink-0 text-xs px-2.5 py-1 rounded-lg bg-ok text-white font-medium hover:opacity-90">
-            去 /bookings 處理 →
-          </a>
-        </div>
-        <div className="mt-1.5 text-xs text-t2 flex flex-wrap gap-x-3">
-          {b.apricotApptId && (
-            <span>
-              Apricot 單號：<span className="font-mono text-t1">{b.apricotApptId}</span>
+      <div className="mb-2 rounded-[26px] overflow-hidden bg-panel border-[1.5px] border-brand">
+        {/* 卡頭 */}
+        <div className="px-4 pt-3 pb-3 bg-brand-hover text-panel">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold tracking-[0.1em] uppercase opacity-90">
+              <Check size={12} strokeWidth={3} /> 已確認 · Apricot
             </span>
-          )}
-          {b.handledByStaffName && <span>發起人：{b.handledByStaffName}</span>}
-          {b.visitReasonCode && <span>Visit reason：{b.visitReasonCode}</span>}
-          <span className="text-ok-text">確認訊息已自動發出</span>
-        </div>
-        {rollbackVisible && (
-          <div className="mt-2 flex items-center gap-2">
-            <button
-              onClick={() => void doRollback()}
-              disabled={rollbackBusy || locked}
-              title={locked ? "Send Lock：只有負責人才可以撤銷" : "撤銷代落單（Apricot 單會刪除，卡彈返 PENDING；唔會自動覆病人）"}
-              className="text-xs px-3 py-1.5 rounded-lg border border-danger-text text-danger-text hover:bg-danger-soft disabled:opacity-40 inline-flex items-center gap-1"
-            >
-              <RotateCcw size={11} />
-              {rollbackBusy ? "撤銷中…" : `撤銷（${formatMmSs(countdown)}）`}
-            </button>
-            {locked && (
-              <span className="text-[10px] text-warn-text inline-flex items-center gap-1">
-                <Lock size={10} /> 只限負責人撤銷（{c.assigneeName}）
-              </span>
-            )}
+            <a href="/bookings" className="ml-auto text-[11px] opacity-90 hover:opacity-100 whitespace-nowrap">
+              去 /bookings 處理 →
+            </a>
           </div>
-        )}
-        {!rollbackVisible && b.handledAt && (
-          <div className="mt-1.5 text-[10px] text-t3">撤銷窗口已過 — 之後改動用側欄 Apricot 預約卡（改期/取消）</div>
-        )}
-        {confirmMsg && (
-          <div className={`mt-1.5 text-xs ${confirmMsg.tone === "ok" ? "text-ok-text" : "text-warn-text"}`}>{confirmMsg.text}</div>
-        )}
-        {rollbackMsg && (
-          <div className={`mt-1.5 text-xs ${rollbackMsg.tone === "ok" ? "text-ok-text" : "text-warn-text"}`}>{rollbackMsg.text}</div>
-        )}
+          <div className="font-display text-[25px] leading-[1.15] mt-1.5">
+            {day.main} {slotText}
+          </div>
+          <div className="text-xs opacity-90 mt-0.5">確認訊息已自動發給病人</div>
+        </div>
+
+        {/* 卡身 */}
+        <div className="px-4 py-3 flex flex-col gap-2">
+          <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
+            <span className="text-t2">病人</span>
+            <span className="font-semibold text-t1 text-right">{c.contact?.profileName ?? "—"}</span>
+          </div>
+          {b.apricotApptId && (
+            <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
+              <span className="text-t2">Apricot 單號</span>
+              <span className="font-mono text-[11.5px] text-t1">{b.apricotApptId}</span>
+            </div>
+          )}
+          {b.handledByStaffName && (
+            <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
+              <span className="text-t2">發起人</span>
+              <span className="text-t1">{b.handledByStaffName}</span>
+            </div>
+          )}
+          {b.visitReasonCode && (
+            <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
+              <span className="text-t2">Visit reason</span>
+              <span className="text-t1">{b.visitReasonCode}</span>
+            </div>
+          )}
+          {rollbackVisible && (
+            <div className="border-t border-line pt-2.5">
+              <button
+                onClick={() => void doRollback()}
+                disabled={rollbackBusy || locked}
+                title={locked ? "Send Lock：只有負責人才可以撤銷" : "撤銷代落單（Apricot 單會刪除，卡彈返 PENDING；唔會自動覆病人）"}
+                className="w-full rounded-full border border-warn bg-panel text-danger-text text-xs font-semibold px-3 py-2 hover:bg-danger-soft disabled:opacity-40 inline-flex items-center justify-center gap-1.5"
+              >
+                <RotateCcw size={12} strokeWidth={2.75} />
+                {rollbackBusy ? "撤銷中…" : `撤銷（${formatMmSs(countdown)}）`}
+              </button>
+              {locked && (
+                <span className="mt-1.5 block text-[10.5px] text-warn-text inline-flex items-center gap-1">
+                  <Lock size={10} strokeWidth={2.75} /> 只限負責人撤銷（{c.assigneeName}）
+                </span>
+              )}
+            </div>
+          )}
+          <p className="text-[10.5px] leading-relaxed text-t2">
+            5 分鐘內可撤銷 — Apricot 單會刪除，卡彈回待處理，唔會再覆病人。過窗要用側欄預約卡改期或取消。
+          </p>
+          {confirmMsg && (
+            <div className={`text-xs ${confirmMsg.tone === "ok" ? "text-ok-text" : "text-warn-text"}`}>{confirmMsg.text}</div>
+          )}
+          {rollbackMsg && (
+            <div className={`text-xs ${rollbackMsg.tone === "ok" ? "text-ok-text" : "text-warn-text"}`}>{rollbackMsg.text}</div>
+          )}
+        </div>
       </div>
     );
   }
 
-  // REJECTED / EXPIRED（簡短顯示 — 隊列頁先處理）
+  // REJECTED / EXPIRED（簡短顯示 — 隊列頁先處理；Organic：灰調 + 收圓角）
+  const day2 = fmtRequestDay(b.requestedDate);
   return (
-    <div className="mb-2 rounded-xl border border-line bg-panel-2 p-2.5">
+    <div className="mb-2 rounded-[26px] border border-line bg-panel-2 p-3.5 opacity-75">
       <div className="flex items-center gap-2">
         <span className="text-xs text-t3 inline-flex items-center gap-1">
-          <CalendarDays size={13} /> 預約請求（{b.status === "EXPIRED" ? "已過期" : "已拒絕"}）
+          <CalendarDays size={13} strokeWidth={2.75} /> 預約請求（{b.status === "EXPIRED" ? "已過期" : "已拒絕"}）
         </span>
-        <span className="text-sm text-t2 line-through truncate">
-          {b.providerName} · {b.requestedDate} {slotText}
-        </span>
+      </div>
+      <div className="mt-1 text-[13px] text-t2 line-through">
+        {day2.main} {slotText} · {b.providerName}
       </div>
     </div>
   );

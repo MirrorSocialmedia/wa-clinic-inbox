@@ -8,6 +8,7 @@ import { CalendarDays, MessageCircle, Settings, Stethoscope } from "lucide-react
  * 手機底部 tab bar（md 以下顯示；桌面用 NavRail）。
  * - 四格：收件箱（unread badge）/ 預約 / 時間表 / 管理（ADMIN only → STAFF 三格）
  * - pb-[env(safe-area-inset-bottom)]：iPhone home indicator 唔遮字
+ * - Organic 1f：icon 23px / label 10.5px / 每格熱區 ≥48px / strokeWidth 2.75
  */
 export function BottomTabBar({
   role,
@@ -38,19 +39,19 @@ export function BottomTabBar({
               key={it.href}
               href={it.href}
               aria-current={active ? "page" : undefined}
-              className={`flex-1 flex flex-col items-center gap-0.5 pt-2 pb-1.5 ${
+              className={`flex-1 flex flex-col items-center justify-center gap-[3px] py-2 min-h-[48px] ${
                 active ? "text-brand-text" : "text-t3"
               }`}
             >
               <span className="relative">
-                <Icon size={20} />
+                <Icon size={23} strokeWidth={2.75} />
                 {badge > 0 && (
-                  <span className="absolute -top-1 -right-2 min-w-[15px] h-[15px] px-1 rounded-full bg-danger text-white text-[10px] font-semibold flex items-center justify-center">
+                  <span className="absolute -top-[3px] -right-[7px] min-w-[17px] h-[17px] px-1 rounded-full bg-danger text-panel text-[10px] font-bold flex items-center justify-center">
                     {badge > 99 ? "99+" : badge}
                   </span>
                 )}
               </span>
-              <span className={`text-[10px] ${active ? "font-semibold" : ""}`}>{it.label}</span>
+              <span className={`text-[10.5px] ${active ? "font-bold" : "font-normal"}`}>{it.label}</span>
             </Link>
           );
         })}

@@ -124,7 +124,7 @@ async function main(): Promise<void> {
 
   // ── 1) 載入 /inbox?conv=conv1 → SSR 快照應顯示 fixture A（林小曼） ─────────
   await P.goto(`${base}/inbox?conv=${conv1}`, { waitUntil: "domcontentloaded" });
-  await P.waitForSelector("text=今日當值", { timeout: 30000 });
+  await P.waitForSelector("text=當值（", { timeout: 30000 });
   const hasA = await P.getByText("林小曼").first().count();
   if (hasA === 0) throw new Error("初始卡冇顯示 fixture A（林小曼）— SSR initialDuty 未生效？");
   const callsAfterLoad = dutyCalls;

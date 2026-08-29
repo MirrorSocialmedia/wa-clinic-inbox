@@ -39,9 +39,9 @@ interface Suggestion {
 }
 
 const KIND_TAG: Record<Suggestion["kind"], string> = {
-  FAQ: "bg-blue-100 text-blue-700",
-  TEMPLATE: "bg-amber-100 text-amber-700",
-  WORKFLOW_DIFF: "bg-purple-100 text-purple-700",
+  FAQ: "bg-brand-soft text-brand-text",
+  TEMPLATE: "bg-warn-soft text-warn-text",
+  WORKFLOW_DIFF: "bg-line text-t2",
 };
 
 function ConvLink({ s }: { s: EvidenceSample }) {
@@ -68,9 +68,9 @@ function EvidenceView({ ev }: { ev: Suggestion["evidence"] }) {
         <table className="w-full border-collapse">
           <thead>
             <tr className="text-t3 text-left">
-              <th className="py-1 pr-2 font-normal w-1/3">AI 草稿</th>
-              <th className="py-1 pr-2 font-normal w-1/3">最終發出</th>
-              <th className="py-1 font-normal">對話</th>
+              <th className="py-1 pr-2 text-[10.5px] uppercase tracking-[0.08em] text-t2 font-semibold w-1/3">AI 草稿</th>
+              <th className="py-1 pr-2 text-[10.5px] uppercase tracking-[0.08em] text-t2 font-semibold w-1/3">最終發出</th>
+              <th className="py-1 text-[10.5px] uppercase tracking-[0.08em] text-t2 font-semibold">對話</th>
             </tr>
           </thead>
           <tbody>
@@ -102,9 +102,9 @@ function WfDiff({ p }: { p: Suggestion["payload"] }) {
       <table className="w-full border-collapse">
         <thead>
           <tr className="text-t3 text-left">
-            <th className="py-1 pr-2 font-normal">參數</th>
-            <th className="py-1 pr-2 font-normal">現行</th>
-            <th className="py-1 font-normal">建議</th>
+            <th className="py-1 pr-2 text-[10.5px] uppercase tracking-[0.08em] text-t2 font-semibold">參數</th>
+            <th className="py-1 pr-2 text-[10.5px] uppercase tracking-[0.08em] text-t2 font-semibold">現行</th>
+            <th className="py-1 text-[10.5px] uppercase tracking-[0.08em] text-t2 font-semibold">建議</th>
           </tr>
         </thead>
         <tbody>
@@ -112,7 +112,7 @@ function WfDiff({ p }: { p: Suggestion["payload"] }) {
             <tr key={k} className="border-t border-line">
               <td className="py-1 pr-2 font-mono">{k}</td>
               <td className="py-1 pr-2">{String(cur[k] ?? "—")}</td>
-              <td className={`py-1 ${JSON.stringify(cur[k]) !== JSON.stringify(p.suggestedParams![k]) ? "text-red-600 font-semibold" : "text-t3"}`}>
+              <td className={`py-1 ${JSON.stringify(cur[k]) !== JSON.stringify(p.suggestedParams![k]) ? "text-danger-text font-semibold" : "text-t3"}`}>
                 {String(p.suggestedParams![k])}
               </td>
             </tr>
@@ -177,7 +177,7 @@ function SuggestionCard({ s, onChanged }: { s: Suggestion; onChanged: () => void
                 <input
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
-                  className="mt-1 w-full rounded-md border border-line bg-transparent px-2 py-1.5 text-sm text-t1"
+                  className="mt-1 w-full rounded-full border border-line bg-panel px-3 py-2 text-sm text-t1"
                   placeholder="例：營業時間係幾點？"
                 />
               </label>
@@ -186,25 +186,25 @@ function SuggestionCard({ s, onChanged }: { s: Suggestion; onChanged: () => void
                 <input
                   value={a}
                   onChange={(e) => setA(e.target.value)}
-                  className="mt-1 w-full rounded-md border border-line bg-transparent px-2 py-1.5 text-sm text-t1"
+                  className="mt-1 w-full rounded-full border border-line bg-panel px-3 py-2 text-sm text-t1"
                   placeholder="例：一至六 10:00-18:00；日公假"
                 />
               </label>
             </div>
           ) : null}
-          {msg ? <p className={`text-sm ${msg.ok ? "text-green-600" : "text-red-500"}`}>{msg.text}</p> : null}
+          {msg ? <p className={`text-sm ${msg.ok ? "text-ok-text" : "text-danger-text"}`}>{msg.text}</p> : null}
           <div className="flex gap-2">
             <button
               disabled={busy}
               onClick={() => decide("APPROVED")}
-              className="text-sm px-3 py-1.5 rounded-md bg-green-600 text-white disabled:opacity-50"
+              className="text-sm px-3.5 py-1.5 rounded-full bg-brand text-panel font-semibold disabled:opacity-50"
             >
               批准
             </button>
             <button
               disabled={busy}
               onClick={() => decide("REJECTED")}
-              className="text-sm px-3 py-1.5 rounded-md border border-line text-t2 hover:bg-panel-2 disabled:opacity-50"
+              className="text-sm px-3.5 py-1.5 rounded-full border border-line bg-panel text-t2 hover:bg-panel-2 disabled:opacity-50"
             >
               拒絕
             </button>
@@ -221,7 +221,7 @@ function SuggestionCard({ s, onChanged }: { s: Suggestion; onChanged: () => void
 
   if (s.status !== "PROPOSED") {
     return (
-      <details className="bg-panel rounded-lg border border-line mb-2 opacity-70">
+      <details className="bg-panel rounded-[22px] border border-line mb-2 opacity-70">
         <summary className="cursor-pointer px-4 py-2 text-sm text-t2 flex items-center gap-2">
           <span className={`text-[11px] px-2 py-0.5 rounded-full ${KIND_TAG[s.kind]}`}>{s.kind}</span>
           <span>{s.title}</span>
@@ -232,7 +232,7 @@ function SuggestionCard({ s, onChanged }: { s: Suggestion; onChanged: () => void
     );
   }
   return (
-    <div className="bg-panel rounded-lg border border-line mb-2">
+    <div className="bg-panel rounded-[22px] border border-line mb-2">
       <button className="w-full text-left px-4 py-2 flex items-center gap-2" onClick={() => setOpen(!open)}>
         <span className={`text-[11px] px-2 py-0.5 rounded-full ${KIND_TAG[s.kind]}`}>{s.kind}</span>
         <span className="font-semibold text-t1">{s.title}</span>
@@ -270,7 +270,7 @@ export default function SuggestionsAdmin() {
       <p className="text-sm text-t3 mb-4">
         週一 05:00 自動 mining（上週數據）。批准 = 生效（FAQ 入 greetingConfig / WORKFLOW_DIFF 出 DRAFT）；拒絕 = 純標記。
       </p>
-      {error ? <p className="text-sm text-red-500 mb-3">{error}</p> : null}
+      {error ? <p className="text-sm text-danger-text mb-3">{error}</p> : null}
       {!rows ? <p className="text-sm text-t3">載入中…</p> : null}
       {rows && rows.length === 0 ? <p className="text-sm text-t3">暫時冇新建議</p> : null}
       {rows && rows.length > 0 ? (

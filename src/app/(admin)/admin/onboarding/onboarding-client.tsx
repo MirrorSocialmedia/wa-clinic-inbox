@@ -237,7 +237,7 @@ export function OnboardingClient({ clinics }: { clinics: OnboardingClinic[] }) {
     );
   }, [configId, onAuthCode]);
 
-  const sel = "mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm";
+  const sel = "mt-1 w-full rounded-full border border-line-strong bg-panel px-4 py-2.5 text-sm";
   const phaseCls: Record<Phase, string> = {
     idle: "bg-panel-2 text-t2",
     "loading-sdk": "bg-panel-2 text-t2",
@@ -250,7 +250,7 @@ export function OnboardingClient({ clinics }: { clinics: OnboardingClinic[] }) {
 
   return (
     <div className="space-y-6 max-w-2xl">
-      <div className="bg-panel rounded-lg border border-line p-6 space-y-4">
+      <div className="bg-panel rounded-[26px] border border-line p-6 space-y-4">
         <h2 className="text-lg font-semibold">WhatsApp Embedded Signup</h2>
         <p className="text-sm text-t2">
           將某診所嘅 WhatsApp 號註冊入本系統（phone number register + WABA subscribe + 寫入 clinic.waPhoneNumberId）。
@@ -258,7 +258,7 @@ export function OnboardingClient({ clinics }: { clinics: OnboardingClinic[] }) {
         </p>
 
         {envMissing && (
-          <div className="rounded-md bg-danger-soft border border-danger/40 px-3 py-2 text-sm text-danger-text">
+          <div className="rounded-[18px] bg-danger-soft border border-danger/40 px-3 py-2 text-sm text-danger-text">
             缺少 <span className="font-mono">NEXT_PUBLIC_FB_APP_ID</span> / <span className="font-mono">NEXT_PUBLIC_FB_CONFIG_ID</span>（.env）。
             FB Dashboard 建咗 App + Embedded Signup 後先填。
           </div>
@@ -279,18 +279,18 @@ export function OnboardingClient({ clinics }: { clinics: OnboardingClinic[] }) {
         <button
           onClick={launch}
           disabled={busy || envMissing || !clinicId}
-          className="rounded-md bg-brand text-white text-sm px-4 py-2 hover:bg-brand-hover disabled:opacity-50"
+          className="rounded-full bg-brand text-panel text-sm font-semibold px-4 py-2 hover:bg-brand-hover disabled:opacity-50"
         >
           {busy ? "進行中…" : "開始 Embedded Signup"}
         </button>
       </div>
 
-      <div className={`rounded-lg border border-line px-4 py-3 text-sm ${phaseCls[status.phase]}`}>
+      <div className={`rounded-[22px] border border-line px-4 py-3 text-sm ${phaseCls[status.phase]}`}>
         <div className="font-semibold">{status.title}</div>
         {status.detail && <div className="mt-1 text-sm opacity-90">{status.detail}</div>}
       </div>
 
-      <div className="bg-panel rounded-lg border border-line p-5 text-sm text-t2 space-y-2">
+      <div className="bg-panel rounded-[26px] border border-line p-5 text-sm text-t2 space-y-2">
         <div className="font-semibold text-t1">用前必读（App Review MD §2.2）</div>
         <ol className="list-decimal pl-5 space-y-1">
           <li>FB App 註冊 WhatsApp Business 後，此 App 就唔可以移除（要等 90 日）。</li>
