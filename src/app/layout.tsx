@@ -33,8 +33,8 @@ export const metadata: Metadata = {
   description: "診所 WhatsApp 共用收件箱（internal tool）",
 };
 
-/** first paint 前定 theme：localStorage → 冇就跟系統。錯誤 fallback light。 */
-const THEME_SCRIPT = `(function(){try{var t=localStorage.getItem("wcx-theme");if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}document.documentElement.dataset.theme=t}catch(e){document.documentElement.dataset.theme="light"}})();`;
+/** first paint 前定 theme：固定 light（Organic 今輪無暗色；ThemeToggle 未 render，[data-theme=dark] block 保留但唔觸發）。 */
+const THEME_SCRIPT = `document.documentElement.dataset.theme="light";`;
 
 export default function RootLayout({
   children,
