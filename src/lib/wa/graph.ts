@@ -291,6 +291,8 @@ export function requirementFlowConfig(flow_token: string): FlowMessageConfig {
  * 發 interactive flow message（MD §8.2：窗口內 free-form 唔收費）。
  * mock mode 回假 wamid（同 sendTextMessage 一致）。
  * ★ PII：flow config 只含 token/CDN/CTA（無病人內容）— log 只帶 wamid。
+ * ★ draft mode：WA_FLOW_DRAFT=1 時 interactive payload 嘅 flow parameters 加
+ *   mode:"draft" — 供 Meta 未 publish Flow 真機測試（draft Flow ID 由 Flows Builder 網址欄攞）。
  */
 export async function sendFlowMessage(opts: {
   phoneNumberId: string;
@@ -333,6 +335,7 @@ export async function sendFlowMessage(opts: {
           flow_id: flow.flow_id,
           flow_cta: flow.flow_cta,
           flow_action: flow.flow_action ?? "NAVIGATE",
+          ...(process.env.WA_FLOW_DRAFT === "1" ? { mode: "draft" } : {}),
         },
       },
     }),
