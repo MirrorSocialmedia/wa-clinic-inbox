@@ -9,7 +9,7 @@
  * Response（我哋 server → WhatsApp）：
  *   response_json = { payload: b64, iv: b64, key_id }
  *   - 同一把 AES key（每次 request 由 WhatsApp 新 wrap 一次）
- *   - ★★ IV 反轉：response iv = reverse(request iv)（MD §8.2 明言嘅 WhatsApp 怪癖）
+ *   - ★★ IV bitwise-NOT 取反：response iv = 逐 byte ~byte & 0xFF 取 request iv（MD §8.2 明言嘅 WhatsApp 怪癖）
  *
  * Keypair：RSA-2048，首次生成持久化到 FLOW_KEYS_DIR（預設 .dev/flow-keys/）：
  *   private.pem (0600) / public.pem / keypair.json { kid, publicJwk }
@@ -115,12 +115,12 @@ export function encryptGcm(key16: Buffer, iv: Buffer, json: unknown): { payload:
   return { payload: Buffer.concat([ct, c.getAuthTag()]).toString("base64"), iv: iv.toString("base64") };
 }
 
-/** ★ MD §8.2：response IV = reverse(request IV) */
+/** ★ MD §8.2：response IV = bitwise-NOT 取反(request IV)（逐 byte ~byte & 0xFF） */
 export function reversedIv(reqIvB64: string): Buffer {
   const iv = Buffer.from(reqIvB64, "base64");
   // Meta 真 spec：request IV = 16 bytes；12 bytes 保留俾 legacy 信封（mock step/complete）
   if (iv.length !== 12 && iv.length !== 16) throw new Error("FLOW_BAD_IV_LEN");
-  return Buffer.from(iv.reverse());
+  return Buffer.from(iv.map((b) => ~b & 0xff));
 }
 
 // ── flow_token（HS256 JWT — 防別店/別對話用；node:crypto 手搓，零依賴） ──

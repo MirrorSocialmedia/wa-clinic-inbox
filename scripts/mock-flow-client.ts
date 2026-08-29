@@ -5,7 +5,7 @@
  * 沙箱冇真 WA — 呢個 script 扮演病人手機：
  *   1. 用 server 嘅 RSA 公鑰（.dev/flow-keys/）wrap 一把新 AES-128 key（同 WhatsApp 做法一致）
  *   2. AES-128-GCM 加密 request body（同 WhatsApp 格式）
- *   3. POST /api/flows/endpoint → 解密 response（驗證「反轉 IV」行為）
+ *   3. POST /api/flows/endpoint → 解密 response（驗證「IV bitwise-NOT 取反」行為）
  *   4. `complete`：產出 nfm_reply webhook payload（加密 response_json）POST /api/wa/webhook
  *
  * 用法（repo root）：
@@ -140,11 +140,11 @@ async function step(): Promise<void> {
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
 
   if (res.status >= 200 && res.status < 300) {
-    // 解密 response（★★ 驗證反轉 IV）
+    // 解密 response（★★ 驗證 IV bitwise-NOT 取反）
     const rj = data.response_json as { payload: string; iv: string; key_id?: string };
     const respIvBuf = reversedIv(iv.toString("base64"));
     if (Buffer.from(rj.iv, "base64").toString("hex") !== respIvBuf.toString("hex")) {
-      console.error("REVERSED_IV_MISMATCH: response iv 唔係 request iv 嘅反轉");
+      console.error("REVERSED_IV_MISMATCH: response iv 唔係 request iv 嘅 bitwise-NOT 取反（~byte & 0xFF）");
       process.exit(1);
     }
     const respPlain = JSON.parse(decryptGcm(aesKey, rj.iv, rj.payload)) as {
@@ -287,8 +287,8 @@ async function stepx(): Promise<void> {
   const text = await res.text();
 
   if (res.status >= 200 && res.status < 300 && (res.headers.get("content-type") ?? "").includes("text/plain")) {
-    // 解密 response（★ 反轉 IV — 同 server 端 reversedIv 一致）— 明文 = {version, screen, data}
-    const respIvB64 = Buffer.from(iv).reverse().toString("base64");
+    // 解密 response（★ IV bitwise-NOT 取反 — 同 server 端 reversedIv 一致）— 明文 = {version, screen, data}
+    const respIvB64 = Buffer.from(iv.map((b) => ~b & 0xff)).toString("base64");
     const respPlain = JSON.parse(decryptGcm(aesKey, respIvB64, text)) as Record<string, unknown>;
     console.log(`HTTP=${res.status} DATA=${JSON.stringify(respPlain)}`);
     return;

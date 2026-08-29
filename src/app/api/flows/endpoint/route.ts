@@ -14,7 +14,7 @@
  *   response = text/plain base64(AES-GCM ciphertext‖tag)，明文 =
  *     { version:"3.0", screen, data } 或 SUCCESS：
  *     { version:"3.0", screen:"SUCCESS", data:{ extension_message_response:{ params } } }
- *     - 同一把 AES key + ★ 反轉 IV（同 legacy）
+ *     - 同一把 AES key + ★ IV bitwise-NOT 取反（同 legacy）
  *
  * **Legacy 信封（mock client / 舊 canvas 三 screen contract — e2e 回歸用）**：
  *   request  = { phone_number_id, wa_id, data_exchange:{ encrypted:{ payload, iv, key_id, wrapped_key } } }
@@ -34,7 +34,7 @@
  *   （純收需求 requirement 變體只行舊 canvas FLOW_REQ_*，本輪唔改）
  *
  * 加密（MD §8.2 樣板 — crypto.ts 原語同 Meta 官方 spec 全對齊）：
- *   RSA-OAEP(SHA-256) unwrap AES-128 key → AES-128-GCM（ciphertext‖tag）→ response 反轉 IV
+ *   RSA-OAEP(SHA-256) unwrap AES-128 key → AES-128-GCM（ciphertext‖tag）→ response IV bitwise-NOT 取反
  *
  * 錯誤處理：認證/結構問題 → 4xx/5xx plaintext JSON；業務驗證失敗 → HTTP 200 +
  * error_message 留原屏（Meta 規則：唔好靠 4xx 傳驗證錯誤）。
@@ -414,7 +414,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 8) 加密 response（同一把 AES key + ★ 反轉 IV）
+    // 8) 加密 response（同一把 AES key + ★ IV bitwise-NOT 取反）
     const { payload, iv } = encryptGcm(key16, reversedIv(reqIvB64), {
       action: nextAction,
       data,
