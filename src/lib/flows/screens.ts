@@ -179,3 +179,25 @@ export function confirmScreenData(opts: {
     error_message: opts.error ?? "",
   };
 }
+
+// ══ T4（providerslot-20260830）：bookable 源 data builder ══════════════
+
+/**
+ * SCR_DATE data（T4 — DatePicker 版）：date_min/date_max（Flow JSON 真欄）+
+ * dates[]（bookable 可約日 — e2e/兼容）+ error（v2 同送規則：has_error=true ⟺ error_message 非空）。
+ */
+export function bookableDateScreen(opts: {
+  dateMin: string;
+  dateMax: string;
+  openDates: string[];
+  error?: string;
+}): DateScreenData & { date_min: string; date_max: string } {
+  const dates = opts.openDates.slice(0, 30).map((d) => ({ id: d, title: fmtDateFull(d) }));
+  return {
+    date_min: opts.dateMin,
+    date_max: opts.dateMax,
+    dates,
+    has_error: opts.error != null,
+    error_message: opts.error ?? "",
+  };
+}

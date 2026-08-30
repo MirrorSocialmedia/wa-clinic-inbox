@@ -4064,13 +4064,17 @@ t98_pat_sweep() { # waId sweep（同 R11 模式）
   q "DELETE FROM \"Contact\" WHERE \"waId\"='$pat'" >/dev/null 2>&1
 }
 if t98_setup_pat "8526903${EPOCH}" "E2E T98"; then
-  # (a) INIT → SCR_DATE（v2：dates[] = 30 日內有空檔日 + has_error=false）
+  # T4：bookable 決定性 fixture（重現 client.ts mock 規則 — TKW / 09:00–13:00 / 兩 mock 醫生）
+  T98_D=$(node -e 'function djb2(s){let h=5381;for(let i=0;i<s.length;i++){h=((h<<5)+h+s.charCodeAt(i))>>>0}return h}const c="TKW";const d0=new Date(Date.now()+8*3600e3).toISOString().slice(0,10);for(let i=0;i<31;i++){const day=new Date(Date.parse(d0+"T00:00:00Z")+i*86400e3).toISOString().slice(0,10);if(djb2(c+"|"+day)%7!==3){console.log(day);break}}')
+  [ -n "$T98_D" ] || { echo "    ❌ T98 fixture：30 日內冇 bookable 開診日"; T98=1; }
+  # (a) INIT → SCR_DATE（T4：DatePicker min/max + dates[] = bookable 可約日 + has_error=false）
   OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action INIT 2>&1 || true)
   if stepx_parse "$OUT" /tmp/e2e-t98-init.json; then
     check "T98 INIT → SCR_DATE" "$(jf screen < /tmp/e2e-t98-init.json)" "SCR_DATE"
     T98_HE=$(grep -oE '"has_error":(true|false)' /tmp/e2e-t98-init.json | head -1 | cut -d: -f2)
     check "T98 INIT has_error=false（v2 明確 boolean）" "$T98_HE" "false"
-    grep -qF "\"id\":\"$T96_S1D\"" /tmp/e2e-t98-init.json && pass "T98 INIT dates[] 含 $T96_S1D（v2 Dropdown options）" || { echo "    ❌ T98 INIT dates[] 冇 $T96_S1D（已知有空檔日）"; T98=1; }
+    check "T98 INIT date_min = 今日" "$(jf date_min < /tmp/e2e-t98-init.json)" "$(node -e 'console.log(new Date(Date.now()+8*3600e3).toISOString().slice(0,10))')"
+    grep -qF "\"id\":\"$T98_D\"" /tmp/e2e-t98-init.json && pass "T98 INIT dates[] 含 $T98_D（bookable 可約日）" || { echo "    ❌ T98 INIT dates[] 冇 $T98_D（bookable 開診日）"; T98=1; }
   else
     echo "    ❌ T98 INIT fail（=${OUT%%$'\n'*}）"; T98=1
   fi
@@ -4084,35 +4088,39 @@ if t98_setup_pat "8526903${EPOCH}" "E2E T98"; then
   else
     echo "    ❌ T98 v2 error 路徑 stepx fail（=${OUT%%$'\n'*}）"; T98=1
   fi
-  # (b) submit_date → SCR_SLOT（providers+times；capacity=0 嘅 S2 唔喺 times — 若其他 provider 無同時段）
-  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_DATE --data "{\"user_action\":\"submit_date\",\"date\":\"$T96_S1D\"}" 2>&1 || true)
+  # (b) submit_date → SCR_SLOT（T4：bookable 源 — providers = workforce 簽發 id；times = 該日可約時段）
+  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_DATE --data "{\"user_action\":\"submit_date\",\"date\":\"$T98_D\"}" 2>&1 || true)
   if stepx_parse "$OUT" /tmp/e2e-t98-slot.json; then
     check "T98 submit_date → SCR_SLOT" "$(jf screen < /tmp/e2e-t98-slot.json)" "SCR_SLOT"
-    grep -qF "\"id\":\"$DOC_A\"" /tmp/e2e-t98-slot.json || { echo "    ❌ T98 providers 冇 DOC_A"; T98=1; }
-    grep -qF "\"$T96_S1T\"" /tmp/e2e-t98-slot.json || { echo "    ❌ T98 times 冇 $T96_S1T"; T98=1; }
-    T98_OTHER=$(q "SELECT count(*)::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"date\"='$T96_S2D' AND \"startTime\"='$T96_S2T' AND \"providerApricotId\"<> '$DOC_A' AND \"isOpen\" AND ((\"remainingCapacity\" IS NULL AND \"bookedCount\"=0) OR \"remainingCapacity\">0)" | jf c)
-    [ "$T98_OTHER" = "0" ] && grep -qF "\"$T96_S2T\"" /tmp/e2e-t98-slot.json && { echo "    ❌ T98 capacity=0 slot（$T96_S2T）出現喺 times"; T98=1; }
+    grep -qF "\"id\":\"mock-pract-TKW-0\"" /tmp/e2e-t98-slot.json || { echo "    ❌ T98 providers 冇 mock-pract-TKW-0（server 簽發 id）"; T98=1; }
+    grep -qF "\"09:00\"" /tmp/e2e-t98-slot.json || { echo "    ❌ T98 times 冇 09:00（bookable 時段）"; T98=1; }
+    grep -qF "\"id\":\"$DOC_A\"" /tmp/e2e-t98-slot.json && { echo "    ❌ T98 providers 混入 L2 apricotId（$DOC_A）— 應該係 bookable 源"; T98=1; }
   else
     echo "    ❌ T98 submit_date fail（=${OUT%%$'\n'*}）"; T98=1
   fi
-  # (c) submit_slot → SCR_CONFIRM（summary + profile_name 預填 = Contact profileName）
-  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_SLOT --data "{\"user_action\":\"submit_slot\",\"date\":\"$T96_S1D\",\"provider_id\":\"$DOC_A\",\"time\":\"$T96_S1T\"}" 2>&1 || true)
+  # (c) submit_slot → SCR_CONFIRM（summary + profile_name 預填 + provider_id = workforce 簽發 id）
+  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_SLOT --data "{\"user_action\":\"submit_slot\",\"date\":\"$T98_D\",\"provider_id\":\"mock-pract-TKW-0\",\"time\":\"09:00\"}" 2>&1 || true)
   if stepx_parse "$OUT" /tmp/e2e-t98-confirm.json; then
     check "T98 submit_slot → SCR_CONFIRM" "$(jf screen < /tmp/e2e-t98-confirm.json)" "SCR_CONFIRM"
     check "T98 confirm profile_name 預填（Contact profileName）" "$(jf profile_name < /tmp/e2e-t98-confirm.json)" "E2E T98"
-    check "T98 confirm time（轉發欄）" "$(jf time < /tmp/e2e-t98-confirm.json)" "$T96_S1T"
+    check "T98 confirm time（轉發欄）" "$(jf time < /tmp/e2e-t98-confirm.json)" "09:00"
+    check "T98 confirm provider_id（server 簽發）" "$(jf provider_id < /tmp/e2e-t98-confirm.json)" "mock-pract-TKW-0"
     T98_HE3=$(grep -oE '"has_error":(true|false)' /tmp/e2e-t98-confirm.json | head -1 | cut -d: -f2)
     check "T98 confirm has_error=false（v2 三屏同送規則）" "$T98_HE3" "false"
   else
     echo "    ❌ T98 submit_slot fail（=${OUT%%$'\n'*}）"; T98=1
   fi
-  # (d) submit_confirm → SUCCESS（params = nfm_reply 契約）
-  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_CONFIRM --data "{\"user_action\":\"submit_confirm\",\"date\":\"$T96_S1D\",\"provider_id\":\"$DOC_A\",\"time\":\"$T96_S1T\",\"name\":\"E2E T98\",\"notes\":\"e2e note\"}" 2>&1 || true)
+  # (d) submit_confirm → ★ claim（T4）→ SUCCESS（params 帶 holdId）+ FlowHoldEvent 落 DB
+  OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action data_exchange --screen SCR_CONFIRM --data "{\"user_action\":\"submit_confirm\",\"date\":\"$T98_D\",\"provider_id\":\"mock-pract-TKW-0\",\"time\":\"09:00\",\"name\":\"E2E T98\",\"notes\":\"e2e note\"}" 2>&1 || true)
   if stepx_parse "$OUT" /tmp/e2e-t98-success.json; then
     check "T98 submit_confirm → SUCCESS" "$(jf screen < /tmp/e2e-t98-success.json)" "SUCCESS"
-    check "T98 SUCCESS params.providerId" "$(jf providerId < /tmp/e2e-t98-success.json)" "$DOC_A"
-    check "T98 SUCCESS params.date" "$(jf date < /tmp/e2e-t98-success.json)" "$T96_S1D"
-    check "T98 SUCCESS params.time" "$(jf time < /tmp/e2e-t98-success.json)" "$T96_S1T"
+    check "T98 SUCCESS params.providerId" "$(jf providerId < /tmp/e2e-t98-success.json)" "mock-pract-TKW-0"
+    check "T98 SUCCESS params.date" "$(jf date < /tmp/e2e-t98-success.json)" "$T98_D"
+    check "T98 SUCCESS params.time" "$(jf time < /tmp/e2e-t98-success.json)" "09:00"
+    T98_HOLD=$(jf holdId < /tmp/e2e-t98-success.json)
+    [ -n "$T98_HOLD" ] && [ "$T98_HOLD" != "undefined" ] && pass "T98 SUCCESS params.holdId（claim 201）" || { echo "    ❌ T98 SUCCESS 冇 holdId（claim 未成功？）"; T98=1; }
+    T98_HEV=$(q "SELECT \"status\"||'|'||\"patientPhone\" v FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T98_TOK'" | jf v)
+    check "T98 FlowHoldEvent 落 DB（HELD + WA fallback 電話）" "$T98_HEV" "HELD|8526903${EPOCH}"
   else
     echo "    ❌ T98 submit_confirm fail（=${OUT%%$'\n'*}）"; T98=1
   fi
@@ -4129,10 +4137,13 @@ if t98_setup_pat "8526903${EPOCH}" "E2E T98"; then
   OUT=$(pnpm -s flow-client step --clinic TKW --conv "$T98_CONV" --token "$T98_TOK" --action SCREEN_DATE --provider "$DOC_A" 2>&1 || true)
   F_HTTP=$(printf '%s' "$OUT" | grep -oE 'HTTP=[0-9]+' | head -1 | cut -d= -f2)
   { [ "$F_HTTP" = "200" ] && printf '%s' "$OUT" | grep -qF "\"$T96_S1D\""; } || { echo "    ❌ T98 legacy SCREEN_DATE 迴歸（HTTP=${F_HTTP:-?}，dates 應含 $T96_S1D）"; T98=1; }
-  # cleanup（SUCCESS 無 nfm_reply → 無 BookingRequest）
+  # cleanup（T4：SUCCESS 後 nfm_reply 走 claimed 變體 → 無 BookingRequest；claim store + FlowHoldEvent 清零）
+  q "DELETE FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T98_TOK'" >/dev/null 2>&1
   q "DELETE FROM \"FlowSession\" WHERE \"flowToken\"='$T98_TOK'" >/dev/null 2>&1
+  q "DELETE FROM \"AuditLog\" WHERE action='FLOW_CLAIM'" >/dev/null 2>&1
+  rm -f .dev/workforce-mock-claims.json
   t98_pat_sweep "8526903${EPOCH}"
-  [ "$T98" = 0 ] && pass "T98 真 Flow v7.3 握手（三屏 → SUCCESS）+ 壞 token 401 + legacy 契約唔變" || { fail "T98 有項失敗（見上 ❌）"; R12=1; }
+  [ "$T98" = 0 ] && pass "T98 真 Flow v7.3 握手（T4 bookable 三屏 → claim → SUCCESS）+ 壞 token 401 + legacy 契約唔變" || { fail "T98 有項失敗（見上 ❌）"; R12=1; }
 else
   echo "    ❌ T98 setup fail（mock-inbound / flow token）"; T98=1; fail "T98 有項失敗（見上 ❌）"; R12=1
 fi
@@ -4275,6 +4286,178 @@ rm -f .dev/workforce-mock-fill.json .dev/workforce-mock-booked.json
 q "UPDATE \"AvailabilitySlot\" SET \"remainingCapacity\"=NULL" >/dev/null 2>&1
 
 [ "$R12" = 0 ] && pass "R12 真 Flow v7.3 + §D remainingCapacity e2e（T96-T100）" || fail "R12 有項失敗（見上 ❌）"
+
+# ══════════════ R13：providerslot T4 — Flow 三屏 claim（providerslot-20260830-T4）═══════════════
+#   T101 三屏 round-trip（bookable 源）+ claim@submit_confirm + FlowHoldEvent + 冪等 replay
+#        + 409 slot_taken → SCR_SLOT 重導 + patient_phone 空 → WA fallback + claimed nfm_reply 變體
+R13=0
+rm -f .dev/workforce-mock-claims.json
+# deterministic fixture（重現 client.ts mock 規則）：首個開診日 + 一個 base seatsFree=1 嘅 slot（409 目標）
+eval "$(node -e '
+function djb2(s){let h=5381;for(let i=0;i<s.length;i++){h=((h<<5)+h+s.charCodeAt(i))>>>0}return h}
+function pad(n){return String(n).padStart(2,"0")}
+const c="TKW";
+const d0=new Date(Date.now()+8*3600e3).toISOString().slice(0,10);
+let d=null,t=null,p=null;
+outer:
+for(let i=0;i<31;i++){
+  const day=new Date(Date.parse(d0+"T00:00:00Z")+i*86400e3).toISOString().slice(0,10);
+  if(djb2(c+"|"+day)%7===3) continue;
+  for(let pr=0;pr<2;pr++){
+    for(let s=9*60;s<13*60;s+=30){
+      if(1+(djb2(c+"|"+day+"|"+s+"|"+pr)%3)===1){ d=day; t=pad(Math.floor(s/60))+":"+pad(s%60); p="mock-pract-"+c+"-"+pr; break outer; }
+    }
+  }
+}
+if(!d){ console.log("T4_D=\"\""); process.exit(0); }
+console.log([`T4_D=${d}`,`T4_T=${t}`,`T4_PROV=${p}`,`T4_SLOTKEY=\"mock|${c}|${d}|${t}|${p}\"`].join("\n"));
+')"
+if [ -z "${T4_D:-}" ]; then
+  echo "    ❌ T4 fixture：30 日內搵唔到 base=1 slot（理論上不可能 — 496 個 slot 全 2..3）"
+  fail "T101 fixture fail"; R13=1
+else
+  # T4_B = 同日另一可約 slot（唔係 T4_T）；T4_C = 另一 provider 個 09:00（FLOW_TOKEN_REUSED 測試用）
+  T4_BT="09:30"; [ "$T4_T" = "09:30" ] && T4_BT="09:00"
+  T4_B="mock|TKW|$T4_D|$T4_BT|$T4_PROV"
+  T4_C="mock|TKW|$T4_D|09:00|mock-pract-TKW-1"
+  T101=0
+  echo "[R13] T101: 三屏 claim（deterministic：day=$T4_D slot=$T4_T prov=$T4_PROV base=1）..."
+  t101_setup_pat() { # $1=waId $2=name $3=VARPREFIX
+    local pat="$1" nm="$2" vp="$3" conv tok
+    pnpm -s mock-inbound message --clinic TKW --from "$pat" --text "預約" --wamid "wamid.E2E_T101_${pat}_${EPOCH}" --name "$nm" >/dev/null 2>&1 || return 1
+    wait_for "SELECT (c.\"lastInboundAt\" IS NOT NULL)::text ok FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" '[{"ok":"true"}]' 15 || return 1
+    conv=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" | jf id)
+    [ -n "$conv" ] || return 1
+    curl -s -o "/tmp/e2e-t101-flow-$vp.json" -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$conv/flows" -H 'Content-Type: application/json'
+    tok=$(jf flowToken < "/tmp/e2e-t101-flow-$vp.json")
+    [ -n "$tok" ] || return 1
+    printf -v "${vp}_CONV" '%s' "$conv"
+    printf -v "${vp}_TOK" '%s' "$tok"
+    return 0
+  }
+  if t101_setup_pat "8526911${EPOCH}" "E2E T101A" T101A && t101_setup_pat "8526912${EPOCH}" "E2E T101B" T101B; then
+    # ── P1：三屏 round-trip ──
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101A_TOK" --action INIT 2>&1 || true)
+    if stepx_parse "$OUT" /tmp/e2e-t101a-init.json; then
+      check "T101 P1 INIT → SCR_DATE" "$(jf screen < /tmp/e2e-t101a-init.json)" "SCR_DATE"
+      check "T101 P1 INIT date_min = 今日" "$(jf date_min < /tmp/e2e-t101a-init.json)" "$(node -e 'console.log(new Date(Date.now()+8*3600e3).toISOString().slice(0,10))')"
+      T101A_HE=$(grep -oE '"has_error":(true|false)' /tmp/e2e-t101a-init.json | head -1 | cut -d: -f2)
+      check "T101 P1 INIT has_error=false" "$T101A_HE" "false"
+    else echo "    ❌ T101 P1 INIT fail"; T101=1; R13=1; fi
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101A_TOK" --action data_exchange --screen SCR_DATE --data "{\"user_action\":\"submit_date\",\"date\":\"$T4_D\"}" 2>&1 || true)
+    if stepx_parse "$OUT" /tmp/e2e-t101a-slot.json; then
+      check "T101 P1 submit_date → SCR_SLOT" "$(jf screen < /tmp/e2e-t101a-slot.json)" "SCR_SLOT"
+      grep -qF "\"id\":\"$T4_PROV\"" /tmp/e2e-t101a-slot.json && pass "T101 P1 SCR_SLOT providers 含 $T4_PROV" || { echo "    ❌ T101 P1 providers 冇 $T4_PROV"; T101=1; R13=1; }
+      grep -qF "\"$T4_T\"" /tmp/e2e-t101a-slot.json && pass "T101 P1 SCR_SLOT times 含 $T4_T" || { echo "    ❌ T101 P1 times 冇 $T4_T"; T101=1; R13=1; }
+    else echo "    ❌ T101 P1 submit_date fail"; T101=1; R13=1; fi
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101A_TOK" --action data_exchange --screen SCR_SLOT --data "{\"user_action\":\"submit_slot\",\"date\":\"$T4_D\",\"provider_id\":\"$T4_PROV\",\"time\":\"$T4_T\"}" 2>&1 || true)
+    if stepx_parse "$OUT" /tmp/e2e-t101a-confirm.json; then
+      check "T101 P1 submit_slot → SCR_CONFIRM" "$(jf screen < /tmp/e2e-t101a-confirm.json)" "SCR_CONFIRM"
+      check "T101 P1 confirm provider_id" "$(jf provider_id < /tmp/e2e-t101a-confirm.json)" "$T4_PROV"
+      check "T101 P1 confirm profile_name" "$(jf profile_name < /tmp/e2e-t101a-confirm.json)" "E2E T101A"
+    else echo "    ❌ T101 P1 submit_slot fail"; T101=1; R13=1; fi
+    # ── P2：搶先都推到 SCR_CONFIRM（slot 仍係空）──
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101B_TOK" --action INIT 2>&1 || true)
+    stepx_parse "$OUT" /tmp/e2e-t101b-init.json || { echo "    ❌ T101 P2 INIT fail"; T101=1; R13=1; }
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101B_TOK" --action data_exchange --screen SCR_DATE --data "{\"user_action\":\"submit_date\",\"date\":\"$T4_D\"}" 2>&1 || true)
+    stepx_parse "$OUT" /tmp/e2e-t101b-slot.json || { echo "    ❌ T101 P2 submit_date fail"; T101=1; R13=1; }
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101B_TOK" --action data_exchange --screen SCR_SLOT --data "{\"user_action\":\"submit_slot\",\"date\":\"$T4_D\",\"provider_id\":\"$T4_PROV\",\"time\":\"$T4_T\"}" 2>&1 || true)
+    if stepx_parse "$OUT" /tmp/e2e-t101b-confirm.json; then
+      check "T101 P2（未佔位）submit_slot → SCR_CONFIRM" "$(jf screen < /tmp/e2e-t101b-confirm.json)" "SCR_CONFIRM"
+    else echo "    ❌ T101 P2 submit_slot fail（應該仲可進 confirm）"; T101=1; R13=1; fi
+    # ── P1：submit_confirm → ★ claim 201 → SUCCESS（patient_phone 空 → WA fallback）──
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101A_TOK" --action data_exchange --screen SCR_CONFIRM --data "{\"user_action\":\"submit_confirm\",\"date\":\"$T4_D\",\"provider_id\":\"$T4_PROV\",\"time\":\"$T4_T\",\"name\":\"E2E T101A\",\"patient_phone\":\"\",\"notes\":\"t101\"}" 2>&1 || true)
+    if stepx_parse "$OUT" /tmp/e2e-t101a-success.json; then
+      check "T101 P1 submit_confirm → SUCCESS" "$(jf screen < /tmp/e2e-t101a-success.json)" "SUCCESS"
+      T101_HOLD=$(jf holdId < /tmp/e2e-t101a-success.json)
+      [ -n "$T101_HOLD" ] && [ "$T101_HOLD" != "undefined" ] && pass "T101 P1 SUCCESS params.holdId" || { echo "    ❌ T101 P1 SUCCESS 冇 holdId"; T101=1; R13=1; }
+      T101_HEV=$(q "SELECT \"status\"||'|'||\"patientPhone\"||'|'||\"patientName\" v FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T101A_TOK'" | jf v)
+      check "T101 FlowHoldEvent（HELD + WA fallback 電話 + 病人名）" "$T101_HEV" "HELD|8526911${EPOCH}|E2E T101A"
+      # conversations API holdEvent（T3 預約卡「線上已佔」源；HoldEventView 唔帶 workforceHoldId — 用 patientPhone 唯一鍵斷言）
+      curl -s -b "$COOKIE_TKW" "$BASE/api/conversations" -o /tmp/e2e-t101-convlist.json
+      grep -qF "\"patientPhone\":\"8526911${EPOCH}\"" /tmp/e2e-t101-convlist.json && grep -qF "\"status\":\"HELD\"" /tmp/e2e-t101-convlist.json && pass "T101 conversations API 帶 holdEvent（HELD + patientPhone）" || { echo "    ❌ T101 conversations API 冇 holdEvent"; T101=1; R13=1; }
+    else echo "    ❌ T101 P1 submit_confirm fail"; T101=1; R13=1; fi
+    # ── P1 冪等 replay：同 token 同 slot 重複 submit_confirm → SUCCESS 再回，唔雙佔 ──
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101A_TOK" --action data_exchange --screen SCR_CONFIRM --data "{\"user_action\":\"submit_confirm\",\"date\":\"$T4_D\",\"provider_id\":\"$T4_PROV\",\"time\":\"$T4_T\",\"name\":\"E2E T101A\",\"patient_phone\":\"\",\"notes\":\"t101\"}" 2>&1 || true)
+    if stepx_parse "$OUT" /tmp/e2e-t101a-replay.json; then
+      check "T101 P1 冪等 replay → SUCCESS" "$(jf screen < /tmp/e2e-t101a-replay.json)" "SUCCESS"
+      check "T101 P1 replay holdId 同一" "$(jf holdId < /tmp/e2e-t101a-replay.json)" "$T101_HOLD"
+      T101_CNT=$(q "SELECT count(*)::text c FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T101A_TOK'" | jf c)
+      check "T101 FlowHoldEvent 仍 1 行（唔雙佔）" "$T101_CNT" "1"
+    else echo "    ❌ T101 P1 replay fail"; T101=1; R13=1; fi
+    # ── P2：submit_confirm → 409 等價 → SCR_SLOT 重導（$T4_T 已冇）──
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101B_TOK" --action data_exchange --screen SCR_CONFIRM --data "{\"user_action\":\"submit_confirm\",\"date\":\"$T4_D\",\"provider_id\":\"$T4_PROV\",\"time\":\"$T4_T\",\"name\":\"E2E T101B\",\"patient_phone\":\"\",\"notes\":\"\"}" 2>&1 || true)
+    if stepx_parse "$OUT" /tmp/e2e-t101b-409.json; then
+      check "T101 P2 submit_confirm → SCR_SLOT 重導" "$(jf screen < /tmp/e2e-t101b-409.json)" "SCR_SLOT"
+      T101B_HE=$(grep -oE '"has_error":(true|false)' /tmp/e2e-t101b-409.json | head -1 | cut -d: -f2)
+      check "T101 P2 重導 has_error=true" "$T101B_HE" "true"
+      grep -qE '"error_message":"[^\"]+' /tmp/e2e-t101b-409.json && pass "T101 P2 重導 error_message 非空" || { echo "    ❌ T101 P2 重導 error_message 空"; T101=1; R13=1; }
+      # 被佔組合（$T4_PROV,$T4_T）唔可再揀（times 係去重平铺 — 其他 provider 同時段仍會列，所以斷言組合拒收）
+      OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101B_TOK" --action data_exchange --screen SCR_SLOT --data "{\"user_action\":\"submit_slot\",\"date\":\"$T4_D\",\"provider_id\":\"$T4_PROV\",\"time\":\"$T4_T\"}" 2>&1 || true)
+      if stepx_parse "$OUT" /tmp/e2e-t101b-combo.json; then
+        T101B_COMBOK="$(jf screen < /tmp/e2e-t101b-combo.json)|$(grep -oE '"has_error":(true|false)' /tmp/e2e-t101b-combo.json | head -1 | cut -d: -f2)"
+        check "T101 P2 被佔組合再揀 → 留 SCR_SLOT + error" "$T101B_COMBOK" "SCR_SLOT|true"
+      else echo "    ❌ T101 P2 組合拒收 stepx fail"; T101=1; R13=1; fi
+      T101B_HEV=$(q "SELECT count(*)::text c FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T101B_TOK'" | jf c)
+      check "T101 P2 無 FlowHoldEvent（未佔位）" "$T101B_HEV" "0"
+    else echo "    ❌ T101 P2 submit_confirm fail（應該 200 + SCR_SLOT 重導）"; T101=1; R13=1; fi
+    # ── mock claim 直查：409 SLOT_TAKEN + 冪等 replay + FLOW_TOKEN_REUSED（client 層）──
+    cat > .dev/t101-claim-check.ts <<'T101TS'
+import { claimSlot, WorkforceApiError } from "@/lib/workforce/client";
+const [slotKey, p1Token, slotB, slotC] = process.argv.slice(2);
+async function main() {
+  // (a) 新 token 搶已佔 slot → 409 SLOT_TAKEN
+  try {
+    await claimSlot({ slotKey, patientWaId: "999000111", patientName: "X", flowToken: "t4-e2e-token-c" });
+    console.log("A-FAIL: 無 409");
+  } catch (e) {
+    console.log(e instanceof WorkforceApiError && e.status === 409 && e.code !== "FLOW_TOKEN_REUSED" ? "A-OK" : `A-FAIL: ${String(e)}`); // 同真 T1：slot_taken 409 無 code 欄
+  }
+  // (b) replay P1 token + 同 slot → 201 同 holdId（冪等唔雙佔）
+  try {
+    const r = await claimSlot({ slotKey, patientWaId: "8526911", patientName: "E2E T101A", flowToken: p1Token });
+    console.log(`B-${r ? "OK" : "FAIL"}: holdId=${r.holdId}`);
+  } catch (e) { console.log(`B-FAIL: ${String(e)}`); }
+  // (c) 新 token3 搶另一 slot → 201；再用 token3 搶第三 slot → 409 FLOW_TOKEN_REUSED
+  try {
+    const r = await claimSlot({ slotKey: slotB, patientWaId: "999000222", patientName: "Y", flowToken: "t4-e2e-token3" });
+    console.log(`C-${r ? "OK" : "FAIL"}`);
+  } catch (e) { console.log(`C-FAIL: ${String(e)}`); }
+  try {
+    await claimSlot({ slotKey: slotC, patientWaId: "999000222", patientName: "Y", flowToken: "t4-e2e-token3" });
+    console.log("D-FAIL: 無 409 REUSED");
+  } catch (e) {
+    console.log(e instanceof WorkforceApiError && e.status === 409 && e.code === "FLOW_TOKEN_REUSED" ? "D-OK" : `D-FAIL: ${String(e)}`);
+  }
+}
+main();
+T101TS
+    T101_CLAIM_OUT=$(WORKFORCE_MOCK=1 pnpm exec tsx .dev/t101-claim-check.ts "$T4_SLOTKEY" "$T101A_TOK" "$T4_B" "$T4_C" 2>&1 | grep -E '^[A-D]-' || true)
+    T101_B_HOLD=$(q "SELECT \"workforceHoldId\"::text w FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T101A_TOK'" | jf w)
+    grep -q "^A-OK$" <<< "$T101_CLAIM_OUT" && pass "T101 mock claim：已佔 slot 新 token → 409 SLOT_TAKEN" || { echo "    ❌ T101 (a)（=$(echo "$T101_CLAIM_OUT" | head -1)）"; T101=1; R13=1; }
+    grep -q "^B-OK: holdId=$T101_B_HOLD$" <<< "$T101_CLAIM_OUT" && pass "T101 mock claim：同 token 同 slot replay → 同 holdId（冪等）" || { echo "    ❌ T101 (b)（=$(echo "$T101_CLAIM_OUT" | sed -n 2p)）"; T101=1; R13=1; }
+    grep -q "^C-OK$" <<< "$T101_CLAIM_OUT" && pass "T101 mock claim：新 token 另一 slot → 201" || { echo "    ❌ T101 (c)"; T101=1; R13=1; }
+    grep -q "^D-OK$" <<< "$T101_CLAIM_OUT" && pass "T101 mock claim：同 token 第三 slot → 409 FLOW_TOKEN_REUSED" || { echo "    ❌ T101 (d)"; T101=1; R13=1; }
+    rm -f .dev/t101-claim-check.ts
+    # ── nfm_reply claimed 變體（--holdId）：唔建 BookingRequest + session COMPLETED ──
+    OUT=$(pnpm -s flow-client complete --clinic TKW --conv "$T101A_CONV" --token "$T101A_TOK" --provider "$T4_PROV" --providerName "mock 陳醫師" --date "$T4_D" --time "$T4_T" --wa-id "8526911${EPOCH}" --wamid "wamid.E2E_T101_CLAIM_${EPOCH}" --name "E2E T101A" --holdId "$T101_HOLD" 2>&1 || true)
+    echo "$OUT" | grep -q "OK wamid=" && pass "T101 nfm_reply claimed 變體 webhook OK" || { echo "    ❌ T101 nfm_reply fail（=${OUT%%$'\n'*}）"; T101=1; R13=1; }
+    wait_for "SELECT (\"status\"='COMPLETED')::text ok FROM \"FlowSession\" WHERE \"flowToken\"='$T101A_TOK'" '[{"ok":"true"}]' 10 && pass "T101 claimed nfm_reply → FlowSession COMPLETED" || { echo "    ❌ T101 FlowSession 未 COMPLETED"; T101=1; R13=1; }
+    T101_BR=$(q "SELECT count(*)::text c FROM \"BookingRequest\" WHERE \"conversationId\"='$T101A_CONV'" | jf c)
+    check "T101 claimed 變體唔建 BookingRequest" "$T101_BR" "0"
+    # ── cleanup ──
+    q "DELETE FROM \"FlowHoldEvent\" WHERE \"flowToken\" IN ('$T101A_TOK','$T101B_TOK')" >/dev/null 2>&1
+    q "DELETE FROM \"FlowSession\" WHERE \"flowToken\" IN ('$T101A_TOK','$T101B_TOK')" >/dev/null 2>&1
+    q "DELETE FROM \"AuditLog\" WHERE action='FLOW_CLAIM'" >/dev/null 2>&1
+    rm -f .dev/workforce-mock-claims.json
+    t98_pat_sweep "8526911${EPOCH}"
+    t98_pat_sweep "8526912${EPOCH}"
+    [ "$T101" = 0 ] && pass "T101 三屏 claim round-trip（409 重導 + 冪等 + WA fallback + claimed nfm_reply）" || fail "T101 有項失敗（見上 ❌）"
+  else
+    echo "    ❌ T101 patient setup fail"; T101=1; fail "T101 有項失敗（見上 ❌）"
+  fi
+fi
+[ "$R13" = 0 ] && pass "R13 providerslot T4 三屏 claim e2e（T101）" || fail "R13 有項失敗（見上 ❌）"
 
 # ── R11 summary ─────────────────────────────────────────────────────────────
 [ "$R11_FAIL" = 0 ] && pass "R11 輪一收尾 e2e（T93 Flow 回滾 / T94 週表頁 / T95 duty 卡刷新）" || fail "R11 有項失敗（見上 ❌）"

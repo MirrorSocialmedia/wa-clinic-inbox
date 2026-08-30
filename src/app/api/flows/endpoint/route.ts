@@ -21,17 +21,16 @@
  *     - 明文 = { action: SCREEN_PROVIDER|SCREEN_DATE|SCREEN_TIME, flow_token, providerId?, date? }
  *   response = { response_json:{ payload, iv, key_id } }，明文 = { action, data, data_count, note? }
  *
- * ══ 新 spec 三屏流（MD §B3 — stateless：每步 data_exchange payload 帶齊上下文）══
+ * ══ 新 spec 三屏流（MD §B3/T4 — stateless：每步 data_exchange payload 帶齊上下文）══
  *   INIT → SCR_DATE（date picker，min=今日 max=+30）
- *   SCR_DATE  submit_date     → 查 availability → SCR_SLOT（醫生 radio + 時段 radio，動態 options）
- *   SCR_SLOT  submit_slot     → 驗證 (provider,date,time) 組合 → SCR_CONFIRM（姓名預填 profileName + 備註）
- *   SCR_CONFIRM submit_confirm → 最終重驗 L2 → SUCCESS（params 入 nfm_reply → worker flow-reply.ts
- *     pipeline 照舊 — 三掣卡寫入路徑零改動；capacity 候選過濾 + submit 重驗 + checkClash 三層）
- *
- * 降級（switch MD §3）：
- * - degraded ∈ {null, STALE_SOURCE, STALE_CACHE} → 照出時段選項
- * - degraded = NONE（API fail + 無 L2 cache）→ 新 spec 回 error_message 留日期屏
- *   （純收需求 requirement 變體只行舊 canvas FLOW_REQ_*，本輪唔改）
+ *   SCR_DATE  submit_date     → workforce bookable-slots → SCR_SLOT（醫生 radio + 時段 radio，
+ *                              provider_id = workforce 簽發真 cuid；slotKey 不透明）
+ *   SCR_SLOT  submit_slot     → 驗證 (provider,date,time) 組合（bookable 源）→ SCR_CONFIRM
+ *   SCR_CONFIRM submit_confirm → ★ claim 時機（MD §3.2）：佔位硬保留（workforce ProviderHold）
+ *     → inbox FlowHoldEvent（T3 預約卡「線上已佔·等你入 Apricot」）→ SUCCESS（params 帶
+ *     holdId 自描述 → nfm_reply flow-reply claimed 變體：唔行 L2 precheck、唔建 BookingRequest）
+ *   409 slot_taken → 重拉最新 bookable → SCR_SLOT 重導（病人揀另一格）
+ *   降級：bookable API fail → 日期屏 error（同舊 NONE 語義）
  *
  * 加密（MD §8.2 樣板 — crypto.ts 原語同 Meta 官方 spec 全對齊）：
  *   RSA-OAEP(SHA-256) unwrap AES-128 key → AES-128-GCM（ciphertext‖tag）→ response IV bitwise-NOT 取反
@@ -55,21 +54,13 @@ import {
   screenProviders,
   screenDates,
   screenTimes,
-  dateOptionsFromSlots,
-  dateScreenData,
   slotScreenData,
   confirmScreenData,
+  bookableDateScreen,
   type ProviderOption,
 } from "@/lib/flows/screens";
-import {
-  syncWindow,
-  getSlots,
-  hkTodayStr,
-  hkDateOffset,
-  slotAvailable,
-  type SlotRow,
-} from "@/lib/availability";
-import { fmtDateFull } from "@/lib/booking/session-engine";
+import { syncWindow, getSlots, hkTodayStr, hkDateOffset } from "@/lib/availability";
+import { getBookableSlots, claimSlot, WorkforceApiError, type BookableDay, type BookableSlot } from "@/lib/workforce/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -117,27 +108,6 @@ function dateRangeError(date: string): string | null {
   const max = hkDateOffset(30);
   if (date < min || date > max) return "請揀今日至 30 日內嘅日期";
   return null;
-}
-
-/** 該日可用 slot 行（§D capacity filter — slotAvailable 統一 predicate）。 */
-function openRowsForDate(slots: SlotRow[] | null, date: string): SlotRow[] {
-  return (slots ?? []).filter((r) => r.date === date && slotAvailable(r));
-}
-
-/**
- * 由 (date, rows) 砌 SCR_SLOT data（doctor radio + time radio options）。
- * 零可用 slot → 回 null（caller 轉回 SCR_DATE + 該日無空檔 error）。
- */
-function buildSlotData(
-  date: string,
-  rows: SlotRow[],
-  providers: ProviderOption[],
-  error: string,
-): ReturnType<typeof slotScreenData> | null {
-  const openProviders = providers.filter((p) => rows.some((r) => r.providerApricotId === p.id));
-  const times = [...new Set(rows.map((r) => r.startTime))].sort();
-  if (openProviders.length === 0 || times.length === 0) return null;
-  return slotScreenData({ date, providers: openProviders, times, error });
 }
 
 export async function POST(req: NextRequest) {
@@ -241,19 +211,28 @@ export async function POST(req: NextRequest) {
     if (envelope === "prod") {
       if (!(NEW_ACTIONS as readonly string[]).includes(action)) return err(400, "bad_action");
 
-      // 每次 call 先經 getSlots()（四層降級鏈）確保 L2 新鮮（precheck 原則 — 病人揀親 = 真有空）
-      const slotRes = await getSlots(clinicId);
+      // T4：三屏全行 workforce bookable-slots（單一來源 — slotKey 不透明 server 簽發；
+      // MD §2：inbox 唔自行計算可約時段）。降級：API fail → bookableDays=null → 日期屏 error
+      const dateMin = hkTodayStr();
+      const dateMax = hkDateOffset(30);
+      let bookableDays: BookableDay[] | null = null;
+      try {
+        bookableDays = (await getBookableSlots(clinic.code, dateMin, dateMax)).days;
+      } catch (e) {
+        log.warn({ clinic: clinic.code, err: e instanceof Error ? e.name : "?" }, "flow endpoint: bookable-slots fail → 降級 NONE");
+      }
+      const sysDownMsg = "預約系統暫時唔到，請稍後再試";
 
-      // INIT（開 Flow）→ 日期屏（v2：dates[] = 30 日內有空檔日，Dropdown options）
+      // INIT（開 Flow）→ 日期屏（DatePicker min=今日 max=+30；dates[] = 可約日，e2e/兼容）
       if (action === "INIT") {
-        log.info({ clinic: clinic.code, degraded: slotRes.degraded, convId: conv.id }, "flow endpoint: INIT → SCR_DATE");
-        return prodResp(key16, reqIvB64, SCREEN_DATE, dateScreenData({ degraded: slotRes.degraded, dates: dateOptionsFromSlots(slotRes.slots) }));
+        log.info({ clinic: clinic.code, degraded: bookableDays === null ? "NONE" : null, convId: conv.id }, "flow endpoint: INIT → SCR_DATE");
+        return prodResp(key16, reqIvB64, SCREEN_DATE, bookableDateScreenData(bookableDays, dateMin, dateMax, bookableDays === null ? sysDownMsg : undefined));
       }
 
       // BACK（refresh_on_back=false → 正常唔會到；到咗就穩陣返日期屏重算）
       if (action === "BACK") {
         log.info({ clinic: clinic.code, screen: plain.screen, convId: conv.id }, "flow endpoint: BACK → SCR_DATE");
-        return prodResp(key16, reqIvB64, SCREEN_DATE, dateScreenData({ degraded: slotRes.degraded, dates: dateOptionsFromSlots(slotRes.slots) }));
+        return prodResp(key16, reqIvB64, SCREEN_DATE, bookableDateScreenData(bookableDays, dateMin, dateMax, bookableDays === null ? sysDownMsg : undefined));
       }
 
       // data_exchange — 由 data.user_action 分支（屏級意圖；唔用 "action" 名 — Meta 會 collision）
@@ -261,95 +240,148 @@ export async function POST(req: NextRequest) {
       const userAction = typeof d.user_action === "string" ? d.user_action : "";
       if (!userAction) return err(400, "bad_user_action");
 
-      // ── submit_date：日期 → 醫生/時段 options ──
+      // ── submit_date：日期 → 醫生/時段 options（bookable 源）──
       if (userAction === "submit_date") {
         const date = String(d.date ?? "");
         const rangeErr = dateRangeError(date);
-        if (rangeErr || slotRes.degraded === "NONE") {
-          const msg =
-            slotRes.degraded === "NONE"
-              ? "預約系統暫時唔到，請稍後再試"
-              : (rangeErr ?? "日期有誤，請重揀");
+        if (rangeErr || bookableDays === null) {
+          const msg = bookableDays === null ? sysDownMsg : (rangeErr ?? "日期有誤，請重揀");
           log.info({ clinic: clinic.code, date, error: msg, convId: conv.id }, "flow endpoint: submit_date → stay SCR_DATE");
-          return prodResp(key16, reqIvB64, SCREEN_DATE, {
-            ...dateScreenData({ degraded: slotRes.degraded, dates: dateOptionsFromSlots(slotRes.slots) }),
-            has_error: true,
-            error_message: msg,
-          });
+          return prodResp(key16, reqIvB64, SCREEN_DATE, bookableDateScreenData(bookableDays, dateMin, dateMax, msg));
         }
-        const rows = openRowsForDate(slotRes.slots, date);
-        const providers = await screenProviders(clinicId);
-        const slotData = buildSlotData(date, rows, providers, "");
-        if (!slotData) {
+        const day = bookableDays.find((x) => x.date === date);
+        if (!day || day.closed || day.slots.length === 0) {
           log.info({ clinic: clinic.code, date, convId: conv.id }, "flow endpoint: submit_date → 該日無空檔");
-          return prodResp(key16, reqIvB64, SCREEN_DATE, {
-            ...dateScreenData({ degraded: slotRes.degraded, dates: dateOptionsFromSlots(slotRes.slots) }),
-            has_error: true,
-            error_message: "呢日冇空檔，請揀其他日期",
-          });
+          return prodResp(key16, reqIvB64, SCREEN_DATE, bookableDateScreenData(bookableDays, dateMin, dateMax, "呢日冇空檔，請揀其他日期"));
         }
-        log.info({ clinic: clinic.code, date, providers: slotData.providers.length, times: slotData.times.length, degraded: slotRes.degraded, convId: conv.id }, "flow endpoint: submit_date → SCR_SLOT");
+        const slotData = bookableSlotData(date, day.slots);
+        log.info({ clinic: clinic.code, date, providers: slotData.providers.length, times: slotData.times.length, convId: conv.id }, "flow endpoint: submit_date → SCR_SLOT");
         return prodResp(key16, reqIvB64, SCREEN_SLOT, slotData);
       }
 
-      // ── submit_slot：醫生+時段 組合驗證 → 確認屏 ──
+      // ── submit_slot：醫生+時段 組合驗證（bookable 源）→ 確認屏 ──
       if (userAction === "submit_slot") {
         const date = String(d.date ?? "");
         const providerId = String(d.provider_id ?? "");
         const time = String(d.time ?? "");
-        const providers = await screenProviders(clinicId);
-        const provider = providers.find((p) => p.id === providerId);
-        const rangeErr = dateRangeError(date);
-        if (rangeErr || !provider || !TIME_RE.test(time) || slotRes.degraded === "NONE") {
-          const msg =
-            slotRes.degraded === "NONE"
-              ? "預約系統暫時唔到，請稍後再試"
-              : "資料有誤，請返回重揀";
+        const day = bookableDays !== null ? bookableDays.find((x) => x.date === date) : undefined;
+        const slot = day?.slots.find((s) => s.providerId === providerId && s.start === time);
+        if (dateRangeError(date) || bookableDays === null || !slot) {
+          const msg = bookableDays === null ? sysDownMsg : "資料有誤，請返回重揀";
           log.info({ clinic: clinic.code, date, providerId, error: msg, convId: conv.id }, "flow endpoint: submit_slot → error");
-          return slotErrorResp(clinicId, key16, reqIvB64, date, slotRes, msg);
-        }
-        const rows = openRowsForDate(slotRes.slots, date);
-        const slot = rows.find((r) => r.providerApricotId === providerId && r.startTime === time);
-        if (!slot) {
-          // 組合唔成立（該醫生呢個時間冇開 / 滿位）→ 留 SCR_SLOT 重揀
-          log.info({ clinic: clinic.code, date, providerId, time, convId: conv.id }, "flow endpoint: submit_slot → 組合唔成立，留 SCR_SLOT");
-          return slotErrorResp(clinicId, key16, reqIvB64, date, slotRes, "呢個時間該醫生冇開診，請揀其他時間");
+          return bookableSlotErrorResp(key16, reqIvB64, date, bookableDays, dateMin, dateMax, msg);
         }
         log.info({ clinic: clinic.code, date, providerId, time, convId: conv.id }, "flow endpoint: submit_slot → SCR_CONFIRM");
-        return prodResp(key16, reqIvB64, SCREEN_CONFIRM, confirmScreenData({ date, providerId, providerName: provider.name, time, profileName }));
+        return prodResp(key16, reqIvB64, SCREEN_CONFIRM, confirmScreenData({ date, providerId, providerName: slot.providerName, time, profileName }));
       }
 
-      // ── submit_confirm：最終重驗 L2 → SUCCESS（params 入 nfm_reply） ──
+      // ── submit_confirm：★ claim 時機（MD §3.2/§5.2）— 病人資料齊先佔位 → FlowHoldEvent → SUCCESS ──
+      //     冪等：claimSlot 內部由 flow_token 派生同一 claimToken（Meta 重試同 token 同 slot → 同 hold 唔雙佔）
       if (userAction === "submit_confirm") {
         const date = String(d.date ?? "");
         const providerId = String(d.provider_id ?? "");
         const time = String(d.time ?? "");
         const name = String(d.name ?? "").trim();
+        const patientPhoneInput = String(d.patient_phone ?? "").trim();
         const notes = String(d.notes ?? "").slice(0, 200);
-        const providers = await screenProviders(clinicId);
-        const provider = providers.find((p) => p.id === providerId);
-        const rangeErr = dateRangeError(date);
-        if (rangeErr || !provider || !TIME_RE.test(time) || !name || name.length > 40) {
+        // patient_phone 空 = 病人自己 WhatsApp 號碼（現有 booking 慣例）
+        const patientPhone = patientPhoneInput || contact?.waId || "";
+        // ★ Flow 級冪等（T4）：呢個 token 已 claim 過（HELD/IN_APRICOT）→ 直接重放 SUCCESS。
+        //   （自己個 hold 會計入 capacity → claim 後該 slot 會離開 bookable；冇呢步 replay 會被誤判「slot 冇咗」重導 SCR_SLOT，病人已約成功卻被要求重揀）
+        const existingHold = await prisma.flowHoldEvent.findUnique({ where: { flowToken: plain.flow_token! } });
+        if (existingHold && (existingHold.status === "HELD" || existingHold.status === "IN_APRICOT")) {
+          log.info({ clinic: clinic.code, date, providerId, time, holdId: existingHold.workforceHoldId, convId: conv.id }, "flow endpoint: submit_confirm → 冪等 replay（FlowHoldEvent active）");
+          return prodSuccess(key16, reqIvB64, {
+            flow_token: plain.flow_token,
+            providerId: existingHold.providerId,
+            providerName: existingHold.providerName,
+            date: existingHold.date,
+            time: minToHhmm(existingHold.startMin),
+            name: name || existingHold.patientName || "",
+            notes,
+            holdId: existingHold.workforceHoldId,
+          });
+        }
+        if (!name || name.length > 40 || patientPhone.length < 5 || patientPhone.length > 20 || !TIME_RE.test(time)) {
           log.info({ clinic: clinic.code, date, providerId, nameLen: name.length, error: "bad_payload", convId: conv.id }, "flow endpoint: submit_confirm → bad payload");
-          return confirmErrorResp(clinicId, key16, reqIvB64, date, providerId, time, profileName, "資料有誤，請返回重揀");
+          return confirmErrorRespBookable(key16, reqIvB64, bookableDays, date, providerId, time, profileName, "資料有誤，請返回重揀");
         }
-        // ★ 最終防線之一：L2 重驗（病人揀親 = 真有空）— capacity 候選過濾 + 呢度重驗 +
-        //   flow-reply precheck + 寫入時 checkClash（兩層唔合併，照舊）
-        const rows = openRowsForDate(slotRes.slots, date);
-        const slot = rows.find((r) => r.providerApricotId === providerId && r.startTime === time);
+        if (bookableDays === null) {
+          log.warn({ clinic: clinic.code, date, providerId, time, convId: conv.id }, "flow endpoint: submit_confirm → 系統唔到");
+          return confirmErrorRespBookable(key16, reqIvB64, bookableDays, date, providerId, time, profileName, sysDownMsg);
+        }
+        const day = bookableDays.find((x) => x.date === date);
+        const slot = day?.slots.find((s) => s.providerId === providerId && s.start === time);
         if (!slot) {
-          log.info({ clinic: clinic.code, date, providerId, time, convId: conv.id }, "flow endpoint: submit_confirm → slot 已滿，留 SCR_CONFIRM");
-          return confirmErrorResp(clinicId, key16, reqIvB64, date, providerId, time, profileName, "呢個時段剛好被人預約咗，請返回重揀");
+          // slot 已冇（中途被人佔走）→ 409 等價 → 重拉最新列表重導 SCR_SLOT
+          log.info({ clinic: clinic.code, date, providerId, time, convId: conv.id }, "flow endpoint: submit_confirm → slot missing → SCR_SLOT 重導");
+          return bookableSlotErrorResp(key16, reqIvB64, date, await refetchBookableDays(clinic.code, dateMin, dateMax), dateMin, dateMax, "呢個時段啱啱被人預約咗，請揀其他時間");
         }
-        log.info({ clinic: clinic.code, date, providerId, time, nameLen: name.length, notesLen: notes.length, convId: conv.id }, "flow endpoint: submit_confirm → SUCCESS");
+        let claim;
+        try {
+          claim = await claimSlot({ slotKey: slot.slotKey, patientWaId: patientPhone, patientName: name, flowToken: plain.flow_token! });
+        } catch (e) {
+          if (e instanceof WorkforceApiError && e.status === 409) {
+            if (e.code === "FLOW_TOKEN_REUSED") {
+              log.warn({ clinic: clinic.code, convId: conv.id }, "flow endpoint: submit_confirm → 409 flow_token_reused");
+              return confirmErrorRespBookable(key16, reqIvB64, bookableDays, date, providerId, time, profileName, "呢單預約已經確認過，請勿重複提交");
+            }
+            // 輸咗 race → 重拉最新列表重導（全列表比 409 body 嘅 alternatives 完整）。
+            // 注意：真 T1 slot_taken 409 body = { v:1, error:"slot_taken", alternatives } — 無 code 欄
+            // （contract 實錘 2026-08-31 CEO 核）→ 409 分支唔靠 code，除 FLOW_TOKEN_REUSED 外一律當 slot_taken
+            log.info({ clinic: clinic.code, date, providerId, time, code: e.code ?? "slot_taken", convId: conv.id }, "flow endpoint: submit_confirm → 409 slot_taken → SCR_SLOT 重導");
+            return bookableSlotErrorResp(key16, reqIvB64, date, await refetchBookableDays(clinic.code, dateMin, dateMax), dateMin, dateMax, "呢個時段啱啱被人預約咗，請揀其他時間");
+          }
+          log.warn({ clinic: clinic.code, date, providerId, time, err: e instanceof Error ? e.name : "?", convId: conv.id }, "flow endpoint: submit_confirm → claim fail");
+          return confirmErrorRespBookable(key16, reqIvB64, bookableDays, date, providerId, time, profileName, "預約系統出錯，請重試");
+        }
+        // claim 201 → FlowHoldEvent（T3 表 — 預約卡「線上已佔·等你入 Apricot」；flowToken 冪等 upsert）
+        const startMin = hhmmToMin(time);
+        await prisma.flowHoldEvent.upsert({
+          where: { flowToken: plain.flow_token! },
+          create: {
+            flowToken: plain.flow_token!,
+            workforceHoldId: claim.holdId,
+            clinicCode: clinic.code,
+            clinicId,
+            providerName: claim.providerName,
+            providerId,
+            date,
+            startMin,
+            endMin: startMin + 30,
+            status: "HELD",
+            patientName: name,
+            patientPhone,
+            notes: notes || null,
+            source: "whatsapp_flow",
+          },
+          update: {
+            // 冪等重放（Meta 重試）：唔覆病人資料，只對齊 holdId/狀態
+            workforceHoldId: claim.holdId,
+            status: "HELD",
+          },
+        });
+        await prisma.auditLog
+          .create({
+            data: {
+              staffId: null,
+              action: "FLOW_CLAIM",
+              entity: "FlowHoldEvent",
+              entityId: claim.holdId,
+              meta: { clinicCode: clinic.code, date, time, providerId } as object,
+            },
+          })
+          .catch(() => undefined);
+        log.info({ clinic: clinic.code, date, providerId, time, nameLen: name.length, convId: conv.id, holdId: claim.holdId }, "flow endpoint: submit_confirm → claim 201 → SUCCESS");
         return prodSuccess(key16, reqIvB64, {
           flow_token: plain.flow_token,
           providerId,
-          providerName: provider.name,
+          providerName: claim.providerName,
           date,
           time,
           name,
           notes,
+          holdId: claim.holdId, // T4 claimed 標記 — flow-reply 認自描述 params（唔行 L2 precheck / 唔建 BookingRequest）
         });
       }
 
@@ -444,48 +476,83 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ── 新 spec 錯誤重渲染（留原屏 + error_message） ─────────────────────────
+// ── 新 spec bookable helpers（T4 — SCR_SLOT options = bookable 該日 slots）─────────────
 
-async function slotErrorResp(
-  clinicId: string,
+/** 由該日 bookable slots 砌 SCR_SLOT data（醫生/時段去重；slotKey 唔出屏 — 提交時 server 重查）。 */
+function bookableSlotData(date: string, slots: BookableSlot[]): ReturnType<typeof slotScreenData> {
+  const providerMap = new Map<string, string>();
+  for (const s of slots) if (!providerMap.has(s.providerId)) providerMap.set(s.providerId, s.providerName);
+  const providers: ProviderOption[] = [...providerMap.entries()].map(([id, name]) => ({ id, name }));
+  const times = [...new Set(slots.map((s) => s.start))].sort();
+  return slotScreenData({ date, providers, times, error: undefined });
+}
+
+/** SCR_DATE data（bookable 源）：date picker min/max + 可約日 + error（v2 同送規則）。 */
+function bookableDateScreenData(days: BookableDay[] | null, dateMin: string, dateMax: string, error?: string) {
+  const openDates = days
+    ? [...new Set(days.filter((dy) => !dy.closed && dy.slots.length > 0).map((dy) => dy.date))].sort()
+    : [];
+  return bookableDateScreen({ dateMin, dateMax, openDates, error });
+}
+
+/** 409/資料有誤：用最新 bookable 重導 SCR_SLOT（該日已冇 slots → 跌返日期屏 + error）。 */
+function bookableSlotErrorResp(
   key16: Buffer,
   reqIvB64: string,
   date: string,
-  slotRes: Awaited<ReturnType<typeof getSlots>>,
+  days: BookableDay[] | null,
+  dateMin: string,
+  dateMax: string,
   msg: string,
-): Promise<NextResponse> {
-  // 穩陣：重算該屏 data（若該日已全滿 → 跌返日期屏）
-  if (!dateRangeError(date) && slotRes.degraded !== "NONE") {
-    const rows = openRowsForDate(slotRes.slots, date);
-    const providers = await screenProviders(clinicId);
-    const slotData = buildSlotData(date, rows, providers, msg);
-    if (slotData) return prodResp(key16, reqIvB64, SCREEN_SLOT, slotData);
+): NextResponse {
+  const day = !dateRangeError(date) && days !== null ? days.find((x) => x.date === date) : undefined;
+  if (day && !day.closed && day.slots.length > 0) {
+    return prodResp(key16, reqIvB64, SCREEN_SLOT, {
+      ...bookableSlotData(date, day.slots),
+      has_error: true,
+      error_message: msg,
+    });
   }
-  return prodResp(key16, reqIvB64, SCREEN_DATE, {
-    ...dateScreenData({ degraded: slotRes.degraded, dates: dateOptionsFromSlots(slotRes.slots) }),
-    has_error: true,
-    error_message: msg,
-  });
+  return prodResp(key16, reqIvB64, SCREEN_DATE, bookableDateScreenData(days, dateMin, dateMax, msg));
 }
 
-async function confirmErrorResp(
-  clinicId: string,
+/** SCR_CONFIRM 錯誤重渲染（bookable 源 — 醫生名由 bookable slots 查）。 */
+function confirmErrorRespBookable(
   key16: Buffer,
   reqIvB64: string,
+  days: BookableDay[] | null,
   date: string,
   providerId: string,
   time: string,
   profileName: string,
   msg: string,
-): Promise<NextResponse> {
-  const providers = await screenProviders(clinicId);
-  const provider = providers.find((p) => p.id === providerId);
+): NextResponse {
+  const day = days !== null ? days.find((x) => x.date === date) : undefined;
+  const slot = day?.slots.find((s) => s.providerId === providerId && s.start === time);
   return prodResp(
     key16,
     reqIvB64,
     SCREEN_CONFIRM,
-    confirmScreenData({ date, providerId, providerName: provider?.name ?? "（醫生）", time, profileName, error: msg }),
+    confirmScreenData({ date, providerId, providerName: slot?.providerName ?? "（醫生）", time, profileName, error: msg }),
   );
+}
+
+/** 409 後重拉最新 bookable（fail-soft → null = 跌日期屏）。 */
+async function refetchBookableDays(clinicCode: string, from: string, to: string): Promise<BookableDay[] | null> {
+  try {
+    return (await getBookableSlots(clinicCode, from, to)).days;
+  } catch {
+    return null;
+  }
+}
+
+function hhmmToMin(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function minToHhmm(min: number): string {
+  return `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 }
 
 /**

@@ -196,6 +196,8 @@ async function complete(): Promise<void> {
   // §D/cwi-r2：真 Flow 確認屏嘅新 params（姓名/備註）— flow-reply 會容納（extra 欄忽略，唔碎寫入路徑）
   if (opts.name) replyPayload.name = opts.name;
   if (opts.notes) replyPayload.notes = opts.notes;
+  // T4（providerslot-20260830）：claimed 變體 — submit_confirm 時已 claim；flow-reply 認 holdId 走 claimed 分支
+  if (opts.holdId) replyPayload.holdId = opts.holdId;
   const { payload, iv: payloadIv } = encryptGcm(aesKey, iv, replyPayload);
 
   const bizNumber = (clinic.waDisplayNumber ?? "").replace(/\D/g, "");

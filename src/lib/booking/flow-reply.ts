@@ -10,6 +10,9 @@
  * - 純收需求（資料源離線時 Flow 變體）：{ flow_token, providerId, providerName, date, timeOfDay }
  *   → 無 slot 可 precheck → BookingRequest(PENDING, precheckPassed=null, requestedTime=null, timeOfDay)
  *   （卡灰字「未經空檔核對（資料源離線）」— 員工照人手對醫生系統，工作流唔斷）
+ * - T4 claimed 變體（providerslot-20260830）：{ flow_token, ..., holdId } — submit_confirm 時已
+ *   claim（workforce ProviderHold + inbox FlowHoldEvent）→ 唔行 L2 precheck、唔建 BookingRequest（MD §5.3）；
+ *   只收 session（冪等）；預約卡生命週期 = FlowHoldEvent（T3 commit/release/sweep）
  * - 正常變體但 getSlots = NONE（源中途離線）：reject source_offline → 自動覆 + 重出 Flow（重出時轉純收需求 canvas）
  *
  * 冪等（MD 驗收）：
@@ -52,7 +55,7 @@ export interface NfmReplyInput {
 }
 
 export type FlowReplyOutcome =
-  | { status: "booked"; bookingId: string }
+  | { status: "booked"; bookingId?: string }
   | { status: "rescheduled"; oldApptId: string; newApptId: string }
   | { status: "duplicate"; reason: string }
   | { status: "rejected"; reason: string }
@@ -66,6 +69,8 @@ interface DecryptedReply {
   time?: string;
   /** 純收需求變體（資料源離線）：MORNING / AFTERNOON / EVENING */
   timeOfDay?: string;
+  /** T4 claimed 變體（providerslot-20260830）：submit_confirm 時已 claim 嘅 workforce holdId */
+  holdId?: string;
 }
 
 const TIME_OF_DAY_VALUES = ["MORNING", "AFTERNOON", "EVENING"] as const;
@@ -141,6 +146,27 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
   if (!conv || contact?.waId !== waId) {
     log.warn({ conversationId }, "flow-reply: wa_id mismatch");
     return { status: "rejected", reason: "wa_id_mismatch" };
+  }
+
+  // ★ T4 claimed 變體（providerslot-20260830）：params 帶 holdId = submit_confirm 時已佔位
+  //   （workforce ProviderHold + inbox FlowHoldEvent）→ 唔行 L2 precheck、唔建 BookingRequest
+  //   （MD §5.3：Flow 提交成功 = 位已佔）。只收 session（冪等：重複 Complete 上面 COMPLETED 檢查已 skip）。
+  if (reply.holdId !== undefined) {
+    // 改期 context 旗標：T4 claim 唔行原子 102+新單 → 清旗標（防下一單新預約被劫）+ log 俾 staff 核舊單
+    if (conv.reschedulingApptId && conv.pinnedPatientApricotId) {
+      await prisma.conversation
+        .update({ where: { id: conversationId }, data: { reschedulingApptId: null } })
+        .catch(() => undefined);
+      log.warn(
+        { conversationId, oldApptId: conv.reschedulingApptId },
+        "flow-reply: T4 claimed 喺改期 context — 旗標已清（舊單需 staff 手處理）"
+      );
+    }
+    await prisma.flowSession
+      .update({ where: { id: session.id }, data: { status: "COMPLETED", completedAt: new Date() } })
+      .catch(() => undefined);
+    log.info({ conversationId, clinicId, holdId: reply.holdId }, "flow-reply: T4 claimed 變體 — hold 已佔位，session COMPLETED");
+    return { status: "booked" };
   }
 
   // ★ booking-ui（E）：改期路徑判定（側欄〔改期〕設咗旗標）

@@ -15,6 +15,12 @@
  *   GET  /api/external/v1/patient-lookup?phoneHash=
  *   GET  /api/external/v1/appointments?phoneHash=&from=&to=
  *
+ * bookable-slots（providerslot-20260830 T1/T3/T4）：
+ *   GET  /api/external/v1/bookable-slots?clinicCode=&from=&to=（可約時段；slotKey 不透明簽發）
+ *   GET  /api/external/v1/bookable-slots/held?clinicCode=（HELD 清單；零病人 PII）
+ *   POST /api/external/v1/bookable-slots/claim（硬保留佔位；Idempotency-Key = claim token）
+ *   POST /api/external/v1/bookable-slots/claim/{holdId}/commit（HELD → IN_APRICOT；冪等）
+ *
  * zod parse = contract 執行點：response 過唔到 schema = 當 API fail（§3 降級鏈接住）。
  * z.object 預設 strip 唔識欄位 → 病人欄位（medicalHistory 等）物理上入唔到下游。
  *
@@ -28,6 +34,7 @@
  *      BOOKING_DEFAULT_VISIT_REASON_CODE（預設 visit reason；空 = 無預設，UI/staff 必揀）
  */
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import log from "@/lib/log";
@@ -204,6 +211,19 @@ const HoldCommitResponse = z.object({
 });
 export type HoldCommitResult = z.infer<typeof HoldCommitResponse>;
 
+// claim（MD 3.2 / providerslot T4）— 佔位硬保留：workforce 單交易重算 offerable → 插 hold。
+// 🔴 response 零病人回顯（只時段/醫生欄）；409 → WorkforceApiError(code=SLOT_TAKEN / FLOW_TOKEN_REUSED)。
+export const ClaimResponse = z.object({
+  v: z.literal(1),
+  holdId: z.string(),
+  start: z.string(),
+  end: z.string(),
+  date: z.string(),
+  providerName: z.string(),
+  expiresAt: z.string().nullable(),
+});
+export type ClaimResult = z.infer<typeof ClaimResponse>;
+
 // ── 錯誤類型（log 只 path+status）────────────────────────────────────────
 
 export class WorkforceApiError extends Error {
@@ -226,7 +246,13 @@ const WORKFORCE_TIMEOUT_MS = 3000;
  * real mode fetch：log 只 path + status（零 body）。
  * 4xx/5xx 時只 parse error body 嘅 `code` 欄（分類標籤，供路由分支）— body 本身唔入 log、唔洩傳。
  */
-async function wfFetch(method: "GET" | "POST" | "PUT", path: string, params: Record<string, string>, body?: unknown): Promise<unknown> {
+async function wfFetch(
+  method: "GET" | "POST" | "PUT",
+  path: string,
+  params: Record<string, string>,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<unknown> {
   const url = new URL(path, process.env.WORKFORCE_API_URL); // http://127.0.0.1:<port>
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
@@ -237,6 +263,7 @@ async function wfFetch(method: "GET" | "POST" | "PUT", path: string, params: Rec
       headers: {
         "x-api-key": process.env.WORKFORCE_API_KEY ?? "",
         "content-type": "application/json",
+        ...extraHeaders,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(WORKFORCE_TIMEOUT_MS),
@@ -267,9 +294,15 @@ async function wfGet(path: string, params: Record<string, string>) {
   return wfFetch("GET", path, params);
 }
 
-async function wfSend(method: "POST" | "PUT", path: string, params: Record<string, string>, body?: unknown) {
+async function wfSend(
+  method: "POST" | "PUT",
+  path: string,
+  params: Record<string, string>,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+) {
   if (process.env.WORKFORCE_MOCK === "1") return mockFixture(path, params, method, body); // §4
-  return wfFetch(method, path, params, body);
+  return wfFetch(method, path, params, body, extraHeaders);
 }
 
 /** test-only 出入口：mock 模式下直接打 workforce 端驗證（e.g. status 白名單）— 本 repo 測試用 */
@@ -451,6 +484,46 @@ export async function commitHold(holdId: string, apricotRef?: string): Promise<H
 }
 
 /**
+ * claim（MD 3.2 / providerslot T4）— 佔位硬保留（Flow 三屏 submit_confirm 內 call）。
+ * - 冪等：Idempotency-Key = claim token（T1 契約）— Meta 重試同 token 同 slot → 同 holdId（唔佔兩個位）
+ * - 409 slot_taken（真 T1 body 無 code 欄）/ 409 flow_token_reused（code=FLOW_TOKEN_REUSED；同 token 唔同 slot）→ WorkforceApiError；
+ *   flow 端收 409 後重拉 bookable-slots 重導 SCR_SLOT（全列表比 409 body 嘅 alternatives 完整）
+ * - 🔴 response 零 PII 回顯
+ */
+export async function claimSlot(p: {
+  slotKey: string;
+  patientWaId: string;
+  patientName?: string | null;
+  /** inbox flow_token（HS256 JWT）— 內部派生 64hex claim token（T1 上限 128 字元；JWT ~215） */
+  flowToken: string;
+}): Promise<ClaimResult> {
+  const path = "/api/external/v1/bookable-slots/claim";
+  const claimToken = deriveClaimToken(p.flowToken);
+  const raw = await wfSend(
+    "POST",
+    path,
+    {},
+    {
+      v: 1,
+      slotKey: p.slotKey,
+      patient: { waId: p.patientWaId, ...(p.patientName ? { name: p.patientName } : {}) },
+      source: "whatsapp_flow",
+      flowToken: claimToken,
+    },
+    { "idempotency-key": claimToken },
+  );
+  return ClaimResponse.parse(raw);
+}
+
+/**
+ * flow_token（HS256 JWT ~215 字元）→ 64 字元穩定 hash（T1 flowToken 上限 8-128 字元）。
+ * 同一 JWT → 同一派生值（冪等語義不變）；不同對話 / 不同 flow → 唔同。
+ */
+export function deriveClaimToken(flowToken: string): string {
+  return createHash("sha256").update(flowToken).digest("hex");
+}
+
+/**
  * 預設 visit reason（env BOOKING_DEFAULT_VISIT_REASON_CODE）。
  * TODO（cwi-bkui-20260823-a1）：0010 定 0021 — 老細上線前拍板後寫入 .env（現留空 = 無預設）。
  * 空 = null（UI 唔設 preselect；create route 两边都冇 → 400 提示）。
@@ -494,6 +567,8 @@ export const MOCK_NEW_PATIENT_FLAG = ".dev/workforce-mock-newpatient.json";
 export const MOCK_SLOT_TAKEN_FLAG = ".dev/workforce-mock-slot-taken.json";
 export const MOCK_HELD_FLAG = ".dev/workforce-mock-held.json";
 export const MOCK_PATIENTS_FILE = ".dev/workforce-mock-patients.json";
+// T4：mock claim hold store（決定性；零 PII；e2e 完清檔）
+export const MOCK_CLAIMS_FILE = ".dev/workforce-mock-claims.json";
 // §D（cwi-r2）：mock booking store（create 後 capacity 遞減 / remove 還原）— 決定性，e2e cleanup 清檔
 export const MOCK_BOOKED_FILE = ".dev/workforce-mock-booked.json";
 const FIXTURE_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-availability.json");
@@ -665,6 +740,10 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
     return mockBookableSlots(params);
   }
 
+  if (path === "/api/external/v1/bookable-slots/claim" && method === "POST") {
+    return mockClaim(body);
+  }
+
   if (path === "/api/external/v1/bookable-slots/held") {
     // 預設空；.dev/workforce-mock-held.json = runtime 覆蓋（截圖/e2e 控制，唔入 git）
     return { v: 1, generatedAt: new Date().toISOString(), holdTimeoutHours: 24, holds: readMockHolds() };
@@ -672,6 +751,9 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
 
   const holdCommitM = path.match(/^\/api\/external\/v1\/bookable-slots\/claim\/([^/]+)\/commit$/);
   if (holdCommitM && method === "POST") {
+    // T4：claim store 同步推進（HELD → IN_APRICOT）— held mock / hold-sweep 跟狀態；
+    // 靜態 flag file 嘅 holdId（T3 截圖 fixture）唔喺 store → no-op（行為唔變）
+    markClaimCommitted(decodeURIComponent(holdCommitM[1]));
     return { v: 1, holdId: decodeURIComponent(holdCommitM[1]), status: "IN_APRICOT" as const, committedAt: new Date().toISOString() };
   }
 
@@ -882,7 +964,7 @@ function mockAppointments(params: Record<string, string>): unknown {
 // ── bookable-slots mock（providerslot-20260830 T3 — 決定性；shape = contract）──
 
 /** .dev/workforce-mock-held.json → HeldItem[]（截圖/e2e 控制；缺檔 = 空）。 */
-function readMockHolds(): HeldItem[] {
+function readStaticHolds(): HeldItem[] {
   try {
     const parsed = JSON.parse(readFileSync(path.resolve(process.cwd(), MOCK_HELD_FLAG), "utf8"));
     const arr = Array.isArray(parsed) ? parsed : [parsed];
@@ -901,8 +983,139 @@ function readMockHolds(): HeldItem[] {
   }
 }
 
+/** T4：claim store 條目 → HeldItem[]（HELD/IN_APRICOT；零 PII — 無病人欄）。 */
+function claimStoreHolds(): HeldItem[] {
+  const now = Date.now();
+  return readClaimStore().map((e) => ({
+    holdId: e.holdId,
+    date: e.date,
+    startMin: e.startMin,
+    endMin: e.endMin,
+    providerId: e.providerId,
+    providerName: e.providerName,
+    status: e.status,
+    source: "whatsapp_flow",
+    createdAt: e.createdAt,
+    ageHours: Math.max(0, (now - Date.parse(e.createdAt)) / 3600e3),
+    appointmentPast: false,
+  }));
+}
+
+/** held mock = 靜態控制檔 + T4 claim store（holdId 去重）。 */
+function readMockHolds(): HeldItem[] {
+  const all = [...readStaticHolds(), ...claimStoreHolds()];
+  const seen = new Set<string>();
+  return all.filter((h) => (seen.has(h.holdId) ? false : (seen.add(h.holdId), true)));
+}
+
 /** 決定性 mock bookable-slots：兩醫生（mock-pract-*）、09:00–13:00 offerable、
- *  休診日 djb2(clinic+date)%7===3、seatsFree 1..capacity（djb2 派生）。 */
+ *  休診日 djb2(clinic+date)%7===3、seatsFree 1..capacity（djb2 派生）。
+ *  T4：扣去 claim hold 已佔嘅 seat（MD §4：HELD 立即由可約計算扣除；seatsFree 歸 0 → 唔出）。 */
+
+const MOCK_CAPACITY = 3;
+const MOCK_START_MIN = 9 * 60;
+const MOCK_END_MIN = 13 * 60;
+const MOCK_PROVIDER_NAMES = ["mock 陳醫師", "mock 李醫師"];
+
+function hhmmToMin(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+/** T4：mock claim hold store（file = 跨 request 持久；零 PII；e2e 完清檔）。 */
+interface MockClaimEntry {
+  holdId: string;
+  flowToken: string;
+  slotKey: string;
+  clinicCode: string;
+  providerId: string;
+  providerName: string;
+  date: string;
+  startMin: number;
+  endMin: number;
+  status: "HELD" | "IN_APRICOT";
+  createdAt: string;
+}
+
+function readClaimStore(): MockClaimEntry[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path.resolve(process.cwd(), MOCK_CLAIMS_FILE), "utf8"));
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (e) =>
+            e &&
+            typeof e.holdId === "string" &&
+            typeof e.flowToken === "string" &&
+            typeof e.slotKey === "string" &&
+            typeof e.startMin === "number" &&
+            (e.status === "HELD" || e.status === "IN_APRICOT")
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeClaimStore(entries: MockClaimEntry[]): void {
+  try {
+    writeFileSync(path.resolve(process.cwd(), MOCK_CLAIMS_FILE), JSON.stringify(entries, null, 1));
+  } catch {
+    /* best-effort — 寫唔到 = hold 丟（e2e 斷言會 red） */
+  }
+}
+
+/** commit（T4）：store 入該 hold → HELD→IN_APRICOT（唔喺 store = 靜態 fixture → no-op）。 */
+function markClaimCommitted(holdId: string): void {
+  const store = readClaimStore();
+  const hit = store.find((e) => e.holdId === holdId);
+  if (hit && hit.status === "HELD") {
+    hit.status = "IN_APRICOT";
+    writeClaimStore(store);
+  }
+}
+
+/** 該 slot 活躍 hold 數（HELD/IN_APRICOT 都佔位 — 真 T1：holds 入 concurrency 重算）。 */
+function holdCountAt(clinicCode: string, providerId: string, date: string, startMin: number): number {
+  return readClaimStore().filter(
+    (e) => e.clinicCode === clinicCode && e.providerId === providerId && e.date === date && e.startMin === startMin
+  ).length;
+}
+
+/** 該日 base slots（hash seatsFree、未扣 hold）— bookable-slots mock 同 claim mock 共用。 */
+function mockBaseDay(clinicCode: string, date: string): { closed: boolean; slots: BookableSlot[] } {
+  const closed = djb2(`${clinicCode}|${date}`) % 7 === 3;
+  const slots: BookableSlot[] = [];
+  if (!closed) {
+    for (let p = 0; p < MOCK_PROVIDER_NAMES.length; p++) {
+      const providerId = `mock-pract-${clinicCode}-${p}`;
+      for (let s = MOCK_START_MIN; s < MOCK_END_MIN; s += 30) {
+        const seatsFree = 1 + (djb2(`${clinicCode}|${date}|${s}|${p}`) % MOCK_CAPACITY);
+        slots.push({
+          start: minToHHmm(s),
+          end: minToHHmm(s + 30),
+          providerId,
+          providerName: MOCK_PROVIDER_NAMES[p],
+          seatsFree,
+          slotKey: `mock|${clinicCode}|${date}|${minToHHmm(s)}|${providerId}`,
+        });
+      }
+    }
+  }
+  slots.sort((a, b) => a.start.localeCompare(b.start) || a.providerName.localeCompare(b.providerName));
+  return { closed, slots };
+}
+
+/** T4：effective offerable = base − 活躍 holds（seatsFree 歸 0 → 唔出，MD §4）。 */
+function mockDaySlots(clinicCode: string, date: string): BookableSlot[] {
+  const { slots } = mockBaseDay(clinicCode, date);
+  return slots
+    .map((s) => {
+      const eff = s.seatsFree - holdCountAt(clinicCode, s.providerId, date, hhmmToMin(s.start));
+      return eff > 0 ? { ...s, seatsFree: eff } : null;
+    })
+    .filter((s): s is BookableSlot => s !== null);
+}
+
 function mockBookableSlots(params: Record<string, string>): unknown {
   const reqPath = "/api/external/v1/bookable-slots";
   const clinicCode = params.clinicCode ?? "";
@@ -911,43 +1124,105 @@ function mockBookableSlots(params: Record<string, string>): unknown {
   if (!clinicCode || !MOCK_DATE_RE.test(from) || !MOCK_DATE_RE.test(to)) {
     throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
   }
-  const capacity = 3;
-  const startMin = 9 * 60;
-  const endMin = 13 * 60;
   const days: BookableDay[] = [];
   let dayGuard = 0;
   for (let d = from; d <= to; d = addDaysStr(d, 1)) {
     // 防禦：日期循環不終止 = 上層 bug（2026-08-30 實錘：+08:00 解析令 d 永不前進 → 8GB OOM）— fail fast 唔好死循環
     if (++dayGuard > 40) throw new WorkforceApiError(500, reqPath, "MOCK_DATE_LOOP");
-    const closed = djb2(`${clinicCode}|${d}`) % 7 === 3;
-    const slots: BookableSlot[] = [];
-    if (!closed) {
-      for (let p = 0; p < 2; p++) {
-        const providerId = `mock-pract-${clinicCode}-${p}`;
-        for (let s = startMin; s < endMin; s += 30) {
-          const seatsFree = 1 + (djb2(`${clinicCode}|${d}|${s}|${p}`) % capacity);
-          slots.push({
-            start: minToHHmm(s),
-            end: minToHHmm(s + 30),
-            providerId,
-            providerName: p === 0 ? "mock 陳醫師" : "mock 李醫師",
-            seatsFree,
-            slotKey: `mock|${clinicCode}|${d}|${minToHHmm(s)}|${providerId}`,
-          });
-        }
-      }
-    }
-    slots.sort((a, b) => a.start.localeCompare(b.start) || a.providerName.localeCompare(b.providerName));
+    const { closed } = mockBaseDay(clinicCode, d);
+    const slots = mockDaySlots(clinicCode, d);
     days.push({ date: d, closed, offerableCount: slots.length, slots });
   }
   log.info({ reqPath, clinic: clinicCode, days: days.length, mock: true, status: 200 }, "workforce MOCK: bookable-slots");
   return {
     v: 1,
     unitMin: 30,
-    capacityPerProvider: capacity,
+    capacityPerProvider: MOCK_CAPACITY,
     leadTimeMin: 60,
     generatedAt: new Date().toISOString(),
     days,
+  };
+}
+
+// ── T4：mock claim（決定性 — 冪等 by flowToken + 409 slot_taken；零 PII 落 store）──
+
+const MOCK_SLOTKEY_RE = /^mock\|([^|]+)\|(\d{4}-\d{2}-\d{2})\|(\d{2}:\d{2})\|([^|]+)$/;
+const MOCK_CLAIM_SOURCES = new Set(["whatsapp_flow", "staff"]);
+
+function mockClaim(bodyIn: unknown): unknown {
+  const reqPath = "/api/external/v1/bookable-slots/claim";
+  const b = (bodyIn ?? {}) as Record<string, unknown>;
+  if (b.v !== 1 || typeof b.slotKey !== "string" || b.slotKey.length < 8 || b.slotKey.length > 512) {
+    throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  }
+  const p = b.patient as { waId?: unknown } | null | undefined;
+  if (typeof p !== "object" || p === null || Array.isArray(p) || typeof p.waId !== "string") {
+    throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  }
+  const waId = p.waId.trim();
+  if (waId.length < 5 || waId.length > 20) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  if (typeof b.source !== "string" || !MOCK_CLAIM_SOURCES.has(b.source)) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  const flowToken = typeof b.flowToken === "string" ? b.flowToken.trim() : "";
+  if (flowToken.length < 8 || flowToken.length > 128) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+
+  const m = MOCK_SLOTKEY_RE.exec(b.slotKey);
+  if (!m) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  const [, clinicCode, date, startHHmm, providerId] = m;
+  const startMin = hhmmToMin(startHHmm);
+  const endMin = startMin + 30;
+  const base = mockBaseDay(clinicCode, date);
+  const baseSlot = base.slots.find((s) => s.providerId === providerId && s.start === startHHmm);
+  // 休診日 / 該醫生冇開呢個時 = 唔可 claim（同真 T1 唔 offerable → slot_taken）
+  if (!baseSlot) throw new WorkforceApiError(409, reqPath); // 同真 T1：slot_taken 409 body 無 code 欄
+
+  const store = readClaimStore();
+
+  // 1) 冪等：同 flowToken（真 T1：flowToken @unique — 同 token 同 slot → 同 hold；唔同 slot → FLOW_TOKEN_REUSED）
+  const same = store.find((e) => e.flowToken === flowToken);
+  if (same) {
+    if (same.slotKey === b.slotKey) {
+      log.info({ reqPath, mock: true, status: 201 }, "workforce MOCK: claim idempotent replay（同 token 同 slot）");
+      return mockClaimOk(same);
+    }
+    log.info({ reqPath, mock: true, status: 409 }, "workforce MOCK: claim FLOW_TOKEN_REUSED");
+    throw new WorkforceApiError(409, reqPath, "FLOW_TOKEN_REUSED");
+  }
+
+  // 2) slot  contention：base seatsFree − 活躍 holds ≥ 1 先收（真 T1：交易內重算 offerable，concurrency < capacity）
+  if (baseSlot.seatsFree - holdCountAt(clinicCode, providerId, date, startMin) < 1) {
+    log.info({ reqPath, mock: true, status: 409 }, "workforce MOCK: claim SLOT_TAKEN");
+    throw new WorkforceApiError(409, reqPath); // 同真 T1：slot_taken 409 body 無 code 欄
+  }
+
+  // 3) 落 hold（holdId = slotKey djb2 決定性 — 一 slot 一 hold，重放穩定；🔴 零病人資料入 store）
+  const entry: MockClaimEntry = {
+    holdId: `mock-hold-${djb2(b.slotKey).toString(16).padStart(8, "0")}`,
+    flowToken,
+    slotKey: b.slotKey,
+    clinicCode,
+    providerId,
+    providerName: baseSlot.providerName,
+    date,
+    startMin,
+    endMin,
+    status: "HELD",
+    createdAt: new Date().toISOString(),
+  };
+  writeClaimStore([...store, entry]);
+  log.info({ reqPath, clinic: clinicCode, date, start: startHHmm, provider: providerId, mock: true, status: 201 }, "workforce MOCK: claim created");
+  return mockClaimOk(entry);
+}
+
+/** 201 response（同真 T1 shape — 🔴 零病人資料）。 */
+function mockClaimOk(e: MockClaimEntry): unknown {
+  return {
+    v: 1,
+    holdId: e.holdId,
+    start: minToHHmm(e.startMin),
+    end: minToHHmm(e.endMin),
+    date: e.date,
+    providerName: e.providerName,
+    expiresAt: null,
   };
 }
 
