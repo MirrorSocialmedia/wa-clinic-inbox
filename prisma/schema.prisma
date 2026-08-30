@@ -381,6 +381,36 @@ model FlowSession {
   @@index([messageId])
 }
 
+// providerslot-20260830 T3：Flow 硬保留 hold 事件（本地鏡像 — 給預約卡渲染 + /admin 警報）。
+// ★ PII 分層：workforce 端 ProviderHold 零病人資料（external held API 只出 provider 層）；
+//   病人資料（patientName/patientPhone/notes）只落呢張本地表 — 前台卡睇到，警報表唔 join。
+// status 狀態機：HELD（claim 201 後）→ IN_APRICOT（workforce 端已 commit，sweep 同步落嚟）
+//   或 COMMITTED（inbox staff 撳「已入 Apricot · 完成」→ call workforce commit 成功）；
+//   RELEASED/EXPIRED = 終態（workforce 放開 / 預約時間已過 / sweep 對返發現消失）。
+// patientPhone = 病人 WA 號（Contact.waId join 點 — 卡渲染用）。
+model FlowHoldEvent {
+  id              String    @id @default(cuid())
+  flowToken       String    @unique             // 冪等（Meta 重試 / T4 submit_confirm 重放）
+  workforceHoldId String?                           // workforce ProviderHold.id（hold_01J...）
+  clinicCode      String                            // workforce clinic code（shortName）
+  clinicId        String?                           // inbox Clinic.id（scope 用；null = 搵唔到店）
+  providerName    String
+  providerId      String?                           // workforce provider id（對 held API 用）
+  date            String                            // YYYY-MM-DD（HK 日界）
+  startMin        Int                               // 0-1410（30m 格）
+  endMin          Int                               // 30m 格 = startMin+30
+  status          String    @default("HELD")       // HELD | IN_APRICOT | COMMITTED | RELEASED | EXPIRED
+  patientName     String?
+  patientPhone    String                            // 病人 WA 號（= Contact.waId）
+  notes           String?
+  source          String    @default("whatsapp_flow")
+  committedAt     DateTime? @db.Timestamptz
+  createdAt       DateTime  @db.Timestamptz @default(now())
+  updatedAt       DateTime  @db.Timestamptz @updatedAt
+  @@index([patientPhone, status])
+  @@index([clinicCode, status])
+}
+
 model AvailabilitySlot {                       // workforce API 嘅 L2 cache（switch 後來源 = clinic-workforce /api/external/v1/availability）
                                                // ★ 只存時段佔用，零病人資料（contract zod schema 已 strip 唔識欄位）
   id                String   @id @default(cuid())

@@ -21,6 +21,7 @@ import type { ConversationItem, DraftInfo, MessageItem, NoteReceipt, StaffInfo }
 import { noteTickState } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 import { BookingCard } from "./booking-card";
+import { HoldCard } from "./hold-card";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -546,8 +547,11 @@ export function ChatPane(p: Props) {
 
       {/* composer 區 */}
       <div className="shrink-0 bg-panel border-t border-line p-3">
-        {/* Phase 3：預約卡 / 發 Flow 提示 — ★ booking-ui（D）：兩態卡（PENDING 綠邊 / CONFIRMED 撤銷倒數） */}
-        {c.pendingBooking ? (
+        {/* Phase 3：預約卡 / 發 Flow 提示 — ★ booking-ui（D）：兩態卡（PENDING 綠邊 / CONFIRMED 撤銷倒數）
+            providerslot-20260830 T3：hold 卡（HELD/COMMITTED）— 有 hold 就睇 hold 卡（狀態機後繼態） */}
+        {c.holdEvent ? (
+          <HoldCard hold={c.holdEvent} locked={locked} onActionDone={() => p.onBookingActionDone?.()} />
+        ) : c.pendingBooking ? (
           <BookingCard
             conversation={c}
             booking={c.pendingBooking}

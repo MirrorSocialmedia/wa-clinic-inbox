@@ -220,6 +220,7 @@ export function InboxClient({
           aiSummary: existing?.aiSummary ?? null,
           contact: e.contact ?? existing?.contact ?? null,
           pendingBooking: existing?.pendingBooking ?? null,
+          holdEvent: existing?.holdEvent ?? null,
           window: windowFromLastInbound(
             isOut ? (existing?.lastInboundAt ?? null) : (e.conversation.lastInboundAt ?? null)
           ),
@@ -1160,6 +1161,7 @@ export function InboxClient({
             aiSummary: null,
             contact: { id: hit.id, waId: hit.waId, profileName: hit.profileName, labels: hit.labels },
             pendingBooking: null,
+            holdEvent: null,
             window: { open: false, remainingMs: 0, remainingHours: 0, tone: "red" },
             preview: "（未開始對話）",
           };

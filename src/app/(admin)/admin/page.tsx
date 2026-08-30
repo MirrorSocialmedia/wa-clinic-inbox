@@ -3,6 +3,7 @@ import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
 import { relTime } from "@/components/inbox/time";
 import { AlertsPanel, type AlertItem } from "./alerts-panel";
+import { HeldAlertsPanel } from "./held-alerts-panel";
 import { TotpCard } from "./totp-card";
 
 /**
@@ -275,6 +276,16 @@ export default async function AdminOverviewPage() {
           <span className="text-xs text-t2">health-check 每 5 分鐘 · quality-check 每日 · 恢復自動 resolve</span>
         </div>
         <AlertsPanel alerts={alertItems} />
+      </section>
+
+      {/* ── providerslot-20260830 T3：線上已佔（HELD）監看 — HELD >12h MEDIUM / >24h HIGH（MD §六）──
+          零病人 PII（workforce held API 只出 provider 層）— 病人資料只喺前台預約卡 ── */}
+      <section className="bg-panel rounded-[26px] border border-line p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-[18px] font-normal text-t1">線上已佔（HELD）監看</h2>
+          <span className="text-xs text-t2">hold-sweep 每 5 分鐘 · 逾時自動落警報行</span>
+        </div>
+        <HeldAlertsPanel />
       </section>
 
       {/* ── Phase 4：各號 quality_rating（被 ban 前哨指標 — MD §9.3） ── */}

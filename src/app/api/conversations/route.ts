@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { requireAuth, clinicScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
+import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
 
 /**
  * GET /api/conversations?clinicId=&status=&after= — 隊列列表（MD §6.4 隊列欄）。
@@ -67,6 +68,12 @@ export const GET = handle(async (req: NextRequest) => {
   ]);
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
+  // providerslot-20260830 T3：hold 卡 — 每個 WA 號最新非終態 hold（join key = Contact.waId）。
+  // scope 跟對話一樣（STAFF 自己店 / ADMIN ?clinicId=）；fail-soft → 空 Map。
+  const holdByPhone = await latestHoldsByPhone(
+    contacts.map((c) => c.waId),
+    where.clinicId as string | undefined
+  ).catch(() => new Map());
   // ★ booking-ui（D）：PENDING 優先（新請求）；冇 PENDING 先顯示最新 CONFIRMED（撤銷倒數卡）
   const pendingBookingMap = new Map<string, (typeof pendingBookings)[number]>();
   for (const b of pendingBookings) {
@@ -125,6 +132,12 @@ export const GET = handle(async (req: NextRequest) => {
             handledByStaffName: b.handledByStaffId ? (staffMap.get(b.handledByStaffId) ?? null) : null,
             handledAt: b.handledAt,
           };
+        })(),
+        // providerslot-20260830 T3：Flow 硬保留 hold 卡（HELD / IN_APRICOT / COMMITTED）
+        holdEvent: (() => {
+          const ph = contactMap.get(cv.contactId)?.waId;
+          if (!ph) return null;
+          return holdByPhone.get(ph) ?? null;
         })(),
         window: {
           open,

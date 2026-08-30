@@ -2,11 +2,16 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
-import { fetchDutyRoster, type DutyEntry } from "@/lib/duty/client";
+import { fetchDutyRoster, hkToday, type DutyEntry } from "@/lib/duty/client";
+import { getBookableSlots, getHeld } from "@/lib/workforce/client";
+import { SlotsBoard, type SlotsData } from "@/components/inbox/slots-board";
 import { ArrowLeft, CalendarDays } from "lucide-react";
 
 /**
- * /schedule — 七日當值週表（MD「輪一收尾」§C；detail-pane「睇成週 →」link 落點）。
+ * /schedule — 醫生時間表（兩個 view）：
+ * - 當值週表（預設）：七日當值（MD「輪一收尾」§C；detail-pane「睇成週 →」link 落點）
+ * - 可約時段表（?view=slots）：workforce bookable-slots 四態格（providerslot-20260830 T3；
+ *   admin 側欄「醫生時間表」落點）
  *
  * Scope（同 /api/duty-roster 一致 — fail-closed）：
  * - STAFF：只見自己店（?clinicId= 唔一致 → 照舊自己店，唔會洩其他店）。
@@ -43,6 +48,7 @@ export default async function SchedulePage({
 
   const sp = await searchParams;
   const clinicParam = typeof sp.clinicId === "string" ? sp.clinicId.trim() : "";
+  const view: "duty" | "slots" = sp.view === "slots" ? "slots" : "duty";
   const isStaff = session.role === "STAFF";
 
   // 店清單（選單用）：STAFF = 自己店；ADMIN = 全部
@@ -69,18 +75,38 @@ export default async function SchedulePage({
     }
   }
 
-  // 七日數據（平行 fetch — 最壞情況 = 一個 3s timeout，唔會 7 倍串行）
+  // 兩 view 各自 fetch（fail-soft）：duty = 七日當值；slots = 可約時段（today..today+6）+ held
   let week: { date: string; entries: DutyEntry[] | null }[] = [];
+  let slotsInitial: SlotsData | null = null;
   if (clinic) {
-    const dates = Array.from({ length: 7 }, (_, i) => hkDateOffset(i));
-    week = await Promise.all(
-      dates.map(async (d) => ({
-        date: d,
-        entries: await fetchDutyRoster(clinic.code, d).catch(() => null),
-      }))
-    );
+    if (view === "duty") {
+      // 七日數據（平行 fetch — 最壞情況 = 一個 3s timeout，唔會 7 倍串行）
+      const dates = Array.from({ length: 7 }, (_, i) => hkDateOffset(i));
+      week = await Promise.all(
+        dates.map(async (d) => ({
+          date: d,
+          entries: await fetchDutyRoster(clinic.code, d).catch(() => null),
+        }))
+      );
+    } else {
+      // 可約時段：workforce bookable-slots（from ≥ today 契約）+ held（四態格「已佔」橙）
+      const today = hkToday();
+      const to6 = hkDateOffset(6);
+      const [slotsRes, heldRes] = await Promise.all([
+        getBookableSlots(clinic.code, today, to6).catch(() => null),
+        getHeld(clinic.code).catch(() => null),
+      ]);
+      slotsInitial = {
+        connected: slotsRes !== null,
+        slots: slotsRes,
+        held: heldRes?.holds ?? [],
+        holdTimeoutHours: heldRes?.holdTimeoutHours ?? null,
+        fetchedAt: new Date().toISOString(),
+      };
+    }
   }
-  const allEmpty = week.length > 0 && week.every((d) => d.entries === null);
+  const allEmpty = view === "duty" && week.length > 0 && week.every((d) => d.entries === null);
+  const clinicQuery = clinicParam ? `?clinicId=${encodeURIComponent(clinicParam)}` : "";
 
   return (
     <div className="h-full overflow-y-auto">
@@ -94,13 +120,33 @@ export default async function SchedulePage({
             <ArrowLeft size={13} /> 返回 inbox
           </Link>
           <h1 className="text-lg font-semibold text-t1 inline-flex items-center gap-1.5">
-            <CalendarDays size={17} className="text-brand-text" /> 當值週表
+            <CalendarDays size={17} className="text-brand-text" />
+            {view === "slots" ? "醫生時間表" : "當值週表"}
             {clinic ? (
               <span className="text-sm font-normal text-t2">
                 · {clinic.name}（{clinic.code}）
               </span>
             ) : null}
           </h1>
+          {/* view 切換（providerslot-20260830 T3：可約時段四態格） */}
+          <div className="flex items-center gap-0.5 bg-panel-2 rounded-full p-0.5">
+            <a
+              href={`/schedule${clinicQuery}`}
+              className={`text-xs px-2.5 py-1 rounded-full font-medium ${
+                view === "duty" ? "bg-brand text-panel" : "text-t2 hover:text-t1"
+              }`}
+            >
+              當值週表
+            </a>
+            <a
+              href={`/schedule?view=slots${clinicParam ? `&clinicId=${encodeURIComponent(clinicParam)}` : ""}`}
+              className={`text-xs px-2.5 py-1 rounded-full font-medium ${
+                view === "slots" ? "bg-brand text-panel" : "text-t2 hover:text-t1"
+              }`}
+            >
+              可約時段
+            </a>
+          </div>
           {!isStaff && clinics.length > 0 && (
             <form method="GET" action="/schedule" className="ml-auto flex items-center gap-1.5 text-xs">
               <span className="text-t2">店：</span>
@@ -129,8 +175,17 @@ export default async function SchedulePage({
           </div>
         ) : !clinic ? (
           <div className="rounded-xl bg-panel-2 p-6 text-sm text-t2 text-center">
-            揀一間店先睇當值週表。
+            揀一間店先睇{view === "slots" ? "醫生時間表" : "當值週表"}。
           </div>
+        ) : view === "slots" ? (
+          <SlotsBoard
+            clinics={clinics}
+            isStaff={isStaff}
+            initialClinicCode={clinic.code}
+            initialView="week"
+            initialData={slotsInitial}
+            today={hkToday()}
+          />
         ) : allEmpty ? (
           <div className="rounded-xl bg-panel-2 p-8 text-center space-y-1">
             <div className="text-sm text-t1 font-medium">未有資料</div>

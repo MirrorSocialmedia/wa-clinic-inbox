@@ -16,6 +16,8 @@
  * - reminder-scan      每 15 分鐘 → T-24h 預約提醒（Phase B，cwi-tmpl-20260824-b1）：
  *                                       CONFIRMED + apricotApptId + 未提醒 + 開診時刻 ∈ [now+23h, now+25h]
  *                                       → template Message + remindedAt 冪等 transaction（寧漏勿重）
+ * - hold-sweep         每 5 分鐘 → providerslot-20260830 T3：Flow hold 狀態推進（HELD→IN_APRICOT/EXPIRED）
+ *                                       + held_timeout 警報（HELD age>12h MEDIUM / >24h HIGH；冪等 upsert + auto-resolve）
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
  */
@@ -31,6 +33,7 @@ import { runRetentionPurge } from "@/lib/ops/retention-purge";
 import { runReminderScan } from "@/lib/booking/reminder";
 import { runWeeklyStats } from "@/lib/ops/automation-stats";
 import { runMining } from "@/lib/ops/mining";
+import { sweepFlowHolds } from "@/lib/flows/hold-sweep";
 
 export async function startCronWorker(): Promise<Worker | null> {
   const worker = new Worker(
@@ -47,6 +50,15 @@ export async function startCronWorker(): Promise<Worker | null> {
         }
         case "bookings-expire": {
           const r = await runExpiry();
+          return { ok: true, ...r };
+        }
+        case "hold-sweep": {
+          // providerslot-20260830 T3：Flow hold 狀態推進 + held_timeout 警報（可空跑）
+          const r = await sweepFlowHolds();
+          log.info(
+            { checked: r.checked, inApricot: r.toInApricot, expired: r.toExpired, alerts: r.alerts, failed: r.clinicsFailed },
+            "cron: hold-sweep done"
+          );
           return { ok: true, ...r };
         }
         case "health-check": {

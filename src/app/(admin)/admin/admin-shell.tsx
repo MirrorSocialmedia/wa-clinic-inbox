@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   Bot,
   Building2,
+  CalendarDays,
   FileText,
   LayoutDashboard,
   Lightbulb,
@@ -21,8 +22,9 @@ import {
  * 舊版：header 一行 9 條平鋪連結。新版：244px 左側欄（五組：監控/診所/團隊/AI/接入）
  * + 右側內容區，整體包喺 rounded-[32px] bg-panel shadow-md 面板入面。
  *
- * 注意：導覽項只連真實存在嘅 route（警報/醫生時間表/今日當值/安全/兩步驟
- * 冇獨立頁 — 警報+TOTP 喺 /admin 總覽、時間表未畫）→ 唔放 dead link。
+ * 注意：導覽項只連真實存在嘅 route（警報/今日當值/安全/兩步驟
+ * 冇獨立頁 — 警報+TOTP 喺 /admin 總覽；時間表 = /schedule，providerslot-20260830 T3
+ * 加咗可約時段四態格後接咗真數據）→ 唔放 dead link。
  */
 
 interface NavItem {
@@ -34,6 +36,7 @@ interface NavItem {
 
 const SECTION_NAMES: Record<string, string> = {
   "/admin": "總覽",
+  "/schedule": "醫生時間表",
   "/admin/clinics": "診所設定",
   "/admin/staff": "員工帳號",
   "/admin/onboarding": "WhatsApp 接入",
@@ -64,7 +67,10 @@ export function AdminShell({
     },
     {
       title: "診所",
-      items: [{ href: "/admin/clinics", label: "診所設定", icon: Building2 }],
+      items: [
+        { href: "/admin/clinics", label: "診所設定", icon: Building2 },
+        { href: "/schedule", label: "醫生時間表", icon: CalendarDays },
+      ],
     },
     {
       title: "團隊",

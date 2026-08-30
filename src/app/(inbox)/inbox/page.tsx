@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
 import { fetchDutyRoster, hkToday } from "@/lib/duty/client";
+import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
 import { InboxClient } from "@/components/inbox/inbox-client";
 import type { DutyInfo } from "@/components/inbox/types";
 
@@ -55,6 +56,12 @@ export default async function InboxPage({
       pendingBookingMap.set(b.conversationId, b);
     }
   }
+  // providerslot-20260830 T3：hold 卡 — 每個 WA 號最新非終態 hold（join key = Contact.waId）。
+  // STAFF 限定自己店（fail-closed）；fail-soft：DB 抖動 → 空 Map（卡唔顯示，唔阻首屏）。
+  const holdByPhone = await latestHoldsByPhone(
+    contacts.map((c) => c.waId),
+    session.role === "STAFF" ? session.clinicId : undefined
+  ).catch(() => new Map());
   const now = Date.now();
 
   // Phase 4：今日當值（側欄卡 — staff 名+職位+更時；null → 隱藏）。
@@ -109,6 +116,12 @@ export default async function InboxPage({
           handledAt: b.handledAt ? b.handledAt.toISOString() : null,
           chiefComplaint: b.chiefComplaint,
         };
+      })(),
+      // providerslot-20260830 T3：Flow 硬保留 hold 卡（HELD / IN_APRICOT / COMMITTED）
+      holdEvent: (() => {
+        const ph = contactMap.get(cv.contactId)?.waId;
+        if (!ph) return null;
+        return holdByPhone.get(ph) ?? null;
       })(),
       window: {
         open: remainingMs > 0,

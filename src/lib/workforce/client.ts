@@ -140,6 +140,70 @@ export const AppointmentsResponse = z.object({
 export type WorkforceAppointment = z.infer<typeof AppointmentsResponse>["appointments"][number];
 export type AppointmentsResult = z.infer<typeof AppointmentsResponse>;
 
+// ── bookable-slots（providerslot-20260830 T1 contract — MD 3.1/3.3 原樣）──────
+// ★ 只出 offerable 格（非 offerable 唔入 payload — 滿/lead-time/未開診前台無法再分）；
+//   零 PII（slots 只有時間/醫生/位數）；碎片唔入 payload（MD 3.1 註）。
+const BookableSlotSchema = z.object({
+  start: z.string(),
+  end: z.string(),
+  providerId: z.string(),
+  providerName: z.string(),
+  seatsFree: z.number().int().min(0),
+  slotKey: z.string(),
+});
+export const BookableSlotsResponse = z.object({
+  v: z.literal(1),
+  unitMin: z.literal(30),
+  capacityPerProvider: z.number().int().positive(),
+  leadTimeMin: z.number().int().min(0),
+  generatedAt: z.string(),
+  days: z.array(
+    z.object({
+      date: z.string(),
+      closed: z.boolean(),
+      offerableCount: z.number().int().min(0),
+      slots: z.array(BookableSlotSchema),
+    })
+  ),
+});
+export type BookableSlot = z.infer<typeof BookableSlotSchema>;
+export type BookableDay = BookableSlotsResult["days"][number];
+export type BookableSlotsResult = z.infer<typeof BookableSlotsResponse>;
+
+// held PII-free 讀（T3 警報用 — MD 交貨 #7）：零病人資料；holdTimeoutHours = clinic 設定
+//（response 層帶出，12h MEDIUM / 24h HIGH 唔硬編）。
+export const HeldResponse = z.object({
+  v: z.literal(1),
+  generatedAt: z.string(),
+  holdTimeoutHours: z.number().int().positive().nullable(),
+  holds: z.array(
+    z.object({
+      holdId: z.string(),
+      date: z.string(),
+      startMin: z.number().int().min(0),
+      endMin: z.number().int().min(0),
+      providerId: z.string(),
+      providerName: z.string(),
+      status: z.enum(["HELD", "IN_APRICOT"]),
+      source: z.string(),
+      createdAt: z.string(),
+      ageHours: z.number().min(0),
+      appointmentPast: z.boolean(),
+    })
+  ),
+});
+export type HeldItem = z.infer<typeof HeldResponse>["holds"][number];
+export type HeldResult = z.infer<typeof HeldResponse>;
+
+// commit（MD 3.3）— 前台已入 Apricot：HELD → IN_APRICOT（冪等；RELEASED → 409）。
+const HoldCommitResponse = z.object({
+  v: z.literal(1),
+  holdId: z.string(),
+  status: z.literal("IN_APRICOT"),
+  committedAt: z.string().nullable(),
+});
+export type HoldCommitResult = z.infer<typeof HoldCommitResponse>;
+
 // ── 錯誤類型（log 只 path+status）────────────────────────────────────────
 
 export class WorkforceApiError extends Error {
@@ -358,6 +422,34 @@ export async function fetchAppointments(phoneHash: string, from: string, to: str
   );
 }
 
+// ── bookable-slots（providerslot-20260830 — T3/T4 reusable）─────────────
+
+/**
+ * 可約時段讀（MD 3.1）— 前台四態格 + Flow PICK_DATE/PICK_TIME 用。
+ * 約束（workforce 端）：from 必須 ≥ today（否則 400）；to 超 clinic.flowWindowDays 會 clamp；
+ * 只回 offerable 格（滿/lead-time/未開診 唔入 payload）。
+ */
+export async function getBookableSlots(clinicCode: string, from: string, to: string): Promise<BookableSlotsResult> {
+  return BookableSlotsResponse.parse(
+    await wfGet("/api/external/v1/bookable-slots", { clinicCode, from, to })
+  );
+}
+
+/**
+ * held PII-free 讀（T3 警報 — 零病人資料）。
+ * ★ response 無 clinicCode → 逐店 call（clinicCode 必傳；唔傳 = 全店，警報要 clinic 欄所以唔用）。
+ */
+export async function getHeld(clinicCode: string): Promise<HeldResult> {
+  return HeldResponse.parse(await wfGet("/api/external/v1/bookable-slots/held", { clinicCode }));
+}
+
+/** commit（MD 3.3）— 前台已入 Apricot：workforce HELD → IN_APRICOT（冪等）。 */
+export async function commitHold(holdId: string, apricotRef?: string): Promise<HoldCommitResult> {
+  return HoldCommitResponse.parse(
+    await wfSend("POST", `/api/external/v1/bookable-slots/claim/${encodeURIComponent(holdId)}/commit`, {}, apricotRef ? { apricotRef } : undefined)
+  );
+}
+
 /**
  * 預設 visit reason（env BOOKING_DEFAULT_VISIT_REASON_CODE）。
  * TODO（cwi-bkui-20260823-a1）：0010 定 0021 — 老細上線前拍板後寫入 .env（現留空 = 無預設）。
@@ -400,6 +492,7 @@ export const MOCK_FILL_FLAG = ".dev/workforce-mock-fill.json";
 export const MOCK_WRITE_DISABLED_FLAG = ".dev/workforce-mock-write-disabled.json";
 export const MOCK_NEW_PATIENT_FLAG = ".dev/workforce-mock-newpatient.json";
 export const MOCK_SLOT_TAKEN_FLAG = ".dev/workforce-mock-slot-taken.json";
+export const MOCK_HELD_FLAG = ".dev/workforce-mock-held.json";
 export const MOCK_PATIENTS_FILE = ".dev/workforce-mock-patients.json";
 // §D（cwi-r2）：mock booking store（create 後 capacity 遞減 / remove 還原）— 決定性，e2e cleanup 清檔
 export const MOCK_BOOKED_FILE = ".dev/workforce-mock-booked.json";
@@ -564,6 +657,22 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
 
   if (path === "/api/external/v1/appointments") {
     return mockAppointments(params);
+  }
+
+  // ── bookable-slots（providerslot-20260830 T3 — mock 決定性，E2E/開發用）──
+
+  if (path === "/api/external/v1/bookable-slots") {
+    return mockBookableSlots(params);
+  }
+
+  if (path === "/api/external/v1/bookable-slots/held") {
+    // 預設空；.dev/workforce-mock-held.json = runtime 覆蓋（截圖/e2e 控制，唔入 git）
+    return { v: 1, generatedAt: new Date().toISOString(), holdTimeoutHours: 24, holds: readMockHolds() };
+  }
+
+  const holdCommitM = path.match(/^\/api\/external\/v1\/bookable-slots\/claim\/([^/]+)\/commit$/);
+  if (holdCommitM && method === "POST") {
+    return { v: 1, holdId: decodeURIComponent(holdCommitM[1]), status: "IN_APRICOT" as const, committedAt: new Date().toISOString() };
   }
 
   // /bookings/{id}/status | /remove | /reschedule
@@ -768,6 +877,90 @@ function mockAppointments(params: Record<string, string>): unknown {
   });
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: appointments");
   return { v: 1, syncedAt: new Date().toISOString(), stale: false, appointments };
+}
+
+// ── bookable-slots mock（providerslot-20260830 T3 — 決定性；shape = contract）──
+
+/** .dev/workforce-mock-held.json → HeldItem[]（截圖/e2e 控制；缺檔 = 空）。 */
+function readMockHolds(): HeldItem[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path.resolve(process.cwd(), MOCK_HELD_FLAG), "utf8"));
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    return arr.filter(
+      (h) =>
+        h &&
+        typeof h.holdId === "string" &&
+        typeof h.date === "string" &&
+        typeof h.startMin === "number" &&
+        typeof h.endMin === "number" &&
+        typeof h.providerName === "string" &&
+        (h.status === "HELD" || h.status === "IN_APRICOT")
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** 決定性 mock bookable-slots：兩醫生（mock-pract-*）、09:00–13:00 offerable、
+ *  休診日 djb2(clinic+date)%7===3、seatsFree 1..capacity（djb2 派生）。 */
+function mockBookableSlots(params: Record<string, string>): unknown {
+  const reqPath = "/api/external/v1/bookable-slots";
+  const clinicCode = params.clinicCode ?? "";
+  const from = params.from ?? "";
+  const to = params.to ?? "";
+  if (!clinicCode || !MOCK_DATE_RE.test(from) || !MOCK_DATE_RE.test(to)) {
+    throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  }
+  const capacity = 3;
+  const startMin = 9 * 60;
+  const endMin = 13 * 60;
+  const days: BookableDay[] = [];
+  let dayGuard = 0;
+  for (let d = from; d <= to; d = addDaysStr(d, 1)) {
+    // 防禦：日期循環不終止 = 上層 bug（2026-08-30 實錘：+08:00 解析令 d 永不前進 → 8GB OOM）— fail fast 唔好死循環
+    if (++dayGuard > 40) throw new WorkforceApiError(500, reqPath, "MOCK_DATE_LOOP");
+    const closed = djb2(`${clinicCode}|${d}`) % 7 === 3;
+    const slots: BookableSlot[] = [];
+    if (!closed) {
+      for (let p = 0; p < 2; p++) {
+        const providerId = `mock-pract-${clinicCode}-${p}`;
+        for (let s = startMin; s < endMin; s += 30) {
+          const seatsFree = 1 + (djb2(`${clinicCode}|${d}|${s}|${p}`) % capacity);
+          slots.push({
+            start: minToHHmm(s),
+            end: minToHHmm(s + 30),
+            providerId,
+            providerName: p === 0 ? "mock 陳醫師" : "mock 李醫師",
+            seatsFree,
+            slotKey: `mock|${clinicCode}|${d}|${minToHHmm(s)}|${providerId}`,
+          });
+        }
+      }
+    }
+    slots.sort((a, b) => a.start.localeCompare(b.start) || a.providerName.localeCompare(b.providerName));
+    days.push({ date: d, closed, offerableCount: slots.length, slots });
+  }
+  log.info({ reqPath, clinic: clinicCode, days: days.length, mock: true, status: 200 }, "workforce MOCK: bookable-slots");
+  return {
+    v: 1,
+    unitMin: 30,
+    capacityPerProvider: capacity,
+    leadTimeMin: 60,
+    generatedAt: new Date().toISOString(),
+    days,
+  };
+}
+
+function addDaysStr(dateStr: string, n: number): string {
+  // 純日曆日運算：按 UTC 午夜解（+08:00 解會令 getUTCDate 跨日界 → +1 日 = 同一日 → 無限循環；
+  // 同 slots-board.tsx addDays 同一修正 — 2026-08-30 T3 visual 驗證實錘 8GB OOM）
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+function minToHHmm(min: number): string {
+  return `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 }
 
 function readSlotTakenFlags(): { clinicCode: string; providerApricotId: string; date: string; start: string }[] {

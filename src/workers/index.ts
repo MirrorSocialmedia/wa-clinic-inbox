@@ -34,6 +34,11 @@ async function registerSchedulers() {
     name: "health-check",
     data: {},
   });
+  // providerslot-20260830 T3：Flow hold 狀態推進 + held_timeout 警報（冪等，可空跑）
+  await cronQueue.upsertJobScheduler("sched-hold-sweep", { pattern: "*/5 * * * *" }, {
+    name: "hold-sweep",
+    data: {},
+  });
   await cronQueue.upsertJobScheduler("sched-quality-check", { pattern: "30 6 * * *" }, {
     name: "quality-check",
     data: {},

@@ -46,6 +46,8 @@ export interface ConversationItem {
   pinnedPatient: { patientApricotId: string } | null;
   /** Phase 3：最新 PENDING 預約（綠色卡）/ ★ booking-ui（D）：CONFIRMED 卡 — null = 冇 */
   pendingBooking: BookingInfo | null;
+  /** providerslot-20260830 T3：Flow 硬保留 hold（HELD/IN_APRICOT/COMMITTED）— null = 冇（RELEASED/EXPIRED 唔帶） */
+  holdEvent: HoldInfo | null;
   window: WindowState;
   /** client-only：最後一則訊息 preview */
   preview?: string;
@@ -69,6 +71,22 @@ export interface BookingInfo {
   handledAt?: string | null; // ISO — 5 分鐘撤銷倒數起點
   /** ★ booking-ui（D）：主訴（AI 摘要快照，≤50 字 — 顯示 + remarks 來源） */
   chiefComplaint?: string | null;
+}
+
+/** providerslot-20260830 T3：Flow 硬保留 hold（本地 FlowHoldEvent — 病人資料落 inbox 本地） */
+export interface HoldInfo {
+  id: string;
+  status: "HELD" | "IN_APRICOT" | "COMMITTED";
+  providerName: string;
+  date: string; // YYYY-MM-DD (HK)
+  startMin: number; // 分鐘自午夜（0..1410）
+  endMin: number;
+  patientName: string | null;
+  patientPhone: string; // waId（join key = Contact.waId）
+  notes: string | null;
+  source: string;
+  committedAt: string | null; // ISO — 完成態顯示
+  createdAt: string;
 }
 
 /** Phase 4：今日當值（clinic-workforce 窄 API，4 欄白名單 — MD §9.2） */
