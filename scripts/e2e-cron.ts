@@ -22,7 +22,7 @@ try {
 
 import { cronQueue } from "../src/lib/queue";
 
-const VALID = ["sync-availability", "bookings-expire", "health-check", "quality-check", "weekly-report", "retention-purge", "reminder-scan", "stats-weekly"];
+const VALID = ["sync-availability", "bookings-expire", "health-check", "quality-check", "weekly-report", "retention-purge", "reminder-scan", "stats-weekly", "hold-sweep", "auto-release"];
 const name = process.argv[2];
 const dataArg = process.argv[3];
 

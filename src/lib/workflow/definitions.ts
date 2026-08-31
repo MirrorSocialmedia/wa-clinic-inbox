@@ -24,11 +24,15 @@ export const TriageParams = z.object({
   confidenceFloor: z.number().min(0).max(1),
   // 多謝/道別嘅 AUTO 覆語（原 prompt 硬編碼例句）
   autoThanksReply: z.string().max(120),
+  // ★ cwi-h6-20260830（h5 §3，MD §3 缺口 2）：auto-release 超時 N 分鐘 —
+  //   三條件（有未覆訊息 ∧ 病人等夠 N ∧ 負責人齋夠 N）全真 → cron 放手回隊列（default 15）
+  autoReleaseMinutes: z.number().int().min(1).max(24 * 60).default(15), // default 15 — 舊 draft（冇呢個欄）照過驗證（W1 迴歸）
 });
 export const TRIAGE_DEFAULTS: z.infer<typeof TriageParams> = {
   humanCooldownMs: 30 * 60_000,
   confidenceFloor: 0.6,
   autoThanksReply: "唔緊要，祝你早日康復！",
+  autoReleaseMinutes: 15,
 };
 
 // ── booking-session ───────────────────────────────────────────────────

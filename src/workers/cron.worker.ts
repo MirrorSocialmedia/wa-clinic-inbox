@@ -18,6 +18,8 @@
  *                                       → template Message + remindedAt 冪等 transaction（寧漏勿重）
  * - hold-sweep         每 5 分鐘 → providerslot-20260830 T3：Flow hold 狀態推進（HELD→IN_APRICOT/EXPIRED）
  *                                       + held_timeout 警報（HELD age>12h MEDIUM / >24h HIGH；冪等 upsert + auto-resolve）
+ * - auto-release       每 5 分鐘 → cwi-h6-20260830（h5 §3）：負責人超時未回覆（三條件）→ 放手回隊列
+ *                                       （N = triage.autoReleaseMinutes per-clinic default 15；AI 等病人下一句先接力）
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
  */
@@ -34,6 +36,7 @@ import { runReminderScan } from "@/lib/booking/reminder";
 import { runWeeklyStats } from "@/lib/ops/automation-stats";
 import { runMining } from "@/lib/ops/mining";
 import { sweepFlowHolds } from "@/lib/flows/hold-sweep";
+import { runAutoReleaseSweep } from "@/lib/auto-release";
 
 export async function startCronWorker(): Promise<Worker | null> {
   const worker = new Worker(
@@ -50,6 +53,15 @@ export async function startCronWorker(): Promise<Worker | null> {
         }
         case "bookings-expire": {
           const r = await runExpiry();
+          return { ok: true, ...r };
+        }
+        case "auto-release": {
+          // cwi-h6-20260830（h5 §3）：負責人超時未回覆 → 放手回隊列（三條件防呆；冪等可空跑）
+          const r = await runAutoReleaseSweep();
+          log.info(
+            { checked: r.checked, released: r.released, failed: r.failed },
+            "cron: auto-release done"
+          );
           return { ok: true, ...r };
         }
         case "hold-sweep": {

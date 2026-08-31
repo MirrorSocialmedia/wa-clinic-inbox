@@ -28,8 +28,9 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertConversationAccess(ctx, conv); // STAFF 別店 → 403
 
-  // ★ H1 Send Lock（MD §3.2）：同 free-form 同規則 — 負責人唔係自己 → 423（INTERNAL note route 冇呢個檢查）
-  if (conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
+  // ★ H1 Send Lock（MD §3.2）：同 free-form 同規則 — 負責人唔係自己 → 423（INTERNAL note route 冇呢個檢查）。
+  // cwi-h6-20260830：ADMIN 豁免（§8：ADMIN 可接手可覆可放手 — E2E T97）
+  if (ctx.staff.role !== "ADMIN" && conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
     log.info(
       { clinicId: conv.clinicId, conversationId: conv.id, staffId: ctx.staff.id, assigneeId: conv.assigneeId },
       "flows: 423 SEND_LOCKED（assignee 係其他 staff）"
@@ -67,6 +68,10 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   try {
     const r = await sendBookingFlow({ conversationId: conv.id, staffId: ctx.staff.id });
+    // cwi-h6-20260830（h5 §1 寫入點 4）：發 Flow 成功 — 負責人自己 → 觸 assigneeLastActionAt
+    if (conv.assigneeId === ctx.staff.id) {
+      await prisma.$executeRaw`UPDATE "Conversation" SET "assigneeLastActionAt" = ${new Date()} WHERE "id" = ${conv.id}`;
+    }
     return NextResponse.json({
       ok: true,
       flowToken: r.flowToken,

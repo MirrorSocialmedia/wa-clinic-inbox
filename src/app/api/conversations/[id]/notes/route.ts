@@ -71,6 +71,11 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   // ★ touch lastMessageAt only — 唔加 unreadCount（MD §4.1：病人冇新訊息）
   await prisma.$executeRaw`UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
 
+  // cwi-h6-20260830（h5 §1 寫入點 3）：落內部備註 — 負責人自己 → 觸 assigneeLastActionAt
+  if (conv.assigneeId === auth.staff.id) {
+    await prisma.$executeRaw`UPDATE "Conversation" SET "assigneeLastActionAt" = ${now} WHERE "id" = ${conv.id}`;
+  }
+
   // socket：同店全員收 note:new（零內文 — 內容由 client 拉；payload 只係 id + 元數據）
   publishNotify(conv.clinicId, "note:new", {
     conversationId: conv.id,

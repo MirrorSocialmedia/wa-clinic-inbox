@@ -184,6 +184,10 @@ model Conversation {
   assignVersion    Int        @default(0)
   // ★ H1：最近一次 assign/transfer/unassign 時間（Send Lock 轉交追蹤；null = 從未派過）
   assignedAt       DateTime? @db.Timestamptz
+  // ★ cwi-h6-20260830（h5 §1）：現任負責人最近一次「對病人線有實質動作」時間。
+  // 四寫入點：assign 成功 / 發送成功 / 落內部備註 / 發 Flow（都係 assignee 自己嘅動作先計）。
+  // release（unassign）→ null。auto-release 三條件之一：now - 呢個 ≥ N（負責人齋夠 N）。
+  assigneeLastActionAt DateTime? @db.Timestamptz
   intent           String?                    // 最近一次分類結果
   intentConfidence Float?
   // Phase 2（AI triage）：

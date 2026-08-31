@@ -64,6 +64,8 @@ function codeDefaults<K extends WorkflowKey>(key: K): ParamsOf<K> {
     return {
       ...TRIAGE_DEFAULTS,
       humanCooldownMs: envNum("AI_HUMAN_COOLDOWN_MS", TRIAGE_DEFAULTS.humanCooldownMs),
+      // cwi-h6-20260830：auto-release 超時（缺口 2 — env 救急底）
+      autoReleaseMinutes: envNum("AI_AUTO_RELEASE_MINUTES", TRIAGE_DEFAULTS.autoReleaseMinutes),
     } as ParamsOf<K>;
   }
   if (key === "reminder") {

@@ -34,6 +34,7 @@
     "test:unit-prompts": "tsx scripts/unit-prompts.ts",
     "test:unit-reminder": "tsx scripts/unit-reminder.ts",
     "test:unit-rbac": "tsx scripts/unit-rbac.ts",
+    "test:unit-auto-release": "tsx scripts/unit-auto-release.ts",
     "test:unit-session-engine": "tsx scripts/unit-session-engine.ts",
     "test:unit-workflow-definitions": "tsx scripts/unit-workflow-definitions.ts",
     "test:unit-workflow-store": "tsx scripts/unit-workflow-store.ts",

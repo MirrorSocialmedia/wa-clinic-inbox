@@ -39,6 +39,11 @@ async function registerSchedulers() {
     name: "hold-sweep",
     data: {},
   });
+  // cwi-h6-20260830（h5 §3）：auto-release — 負責人超時未回覆（三條件）→ 放手回隊列（冪等，可空跑）
+  await cronQueue.upsertJobScheduler("sched-auto-release", { pattern: "*/5 * * * *" }, {
+    name: "auto-release",
+    data: {},
+  });
   await cronQueue.upsertJobScheduler("sched-quality-check", { pattern: "30 6 * * *" }, {
     name: "quality-check",
     data: {},

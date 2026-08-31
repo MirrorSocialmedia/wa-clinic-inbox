@@ -40,8 +40,10 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv); // STAFF 別店 → 403
-  assertCanAssign(auth, conv, parsed.data.toStaffId); // 現任 assignee / ADMIN / unassigned claim / 接手（self）
+  // cwi-h6-20260830（T96）：assertCanAssign 先 — 外店 self-claim 要報明確碼 CROSS_CLINIC_CLAIM_FORBIDDEN
+  // （assertConversationAccess 先行會被通用 403 截走）；assertCanAssign ⊇ 讀訪問謂詞，調換安全。
+  assertCanAssign(auth, conv, parsed.data.toStaffId);
+  assertConversationAccess(auth, conv); // STAFF 別店 → 403（冗餘防護）
 
   // ★ R5：client 帶 version → 樂觀鎖（陳舊 → ASSIGN_CONFLICT）；唔帶 → 舊 assigneeId lock
   let r;

@@ -85,8 +85,9 @@ export const POST = handle(async (req: NextRequest) => {
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertConversationAccess(ctx, conv); // STAFF 砌別店 URL → 403
 
-  // ★ H1 Send Lock（MD §3.2）：對話有負責人時，只有負責人可以發 WhatsApp（含 ADMIN）。
+  // ★ H1 Send Lock（MD §3.2）：對話有負責人時，只有負責人可以發 WhatsApp。
   // 其他店內員工 → 423 SEND_LOCKED（UI composer 轉內部備註模式；INTERNAL note route 冇呢個檢查）。
+  // cwi-h6-20260830（T97）：ADMIN 要先接手（變 assignee）先可以覆 — 非負責人（包 ADMIN）照 423（T57 迴歸）。
   // AI AUTO 派卡係 system sender（worker 直接寫 DB + queue），唔經呢個 HTTP route → 天然唔受 lock。
   if (conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
     log.info(
@@ -278,6 +279,12 @@ export const POST = handle(async (req: NextRequest) => {
       }
     }
     throw err;
+  }
+
+  // cwi-h6-20260830（h5 §1 寫入點 2）：發送成功（入隊）— 負責人自己嘅動作 → 觸 assigneeLastActionAt。
+  //   非負責人（ADMIN 豁免路徑）唔觸 — 呢個欄只反映現任負責人嘅活動。
+  if (conv.assigneeId && conv.assigneeId === ctx.staff.id) {
+    await prisma.$executeRaw`UPDATE "Conversation" SET "assigneeLastActionAt" = ${now} WHERE "id" = ${conv.id}`;
   }
 
   await prisma.$executeRaw`
