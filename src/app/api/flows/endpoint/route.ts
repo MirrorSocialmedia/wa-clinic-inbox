@@ -60,7 +60,8 @@ import {
   type ProviderOption,
 } from "@/lib/flows/screens";
 import { syncWindow, getSlots, hkTodayStr, hkDateOffset } from "@/lib/availability";
-import { getBookableSlots, claimSlot, WorkforceApiError, type BookableDay, type BookableSlot } from "@/lib/workforce/client";
+import { getBookableSlots, claimSlot, WorkforceApiError, refreshAvailability, type BookableDay, type BookableSlot } from "@/lib/workforce/client";
+import { getSlotFreshness, invalidateAvailabilityDay } from "@/lib/availability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -215,6 +216,34 @@ export async function POST(req: NextRequest) {
       // MD §2：inbox 唔自行計算可約時段）。降級：API fail → bookableDays=null → 日期屏 error
       const dateMin = hkTodayStr();
       const dateMax = hkDateOffset(30);
+
+      // ★ cwi-refresh-20260831 §5：Flow 出 options 前，若 L2 >20m 新鮮度過期 → 先靜默行一次
+      //   refresh+bust 先出 options（單日窗口限制病人側延遲；fail-soft — 失敗照用現有數據）。
+      //   focus：submit_date = 病人揀緊嘅日；INIT/BACK = 今日（focus 日 — 避免 30 日全刷阻塞病人 flow）。
+      let focusDate: string | null = null;
+      if (action === "data_exchange") {
+        const dd = plain.data ?? {};
+        if (dd.user_action === "submit_date") {
+          const dt = String(dd.date ?? "");
+          if (!dateRangeError(dt)) focusDate = dt;
+        }
+      } else if (action === "INIT" || action === "BACK") {
+        focusDate = dateMin;
+      }
+      if (focusDate) {
+        const freshness = await getSlotFreshness(clinicId, dateMin, focusDate);
+        const ageMs = freshness.maxSyncedAt ? Date.now() - freshness.maxSyncedAt.getTime() : Number.POSITIVE_INFINITY;
+        if (ageMs > 20 * 60_000 || freshness.stale) {
+          try {
+            const r = await refreshAvailability(clinic.code, [focusDate]);
+            for (const day of r.refreshed) if (day.ok) await invalidateAvailabilityDay(clinic.code, day.date);
+            log.info({ clinic: clinic.code, focusDate, okDays: r.refreshed.filter((x) => x.ok).length }, "flow endpoint: silent pre-refresh done（L2 >20m stale）");
+          } catch (e) {
+            log.warn({ clinic: clinic.code, focusDate, err: e instanceof Error ? e.name : "?" }, "flow endpoint: silent pre-refresh fail（fail-soft — 照用現有數據）");
+          }
+        }
+      }
+
       let bookableDays: BookableDay[] | null = null;
       try {
         bookableDays = (await getBookableSlots(clinic.code, dateMin, dateMax)).days;

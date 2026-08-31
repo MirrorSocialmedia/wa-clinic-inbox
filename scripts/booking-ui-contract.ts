@@ -239,6 +239,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("\nBOOKING-UI-CONTRACT PASS ✓");
+  process.exit(0); // ★ cwi-refresh-20260831：同上 — import 鏈含 redis handle，成功路徑顯式 exit
 }
 
 async function assertApiError(name: string, fn: () => Promise<unknown>, status: number, code?: string): Promise<void> {

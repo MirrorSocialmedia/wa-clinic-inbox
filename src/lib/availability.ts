@@ -20,6 +20,8 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { fetchAvailability, WorkforceApiError, type WorkforceAvailability } from "@/lib/workforce/client";
+import { publishControl } from "@/lib/notify";
+import { invalidateDayCache } from "@/lib/booking/booking-ops";
 import { ZodError } from "zod";
 
 // ── types ───────────────────────────────────────────────────────────────────
@@ -250,6 +252,72 @@ export async function getSlots(
 }
 
 // ── cron / worker 啟動用：逐店刷新 ──────────────────────────────────────────
+
+/**
+ * 該店該窗口 L2 資料年齡（MD §5 新鮮度三態用）。
+ * maxSyncedAt = 窗口內 AvailabilitySlot 最大 syncedAt（null = 無 cache row）；
+ * stale = WorkforceSyncState.lastStale（上次 fetch 時 workforce 回報 stale=true）。
+ * fail-soft：查不到 → { maxSyncedAt: null, stale: false }。
+ */
+export async function getSlotFreshness(
+  clinicId: string,
+  from: string,
+  to: string,
+): Promise<{ maxSyncedAt: Date | null; stale: boolean }> {
+  try {
+    const [row, state] = await Promise.all([
+      prisma.availabilitySlot.aggregate({
+        where: { clinicId, date: { gte: from, lte: to } },
+        _max: { syncedAt: true },
+      }),
+      prisma.workforceSyncState.findUnique({ where: { clinicId }, select: { lastStale: true } }),
+    ]);
+    return { maxSyncedAt: row._max.syncedAt, stale: state?.lastStale ?? false };
+  } catch (e) {
+    log.warn(
+      { clinicId, from, to, err: e instanceof Error ? e.message : String(e) },
+      "availability: getSlotFreshness fail（回 null/非 stale — UI 照顯示）",
+    );
+    return { maxSyncedAt: null, stale: false };
+  }
+}
+
+/**
+ * 清 L2 cache 指定日 + 立即重讀 workforce 填返（唔等 15 分鐘 cron）+ 廣播 availability:busted。
+ *
+ * 用家：client.ts 四個寫入 API 成功後 `if (res.dayRefreshed) await invalidateAvailabilityDay(...)`。
+ * 🔴 全程 fail-soft：寫入已成功，刷新失敗唔可以令 booking 報錯 — 任何錯誤都吞（log warn）。
+ *
+ * 順序（MD §3 字面）：① 清該日 L2 row（重用 booking-ops invalidateDayCache）→
+ * ② getSlots 單日窗口即刻重讀填返（fail-soft 四層降級內建；重讀失敗 = 該日空，下次讀取會再拉）→
+ * ③ CONTROL_CHANNEL 廣播（web+worker 兩 process 同步；UI 即時重繪）。
+ */
+export async function invalidateAvailabilityDay(clinicCode: string, date: string): Promise<void> {
+  try {
+    const clinic = await prisma.clinic.findFirst({ where: { code: clinicCode }, select: { id: true } });
+    if (!clinic) {
+      log.warn({ clinicCode, date }, "invalidateAvailabilityDay: clinic not found（skip）");
+      return;
+    }
+    // ① 清該日 L2
+    await invalidateDayCache(clinic.id, date);
+    // ② 即刻重讀填返（單日窗口 — getSlots 本身 fail-soft 唔會 throw；try 係雙保險）
+    try {
+      await getSlots(clinic.id, { start: date, end: date });
+    } catch {
+      /* getSlots 理論上唔會 throw（四層降級）— 呢度雙保險 */
+    }
+    // ③ 廣播（web + worker 兩 process；UI 即時重繪）
+    publishControl({ cmd: "availability:busted", clinicCode, clinicId: clinic.id, date });
+    log.info({ clinicCode, date }, "availability: day busted + refilled（寫入後即時刷新）");
+  } catch (e) {
+    // 🔴 吞錯 — 寫入已成功；刷新失敗唔可以令 booking 報錯
+    log.warn(
+      { clinicCode, date, err: e instanceof Error ? e.message : String(e) },
+      "invalidateAvailabilityDay failed（fail-soft — 寫入唔受影響）",
+    );
+  }
+}
 
 /**
  * 逐店 getSlots()（sync-availability cron 每 15 分鐘 + worker 啟動首跑）。

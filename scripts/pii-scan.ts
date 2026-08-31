@@ -279,4 +279,6 @@ main()
   })
   .finally(async () => {
     await prisma.$disconnect();
+    // ★ cwi-refresh-20260831：client.ts import 鏈現含 redis handle（availability→notify→queue module-level BullMQ）— 必須顯式 exit，否則 process 永不退出（e2e T33 實錘）
+    process.exit(process.exitCode ?? 0);
   });

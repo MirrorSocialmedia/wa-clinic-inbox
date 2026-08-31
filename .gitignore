@@ -58,8 +58,16 @@ next-env.d.ts
 /.dev/workforce-mock-write-disabled.json
 /.dev/workforce-mock-newpatient.json
 /.dev/workforce-mock-slot-taken.json
+/.dev/workforce-mock-booked.json
 /.dev/workforce-mock-patients.json
 /.dev/workforce-mock-calls.jsonl
+/.dev/workforce-mock-refresh-429.json
+/.dev/workforce-mock-refresh-409.json
+/.dev/workforce-mock-refresh-404.json
+/.dev/workforce-mock-refresh-403.json
+/.dev/workforce-mock-refresh-400.json
+/.dev/workforce-mock-refresh-failday.json
+/.dev/workforce-mock-dayrefreshed-off.json
 
 # Phase 4 backup artifacts（本地，唔入 git）
 .dev/backups/

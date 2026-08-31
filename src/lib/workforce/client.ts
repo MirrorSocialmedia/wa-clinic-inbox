@@ -38,6 +38,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import log from "@/lib/log";
+import { invalidateAvailabilityDay } from "@/lib/availability";
 
 // ── zod contract（§2 原樣）───────────────────────────────────────────────
 
@@ -232,6 +233,8 @@ export class WorkforceApiError extends Error {
     public readonly path: string,
     /** workforce 錯誤碼（SLOT_TAKEN / NEW_PATIENT_DISABLED / WRITE_DISABLED / …）— 只供路由分支，唔入 log */
     public readonly code?: string,
+    /** cwi-refresh-20260831：429 嘅 retryAfterSec（S1 端點 body 欄；UI 倒數用） */
+    public readonly retryAfterSec?: number,
   ) {
     super(`workforce API ${status} ${path}`);
     this.name = "WorkforceApiError";
@@ -276,14 +279,16 @@ async function wfFetch(
   if (!res.ok) {
     // ★ log 只 path + status（零 body — 401 都唔洩 response 內容）
     let code: string | undefined;
+    let retryAfterSec: number | undefined;
     try {
-      const j = (await res.json()) as { code?: unknown };
+      const j = (await res.json()) as { code?: unknown; retryAfterSec?: unknown };
       if (j && typeof j.code === "string") code = j.code; // 只取分類標籤
+      if (j && typeof j.retryAfterSec === "number") retryAfterSec = j.retryAfterSec; // 429 倒數（UI 用）
     } catch {
       /* non-JSON error body（reverse proxy HTML 等）— path+status 已夠 */
     }
     log.warn({ path, status: res.status }, "workforce: non-2xx");
-    throw new WorkforceApiError(res.status, path, code);
+    throw new WorkforceApiError(res.status, path, code, retryAfterSec);
   }
   log.debug({ path, status: res.status }, "workforce: fetch ok");
   return res.json();
@@ -324,6 +329,32 @@ export async function fetchAvailability(
   return AvailabilityResponse.parse(raw);
 }
 
+// ── 強制刷新空檔 cache（cwi-refresh-20260831 §2/§4 — S1 端點 contract 逐項對齊）──
+const RefreshResponse = z.object({
+  v: z.literal(1),
+  refreshed: z.array(
+    z.object({
+      date: z.string(),
+      ok: z.boolean(),
+      syncedAt: z.string().nullable().optional(),
+      error: z.string().optional(),
+    }),
+  ),
+  durationMs: z.number().int(),
+});
+export type RefreshResult = z.infer<typeof RefreshResponse>;
+
+/**
+ * 強制刷新 workforce availability cache（POST /availability/refresh）。
+ * dates 1..7 個 YYYY-MM-DD（F 側上限 7 — 超出 400）。
+ * 錯誤：429 RATE_LIMITED（retryAfterSec）/ 409 APRICOT_BUSY / 404 CLINIC_NOT_FOUND /
+ * 403 FORBIDDEN（scope 未加）/ 400 BAD_REQUEST — 均 throw WorkforceApiError。
+ */
+export async function refreshAvailability(clinicCode: string, dates: string[]): Promise<RefreshResult> {
+  const raw = await wfSend("POST", "/api/external/v1/availability/refresh", {}, { v: 1, clinicCode, dates });
+  return RefreshResponse.parse(raw);
+}
+
 export async function fetchDutyRoster(clinicCode: string, date: string): Promise<WorkforceDuty> {
   return DutySchema.parse(await wfGet("/api/external/v1/duty-roster", { clinicCode, date }));
 }
@@ -359,7 +390,10 @@ export async function createBooking(p: {
     patient: p.patient,
   };
   const raw = await wfSend("POST", "/api/external/v1/bookings", {}, body);
-  return BookingCreateResponse.parse(raw);
+  const res = BookingCreateResponse.parse(raw);
+  // ★ cwi-refresh-20260831 §3：寫入成功 → 該日 L2 即時 bust + 重填（fail-soft — 永不 throw）
+  if (res.dayRefreshed) await invalidateAvailabilityDay(p.clinicCode, p.date);
+  return res;
 }
 
 /** 改狀態（白名單 102 / -7 — 其他 workforce 400） */
@@ -373,7 +407,9 @@ export async function updateBookingStatus(
     `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/status`,
     { status: String(status), date: p.date, clinicCode: p.clinicCode }
   );
-  return BookingStatusResponse.parse(raw);
+  const res = BookingStatusResponse.parse(raw);
+  if (res.dayRefreshed) await invalidateAvailabilityDay(p.clinicCode, p.date);
+  return res;
 }
 
 /** 刪 appointment（rollback 路徑 — 撤銷代落單） */
@@ -386,7 +422,9 @@ export async function removeBooking(
     `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/remove`,
     { date: p.date, clinicCode: p.clinicCode }
   );
-  return BookingRemoveResponse.parse(raw);
+  const res = BookingRemoveResponse.parse(raw);
+  if (res.dayRefreshed) await invalidateAvailabilityDay(p.clinicCode, p.date);
+  return res;
 }
 
 /** 改期（workforce 原子 102 舊單 + 新落單；409 = 新時段撞） */
@@ -417,7 +455,13 @@ export async function rescheduleBooking(
     ...(p.remarks ? { remarks: p.remarks } : {}),
   };
   const raw = await wfSend("POST", `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/reschedule`, {}, body);
-  return BookingRescheduleResponse.parse(raw);
+  const res = BookingRescheduleResponse.parse(raw);
+  // reschedule 兩日都要：舊日 + 新日
+  if (res.dayRefreshed) {
+    await invalidateAvailabilityDay(p.clinicCode, p.oldDate);
+    await invalidateAvailabilityDay(p.clinicCode, p.date);
+  }
+  return res;
 }
 
 /**
@@ -571,6 +615,15 @@ export const MOCK_PATIENTS_FILE = ".dev/workforce-mock-patients.json";
 export const MOCK_CLAIMS_FILE = ".dev/workforce-mock-claims.json";
 // §D（cwi-r2）：mock booking store（create 後 capacity 遞減 / remove 還原）— 決定性，e2e cleanup 清檔
 export const MOCK_BOOKED_FILE = ".dev/workforce-mock-booked.json";
+// cwi-refresh-20260831：mock refresh 端點錯誤旗（shape 逐項對齊 S1 真端點 contract）
+export const MOCK_REFRESH_429_FLAG = ".dev/workforce-mock-refresh-429.json"; // { clinicCode? } → 429 RATE_LIMITED + retryAfterSec
+export const MOCK_REFRESH_409_FLAG = ".dev/workforce-mock-refresh-409.json"; // { clinicCode? } → 409 APRICOT_BUSY
+export const MOCK_REFRESH_404_FLAG = ".dev/workforce-mock-refresh-404.json"; // { clinicCode? } → 404 CLINIC_NOT_FOUND
+export const MOCK_REFRESH_403_FLAG = ".dev/workforce-mock-refresh-403.json"; // { clinicCode? } → 403 FORBIDDEN（scope 未加）
+export const MOCK_REFRESH_400_FLAG = ".dev/workforce-mock-refresh-400.json"; // { clinicCode? } → 400 BAD_REQUEST
+export const MOCK_REFRESH_FAILDAY_FLAG = ".dev/workforce-mock-refresh-failday.json"; // [date, ...] → 該日 ok:false（逐日失敗 UI）
+// 寫入 mock 回 dayRefreshed:false（T145：唔 bust 斷言）
+export const MOCK_DAYREFRESHED_OFF_FLAG = ".dev/workforce-mock-dayrefreshed-off.json"; // { on: true }
 const FIXTURE_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-availability.json");
 const FIXTURE_DICTIONARIES_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-dictionaries.json");
 const FIXTURE_PATIENT_LOOKUP_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-patient-lookup.json");
@@ -718,6 +771,11 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
 
   // ── 寫入 + patient-context 端點（booking-ui MD §1 — mock 決定性，E2E 斷言用）──
 
+  // cwi-refresh-20260831：強制刷新端點（mock 決定性；錯誤 shape 對齊 S1 真端點）
+  if (path === "/api/external/v1/availability/refresh" && method === "POST") {
+    return mockAvailabilityRefresh(body);
+  }
+
   if (path === "/api/external/v1/bookings" && method === "POST") {
     return mockCreateBooking(body);
   }
@@ -771,6 +829,62 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
 }
 
 // ── mock 寫入端點 helper（決定性；log 同 real mode 一樣只 path+status）──
+
+/** T145：寫入 mock 回 dayRefreshed:false（e2e flag — 斷言「唔 bust」路徑） */
+function mockDayRefreshedOff(): boolean {
+  return !!readFlag<{ on?: boolean }>(MOCK_DAYREFRESHED_OFF_FLAG, (f) => f.on === true);
+}
+
+/**
+ * mock /availability/refresh（cwi-refresh-20260831）— 200/429/409/404/403/400 各 shape
+ * 逐項對齊 S1 真端點 contract（T4 教訓：client 分支 + mock 對稱地錯 = real-mode 永不命中）。
+ */
+function mockAvailabilityRefresh(bodyIn: unknown): unknown {
+  const path = "/api/external/v1/availability/refresh";
+  const b = (bodyIn ?? {}) as { clinicCode?: string; dates?: string[] };
+  const c = b.clinicCode;
+  const hit = (flag: string) => !!readFlag<{ clinicCode?: string }>(flag, (f) => !f.clinicCode || f.clinicCode === c);
+  if (hit(MOCK_REFRESH_403_FLAG)) {
+    log.info({ path, mock: true, status: 403 }, "workforce MOCK: refresh 403 FORBIDDEN");
+    throw new WorkforceApiError(403, path, "FORBIDDEN");
+  }
+  if (hit(MOCK_REFRESH_404_FLAG)) {
+    log.info({ path, mock: true, status: 404 }, "workforce MOCK: refresh 404 CLINIC_NOT_FOUND");
+    throw new WorkforceApiError(404, path, "CLINIC_NOT_FOUND");
+  }
+  if (hit(MOCK_REFRESH_429_FLAG)) {
+    log.info({ path, mock: true, status: 429 }, "workforce MOCK: refresh 429 RATE_LIMITED");
+    throw new WorkforceApiError(429, path, "RATE_LIMITED", 37);
+  }
+  if (hit(MOCK_REFRESH_409_FLAG)) {
+    log.info({ path, mock: true, status: 409 }, "workforce MOCK: refresh 409 APRICOT_BUSY");
+    throw new WorkforceApiError(409, path, "APRICOT_BUSY");
+  }
+  if (hit(MOCK_REFRESH_400_FLAG)) {
+    log.info({ path, mock: true, status: 400 }, "workforce MOCK: refresh 400 BAD_REQUEST");
+    throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  }
+  if (!Array.isArray(b.dates) || b.dates.length === 0 || b.dates.length > 7) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+  // failday flag = JSON array of dates（文件本身就係值）— 唔好用 readFlag：
+  // 佢「攞第一個 matching element」語義會返返 date string → 下面 .filter crash → 502（T147 2026-08-31 實測）
+  let failDates: string[] = [];
+  try {
+    // 相對 cwd 讀（mock 只喺 repo root 嘅 e2e/dev process 跑）— 本地 const path 會 shadow node:path，唔好用 path.resolve
+    const raw: unknown = JSON.parse(readFileSync(MOCK_REFRESH_FAILDAY_FLAG, "utf8"));
+    if (Array.isArray(raw)) failDates = raw.filter((d): d is string => typeof d === "string");
+  } catch {
+    /* 無 flag */
+  }
+  const now = new Date().toISOString();
+  log.info({ path, mock: true, status: 200, n: b.dates.length, failDays: failDates.filter((d) => b.dates!.includes(d)) }, "workforce MOCK: refresh ok");
+  return {
+    v: 1,
+    refreshed: b.dates!.map((d) =>
+      failDates.includes(d) ? { date: d, ok: false, error: "SYNC_FAILED" } : { date: d, ok: true, syncedAt: now },
+    ),
+    durationMs: 42,
+  };
+}
 
 type MockBookingBody = {
   v?: number;
@@ -856,7 +970,7 @@ function mockCreateBooking(bodyIn: unknown): unknown {
     bookingStatus: 0,
     patientApricotId,
     patientCode: `MOCK${djb2(patientApricotId).toString(16).padStart(6, "0").slice(-6).toUpperCase()}`,
-    dayRefreshed: true,
+    dayRefreshed: !mockDayRefreshedOff(),
     syncedAt: new Date().toISOString(),
   };
 }
@@ -870,7 +984,7 @@ function mockBookingStatus(id: string, params: Record<string, string>): unknown 
   if (!params.date || !params.clinicCode) throw new WorkforceApiError(400, path, "BAD_REQUEST");
   mockWriteDisabled(path, params.clinicCode);
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking status updated");
-  return { v: 1, bookingStatus: status, dayRefreshed: true, syncedAt: new Date().toISOString() };
+  return { v: 1, bookingStatus: status, dayRefreshed: !mockDayRefreshedOff(), syncedAt: new Date().toISOString() };
 }
 
 function mockBookingRemove(id: string, params: Record<string, string>): unknown {
@@ -879,7 +993,7 @@ function mockBookingRemove(id: string, params: Record<string, string>): unknown 
   mockWriteDisabled(path, params.clinicCode);
   forgetBooked(id); // §D：remove → capacity 還原
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking removed");
-  return { v: 1, removed: true, dayRefreshed: true, syncedAt: new Date().toISOString() };
+  return { v: 1, removed: true, dayRefreshed: !mockDayRefreshedOff(), syncedAt: new Date().toISOString() };
 }
 
 function mockReschedule(id: string, bodyIn: unknown): unknown {
@@ -901,7 +1015,7 @@ function mockReschedule(id: string, bodyIn: unknown): unknown {
   forgetBooked(id);
   recordBooked({ apricotApptId: newApptId, clinicCode: b.clinicCode, providerApricotId: b.providerApricotId, date: b.date, start: b.start });
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: booking rescheduled");
-  return { v: 1, oldApptId: id, newApptId, dayRefreshed: true, syncedAt: new Date().toISOString() };
+  return { v: 1, oldApptId: id, newApptId, dayRefreshed: !mockDayRefreshedOff(), syncedAt: new Date().toISOString() };
 }
 
 function mockDictionaries(params: Record<string, string>): unknown {

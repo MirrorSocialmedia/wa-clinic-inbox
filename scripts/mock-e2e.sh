@@ -3054,10 +3054,12 @@ import { fetchAvailability } from "$(pwd)/src/lib/workforce/client";
   const d = r.days.find((x: any) => x.date === "$PC_D2S");
   const p = d?.providers.find((x: any) => x.providerApricotId === "$PC_P2");
   const s = p?.slots.find((x: any) => x.start === "15:00");
-  console.log(s ? String(s.bookedCount) : "missing");
+  console.log("FILLB:" + (s ? String(s.bookedCount) : "missing"));
+  process.exit(0); // ★ cwi-refresh-20260831：client.ts import 鏈含 redis handle — 成功路徑必須顯式 exit，否則 $( ) 永久 hang
 })();
 EOF2
-  PC_FLAG_B=$( (set -a; . ./.env; set +a; ./node_modules/.bin/tsx /tmp/pc-fill-check.ts 2>/dev/null) )
+  # FILLB: marker + grep — 隔離 import 鏈帶入嘅 pino "redis connected" stdout 行（T145/PC-G2 實測污染）
+  PC_FLAG_B=$( (set -a; . ./.env; set +a; ./node_modules/.bin/tsx /tmp/pc-fill-check.ts 2>/dev/null) | grep -oE 'FILLB:[0-9a-z]+' | head -1 | cut -d: -f2 )
   [ "$PC_FLAG_B" = "1" ] || { fail "PC-G2 fill flag 自驗失敗（in-process mock b=$PC_FLAG_B; flag file: $(cat .dev/workforce-mock-fill.json)）"; PC_FAIL=1; }
   # 強制 TKW L2 stale → sync job 重新 fetch（帶 flag）→ L2 落 b=1
   q "UPDATE \"AvailabilitySlot\" SET \"syncedAt\"=\"syncedAt\"-interval '1 hour' WHERE \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null
@@ -4013,8 +4015,8 @@ R12=0
 # ── T96. §D：remainingCapacity=0 唔入候選 + 缺欄 → fallback=1 ──────────────
 echo "[R12] T96: remainingCapacity=0 hidden + missing-field fallback=1..."
 T96=0
-T96_S1=$(q "SELECT \"date\"||'|'||\"startTime\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 ORDER BY \"date\",\"startTime\" LIMIT 1" | jf v)
-T96_S2=$(q "SELECT \"date\"||'|'||\"startTime\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 ORDER BY \"date\",\"startTime\" LIMIT 1 OFFSET 1" | jf v)
+T96_S1=$(q "SELECT \"date\"||'|'||\"startTime\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 AND \"date\" >= ((date_trunc('day', (now() AT TIME ZONE 'Asia/Hong_Kong'))::date + 1)::text) ORDER BY \"date\",\"startTime\" LIMIT 1" | jf v)
+T96_S2=$(q "SELECT \"date\"||'|'||\"startTime\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 AND \"date\" >= ((date_trunc('day', (now() AT TIME ZONE 'Asia/Hong_Kong'))::date + 1)::text) ORDER BY \"date\",\"startTime\" LIMIT 1 OFFSET 1" | jf v)
 [ -n "$T96_S1" ] && [ -n "$T96_S2" ] || { echo "    ❌ T96 fixture：DOC_A 空 slot 唔夠 2 個"; T96=1; }
 T96_S1D=${T96_S1%%|*}; T96_S1T=${T96_S1##*|}
 T96_S2D=${T96_S2%%|*}; T96_S2T=${T96_S2##*|}
@@ -4151,7 +4153,7 @@ fi
 # ── T97. §D：confirm 後 sync capacity 遞減（base 2 → 1 → 0，mock stateful） ────────
 echo "[R12] T97: capacity decrement after confirm (2→1→0)..."
 T97=0
-T97_S3=$(q "SELECT \"date\"||'|'||\"startTime\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 ORDER BY \"date\",\"startTime\" LIMIT 1 OFFSET 2" | jf v)
+T97_S3=$(q "SELECT \"date\"||'|'||\"startTime\" v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 AND \"date\" >= ((date_trunc('day', (now() AT TIME ZONE 'Asia/Hong_Kong'))::date + 1)::text) ORDER BY \"date\",\"startTime\" LIMIT 1 OFFSET 2" | jf v)
 [ -n "$T97_S3" ] || { echo "    ❌ T97 fixture：DOC_A 空 slot 唔夠 3 個"; T97=1; }
 T97_S3D=${T97_S3%%|*}; T97_S3T=${T97_S3##*|}
 # flag：S2 rc=0（繼承 T96）+ S3 base=2（遞減測試）
@@ -4430,7 +4432,7 @@ async function main() {
     console.log(e instanceof WorkforceApiError && e.status === 409 && e.code === "FLOW_TOKEN_REUSED" ? "D-OK" : `D-FAIL: ${String(e)}`);
   }
 }
-main();
+main().then(() => process.exit(0)); // ★ cwi-refresh-20260831：client.ts import 鏈含 redis handle — 必須顯式 exit
 T101TS
     T101_CLAIM_OUT=$(WORKFORCE_MOCK=1 pnpm exec tsx .dev/t101-claim-check.ts "$T4_SLOTKEY" "$T101A_TOK" "$T4_B" "$T4_C" 2>&1 | grep -E '^[A-D]-' || true)
     T101_B_HOLD=$(q "SELECT \"workforceHoldId\"::text w FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T101A_TOK'" | jf w)
@@ -4461,6 +4463,170 @@ fi
 
 # ── R11 summary ─────────────────────────────────────────────────────────────
 [ "$R11_FAIL" = 0 ] && pass "R11 輪一收尾 e2e（T93 Flow 回滾 / T94 週表頁 / T95 duty 卡刷新）" || fail "R11 有項失敗（見上 ❌）"
+
+# ── R14: cwi-refresh-20260831（T145–T148）────────────────────────────────
+echo "[R14] T145–T148: 全鏈手動刷新 + 寫入後 bust + Flow stale gate (cwi-refresh-20260831)..."
+R14=0
+# 決定性 open 日（mock 規則 djb2(clinic|day)%7!==3 — 同 T98；取兩個做雙日測試）
+read -r R14_D R14_D2 <<EOF14
+$(node -e 'function djb2(s){let h=5381;for(let i=0;i<s.length;i++){h=((h<<5)+h+s.charCodeAt(i))>>>0}return h}const c="TKW";const d0=new Date(Date.now()+8*3600e3).toISOString().slice(0,10);const f=[];for(let i=1;i<31&&f.length<2;i++){const day=new Date(Date.parse(d0+"T00:00:00Z")+i*86400e3).toISOString().slice(0,10);if(djb2(c+"|"+day)%7!==3)f.push(day)}console.log(f.join(" "))')
+EOF14
+# L2 該日 max syncedAt（text — 避開 naive timestamp tz 陷阱：只比「變咗冇」/ epoch 比較）
+l2_max() { q "SELECT max(\"syncedAt\")::text m FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"date\"='$1'" | jf m; }
+
+if [ -z "$R14_D" ] || [ -z "$R14_D2" ]; then
+  echo "    ❌ R14：mock 30 日內搵唔到兩個 open 日"; R14=1
+else
+  # ── T145. 手動刷新 200 全鏈 + 寫入後 dayRefreshed hook ───────────────────
+  T145_OLD=$(l2_max "$R14_D")
+  T145_RES=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
+  T145_HTTP=$(tail -1 <<< "$T145_RES")
+  T145_BODY=$(head -1 <<< "$T145_RES")
+  sleep 1
+  T145_NEW=$(l2_max "$R14_D")
+  check "T145a 手動刷新 200" "$T145_HTTP" "200"
+  grep -q '"v":1' <<< "$T145_BODY" && pass "T145a body v=1" || { echo "    ❌ T145a body（=${T145_BODY:0:120}）"; R14=1; }
+  grep -q "\"date\":\"$R14_D\",\"ok\":true" <<< "$T145_BODY" && pass "T145a refreshed[0].ok=true" || { echo "    ❌ T145a ok（=${T145_BODY:0:120}）"; R14=1; }
+  [ -n "$T145_NEW" ] && [ "$T145_NEW" != "$T145_OLD" ] && pass "T145a L2 busted + refilled（syncedAt ${T145_OLD:0:19}→${T145_NEW:0:19}）" || { echo "    ❌ T145a L2 未變（old=$T145_OLD new=$T145_NEW）"; R14=1; }
+
+  # (b) 寫入 → dayRefreshed hook（on=bust / off=唔 bust 對照 — tsx 直測 client hook）
+  cat > .dev/t145-hook-check.ts <<'T145TS'
+// T145b：createBooking(dayRefreshed) → L2 syncedAt 必變；dayrefreshed-off flag → 唔變
+// ★ async IIFE 包身：.dev/*.ts 無 "type":"module" → tsx 按 CJS 轉譯 → top-level await 直接 TransformError（2026-08-31 實測空輸出）
+process.env.WORKFORCE_MOCK = "1";
+import prisma from "../src/lib/prisma";
+import { createBooking } from "../src/lib/workforce/client";
+import { writeFileSync } from "node:fs";
+
+const [, , clinicId, date] = process.argv;
+const maxSync = async () => {
+  const r = await prisma.$queryRawUnsafe(
+    'SELECT max("syncedAt")::text m FROM "AvailabilitySlot" WHERE "clinicId"=$1 AND "date"=$2',
+    clinicId, date,
+  );
+  return String((r as Array<{ m: string | null }>)[0]?.m ?? "");
+};
+const mk = (n: string) => ({
+  idempotencyKey: `t145-hook-${n}-${Date.now()}`,
+  clinicCode: "TKW",
+  providerApricotId: "mock-dr-t145",
+  date,
+  start: "09:00",
+  durationMin: 30,
+  visitReasonId: "0010",
+  patient: { name: "E2E T145", phone: "85200000001" },
+});
+(async () => {
+  // new-patient mock Stage 1 預設 off → {name,phone} 新客 body 會 422 NEW_PATIENT_DISABLED（T145b 2026-08-31 實測）
+  writeFileSync(".dev/workforce-mock-newpatient.json", JSON.stringify({ on: true }));
+  const before = await maxSync();
+  await new Promise((r) => setTimeout(r, 1100));
+  await createBooking(mk("on"));
+  const after = await maxSync();
+  console.log(`HOOK-DIFF:${before === after ? "SAME" : "CHANGED"}`);
+  writeFileSync(".dev/workforce-mock-dayrefreshed-off.json", JSON.stringify({ on: true }));
+  const before2 = await maxSync();
+  await new Promise((r) => setTimeout(r, 1100));
+  await createBooking(mk("off"));
+  const after2 = await maxSync();
+  console.log(`HOOK-OFF-DIFF:${before2 === after2 ? "SAME" : "CHANGED"}`);
+  writeFileSync(".dev/workforce-mock-dayrefreshed-off.json", JSON.stringify({ on: false }));
+  writeFileSync(".dev/workforce-mock-newpatient.json", JSON.stringify({ on: false })); // 還原，防止污染其他 run 嘅 new-patient 422 斷言
+  process.exit(0); // ★ client.ts import 鏈含 redis handle — 必須顯式 exit
+})().catch((e) => {
+  console.error(`HOOK-ERR:${e?.message ?? e}`);
+  process.exit(1);
+});
+T145TS
+  T145_HK=$(WORKFORCE_MOCK=1 pnpm exec tsx .dev/t145-hook-check.ts "$TKW_CLINIC_ID" "$R14_D" 2>&1 | grep -E '^HOOK' || true)
+  grep -q "HOOK-DIFF:CHANGED" <<< "$T145_HK" && pass "T145b 寫入(dayRefreshed=true) → L2 即時 bust（syncedAt 變）" || { echo "    ❌ T145b on（=$(echo "$T145_HK" | tr '\n' ' ')）"; R14=1; }
+  grep -q "HOOK-OFF-DIFF:SAME" <<< "$T145_HK" && pass "T145b 寫入(dayRefreshed=false) → 唔 bust（對照）" || { echo "    ❌ T145b off（=$(echo "$T145_HK" | tr '\n' ' ')）"; R14=1; }
+  rm -f .dev/t145-hook-check.ts .dev/workforce-mock-dayrefreshed-off.json .dev/workforce-mock-booked.json
+
+  # ── T146. refresh 錯誤 shape（429/409/404/403/400 — 對齊 S1 真端點）────
+  # 429 flag
+  echo '{}' > .dev/workforce-mock-refresh-429.json
+  T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
+  check "T146 429" "$(tail -1 <<< "$T146_R")" "429"
+  grep -q '"code":"RATE_LIMITED"' <<< "$(head -1 <<< "$T146_R")" && pass "T146 429 code=RATE_LIMITED" || { echo "    ❌ T146 429 code（=$(head -1 <<< "$T146_R" | head -c 120)）"; R14=1; }
+  grep -q '"retryAfterSec":37' <<< "$(head -1 <<< "$T146_R")" && pass "T146 429 retryAfterSec=37" || { echo "    ❌ T146 429 retryAfterSec（=$(head -1 <<< "$T146_R" | head -c 120)）"; R14=1; }
+  rm -f .dev/workforce-mock-refresh-429.json
+  # 409
+  echo '{}' > .dev/workforce-mock-refresh-409.json
+  T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
+  check "T146 409" "$(tail -1 <<< "$T146_R")" "409"
+  grep -q 'APRICOT_BUSY' <<< "$(head -1 <<< "$T146_R")" && pass "T146 409 code=APRICOT_BUSY" || { echo "    ❌ T146 409（=$(head -1 <<< "$T146_R" | head -c 120)）"; R14=1; }
+  rm -f .dev/workforce-mock-refresh-409.json
+  # 404
+  echo '{}' > .dev/workforce-mock-refresh-404.json
+  T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
+  check "T146 404" "$(tail -1 <<< "$T146_R")" "404"
+  grep -q 'CLINIC_NOT_FOUND' <<< "$(head -1 <<< "$T146_R")" && pass "T146 404 code=CLINIC_NOT_FOUND" || { echo "    ❌ T146 404（=$(head -1 <<< "$T146_R" | head -c 120)）"; R14=1; }
+  rm -f .dev/workforce-mock-refresh-404.json
+  # 403
+  echo '{}' > .dev/workforce-mock-refresh-403.json
+  T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
+  check "T146 403" "$(tail -1 <<< "$T146_R")" "403"
+  rm -f .dev/workforce-mock-refresh-403.json
+  # 400：8 日（超上限）— POST 可安全 retry：8 日喺 route zod 層即拒，唔到 mock（無 side effect）
+  T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d '{"clinicCode":"TKW","dates":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05","2026-09-06","2026-09-07","2026-09-08"]}')
+  T146_C=$(tail -1 <<< "$T146_R")
+  for i in 1 2; do
+    [ "$T146_C" = "400" ] && break
+    grep -q "Unexpected end of JSON input" <<< "$(sed '$d' <<< "$T146_R")" || break # 只 retry flake 簽名；真 500 照 fail
+    echo "    (T146 8d dev manifest flake 500 → retry $i)"
+    sleep 2
+    T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d '{"clinicCode":"TKW","dates":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05","2026-09-06","2026-09-07","2026-09-08"]}')
+    T146_C=$(tail -1 <<< "$T146_R")
+  done
+  check "T146 400（8 日）" "$T146_C" "400"
+
+  # ── T147. 逐日 ok:false → 該日唔 bust（對照日照 bust）──────────────────
+  T147_OLD=$(l2_max "$R14_D")
+  T147_OLD2=$(l2_max "$R14_D2")
+  echo "[\"$R14_D\"]" > .dev/workforce-mock-refresh-failday.json
+  T147_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\",\"$R14_D2\"]}")
+  T147_BODY=$(head -1 <<< "$T147_R")
+  check "T147 200" "$(tail -1 <<< "$T147_R")" "200"
+  sleep 1
+  T147_NEW=$(l2_max "$R14_D")
+  T147_NEW2=$(l2_max "$R14_D2")
+  grep -q "\"date\":\"$R14_D\",\"ok\":false" <<< "$T147_BODY" && pass "T147 fail day ok:false" || { echo "    ❌ T147 ok:false（=${T147_BODY:0:160}）"; R14=1; }
+  grep -q 'SYNC_FAILED' <<< "$T147_BODY" && pass "T147 fail day error=SYNC_FAILED" || { echo "    ❌ T147 error（=${T147_BODY:0:160}）"; R14=1; }
+  grep -q "\"date\":\"$R14_D2\",\"ok\":true" <<< "$T147_BODY" && pass "T147 對照日 ok:true" || { echo "    ❌ T147 對照日（=${T147_BODY:0:160}）"; R14=1; }
+  [ "$T147_NEW" = "$T147_OLD" ] && pass "T147 fail day 唔 bust（L2 原封）" || { echo "    ❌ T147 fail day 被 bust（old=$T147_OLD new=$T147_NEW）"; R14=1; }
+  [ -n "$T147_NEW2" ] && [ "$T147_NEW2" != "$T147_OLD2" ] && pass "T147 對照日 busted + refilled" || { echo "    ❌ T147 對照日未變（old=$T147_OLD2 new=$T147_NEW2）"; R14=1; }
+  rm -f .dev/workforce-mock-refresh-failday.json
+
+  # ── T148. Flow data_exchange stale gate（>20m → 靜默 refresh+bust → 出 options）──
+  # 準備：L2 窗口（today..R14_D）清晒 → 只 seed R14_D → 打舊 2 小時（naive column：AT TIME ZONE 'UTC'）
+  T148_TODAY=$(node -e 'console.log(new Date(Date.now()+8*3600e3).toISOString().slice(0,10))')
+  q "DELETE FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"date\" BETWEEN '$T148_TODAY' AND '$R14_D'" >/dev/null 2>&1
+  curl -s -o /dev/null -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}"
+  q "UPDATE \"AvailabilitySlot\" SET \"syncedAt\"=(now() AT TIME ZONE 'UTC') - interval '2 hours' WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"date\"='$R14_D'" >/dev/null 2>&1
+  if t98_setup_pat "8526955${EPOCH}" "E2E T148"; then
+    T148_TOK="$T98_TOK" # t98_setup_pat 設嘅係 T98_TOK（T148 原引用咗唔存在嘅 T148_TOK → stepx 空 token → 全段靜默失敗，2026-08-31 實測）
+    T148_LOG0=$(grep -c '"path":"/api/external/v1/availability/refresh"' .dev/workforce-mock-calls.jsonl 2>/dev/null); T148_LOG0=${T148_LOG0:-0}
+    T148_OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T148_TOK" --action data_exchange --screen SCR_DATE --data '{"user_action":"submit_date","date":"'$R14_D'"}' 2>&1 || true)
+    stepx_parse "$T148_OUT" /tmp/e2e-t148-slot.json
+    T148_LOG1=$(grep -c '"path":"/api/external/v1/availability/refresh"' .dev/workforce-mock-calls.jsonl 2>/dev/null); T148_LOG1=${T148_LOG1:-0}
+    [ "$T148_LOG1" -gt "$T148_LOG0" ] && pass "T148 stale(>20m) → data_exchange 前靜默 refresh 觸發" || { echo "    ❌ T148 無 refresh（log0=$T148_LOG0 log1=$T148_LOG1 out=$(echo "$T148_OUT" | head -c 160)）"; R14=1; }
+    grep -q '"screen":"SCR_SLOT"' /tmp/e2e-t148-slot.json 2>/dev/null && pass "T148 refresh 後出 options（SCR_SLOT）" || { echo "    ❌ T148 屏（=$(head -c 160 /tmp/e2e-t148-slot.json 2>/dev/null)）"; R14=1; }
+    T148_MAX=$(l2_max "$R14_D")
+    T148_MAX_E=$(date -u -d "$T148_MAX" +%s 2>/dev/null || echo 0)
+    T148_STALE_E=$(date -u -d '2 hours ago' +%s)
+    [ "$T148_MAX_E" -gt "$T148_STALE_E" ] && pass "T148 L2 已重填（syncedAt 新於 stale mark）" || { echo "    ❌ T148 L2 未重填（max=$T148_MAX）"; R14=1; }
+    # 負對照：L2 已 fresh → 再 stepx 唔該再 refresh
+    T148_OUT2=$(pnpm -s flow-client stepx --clinic TKW --token "$T148_TOK" --action data_exchange --screen SCR_DATE --data '{"user_action":"submit_date","date":"'$R14_D'"}' 2>&1 || true)
+    T148_LOG2=$(grep -c '"path":"/api/external/v1/availability/refresh"' .dev/workforce-mock-calls.jsonl 2>/dev/null); T148_LOG2=${T148_LOG2:-0}
+    [ "$T148_LOG2" = "$T148_LOG1" ] && pass "T148 fresh L2 → 唔重複 refresh（gate 正確）" || { echo "    ❌ T148 fresh 仲 refresh（log1=$T148_LOG1 log2=$T148_LOG2）"; R14=1; }
+    t98_pat_sweep "8526955${EPOCH}"
+  else
+    echo "    ❌ T148 patient setup fail"; R14=1
+  fi
+fi
+rm -f .dev/workforce-mock-refresh-4*.json .dev/workforce-mock-refresh-failday.json .dev/workforce-mock-dayrefreshed-off.json
+[ "$R14" = 0 ] && pass "R14 cwi-refresh 全鏈 e2e（T145 手動刷新+hook / T146 錯誤 shape / T147 逐日失敗 / T148 Flow stale gate）" || fail "R14 有項失敗（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

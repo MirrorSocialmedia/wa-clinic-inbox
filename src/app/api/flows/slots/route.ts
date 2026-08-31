@@ -14,6 +14,7 @@ import { requireAuth } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { hkToday } from "@/lib/duty/client";
 import { getBookableSlots, getHeld } from "@/lib/workforce/client";
+import { getSlotFreshness } from "@/lib/availability";
 
 export const dynamic = "force-dynamic";
 
@@ -43,10 +44,14 @@ export const GET = handle(async (req: NextRequest) => {
     }
   }
 
-  const [slotsRes, heldRes] = await Promise.all([
+  const [slotsRes, heldRes, clinicRow] = await Promise.all([
     getBookableSlots(clinicCode, from, to).catch(() => null),
     getHeld(clinicCode).catch(() => null),
+    // cwi-refresh-20260831 §5：L2 新鮮度（資料截至 / 可能滯後）— fail-soft
+    prisma.clinic.findUnique({ where: { code: clinicCode }, select: { id: true } }).catch(() => null),
   ]);
+  const clinicId = ctx.staff.role === "STAFF" ? ctx.clinicId! : clinicRow?.id ?? null;
+  const freshness = clinicId ? await getSlotFreshness(clinicId, from, to) : { maxSyncedAt: null, stale: false };
 
   return NextResponse.json({
     v: 1,
@@ -57,5 +62,7 @@ export const GET = handle(async (req: NextRequest) => {
     slots: slotsRes,
     held: heldRes?.holds ?? [],
     holdTimeoutHours: heldRes?.holdTimeoutHours ?? null,
+    syncedAt: freshness.maxSyncedAt ? freshness.maxSyncedAt.toISOString() : null,
+    stale: freshness.stale,
   });
 });

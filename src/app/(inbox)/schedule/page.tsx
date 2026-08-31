@@ -4,6 +4,7 @@ import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
 import { fetchDutyRoster, hkToday, type DutyEntry } from "@/lib/duty/client";
 import { getBookableSlots, getHeld } from "@/lib/workforce/client";
+import { getSlotFreshness } from "@/lib/availability";
 import { SlotsBoard, type SlotsData } from "@/components/inbox/slots-board";
 import { ArrowLeft, CalendarDays } from "lucide-react";
 
@@ -92,9 +93,11 @@ export default async function SchedulePage({
       // 可約時段：workforce bookable-slots（from ≥ today 契約）+ held（四態格「已佔」橙）
       const today = hkToday();
       const to6 = hkDateOffset(6);
-      const [slotsRes, heldRes] = await Promise.all([
+      const [slotsRes, heldRes, freshness] = await Promise.all([
         getBookableSlots(clinic.code, today, to6).catch(() => null),
         getHeld(clinic.code).catch(() => null),
+        // cwi-refresh-20260831 §5：L2 新鮮度（資料截至 / 可能滯後）— fail-soft
+        getSlotFreshness(clinic.id, today, to6),
       ]);
       slotsInitial = {
         connected: slotsRes !== null,
@@ -102,6 +105,8 @@ export default async function SchedulePage({
         held: heldRes?.holds ?? [],
         holdTimeoutHours: heldRes?.holdTimeoutHours ?? null,
         fetchedAt: new Date().toISOString(),
+        syncedAt: freshness.maxSyncedAt ? freshness.maxSyncedAt.toISOString() : null,
+        stale: freshness.stale,
       };
     }
   }

@@ -159,6 +159,7 @@ check("response v=1 + clinicCode 非空", fixture.v === 1 && fixture.clinicCode.
 
 if (failures === 0) {
   console.log("WORKFORCE-CONTRACT OK");
+  process.exit(0); // ★ cwi-refresh-20260831：client.ts import 鏈現含 redis handle（availability→notify→queue）— 成功路徑必須顯式 exit，否則 e2e 內 $( ) 永遠唔會完成
 } else {
   console.error(`WORKFORCE-CONTRACT FAILED: ${failures} failures`);
   process.exit(1);

@@ -166,6 +166,10 @@ export function initControlBridge(sub: Redis): void {
       } else if (data.cmd === "cache:bust") {
         // ★ Fix B（cwi-fix-20260825-f1）：web process 側 automation/workflow cache 即時失效
         applyCacheBust(data.scope);
+      } else if (data.cmd === "availability:busted") {
+        // ★ cwi-refresh-20260831 §3：availability L2 該日 busted + 重填完 → 推 clinic room 俾 UI 即時重繪
+        // （payload 零 PII：clinicCode/date 都係營運元數據）
+        notifyClinic(data.clinicId, "availability:busted", { clinicCode: data.clinicCode, date: data.date });
       }
     } catch (err) {
       log.warn(
