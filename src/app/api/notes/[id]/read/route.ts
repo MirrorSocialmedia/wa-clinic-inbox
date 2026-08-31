@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { publishNotify } from "@/lib/notify";
 
@@ -12,7 +12,7 @@ import { publishNotify } from "@/lib/notify";
  * - 只對 channel=INTERNAL 嘅 note 生效（其他 message → 400 "not a note"）。
  * - upsert NoteReadReceipt（@@unique([messageId, staffId])）— 冪等：重複 read 唔新增 row、
  *   readAt 保留首次已讀時間（tick hover 顯示「邊個・幾點」用首次時間，似 WhatsApp）。
- * - RBAC：assertClinicAccess — STAFF 跨店 → 403（ADMIN 跨店照舊，同其他 route 一致）。
+ * - RBAC：assertConversationAccess — STAFF 跨店 → 403（ADMIN 跨店照舊，同其他 route 一致）。
  * - socket：note:read → room clinic:{id}（payload **零內文** — 只 id/時間戳元數據；
  *   收方 client 即時重算 tick）。
  *
@@ -36,7 +36,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
     select: { id: true, clinicId: true, assigneeId: true },
   });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(auth, conv.clinicId); // STAFF 別店 → 403
+  assertConversationAccess(auth, conv); // STAFF 別店 → 403
   if (msg.channel !== "INTERNAL" || msg.type !== "note") {
     return NextResponse.json({ error: "not a note" }, { status: 400 });
   }

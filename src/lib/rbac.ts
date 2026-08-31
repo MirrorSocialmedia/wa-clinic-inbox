@@ -7,10 +7,11 @@ import { getRedis } from "@/lib/queue";
 /**
  * WA Clinic Inbox — RBAC 基礎（框架 MD D10 / §6.4）
  *
- * 權限模型：
+ * 權限模型（cwi-h6-20260830 多店化）：
  * - ADMIN  → 跨店（clinicId = null，可睇全部店）
- * - STAFF  → 只自己店（clinicId 硬性綁定；每條 query 都要帶 clinicId = session.clinicId，
- *            唔靠前端收埋）
+ * - STAFF  → 綁定店集合 StaffClinic（clinicIds 硬性綁定；每條 query 都必過 clinicScope，
+ *            唔靠前端收埋）。conversation 級另有單線授權：assigneeId == 自己
+ *            （派俾完全外店嘅人嗰條線，見 assertConversationAccess）
  *
  * 用法（App Router route handler）：
  *   const { staff, clinicId, res } = await requireAuth(req);
@@ -37,8 +38,10 @@ export interface StaffInfo {
 
 export interface AuthContext {
   staff: StaffInfo;
-  /** STAFF = 綁定店；ADMIN = null（跨店） */
+  /** STAFF = 主店（StaffClinic isPrimary；舊 session = 唯一店）；ADMIN = null（跨店） */
   clinicId: string | null;
+  /** ★ cwi-h6-20260830：綁定店集合。ADMIN = []（全店，scope 不限）；STAFF = StaffClinic 全部 clinicId（≥1，fail-closed）。舊 session 冇呢個欄 → fallback [clinicId]。 */
+  clinicIds: string[];
   /** 必需要將呢個 response（或其 set-cookie header）帶返畀 client */
   res: Awaited<ReturnType<typeof getSession>>["res"];
 }
@@ -174,31 +177,62 @@ export async function requireAdmin(req: NextRequest): Promise<AuthContext> {
 }
 
 /**
- * STAFF 硬性綁定 clinicId 嘅 query scope helper：
+ * STAFF 硬性綁定 clinicIds 嘅 query scope helper（cwi-h6-20260830 多店化）：
  *   where: { ...clinicScope(ctx) }
- * ADMIN → {}（跨店）；STAFF → { clinicId }（只自己店）。
+ * ADMIN → {}（跨店）；STAFF → { clinicId: { in: [店1, 店2, ...] } }（只綁定店）。
  * 所有按店過濾嘅 Prisma query 都必過呢個，唔好手寫 clinicId 條件。
  */
 export function clinicScope(ctx: {
   staff: { role: "ADMIN" | "STAFF" };
-  clinicId: string | null;
-}): { clinicId?: string } {
+  clinicIds: string[];
+}): { clinicId?: { in: string[] } } {
   if (ctx.staff.role === "STAFF") {
-    if (!ctx.clinicId) {
-      // STAFF 冇 clinicId = 壞 session，直接擋
-      throw new RbacError(401, "staff session missing clinicId");
+    if (!ctx.clinicIds.length) {
+      // STAFF 冇店集合 = 壞 session，直接擋
+      throw new RbacError(401, "staff session missing clinics");
     }
-    return { clinicId: ctx.clinicId };
+    return { clinicId: { in: ctx.clinicIds } };
   }
   return {};
 }
 
-/** 單店訪問檢查（e.g. GET /api/conversations/[id]）：STAFF 只准入自己店嘅 entity。 */
+/**
+ * ★ cwi-h6-20260830：conversation 級 access（取代大部分 assertClinicAccess call site）。
+ * 模型（MD §0）：可以睇/覆一個 conversation =
+ *   ADMIN ∨ conv.clinicId ∈ 我嘅店集合 ∨ conv.assigneeId == 我（單線授權 — 派俾完全外店嘅人嗰條線）
+ */
+export function assertConversationAccess(
+  ctx: Pick<AuthContext, "staff" | "clinicIds">,
+  conv: { clinicId: string; assigneeId: string | null }
+): void {
+  if (ctx.staff.role === "ADMIN") return;
+  if (ctx.clinicIds.includes(conv.clinicId)) return;
+  if (conv.assigneeId === ctx.staff.id) return; // 單線授權
+  throw new RbacError(403, "no access to this conversation");
+}
+
+/**
+ * ★ cwi-h6-20260830：conversation 列表 scope（queue 欄 / 搜尋）：
+ * ADMIN → {}；STAFF → 自己所有店 ∪ 我係負責人嘅對話（單線授權 — 外店派咗落嚟嗰條線）。
+ * 注意：呢個係列表層級；單對話 access 仍以 assertConversationAccess 為準。
+ */
+export function conversationScope(ctx: {
+  staff: { role: "ADMIN" | "STAFF"; id: string };
+  clinicIds: string[];
+}): Record<string, unknown> {
+  if (ctx.staff.role === "STAFF") {
+    if (!ctx.clinicIds.length) throw new RbacError(401, "staff session missing clinics");
+    return { OR: [{ clinicId: { in: ctx.clinicIds } }, { assigneeId: ctx.staff.id }] };
+  }
+  return {};
+}
+
+/** 單店訪問檢查（clinic 級 entity：booking / contact / flow hold 等 — cwi-h6-20260830 多店化：目標店 ∈ 我嘅店集合）。 */
 export function assertClinicAccess(
-  ctx: Pick<AuthContext, "staff" | "clinicId">,
+  ctx: Pick<AuthContext, "staff" | "clinicIds">,
   targetClinicId: string
 ): void {
-  if (ctx.staff.role === "STAFF" && ctx.clinicId !== targetClinicId) {
+  if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(targetClinicId)) {
     throw new RbacError(403, "cross-clinic access denied");
   }
 }
@@ -208,9 +242,19 @@ function toContext(data: SessionData, res: AuthContext["res"]): AuthContext {
   if (data.role !== "ADMIN" && data.role !== "STAFF") {
     throw new RbacError(401, "invalid session role");
   }
-  // Fail-closed：STAFF 必須有 clinicId — 冇 clinicId 嘅 STAFF context 會令 query 變成無 scope（跨店讀），
+  // ★ cwi-h6-20260830：clinicIds — 新 session 由 login 寫入（StaffClinic 查詢）；
+  // 舊 session（冇 clinicIds 欄）fallback [clinicId]（行為同舊版完全一致 — T98 驗收）。
+  const clinicIds =
+    data.role === "ADMIN"
+      ? []
+      : data.clinicIds?.length
+        ? data.clinicIds
+        : data.clinicId
+          ? [data.clinicId]
+          : null;
+  // Fail-closed：STAFF 必須有店集合 — 冇店嘅 STAFF context 會令 query 變無 scope（跨店讀），
   // 所以喺最底層呢度就擋死，唔靠每個 route 記得調 clinicScope。
-  if (data.role === "STAFF" && !data.clinicId) {
+  if (data.role === "STAFF" && !clinicIds) {
     throw new RbacError(401, "staff session missing clinicId");
   }
   return {
@@ -221,6 +265,7 @@ function toContext(data: SessionData, res: AuthContext["res"]): AuthContext {
       role: data.role,
     },
     clinicId: data.clinicId,
+    clinicIds: clinicIds ?? [],
     res,
   };
 }

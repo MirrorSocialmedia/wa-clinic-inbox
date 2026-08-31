@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { publishNotify } from "@/lib/notify";
 import { phoneHash } from "@/lib/phone-hash";
@@ -50,7 +50,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   if (!loaded) return NextResponse.json({ error: "not found" }, { status: 404 });
   const { conv, contact } = loaded;
   if (!contact) return NextResponse.json({ error: "contact not found" }, { status: 404 });
-  assertClinicAccess(auth, conv.clinicId);
+  assertConversationAccess(auth, conv);
 
   const hash = phoneHash(contact.waId);
   let matches;
@@ -99,7 +99,7 @@ export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
   const loaded = await loadConvAndContact(id);
   if (!loaded) return NextResponse.json({ error: "not found" }, { status: 404 });
   const { conv } = loaded;
-  assertClinicAccess(auth, conv.clinicId);
+  assertConversationAccess(auth, conv);
 
   if (conv.pinnedPatientApricotId) {
     await prisma.conversation.update({

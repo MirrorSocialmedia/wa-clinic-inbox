@@ -21,8 +21,11 @@ export interface SessionData {
   email: string;
   name: string;
   role: SessionRole;
-  /** STAFF 硬性綁定嘅 clinicId；ADMIN = null（跨店） */
+  /** STAFF 主店（StaffClinic isPrimary）；ADMIN = null（跨店） */
   clinicId: string | null;
+  /** ★ cwi-h6-20260830：STAFF 綁定店集合（login 時查 StaffClinic 一次過寫入）；ADMIN = []（全店）。
+   * 舊 session 冇呢個欄 → toContext fallback [clinicId]。 */
+  clinicIds?: string[];
   /** login 時間（epoch ms），session 過期檢查用 */
   loginAt: number;
 }

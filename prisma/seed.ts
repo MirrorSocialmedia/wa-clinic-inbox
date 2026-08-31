@@ -181,6 +181,22 @@ async function main(): Promise<void> {
     console.log(`[seed] created ${u.role} ${user.email.split("@")[0]}@<redacted>  password=${password}  (only shown ONCE; saved to .dev/credentials.txt)`);
   }
 
+  // ★ cwi-h6-20260830：多店員工 — STAFF 有店但無 StaffClinic 行 → 回填（isPrimary=true）；
+  // ADMIN 唔插（全店）。冪等（已綁定集合內 → 跳）。
+  const allStaff = await prisma.staffUser.findMany({
+    where: { role: "STAFF", active: true },
+    select: { id: true, clinicId: true },
+  });
+  for (const s of allStaff) {
+    if (!s.clinicId) continue;
+    const rows = await prisma.staffClinic.findMany({ where: { staffId: s.id }, select: { clinicId: true } });
+    if (rows.length === 0) {
+      await prisma.staffClinic.create({ data: { staffId: s.id, clinicId: s.clinicId, isPrimary: true } });
+    } else if (!rows.some((r) => r.clinicId === s.clinicId)) {
+      await prisma.staffClinic.create({ data: { staffId: s.id, clinicId: s.clinicId, isPrimary: false } });
+    }
+  }
+
   // credentials 檔：舊行（existing 用戶）+ 今次新建行 — 一次寫定（冪等）
   const ordered: string[] = [];
   for (const u of USERS) {

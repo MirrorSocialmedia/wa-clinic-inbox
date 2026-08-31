@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { assignConversation, assertCanAssign, AssignError } from "@/lib/assign";
 
@@ -40,7 +40,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(auth, conv.clinicId); // STAFF 別店 → 403
+  assertConversationAccess(auth, conv); // STAFF 別店 → 403
   assertCanAssign(auth, conv, parsed.data.toStaffId); // 現任 assignee / ADMIN / unassigned claim / 接手（self）
 
   // ★ R5：client 帶 version → 樂觀鎖（陳舊 → ASSIGN_CONFLICT）；唔帶 → 舊 assigneeId lock

@@ -251,14 +251,15 @@ export interface HoldEventView {
 
 export async function latestHoldsByPhone(
   waIds: string[],
-  clinicId?: string | null
+  clinicId?: string | string[] | null
 ): Promise<Map<string, HoldEventView>> {
   if (waIds.length === 0) return new Map();
   const rows = await prisma.flowHoldEvent.findMany({
     where: {
       patientPhone: { in: waIds },
       status: { in: ["HELD", "IN_APRICOT", "COMMITTED"] },
-      ...(clinicId ? { clinicId } : {}),
+      // cwi-h6-20260830：string[] = 多店員工（in）；string = 單店 / ADMIN 指定
+      ...(clinicId ? { clinicId: Array.isArray(clinicId) ? { in: clinicId } : clinicId } : {}),
     },
     orderBy: { createdAt: "desc" },
     take: 500,

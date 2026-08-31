@@ -19,8 +19,8 @@ export const GET = handle(async (req: NextRequest) => {
   const clinicParam = url.searchParams.get("clinicId");
   const where: Record<string, unknown> = { ...scope, readAt: null };
   if (clinicParam) {
-    // STAFF 砌別店 clinicId → 403（RBAC 鐵律，同 conversations route 一致）
-    if (ctx.staff.role === "STAFF" && clinicParam !== ctx.clinicId) {
+    // STAFF 稔非自己綁定店嘅 clinicId → 403（RBAC 鐵律；cwi-h6 多店：集合檢查）
+    if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
       return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
     }
     where.clinicId = clinicParam;

@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, clinicScope } from "@/lib/rbac";
+import { requireAuth } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -9,7 +9,8 @@ import { handle } from "@/lib/api-error";
  * - Contact：waId 子字串 + profileName pg_trgm similarity / ILIKE（中文 fuzzy）
  * - Message：tsvector(english)（英文 full-text）+ ILIKE（中文/廣東話 fallback）
  *
- * Scope：STAFF 只自己店（clinicScope 硬性注入）；ADMIN 可以 ?clinicId= 指定。
+ * Scope：cwi-h6-20260830 多店 — STAFF 可搜 = 自己綁定店集合 + 我係 assignee 嘅對話（單線授權，
+ * message 分支）；ADMIN 可 ?clinicId= 指定。
  * ★ q 一律 bind parameter 传入（唔插值入 SQL），body 內容只以 snippet 形式
  *   回傳畀已授權 UI（正常業務數據，唔係 log）。
  */
@@ -47,27 +48,29 @@ interface MessageHit {
 
 export const GET = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
-  const scope = clinicScope(ctx);
   const url = new URL(req.url);
   const q = (url.searchParams.get("q") ?? "").trim();
   const type = url.searchParams.get("type") ?? "contact";
   if (q.length < 1) return NextResponse.json({ error: "q required" }, { status: 400 });
   if (q.length > 200) return NextResponse.json({ error: "q too long" }, { status: 400 });
 
+  // cwi-h6-20260830 多店：clinicIds = null → 無店限制（ADMIN 唔指定 clinicParam）；
+  // STAFF = 綁定店集合；clinicParam 指定時 = [clinicParam]（先驗證 ∈ 集合）
   const clinicParam = url.searchParams.get("clinicId");
-  const whereClinic: Record<string, unknown> = { ...scope };
-  if (clinicParam) {
-    if (ctx.staff.role === "STAFF" && clinicParam !== ctx.clinicId) {
-      return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-    }
-    whereClinic.clinicId = clinicParam;
+  if (clinicParam && ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
+    return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
   }
-  const clinicId = whereClinic.clinicId as string | undefined;
+  const clinicIds: string[] | null = clinicParam
+    ? [clinicParam]
+    : ctx.staff.role === "STAFF"
+      ? ctx.clinicIds
+      : null;
+  const selfId = ctx.staff.id; // 單線授權：我係 assignee 嘅對話（外店派咗落嚟嗰條線）
   // ★ L-2：ILIKE/LIKE 用 escape 後嘅值（bind 照樣）；tsvector/similarity 用原 q
   const qEsc = escapeLikeWildcards(q);
 
   if (type === "message") {
-    const rows = clinicId
+    const rows = clinicIds
       ? await prisma.$queryRaw<MessageHit[]>`
           SELECT m.id, m."conversationId", m.direction, m.type,
                  left(m.body, 80) AS snippet, m."waTimestamp",
@@ -75,7 +78,7 @@ export const GET = handle(async (req: NextRequest) => {
           FROM "Message" m
           JOIN "Conversation" cv ON cv.id = m."conversationId"
           JOIN "Contact" c ON c.id = cv."contactId"
-          WHERE cv."clinicId" = ${clinicId}
+          WHERE (cv."clinicId" = ANY(${clinicIds}) OR cv."assigneeId" = ${selfId})
             AND (
               to_tsvector('english', coalesce(m.body, '')) @@ plainto_tsquery('english', ${q})
               OR coalesce(m.body, '') ILIKE '%' || ${qEsc} || '%'
@@ -98,11 +101,11 @@ export const GET = handle(async (req: NextRequest) => {
   }
 
   // default: contact
-  const rows = clinicId
+  const rows = clinicIds
     ? await prisma.$queryRaw<ContactHit[]>`
         SELECT id, "waId", "profileName", labels, "clinicId"
         FROM "Contact"
-        WHERE "clinicId" = ${clinicId}
+        WHERE "clinicId" = ANY(${clinicIds})
           AND (
             "waId" LIKE '%' || ${qEsc} || '%'
             OR coalesce("profileName", '') ILIKE '%' || ${qEsc} || '%'

@@ -1,7 +1,7 @@
 /**
  * POST /api/conversations/[id]/flag — 標記投訴 / AI 錯誤（Phase E 即時記帳，cwi-ai-20260825-t5）。
  *
- * 前線先見到問題 — STAFF 可用（assertClinicAccess 守店界）。
+ * 前線先見到問題 — STAFF 可用（assertConversationAccess 守店界）。
  * - body: { kind: "COMPLAINT" | "AI_ERROR" }
  * - AuditLog(MARK_COMPLAINT / MARK_AI_ERROR, meta: { intent })
  * - AutomationStat(complaints++) — AI_ERROR 都計入 complaints（同一「唔收貨」訊號，唔另開欄）
@@ -11,7 +11,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { bumpStat } from "@/lib/ops/automation-stats";
 
@@ -26,7 +26,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(ctx, conv.clinicId); // STAFF 別店 → 403
+  assertConversationAccess(ctx, conv); // STAFF 別店 → 403
 
   const parsed = bodySchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {

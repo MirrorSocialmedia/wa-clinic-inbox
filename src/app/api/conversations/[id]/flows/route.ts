@@ -1,7 +1,7 @@
 /**
  * POST /api/conversations/[id]/flows — staff 撳「📅 預約」掣 → 發 Booking Flow
  *
- * - RBAC：requireAuth + assertClinicAccess（STAFF 撳別店 → 403）
+ * - RBAC：requireAuth + assertConversationAccess（STAFF 撳別店 → 403）
  * - ★ H1 Send Lock（MD §3.2）：有負責人且唔係自己 → 423 SEND_LOCKED（同 free-form 同規則）
  * - 24h 窗口：過窗 → 422 window_closed（提示用帶 Flow 嘅 template — MD §8.2.4）
  * - 冪等：對話已有 SENT FlowSession → 重用（200 reused=true，唔重發訊息）
@@ -12,7 +12,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { assignConversation } from "@/lib/assign";
@@ -26,7 +26,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(ctx, conv.clinicId); // STAFF 別店 → 403
+  assertConversationAccess(ctx, conv); // STAFF 別店 → 403
 
   // ★ H1 Send Lock（MD §3.2）：同 free-form 同規則 — 負責人唔係自己 → 423（INTERNAL note route 冇呢個檢查）
   if (conv.assigneeId && conv.assigneeId !== ctx.staff.id) {

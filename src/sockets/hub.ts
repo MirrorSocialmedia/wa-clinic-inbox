@@ -101,8 +101,9 @@ export function initHub(io: SocketIOServer): void {
     );
 
     if (session.role === "STAFF") {
-      // STAFF 硬性綁自己店
-      void socket.join(`clinic:${session.clinicId}`);
+      // ★ cwi-h6-20260830：多店員工 join 全部綁定店 room（舊 session 冇 clinicIds → fallback [clinicId]）
+      const roomClinics = session.clinicIds?.length ? session.clinicIds : session.clinicId ? [session.clinicId] : [];
+      void Promise.all(roomClinics.map((cid) => socket.join(`clinic:${cid}`)));
     } else if (session.role === "ADMIN") {
       // ADMIN join 全部已知 clinic room
       void prisma

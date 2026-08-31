@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { publishNotify } from "@/lib/notify";
 import { assertCanAssign } from "@/lib/assign";
@@ -31,7 +31,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id } = await ctx.params;
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(auth, conv.clinicId);
+  assertConversationAccess(auth, conv); // cwi-h6：店集合 ∨ 單線授權（assignee == 自己）；外店他人對話 → 403
   const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
   return NextResponse.json({ conversation: conv, contact });
 });
@@ -44,7 +44,7 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(auth, conv.clinicId);
+  assertConversationAccess(auth, conv); // cwi-h6：店集合 ∨ 單線授權
 
   // ★ H1：assignee 改動受權限模型約束（現任 assignee / ADMIN / unassigned claim / 接手 self；否則 403）
   if (parsed.data.assigneeId !== undefined) {
@@ -53,15 +53,12 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const { status, assigneeId, markRead, urgent } = parsed.data;
 
-  // assignee 必須係同店嘅 staff（STAFF 唔會見到別店 staff；ADMIN 都可以指定）
+  // cwi-h6-20260830：assignee 只須 active（任何店 / ADMIN 都可 — 權限矩陣：ASSIGN target = 任何 active STAFF/ADMIN；
+  // 跨店由 assertCanAssign + assertConversationAccess 判，唔再限同店）
   if (assigneeId) {
     const staff = await prisma.staffUser.findUnique({ where: { id: assigneeId } });
     if (!staff || !staff.active) {
       return NextResponse.json({ error: "assignee not found or inactive" }, { status: 400 });
-    }
-    // STAFF 做嘅 assignee 必須同店；ADMIN 做嘅可以跨店（ADMIN 嘅對話都在任何店）
-    if (staff.clinicId && staff.clinicId !== conv.clinicId) {
-      return NextResponse.json({ error: "assignee belongs to another clinic" }, { status: 400 });
     }
   }
 

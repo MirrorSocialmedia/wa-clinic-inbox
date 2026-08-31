@@ -25,7 +25,8 @@ export const GET = handle(async (req: NextRequest) => {
 
   const where: Record<string, unknown> = { ...scope };
   if (clinicParam) {
-    if (ctx.staff.role === "STAFF" && clinicParam !== ctx.clinicId) {
+    // cwi-h6 多店：集合檢查（STAFF 綁定店之一先准）
+    if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
       return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
     }
     where.clinicId = clinicParam;

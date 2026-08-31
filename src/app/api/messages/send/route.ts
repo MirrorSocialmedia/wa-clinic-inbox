@@ -3,7 +3,7 @@ import { z } from "zod";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess, clinicScope } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, clinicScope } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { outboundQueue } from "@/lib/queue";
 import { getWindowState } from "@/lib/wa/window";
@@ -25,7 +25,7 @@ import {
 /**
  * POST /api/messages/send — 員工發訊息（框架 MD §6.3 + Phase B template 覆）。
  *
- * 1. RBAC：STAFF 只能發自己店嘅對話（assertClinicAccess → 403 實測）
+ * 1. RBAC：STAFF 只能發自己店嘅對話（assertConversationAccess → 403 實測）
  * 2. free-form（body）：窗口檢查 now - lastInboundAt < 24h 先准；
  *    過窗 → 422 + `templates` 欄（APPROVED + UTILITY 名單 — UI 轉 template 揀選）
  * 3. template（templateName）：窗口外合法（utility template 就係為呢個情境）；
@@ -83,7 +83,7 @@ export const POST = handle(async (req: NextRequest) => {
     where: { id: parsed.data.conversationId },
   });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(ctx, conv.clinicId); // STAFF 砌別店 URL → 403
+  assertConversationAccess(ctx, conv); // STAFF 砌別店 URL → 403
 
   // ★ H1 Send Lock（MD §3.2）：對話有負責人時，只有負責人可以發 WhatsApp（含 ADMIN）。
   // 其他店內員工 → 423 SEND_LOCKED（UI composer 轉內部備註模式；INTERNAL note route 冇呢個檢查）。

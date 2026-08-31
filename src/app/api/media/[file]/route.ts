@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import path from "node:path";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { readMediaFile } from "@/lib/wa/media";
 import log from "@/lib/log";
@@ -13,7 +13,7 @@ import log from "@/lib/log";
  * - basename 驗證（防 path traversal：../ 一律 400）
  * - 只可以讀 media dir 底下嘅檔案
  * - ★ P1-1 clinic scope：由 mediaPath 反查 Message → Conversation.clinicId →
- *   assertClinicAccess（店 A staff 唔可以攞店 B 嘅媒體 — wamid 唔係秘密）；
+ *   assertConversationAccess（店 A staff 唔可以攞店 B 嘅媒體 — wamid 唔係秘密）；
  *   查唔到任何 Message 持有呢個檔 → 404（唔洩露檔案存在性）
  * - ★ C-1b per-file 加密：readMediaFile 透明解密（碟上密文 / 冇 key 時 legacy 明文）
  * - ★ AS-4 下載安全：X-Content-Type-Options: nosniff（防 MIME sniffing）；
@@ -61,12 +61,12 @@ export const GET = handle(
     }
     const conv = await prisma.conversation.findUnique({
       where: { id: msg.conversationId },
-      select: { clinicId: true },
+      select: { clinicId: true, assigneeId: true },
     });
     if (!conv) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
-    assertClinicAccess(auth, conv.clinicId); // STAFF 跨店 → RbacError(403)
+    assertConversationAccess(auth, conv); // STAFF 跨店 → RbacError(403)
 
     const ext = (file.split(".").pop() ?? "").toLowerCase();
     const mime = MIME[ext] ?? "application/octet-stream";

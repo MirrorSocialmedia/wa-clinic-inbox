@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -12,7 +12,7 @@ import { handle } from "@/lib/api-error";
  * 回傳 { receipts: [{ messageId, staffId, readAt }] } — 零內文（note 內容喺 GET messages，
  * 呢度只有回執元數據）。
  *
- * RBAC：assertClinicAccess（STAFF 別店 → 403）。
+ * RBAC：assertConversationAccess（STAFF 別店 → 403）。
  */
 export const dynamic = "force-dynamic";
 
@@ -24,10 +24,10 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const conv = await prisma.conversation.findUnique({
     where: { id },
-    select: { id: true, clinicId: true },
+    select: { id: true, clinicId: true, assigneeId: true },
   });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(auth, conv.clinicId); // STAFF 別店 → 403
+  assertConversationAccess(auth, conv); // STAFF 別店 → 403
 
   // 只撈 INTERNAL note 嘅回執（先攞 note id 陣列，再 join 回執 row）
   const noteRows = await prisma.message.findMany({

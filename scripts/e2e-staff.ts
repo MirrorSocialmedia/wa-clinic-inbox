@@ -67,6 +67,12 @@ async function main() {
         data: { email, name, role: "STAFF", clinicId: clinicRow.id, passwordHash: hash, active: true },
       });
     }
+    // cwi-h6-20260830：StaffClinic 綁定行（login clinicIds 靠呢行；冪等 upsert）
+    await prisma.staffClinic.upsert({
+      where: { staffId_clinicId: { staffId: staff.id, clinicId: clinicRow.id } },
+      update: { isPrimary: true },
+      create: { staffId: staff.id, clinicId: clinicRow.id, isPrimary: true },
+    });
     console.log(`STAFF_ID=${staff.id}`);
     return;
   }

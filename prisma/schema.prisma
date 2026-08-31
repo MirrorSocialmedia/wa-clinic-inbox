@@ -116,6 +116,8 @@ model Clinic {
   aiMode           AiMode  @default(DRAFT)
   // Phase 3：該店醫生名錄（SCREEN_PROVIDER 來源；sync 表 — 多對多，醫生可以跨店）
   providers        ProviderClinic[]
+  // ★ cwi-h6-20260830：多店員工綁定（StaffClinic M2M）
+  staff            StaffClinic[]
   // Phase 4：webhook 最後事件時間（inbound worker 每 event 更新）— 5 分鐘健康自檢
   // stale 判斷用：有 traffic（!= null）但 > 30 分鐘無事件 → 警報；null = 從來無 traffic 唔計。
   lastWebhookEventAt DateTime? @db.Timestamptz
@@ -133,7 +135,10 @@ model StaffUser {
   passwordHash String
   name         String
   role         Role
-  clinicId     String?                        // STAFF 必填；ADMIN 留空 = 跨店
+  // @deprecated（cwi-h6-20260830）：改用 StaffClinic M2M；保留做 primary fallback + 舊 session 兼容（唔 drop）
+  clinicId     String?
+  // ★ cwi-h6-20260830：多店員工（M2M）— STAFF 可綁多間店；ADMIN 唔插（全店）
+  clinics      StaffClinic[]
   active       Boolean @default(true)
   // 安全審計 H-2：ADMIN TOTP（RFC 6238）secret — AES-256-GCM 密文（iv|tag|ct base64，
   // 見 src/lib/totp-enc.ts，key = TOTP_ENC_KEY）。NULL = 未啟用；啟用後 ADMIN 登入
@@ -141,6 +146,20 @@ model StaffUser {
   totpSecretEnc String?
   // ★ H3：自動派單 round-robin 用（「上次被派時間」最耐嗰個先；NULL = 從未派）
   lastAssignedAt DateTime? @db.Timestamptz
+}
+
+model StaffClinic {
+  // ★ cwi-h6-20260830：多店員工綁定（M2M join 表）。
+  // - isPrimary = 預設店（UI 落單/新對話 default、通知分組用）— 每 staff 最多一行 true。
+  // - ADMIN 唔插行（佢全店）；STAFF 至少一行（登入時寫入 session clinicIds）。
+  staffId   String
+  clinicId  String
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.Timestamptz
+  staff     StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  clinic    Clinic    @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  @@id([staffId, clinicId])
+  @@index([clinicId])
 }
 
 model Contact {

@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, clinicScope } from "@/lib/rbac";
+import { requireAuth, conversationScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
 
@@ -20,7 +20,7 @@ const WINDOW_MS = 24 * 3600 * 1000;
 
 export const GET = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
-  const scope = clinicScope(ctx);
+  const scope = conversationScope(ctx);
   const url = new URL(req.url);
   const clinicParam = url.searchParams.get("clinicId");
   const statusParam = url.searchParams.get("status");
@@ -28,7 +28,7 @@ export const GET = handle(async (req: NextRequest) => {
   const where: Record<string, unknown> = { ...scope };
   if (clinicParam) {
     // STAFF 砌別店 clinicId → 403（RBAC 鐵律，E2E 要實測呢條）
-    if (ctx.staff.role === "STAFF" && clinicParam !== ctx.clinicId) {
+    if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
       return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
     }
     where.clinicId = clinicParam;
@@ -70,10 +70,12 @@ export const GET = handle(async (req: NextRequest) => {
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
   // providerslot-20260830 T3：hold 卡 — 每個 WA 號最新非終態 hold（join key = Contact.waId）。
   // scope 跟對話一樣（STAFF 自己店 / ADMIN ?clinicId=）；fail-soft → 空 Map。
-  const holdByPhone = await latestHoldsByPhone(
-    contacts.map((c) => c.waId),
-    where.clinicId as string | undefined
-  ).catch(() => new Map());
+  const holdClinicFilter: string | string[] | undefined = clinicParam
+    ? clinicParam
+    : ctx.staff.role === "STAFF"
+      ? ctx.clinicIds
+      : undefined;
+  const holdByPhone = await latestHoldsByPhone(contacts.map((c) => c.waId), holdClinicFilter).catch(() => new Map());
   // ★ booking-ui（D）：PENDING 優先（新請求）；冇 PENDING 先顯示最新 CONFIRMED（撤銷倒數卡）
   const pendingBookingMap = new Map<string, (typeof pendingBookings)[number]>();
   for (const b of pendingBookings) {

@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -16,7 +16,7 @@ import { handle } from "@/lib/api-error";
  * DELETE /api/conversations/[id]/drafts/[draftId] — 棄用 draft。
  *   PROPOSED → DISCARDED（200）；已 DISCARDED → 200（冪等）；SENT_* → 409（已發出，唔可棄）。
  *
- * 別店 → 403（assertClinicAccess，fail-closed）。
+ * 別店 → 403（assertConversationAccess，fail-closed）。
  */
 export const dynamic = "force-dynamic";
 
@@ -27,7 +27,7 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id, draftId } = await ctx.params;
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(auth, conv.clinicId);
+  assertConversationAccess(auth, conv);
   const draft = await prisma.aiDraft.findFirst({ where: { id: draftId, conversationId: id } });
   if (!draft) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (draft.status === "DISCARDED") {
@@ -66,7 +66,7 @@ export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id, draftId } = await ctx.params;
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(auth, conv.clinicId);
+  assertConversationAccess(auth, conv);
   const draft = await prisma.aiDraft.findFirst({ where: { id: draftId, conversationId: id } });
   if (!draft) return NextResponse.json({ error: "not found" }, { status: 404 });
 

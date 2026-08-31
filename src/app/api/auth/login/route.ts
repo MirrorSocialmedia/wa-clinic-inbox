@@ -14,7 +14,7 @@ import { decryptTotpSecret } from "@/lib/totp-enc";
  * POST /api/auth/login — email + argon2 verify（框架 MD §2：自建 auth）。
  *
  * - 帳號唔存在 / 密碼錯 / 停用 → 同一個 401（唔洩露邊個帳號存在）
- * - STAFF session 帶 clinicId（RBAC 鐵律）；ADMIN 唔帶（null = 跨店）
+ * - STAFF session 帶 clinicId（主店）+ clinicIds（綁定店集合 — cwi-h6-20260830 多店）；ADMIN 唔帶（null = 跨店）
  * - per-IP 限流（5 次/分鐘）+ ★ AS-3③ per-account lockout（同 email 連續 5 次
  *   fail → 15min 冷卻，Redis SET NX EX — 換 IP 都繞唔到；mock mode 禁用）
  * - ★ H-2 ADMIN TOTP 兩步驟：ADMIN 啟用咗 TOTP 之後，password 過 → 要 6 位
@@ -128,12 +128,27 @@ export const POST = handle(async (req: NextRequest) => {
     }
   }
 
+  // ★ cwi-h6-20260830：多店員工 — 查 StaffClinic 一次過寫入 session（clinicIds）；
+  //   clinicId = isPrimary 店（排序頭行）— UI default 店 / 通知分組用。
+  //   舊資料（無 StaffClinic 行）fallback StaffUser.clinicId 單店；都無 → toContext fail-closed 401。
+  let clinicIds: string[] = [];
+  if (user.role === "STAFF") {
+    const rows = await prisma.staffClinic.findMany({
+      where: { staffId: user.id },
+      select: { clinicId: true },
+      orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
+    });
+    clinicIds = rows.map((r) => r.clinicId);
+  }
+  const primaryClinicId = user.role === "STAFF" ? (clinicIds[0] ?? user.clinicId) : null;
+
   const res = await setSession(req, {
     staffId: user.id,
     email: user.email,
     name: user.name,
     role: user.role,
-    clinicId: user.role === "STAFF" ? user.clinicId : null,
+    clinicId: primaryClinicId,
+    clinicIds: user.role === "STAFF" ? clinicIds : [],
     loginAt: Date.now(),
   });
 

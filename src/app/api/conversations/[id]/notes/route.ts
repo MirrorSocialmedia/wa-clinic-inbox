@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { publishNotify, publishStaffNotify } from "@/lib/notify";
 
@@ -18,7 +18,7 @@ import { publishNotify, publishStaffNotify } from "@/lib/notify";
  *   唔入對答庫候選（ai.worker 只處理 API inbound）— outbound.worker / graph.ts 零改動。
  * - ★ touch 只更新 lastMessageAt（GREATEST）— 唔加 unreadCount（病人冇新嘢）。
  * - ★ Send Lock 唔適用：任何人（包括 ADMIN）都攞到 423 都可以發 INTERNAL note（MD §3.2）。
- * - RBAC：assertClinicAccess（STAFF 別店 → 403）；ADMIN 跨店照舊。
+ * - RBAC：assertConversationAccess（STAFF 別店 → 403）；ADMIN 跨店照舊。
  * - mentions：只保留同店 active staffId（UI autocomplete 只出合法值；非法值靜默 drop）。
  * - socket：note:new（room clinic:{id}，payload 零內文 — 內容由 client 撳完拉）
  *   + ★ H2：notify:mention（定向發畀每個被 @ 而唔係自己嘅 staff — bell badge / 黃點）。
@@ -40,7 +40,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(auth, conv.clinicId); // STAFF 別店 → 403
+  assertConversationAccess(auth, conv); // STAFF 別店 → 403
 
   // mentions：只保留同店 active staff（非法值靜默 drop — 防注入別店/停用 staff）
   let mentions: string[] = [];
