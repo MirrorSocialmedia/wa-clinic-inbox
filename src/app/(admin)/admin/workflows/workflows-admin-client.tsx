@@ -181,6 +181,8 @@ function KeyCard({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [pendingDraft, setPendingDraft] = useState<{ id: string; version: number } | null>(null);
   const [busy, setBusy] = useState(false);
+  // ★ cwi-h6 §5：流程圖縮放（0.6–1.4 step 0.2；CSS zoom — 不另開 scroll context / 唔用 position:fixed）
+  const [graphZoom, setGraphZoom] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -415,11 +417,38 @@ function KeyCard({
         ) : null}
 
         {tab === "graph" ? (
-          <div className="overflow-x-auto">
-            <GraphSvg graph={graph} />
-            <p className="text-[11px] text-t3 mt-2">
-              唯讀流程圖（顯示用）— v1 執行器唔係 graph interpreter；實際執行仍係現有 code path，每決策點讀 ACTIVE params。
-            </p>
+          <div>
+            {/* ★ cwi-h6 §5：縮放工具列（0.6–1.4 step 0.2） */}
+            <div className="flex items-center gap-1.5 mb-2">
+              <button
+                onClick={() => setGraphZoom((z) => Math.max(0.6, +(z - 0.2).toFixed(1)))}
+                disabled={graphZoom <= 0.6}
+                aria-label="縮細"
+                className="w-7 h-7 rounded-full border border-line text-t2 hover:text-brand hover:border-brand disabled:opacity-40"
+              >
+                −
+              </button>
+              <span className="text-[11px] text-t3 w-10 text-center tabular-nums">{Math.round(graphZoom * 100)}%</span>
+              <button
+                onClick={() => setGraphZoom((z) => Math.min(1.4, +(z + 0.2).toFixed(1)))}
+                disabled={graphZoom >= 1.4}
+                aria-label="放大"
+                className="w-7 h-7 rounded-full border border-line text-t2 hover:text-brand hover:border-brand disabled:opacity-40"
+              >
+                ＋
+              </button>
+              <button onClick={() => setGraphZoom(1)} className="ml-1 text-[11px] text-t3 hover:text-t1 underline">
+                重設 100%
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <div style={{ zoom: graphZoom }}>
+                <GraphSvg graph={graph} />
+              </div>
+              <p className="text-[11px] text-t3 mt-2">
+                唯讀流程圖（顯示用）— v1 執行器唔係 graph interpreter；實際執行仍係現有 code path，每決策點讀 ACTIVE params。
+              </p>
+            </div>
           </div>
         ) : null}
 

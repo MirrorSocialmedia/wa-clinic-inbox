@@ -4628,6 +4628,314 @@ fi
 rm -f .dev/workforce-mock-refresh-4*.json .dev/workforce-mock-refresh-failday.json .dev/workforce-mock-dayrefreshed-off.json
 [ "$R14" = 0 ] && pass "R14 cwi-refresh 全鏈 e2e（T145 手動刷新+hook / T146 錯誤 shape / T147 逐日失敗 / T148 Flow stale gate）" || fail "R14 有項失敗（見上 ❌）"
 
+# ════════════════════════════════════════════════════════════════════════
+# H6 cwi-h6-20260830 §7：E2E H6-T91–T99（多店員工 + 接手放手 + auto-release + 備註卡）
+# ★ 偏差聲明：本檔既有 T88–T104 編號已被舊 ticket（template/flow/schedule/duty/capacity）佔用 —
+#   新測試標 H6-T91…H6-T99，一一对應 MD §7 嘅 T91…T99 定義（編號撞車，唔改名舊測試）。
+# 合成 fixture 全帶 E2E/EPOCH 前綴，零 PII；段尾 hermetic cleanup。
+# ════════════════════════════════════════════════════════════════════════
+echo "[H6] cwi-h6-20260830: H6-T91–T99..."
+H6=0
+NOWISO6=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
+WTC_CLINIC_ID=$(q "SELECT id FROM \"Clinic\" WHERE code='WTC'" | jf id)
+WTC_STAFF_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='staff-wtc@wa-clinic.local'" | jf id)
+ADMIN_STAFF_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$ADMIN_EMAIL'" | jf id)
+[ -n "$WTC_CLINIC_ID" ] && [ -n "$WTC_STAFF_ID" ] && [ -n "$ADMIN_STAFF_ID" ] || { echo "    FATAL: WTC/ADMIN id 搵唔到"; exit 1; }
+WTC_EMAIL=$(awk '/^WTC STAFF:/{print $3}' .dev/credentials.txt)
+WTC_PASS=$(awk '/^WTC STAFF:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
+COOKIE_WTC=/tmp/e2e-cookie-wtc.txt
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_WTC" \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$WTC_EMAIL\",\"password\":\"$WTC_PASS\"}")
+check "H6 setup login staff-wtc → 200" "$CODE" "200"
+
+# H6 多店 staff fixture：TKW primary + MF secondary（固定 email 冪等；段尾刪 — hermetic）
+H6M_EMAIL="h6-multi@wa-clinic.local"
+H6M_OUT=$(pnpm -s e2e:staff create --clinic TKW --email "$H6M_EMAIL" --name "E2E H6 Multi")
+H6M_ID=$(echo "$H6M_OUT" | grep -oE 'STAFF_ID=\S+' | cut -d= -f2)
+q "INSERT INTO \"StaffClinic\" (\"staffId\", \"clinicId\", \"isPrimary\") VALUES ('$H6M_ID', '$MF_CLINIC_ID', false) ON CONFLICT DO NOTHING" >/dev/null 2>&1
+COOKIE_H6M=/tmp/e2e-cookie-h6m.txt
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_H6M" \
+  -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$H6M_EMAIL\",\"password\":\"$H1B_PASS\"}")
+check "H6 setup 多店 staff login（TKW+MF）→ 200" "$CODE" "200"
+
+# ── H6-T91. 同秒雙搶 → 一 200 一 409 + 留痕齊 ────────────────────────────
+echo "[H6] T91: same-second double claim..."
+P91="8526961${EPOCH}"; C91="h6-t91-c-${EPOCH}"; CV91="h6-t91-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C91', '$TKW_CLINIC_ID', '$P91', 'E2E H6 T91', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV91', '$TKW_CLINIC_ID', '$C91', 'OPEN', '$NOWISO6')" >/dev/null 2>&1
+CODE_A=$(curl -s -o /tmp/e2e-h6-t91a.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CV91/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$TKW_STAFF_ID\",\"assignVersion\":0}")
+CODE_B=$(curl -s -o /tmp/e2e-h6-t91b.json -w '%{http_code}' -b "$COOKIE_H6M" -X POST "$BASE/api/conversations/$CV91/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$H6M_ID\",\"assignVersion\":0}")
+if { [ "$CODE_A" = 200 ] && [ "$CODE_B" = 409 ]; } || { [ "$CODE_A" = 409 ] && [ "$CODE_B" = 200 ]; }; then
+  pass "H6-T91 同秒雙搶：一 200 一 409（A=$CODE_A B=$CODE_B）"
+else
+  fail "H6-T91 同秒雙搶（A=$CODE_A B=$CODE_B）"; H6=1
+fi
+LOSERR=$(grep -oE '"error":"[A-Z_]+"' /tmp/e2e-h6-t91a.json /tmp/e2e-h6-t91b.json 2>/dev/null | grep -o 'ASSIGN_CONFLICT' | head -1)
+check "H6-T91 輸家 409 body = ASSIGN_CONFLICT" "$LOSERR" "ASSIGN_CONFLICT"
+WINNER=$(q "SELECT \"assigneeId\"::text a FROM \"Conversation\" WHERE id='$CV91'" | jf a)
+[ "$WINNER" = "$TKW_STAFF_ID" ] || [ "$WINNER" = "$H6M_ID" ] && pass "H6-T91 贏家已 assign（version 樂觀鎖生效）" || { fail "H6-T91 贏家"; H6=1; }
+NOTE91=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CV91' AND channel='INTERNAL' AND type='note'" | jf c)
+AUD91=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE entity='Conversation' AND \"entityId\"='$CV91' AND action='TRANSFER'" | jf c)
+check "H6-T91 留痕：INTERNAL note=1" "$NOTE91" "1"
+check "H6-T91 留痕：AuditLog TRANSFER=1" "$AUD91" "1"
+
+# ── H6-T92. 放手 → AI 喺病人下一句接力；舊訊息冇被補覆 ────────────────────
+echo "[H6] T92: release → AI resumes on next patient message..."
+patch_aimode "$TKW_CLINIC_ID" AUTO
+code_pam=$PAM_CODE
+check "H6-T92 TKW→AUTO" "$code_pam" "200"
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null 2>&1  # hermetic：fallback L2
+P92="8526962${EPOCH}"; C92="h6-t92-c-${EPOCH}"; CV92="h6-t92-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C92', '$TKW_CLINIC_ID', '$P92', 'E2E H6 T92', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV92', '$TKW_CLINIC_ID', '$C92', 'OPEN', '$NOWISO6')" >/dev/null 2>&1
+# staff-tkw 先 claim（pre-inbound — 無 race）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CV92/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$TKW_STAFF_ID\",\"assignVersion\":0}")
+check "H6-T92 staff-tkw claim → 200" "$CODE" "200"
+# 病人第一句（AI 應 assigned 閘收聲 — draft only）
+WAMID92A="wamid.E2E_H6T92A_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$P92" --text "你哋幾點開門" --wamid "$WAMID92A" --name "E2E H6 T92a" >/dev/null || fail "H6-T92a mock-inbound"
+M92A=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID92A'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M92A'" '[{"s":"PROPOSED"}]' 30; then
+  pass "H6-T92 assigned：舊訊息只出 draft（PROPOSED）"
+else
+  fail "H6-T92 assigned draft"; H6=1
+fi
+sleep 2
+OUT92A=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CV92' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
+check "H6-T92 assigned：0 OUT（assigned 閘生效）" "$OUT92A" "0"
+# 回撥超時（病人等 16m + 負責人齋 16m > default 15m）→ 手動 sweep
+q "UPDATE \"Conversation\" SET \"lastInboundAt\" = now() - interval '16 minutes', \"assigneeLastActionAt\" = now() - interval '16 minutes' WHERE id='$CV92'" >/dev/null
+pnpm -s e2e:cron auto-release >/dev/null 2>&1 || fail "H6-T92 e2e:cron auto-release enqueue"
+if wait_for "SELECT (\"assigneeId\" IS NULL)::text u FROM \"Conversation\" WHERE id='$CV92'" '[{"u":"true"}]' 45; then
+  pass "H6-T92 auto-release：超時 → 放手回隊列（assigneeId=null）"
+else
+  fail "H6-T92 auto-release 放手"; H6=1
+fi
+NOTE92REL=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CV92' AND channel='INTERNAL' AND type='note' AND body LIKE '系統自動放手%'" | jf c)
+AUD92REL=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE entity='Conversation' AND \"entityId\"='$CV92' AND action='UNASSIGN' AND (meta->>'by')='AUTO_RELEASE'" | jf c)
+check "H6-T92 放手留痕：INTERNAL 備註=1" "$NOTE92REL" "1"
+check "H6-T92 放手留痕：audit UNASSIGN by=AUTO_RELEASE" "$AUD92REL" "1"
+OUT92B=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CV92' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
+check "H6-T92 舊訊息冇被補覆（放手後、病人未再開口 → 0 OUT）" "$OUT92B" "0"
+# 病人下一句 → AI 接力（auto-send）
+WAMID92B="wamid.E2E_H6T92B_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$P92" --text "你哋幾點開門" --wamid "$WAMID92B" --name "E2E H6 T92b" >/dev/null || fail "H6-T92b mock-inbound"
+M92B=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID92B'" | jf id)
+if wait_for "SELECT (\"aiAutoSent\")::text a FROM \"Message\" WHERE \"conversationId\"='$CV92' AND direction='OUT' AND channel<>'INTERNAL'" '[{"a":"true"}]' 45; then
+  pass "H6-T92 病人下一句 → AI 接力（auto-send 成功）"
+else
+  fail "H6-T92 AI 接力"; H6=1
+fi
+OUT92C=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CV92' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
+check "H6-T92 只補覆下一句（OUT 總數=1，冇追舊訊息）" "$OUT92C" "1"
+
+# ── H6-T93. auto-release 三防呆 + 踢中 case（一次 sweep 四案例）──────────
+echo "[H6] T93: auto-release 3 foolproofs + hit case..."
+mk93() { # mk93 <suffix> <patient> → 預建 + claim，echo conv id
+  local suf="$1" p="$2"
+  local c="h6-t93-${suf}-${EPOCH}" cv="h6-t93-${suf}conv-${EPOCH}"  # 拆兩行：set -u 下同 local 行自引用 ${suf} 會先展開後賦值 → unbound
+  q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$c', '$TKW_CLINIC_ID', '$p', 'E2E H6 T93${suf}', ARRAY[]::text[])" >/dev/null 2>&1
+  q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$cv', '$TKW_CLINIC_ID', '$c', 'OPEN', '$NOWISO6')" >/dev/null 2>&1
+  # claim 重試 2 次（loadManifest flake 500 已知 — 重跑即好，唔好當 code 回歸）
+  local i code
+  for i in 1 2; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$cv/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$TKW_STAFF_ID\",\"assignVersion\":0}")
+    [ "$code" = 200 ] && break
+    sleep 2
+  done
+  echo "$cv"
+}
+CV93A=$(mk93 a "8526963${EPOCH}")
+CV93B=$(mk93 b "8526964${EPOCH}")
+CV93C=$(mk93 c "8526965${EPOCH}")
+CV93D=$(mk93 d "8526966${EPOCH}")
+# A：已覆（markRead + send → unread=0）
+pnpm -s mock-inbound message --clinic TKW --from "8526963${EPOCH}" --text "你哋幾點開門" --wamid "wamid.E2E_H6T93A_${EPOCH}" --name "E2E H6 T93a" >/dev/null || true
+sleep 2
+curl -s -o /dev/null -b "$COOKIE_TKW" -X PATCH -H 'Content-Type: application/json' -d '{"markRead":true}' "$BASE/api/conversations/$CV93A"
+curl -s -o /dev/null -b "$COOKIE_TKW" -X POST -H 'Content-Type: application/json' -d "{\"conversationId\":\"$CV93A\",\"body\":\"e2e h6 t93a reply\"}" "$BASE/api/messages/send"
+q "UPDATE \"Conversation\" SET \"lastInboundAt\" = now() - interval '16 minutes' WHERE id='$CV93A'" >/dev/null
+# B：病人剛到（lastInboundAt 新）+ 負責人齋 16m
+pnpm -s mock-inbound message --clinic TKW --from "8526964${EPOCH}" --text "你哋幾點開門" --wamid "wamid.E2E_H6T93B_${EPOCH}" --name "E2E H6 T93b" >/dev/null || true
+q "UPDATE \"Conversation\" SET \"assigneeLastActionAt\" = now() - interval '16 minutes' WHERE id='$CV93B'" >/dev/null
+# C：病人等 16m 但負責人剛 claim（lastAction 新）
+pnpm -s mock-inbound message --clinic TKW --from "8526965${EPOCH}" --text "你哋幾點開門" --wamid "wamid.E2E_H6T93C_${EPOCH}" --name "E2E H6 T93c" >/dev/null || true
+q "UPDATE \"Conversation\" SET \"lastInboundAt\" = now() - interval '16 minutes' WHERE id='$CV93C'" >/dev/null
+# D：踢中（兩邊都 16m + unread=1）
+pnpm -s mock-inbound message --clinic TKW --from "8526966${EPOCH}" --text "你哋幾點開門" --wamid "wamid.E2E_H6T93D_${EPOCH}" --name "E2E H6 T93d" >/dev/null || true
+sleep 3
+q "UPDATE \"Conversation\" SET \"lastInboundAt\" = now() - interval '16 minutes', \"assigneeLastActionAt\" = now() - interval '16 minutes' WHERE id='$CV93D'" >/dev/null
+pnpm -s e2e:cron auto-release >/dev/null 2>&1 || fail "H6-T93 e2e:cron auto-release enqueue"
+if wait_for "SELECT (\"assigneeId\" IS NULL)::text u FROM \"Conversation\" WHERE id='$CV93D'" '[{"u":"true"}]' 45; then
+  pass "H6-T93 踢中 case：三條件全真 → 放手"
+else
+  fail "H6-T93 踢中 case 放手"; H6=1
+fi
+# 防呆 A/B/C：全部仲係 staff-tkw
+STILL_A=$(q "SELECT (\"assigneeId\"='$TKW_STAFF_ID')::text s FROM \"Conversation\" WHERE id='$CV93A'" | jf s)
+STILL_B=$(q "SELECT (\"assigneeId\"='$TKW_STAFF_ID')::text s FROM \"Conversation\" WHERE id='$CV93B'" | jf s)
+STILL_C=$(q "SELECT (\"assigneeId\"='$TKW_STAFF_ID')::text s FROM \"Conversation\" WHERE id='$CV93C'" | jf s)
+# 瞬時 DB 查詢失敗（q 吞 stderr → 空）→ 重試一次再斷言
+if [ -z "$STILL_A" ] || [ -z "$STILL_B" ] || [ -z "$STILL_C" ]; then
+  sleep 2
+  [ -n "$STILL_A" ] || STILL_A=$(q "SELECT (\"assigneeId\"='$TKW_STAFF_ID')::text s FROM \"Conversation\" WHERE id='$CV93A'" | jf s)
+  [ -n "$STILL_B" ] || STILL_B=$(q "SELECT (\"assigneeId\"='$TKW_STAFF_ID')::text s FROM \"Conversation\" WHERE id='$CV93B'" | jf s)
+  [ -n "$STILL_C" ] || STILL_C=$(q "SELECT (\"assigneeId\"='$TKW_STAFF_ID')::text s FROM \"Conversation\" WHERE id='$CV93C'" | jf s)
+fi
+check "H6-T93 防呆 A：已覆（unread=0）→ 唔放手" "$STILL_A" "true"
+check "H6-T93 防呆 B：病人等唔夠 N → 唔放手" "$STILL_B" "true"
+check "H6-T93 防呆 C：負責人冇齋夠 N → 唔放手" "$STILL_C" "true"
+
+# ── H6-T94. 多店員工：TKW+MF 睇晒覆晒；WTC 403；default = isPrimary ──────
+echo "[H6] T94: multi-clinic staff scope..."
+curl -s -b "$COOKIE_H6M" -o /tmp/e2e-h6-t94.json "$BASE/api/conversations"
+H6M_SCOPE=$(node -e 'try{const a=JSON.parse(require("fs").readFileSync("/tmp/e2e-h6-t94.json","utf8"));const s=new Set(a.map(x=>x.clinicId));console.log((s.has(process.argv[1])&&s.has(process.argv[2])?"ok":"missing:"+s.size))}catch{console.log("badjson")}' "$TKW_CLINIC_ID" "$MF_CLINIC_ID")
+check "H6-T94 多店列表：TKW + MF 對話都見到" "$H6M_SCOPE" "ok"
+# 覆兩店：TKW 用 T92 conv（unassigned），MF 用 T10 conv
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_H6M" -X POST -H 'Content-Type: application/json' -d "{\"conversationId\":\"$CV92\",\"body\":\"e2e h6 t94 tkw reply\"}" "$BASE/api/messages/send")
+check "H6-T94 覆 TKW 對話 → 202" "$CODE" "202"
+# MF：新預建 unassigned 對話（MF_CONV_ID 可能被前段測試 assign 過 → 423）
+P94M="8526970${EPOCH}"; C94M="h6-t94m-c-${EPOCH}"; CV94M="h6-t94m-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C94M', '$MF_CLINIC_ID', '$P94M', 'E2E H6 T94M', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV94M', '$MF_CLINIC_ID', '$C94M', 'OPEN', '$NOWISO6')" >/dev/null 2>&1
+# 病人先開口（開 24h 窗 — 預建對話 lastInboundAt=null → 直接 send 會 422）
+pnpm -s mock-inbound message --clinic MF --from "$P94M" --text "你哋幾點開門" --wamid "wamid.E2E_H6T94M_${EPOCH}" --name "E2E H6 T94M" >/dev/null || true
+sleep 2
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_H6M" -X POST -H 'Content-Type: application/json' -d "{\"conversationId\":\"$CV94M\",\"body\":\"e2e h6 t94 mf reply\"}" "$BASE/api/messages/send")
+check "H6-T94 覆 MF 對話 → 202" "$CODE" "202"
+# WTC 對話 → 403
+P94W="8526967${EPOCH}"; C94W="h6-t94w-c-${EPOCH}"; CV94W="h6-t94w-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C94W', '$WTC_CLINIC_ID', '$P94W', 'E2E H6 T94W', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV94W', '$WTC_CLINIC_ID', '$C94W', 'OPEN', '$NOWISO6')" >/dev/null 2>&1
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_H6M" "$BASE/api/conversations/$CV94W")
+check "H6-T94 WTC 對話（唔喺店集合）→ 403" "$CODE" "403"
+# session default 店 = isPrimary（TKW）+ clinicIds 齊
+H6M_SEAL=$(awk '$6=="wa_inbox_session"{print $7}' "$COOKIE_H6M" | head -1)
+H6M_SESS=$(node -e "const{unsealData}=require('iron-session');const fs=require('fs');const env=fs.readFileSync('.env','utf8');const secret=(env.split('\n').find(l=>l.startsWith('SESSION_SECRET'))||'').split('=').slice(1).join('=').trim();(async()=>{try{const d=await unsealData(process.argv[1],{ttl:86400,password:secret});console.log(d&&d.clinicId===process.argv[2]&&Array.isArray(d.clinicIds)&&d.clinicIds.includes(process.argv[2])&&d.clinicIds.includes(process.argv[3])?'ok':'bad:'+JSON.stringify(d))}catch(e){console.log('unseal-fail')}})()" "$H6M_SEAL" "$TKW_CLINIC_ID" "$MF_CLINIC_ID" 2>/dev/null)
+check "H6-T94 session：clinicId=TKW（isPrimary default）+ clinicIds=[TKW,MF]" "$H6M_SESS" "ok"
+
+# ── H6-T95. 外店指派：TKW 線指派俾 WTC staff → 單線授權；轉走即失 ─────────
+echo "[H6] T95: cross-clinic assign (single-line grant)..."
+P95="8526968${EPOCH}"; C95="h6-t95-c-${EPOCH}"; CV95="h6-t95-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C95', '$TKW_CLINIC_ID', '$P95', 'E2E H6 T95', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV95', '$TKW_CLINIC_ID', '$C95', 'OPEN', '$NOWISO6')" >/dev/null 2>&1
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/conversations/$CV95/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$WTC_STAFF_ID\",\"assignVersion\":0}")
+check "H6-T95 ADMIN 指派 TKW 線 → WTC staff（外店 target）→ 200" "$CODE" "200"
+# 病人先開口（開 24h 窗 — 預建對話 lastInboundAt=null → 直接 send 會 422）
+pnpm -s mock-inbound message --clinic TKW --from "$P95" --text "你哋幾點開門" --wamid "wamid.E2E_H6T95_${EPOCH}" --name "E2E H6 T95" >/dev/null || true
+sleep 2
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations/$CV95")
+check "H6-T95 WTC staff 睇到呢條（單線授權）→ 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" -X POST -H 'Content-Type: application/json' -d "{\"conversationId\":\"$CV95\",\"body\":\"e2e h6 t95 wtc reply\"}" "$BASE/api/messages/send")
+check "H6-T95 WTC staff 覆到（TKW 線）→ 202" "$CODE" "202"
+WAMID95=$(q "SELECT \"waMessageId\" FROM \"Message\" WHERE \"conversationId\"='$CV95' AND direction='OUT' AND channel<>'INTERNAL' ORDER BY \"createdAt\" DESC LIMIT 1" | jf waMessageId)
+if [ -n "$WAMID95" ] && [ "$WAMID95" != "null" ]; then
+  pass "H6-T95 發送成功（wamid 由 TKW 號碼出 — mock Graph 已收）"
+else
+  sleep 3
+  WAMID95=$(q "SELECT \"waMessageId\" FROM \"Message\" WHERE \"conversationId\"='$CV95' AND direction='OUT' AND channel<>'INTERNAL' ORDER BY \"createdAt\" DESC LIMIT 1" | jf waMessageId)
+  [ -n "$WAMID95" ] && [ "$WAMID95" != "null" ] && pass "H6-T95 發送成功（wamid 由 TKW 號碼出）" || { fail "H6-T95 發送 wamid"; H6=1; }
+fi
+# 其他 TKW 對話仍 403（單線授權只限嗰一條）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations/$CV91")
+check "H6-T95 其他 TKW 對話 → 403（單線唔擴散）" "$CODE" "403"
+# 轉走（ADMIN 改指 staff-tkw）→ 即失 access
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/conversations/$CV95/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$TKW_STAFF_ID\",\"assignVersion\":1}")
+check "H6-T95 ADMIN 轉走 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations/$CV95")
+check "H6-T95 轉走後 WTC staff 即失 access → 403" "$CODE" "403"
+
+# ── H6-T96. 外店 self-claim → 403 CROSS_CLINIC_CLAIM_FORBIDDEN ───────────
+curl -s -o /tmp/e2e-h6-t96.json -b "$COOKIE_WTC" -X POST "$BASE/api/conversations/$CV95/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$WTC_STAFF_ID\",\"assignVersion\":2}"
+CODE=$(grep -oE '"error":"[A-Z_]+"' /tmp/e2e-h6-t96.json | head -1 | cut -d'"' -f4)
+check "H6-T96 外店 self-claim → 403 CROSS_CLINIC_CLAIM_FORBIDDEN" "$CODE" "CROSS_CLINIC_CLAIM_FORBIDDEN"
+
+# ── H6-T97. ADMIN 接手 → 發送成功（原 ASSIGNEE_INVALID 場景反轉）───────────
+echo "[H6] T97: ADMIN joins + sends..."
+P97="8526969${EPOCH}"; C97="h6-t97-c-${EPOCH}"; CV97="h6-t97-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C97', '$TKW_CLINIC_ID', '$P97', 'E2E H6 T97', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV97', '$TKW_CLINIC_ID', '$C97', 'OPEN', '$NOWISO6')" >/dev/null 2>&1
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CV97/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$TKW_STAFF_ID\",\"assignVersion\":0}")
+check "H6-T97 staff-tkw claim → 200" "$CODE" "200"
+# 病人先開口（開 24h 窗）
+pnpm -s mock-inbound message --clinic TKW --from "$P97" --text "你哋幾點開門" --wamid "wamid.E2E_H6T97_${EPOCH}" --name "E2E H6 T97" >/dev/null || true
+sleep 2
+# ADMIN 接手（target = ADMIN 自己 — 舊同店檢查會 ASSIGNEE_INVALID 嘅場景）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/conversations/$CV97/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$ADMIN_STAFF_ID\",\"assignVersion\":1}")
+check "H6-T97 ADMIN 接手（target=ADMIN）→ 200" "$CODE" "200"
+# 接手後 ADMIN 覆 → 成功（MD §7 T97：ADMIN 接手 → 發送成功）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST -H 'Content-Type: application/json' -d "{\"conversationId\":\"$CV97\",\"body\":\"e2e h6 t97 admin send\"}" "$BASE/api/messages/send")
+check "H6-T97 接手後 ADMIN 覆 → 202（MD T97 場景）" "$CODE" "202"
+# ADMIN 放手（release）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/conversations/$CV97/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":null,\"assignVersion\":2}")
+check "H6-T97 ADMIN 放手 → 200" "$CODE" "200"
+REL97=$(q "SELECT (\"assigneeId\" IS NULL)::text u FROM \"Conversation\" WHERE id='$CV97'" | jf u)
+check "H6-T97 放手後 assigneeId=null" "$REL97" "true"
+
+# ── H6-T98. 舊 session（無 clinicIds）→ fallback 單店行為不變 ─────────────
+echo "[H6] T98: legacy session fallback..."
+OLDSEAL=$(node -e "const{sealData}=require('iron-session');const fs=require('fs');const env=fs.readFileSync('.env','utf8');const secret=(env.split('\n').find(l=>l.startsWith('SESSION_SECRET'))||'').split('=').slice(1).join('=').trim();(async()=>{const s=await sealData({staffId:process.argv[1],email:process.argv[2],name:'E2E H6 Old',role:'STAFF',clinicId:process.argv[3],loginAt:Date.now()-3600e3},{ttl:86400,password:secret});process.stdout.write(s)})()" "$TKW_STAFF_ID" "$TKW_EMAIL" "$TKW_CLINIC_ID" 2>/dev/null)
+COOKIE_OLD=/tmp/e2e-cookie-h6old.txt
+printf '#HttpOnly_127.0.0.1\tFALSE\t/\tFALSE\t%s\twa_inbox_session\t%s\n' "$(( $(date +%s) + 86400 ))" "$OLDSEAL" > "$COOKIE_OLD"
+curl -s -b "$COOKIE_OLD" -o /tmp/e2e-h6-t98.json "$BASE/api/conversations"
+H6T98=$(node -e 'try{const a=JSON.parse(require("fs").readFileSync("/tmp/e2e-h6-t98.json","utf8"));console.log(Array.isArray(a)&&a.some(x=>x.id===process.argv[1])&&!a.some(x=>x.id===process.argv[2])?"ok":"bad")}catch{console.log("badjson")}' "$CV91" "$MF_CONV_ID")
+check "H6-T98 舊 session 列表：TKW 見到 + MF 唔見（fallback 單店）" "$H6T98" "ok"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_OLD" "$BASE/api/conversations/$MF_CONV_ID")
+check "H6-T98 舊 session GET MF 對話 → 403（行為同舊單店一致）" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_OLD" "$BASE/api/conversations/$CV91")
+check "H6-T98 舊 session GET TKW 對話 → 200" "$CODE" "200"
+
+# ── H6-T99. 內部備註卡：兩 staff 見到 + 已讀 receipt + canary（唔入 AI prompt）─
+echo "[H6] T99: internal notes card + canary..."
+CODE=$(curl -s -o /tmp/e2e-h6-t99.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CV91/notes" -H 'Content-Type: application/json' -d '{"body":"e2e H6 T99 canary：該患者曾投訴服務態度，注意處理"}')
+check "H6-T99 加備註 → 201" "$CODE" "201"
+NOTE99=$(grep -oE '"messageId":"[^"]*"' /tmp/e2e-h6-t99.json | head -1 | cut -d'"' -f4)
+[ -n "$NOTE99" ] && pass "H6-T99 note messageId 回傳" || { fail "H6-T99 note id"; H6=1; }
+curl -s -b "$COOKIE_H6M" -o /tmp/e2e-h6-t99msg.json "$BASE/api/conversations/$CV91/messages?limit=100"
+H6T99VIS=$(grep -c "e2e H6 T99 canary" /tmp/e2e-h6-t99msg.json)
+[ "$H6T99VIS" -ge 1 ] && pass "H6-T99 第二個 staff（h6m）見到備註" || { fail "H6-T99 備註可見性"; H6=1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_H6M" -X POST "$BASE/api/notes/$NOTE99/read")
+check "H6-T99 已讀 receipt POST → 200" "$CODE" "200"
+curl -s -b "$COOKIE_H6M" -o /tmp/e2e-h6-t99rc.json "$BASE/api/conversations/$CV91/note-read-receipts"
+H6T99RC=$(node -e 'try{const j=JSON.parse(require("fs").readFileSync("/tmp/e2e-h6-t99rc.json","utf8"));console.log((j.receipts||[]).some(r=>r.messageId===process.argv[1]&&r.staffId===process.argv[2])?"ok":"bad")}catch{console.log("badjson")}' "$NOTE99" "$H6M_ID")
+check "H6-T99 receipt 落庫（GET 見到 h6m 已讀）" "$H6T99RC" "ok"
+# canary（沿用 T88 法）：備註含「投訴」→ 病人下條 QUESTION 唔被污染
+WAMID99="wamid.E2E_H6T99_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$P91" --text "你哋幾點開門" --wamid "$WAMID99" --name "E2E H6 T99 canary" >/dev/null || fail "H6-T99 canary mock-inbound"
+M99=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID99'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M99'" '[{"s":"PROPOSED"}]' 30; then
+  pass "H6-T99 canary：QUESTION draft 照出（PROPOSED）"
+else
+  fail "H6-T99 canary draft"; H6=1
+fi
+sleep 2
+check "H6-T99 canary：intent = QUESTION（備註「投訴」唔污染分類）" "$(q "SELECT \"intent\"::text i FROM \"Conversation\" WHERE id='$CV91'" | jf i)" "QUESTION"
+check "H6-T99 canary：零 HANDOFF_REQUEST（COMPLAINT 軌未誤觸）" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$CV91' AND kind='HANDOFF_REQUEST'" | jf c)" "0"
+
+# ── H6 cleanup（hermetic：fixture staff / policy / aiMode / 對話全清）─────
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN ('$CV91','$CV92','$CV93A','$CV93B','$CV93C','$CV93D','$CV94W','$CV94M','$CV95','$CV97')" >/dev/null 2>&1
+q "DELETE FROM \"NoteReadReceipt\" WHERE \"messageId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\" IN ('$CV91','$CV92','$CV93A','$CV93B','$CV93C','$CV93D','$CV94W','$CV94M','$CV95','$CV97'))" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$CV91','$CV92','$CV93A','$CV93B','$CV93C','$CV93D','$CV94W','$CV94M','$CV95','$CV97')" >/dev/null 2>&1
+q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\" IN ('$CV91','$CV92','$CV93A','$CV93B','$CV93C','$CV93D','$CV94W','$CV94M','$CV95','$CV97')" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id IN ('$CV91','$CV92','$CV93A','$CV93B','$CV93C','$CV93D','$CV94W','$CV94M','$CV95','$CV97')" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id IN ('$C91','$C92','h6-t93-a-${EPOCH}','h6-t93-b-${EPOCH}','h6-t93-c-${EPOCH}','h6-t93-d-${EPOCH}','$C94W','$C94M','$C95','$C97')" >/dev/null 2>&1
+# waId sweep（兜底：mk93 失敗時 inbound worker 自建嘅 contact/conv 殘留 — 跟 waId 洗先洗到齊）
+for P9 in "8526963${EPOCH}" "8526964${EPOCH}" "8526965${EPOCH}" "8526966${EPOCH}"; do
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN (SELECT id FROM \"Conversation\" WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$P9' AND \"clinicId\"='$TKW_CLINIC_ID'))" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN (SELECT id FROM \"Conversation\" WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$P9' AND \"clinicId\"='$TKW_CLINIC_ID'))" >/dev/null 2>&1
+  q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\" IN (SELECT id FROM \"Conversation\" WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$P9' AND \"clinicId\"='$TKW_CLINIC_ID'))" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$P9' AND \"clinicId\"='$TKW_CLINIC_ID')" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE \"waId\"='$P9' AND \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null 2>&1
+done
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null 2>&1
+patch_aimode "$TKW_CLINIC_ID" DRAFT
+pnpm -s e2e:staff delete --email "$H6M_EMAIL" >/dev/null 2>&1 || echo "    WARN: H6M staff delete fail（留意殘留）"
+H6M_RESID=$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE email='$H6M_EMAIL'" | jf c)
+check "H6 cleanup：fixture staff 零殘留" "$H6M_RESID" "0"
+[ "$H6" = 0 ] && pass "H6 cwi-h6-20260830 全鏈 e2e（H6-T91–T99）" || fail "H6 有項失敗（見上 ❌）"
+
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

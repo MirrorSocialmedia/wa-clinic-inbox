@@ -41,6 +41,25 @@ const LEVEL_STYLE: Record<string, string> = {
   L4: "bg-brand text-panel font-semibold",
 };
 
+// ★ cwi-h6 §6.1：級別圖例（以 src/lib/ai/automation.ts + ai.worker.ts 實際行為為準 —
+//   偏差聲明：MD 參考嘅 AUTOMATION_LEVELS 常數 repo 唔存在，圖例文案由 code 實義寫出）
+const LEVEL_LEGEND: { level: string; label: string; desc: string }[] = [
+  { level: "L1", label: "只出草稿", desc: "AI 只出草稿，由職員審後手動發出（自動覆全停）" },
+  { level: "L2", label: "自動覆", desc: "AI 可自動發出覆病人訊息（受 9 道閘：真人接手即收聲 / 冷靜期 / 低信心 等）" },
+  { level: "L3", label: "訂位 session", desc: "L2 + BOOKING_REQUEST 無人接手時 AI 自動開訂位 session 導病人揀時段" },
+  { level: "L4", label: "全自動", desc: "L3 + AI 自動落單（Apricot 確認；成功後職員收通知）" },
+];
+
+// ★ cwi-h6 §6.2：六 intent tooltip（列頭 hover）
+const INTENT_TIP: Record<string, string> = {
+  BOOKING_REQUEST: "預約請求 — 病人想約診（L3+ 會自動開訂位 session）",
+  QUESTION: "一般查詢 — 時間 / 症狀 / 費用 等",
+  URGENT_PAIN: "🚨 急症痛 — 🔒 永遠人手（鐵律：code 第二重擋，無調級掣）",
+  COMPLAINT: "🚨 投訴 — 🔒 絕不自動發（要人講）",
+  OUT_OF_SCOPE: "離題 — 唔屬診所範疇",
+  OTHER: "其他 — 未分類",
+};
+
 function Trend({ rates }: { rates: (number | null)[] }) {
   // 4 週迷你走勢：格高 = rate（無數據 = 淡灰格）
   return (
@@ -166,6 +185,19 @@ export default function AutomationAdmin() {
         </button>
       </div>
 
+      {/* ★ cwi-h6 §6.1：級別圖例 */}
+      <div className="bg-panel rounded-[22px] border border-line px-4 py-3 mb-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+        {LEVEL_LEGEND.map((l) => (
+          <div key={l.level} className="flex items-start gap-2" title={l.desc}>
+            <span className={`shrink-0 text-[11px] px-1.5 py-0.5 rounded-full font-semibold ${LEVEL_STYLE[l.level] ?? ""}`}>{l.level}</span>
+            <div>
+              <div className="text-xs font-semibold text-t1">{l.label}</div>
+              <div className="text-[11px] text-t3 leading-snug">{l.desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
       {/* 矩陣 */}
       <div className="bg-panel rounded-[22px] border border-line overflow-x-auto">
         <table className="w-full border-collapse text-sm">
@@ -173,9 +205,15 @@ export default function AutomationAdmin() {
             <tr className="border-b border-line">
               <th className="text-left px-3 py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">店</th>
               {data.categories.map((c) => (
-                <th key={c} className="text-left px-2 py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold">
-                  {c}
-                  {data.lockedCategories.includes(c) ? <span className="ml-1 text-danger-text">🔒</span> : null}
+                <th
+                  key={c}
+                  className="text-left px-2 py-2 text-[11px] uppercase tracking-[0.08em] text-t2 font-semibold"
+                >
+                  <span title={INTENT_TIP[c]}>{c}</span>
+                  <span className="ml-0.5 cursor-help text-t3" title={INTENT_TIP[c]}>ⓘ</span>
+                  {data.lockedCategories.includes(c) ? (
+                    <span className="ml-1 text-danger-text" title="安全鐵律鎖死，任何級別都唔會自動覆">🔒</span>
+                  ) : null}
                 </th>
               ))}
             </tr>

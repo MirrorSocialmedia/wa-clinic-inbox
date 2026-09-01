@@ -91,6 +91,8 @@ export function InboxClient({
   const [selectedConvId, setSelectedConvId] = useState<string | null>(initialSelectedConvId ?? null);
   // ★ booking-ui（C）：側欄 patient-context 重載訊號（socket booking:changed / 側欄寫入後 bump）
   const [ctxRefreshKey, setCtxRefreshKey] = useState(0);
+  // ★ cwi-h6 §4：內部備註卡重拉訊號（socket note:new → 選中對話）
+  const [notesRefreshKey, setNotesRefreshKey] = useState(0);
   // 手機：detail bottom sheet（<lg 撳 chat header 先開；桌面側欄常駐）— 換對話即關
   const [detailOpen, setDetailOpen] = useState(false);
   useEffect(() => {
@@ -378,6 +380,8 @@ export function InboxClient({
       );
       if (selectedIdRef.current === e.conversationId) {
         void fetchMessagesLatest(e.conversationId);
+        // cwi-h6 §4：側欄內部備註卡同步重拉（realtime）
+        setNotesRefreshKey((k) => k + 1);
       }
     });
 
@@ -1269,6 +1273,7 @@ export function InboxClient({
           setCtxRefreshKey((k) => k + 1);
         }}
         ctxRefreshKey={ctxRefreshKey}
+        notesRefreshKey={notesRefreshKey}
       />
 
       {/* Phase 2：急症升級 toast（socket urgent:escalation） */}

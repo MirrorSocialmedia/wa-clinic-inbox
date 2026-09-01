@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { CalendarClock, Sparkles, Stethoscope, X } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { CalendarClock, CheckCheck, Lock, Sparkles, Stethoscope, Tag, X } from "lucide-react";
 import Link from "next/link";
 import type { ConversationItem, ConvStatus, DutyInfo, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
 import { relTime } from "./time";
@@ -26,6 +26,8 @@ interface Props {
   onBookingUiChanged?: () => void;
   /** ★ booking-ui（C）：socket booking:changed / parent 重拉觸發 patient-context 重載 */
   ctxRefreshKey?: number;
+  /** ★ cwi-h6 §4：socket note:new / 備註寫入後 parent 重拉訊號（內部備註卡） */
+  notesRefreshKey?: number;
 }
 
 const STATUS_SEG: { key: ConvStatus; label: string }[] = [
@@ -67,6 +69,7 @@ export function DetailPane({
   onMobileClose,
   onBookingUiChanged,
   ctxRefreshKey = 0,
+  notesRefreshKey = 0,
 }: Props) {
   const [name, setName] = useState("");
   const [labels, setLabels] = useState<string[]>([]);
@@ -82,6 +85,82 @@ export function DetailPane({
   const [apptBusy, setApptBusy] = useState<string | null>(null);
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
   const [apptNote, setApptNote] = useState<string | null>(null);
+
+  // ★ cwi-h6 §4：內部備註卡 — reuse GET messages（channel=INTERNAL type=note）+ note-read-receipts（無新 API）
+  const [notes, setNotes] = useState<{ id: string; body: string; sentByStaffId: string | null; waTimestamp: string | null }[]>([]);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [notesExpanded, setNotesExpanded] = useState(false);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteBusy, setNoteBusy] = useState(false);
+  const [noteReceipts, setNoteReceipts] = useState<{ messageId: string; staffId: string; readAt: string }[]>([]);
+  // 聯絡人卡：標籤圖標按鈕展開狀態（§4 壓一格）
+  const [showLabelEditor, setShowLabelEditor] = useState(false);
+
+  const loadNotes = useCallback(async (convId: string) => {
+    try {
+      setNotesLoading(true);
+      const [mRes, rRes] = await Promise.all([
+        fetch(`/api/conversations/${convId}/messages?limit=100`),
+        fetch(`/api/conversations/${convId}/note-read-receipts`),
+      ]);
+      if (mRes.ok) {
+        const mj = (await mRes.json()) as {
+          messages?: { id: string; body: string | null; sentByStaffId: string | null; waTimestamp: string | null; channel?: string; type?: string }[];
+        };
+        const internal = (mj.messages ?? [])
+          .filter((m) => m.channel === "INTERNAL" && m.type === "note")
+          .sort((a, b) => new Date(b.waTimestamp ?? 0).getTime() - new Date(a.waTimestamp ?? 0).getTime());
+        setNotes(internal.map((m) => ({ id: m.id, body: m.body ?? "", sentByStaffId: m.sentByStaffId, waTimestamp: m.waTimestamp })));
+      }
+      if (rRes.ok) {
+        const rj = (await rRes.json()) as { receipts?: { messageId: string; staffId: string; readAt: string }[] };
+        setNoteReceipts(rj.receipts ?? []);
+      }
+    } catch {
+      /* fail-soft：備註卡只係空，唔阻側欄其餘部分 */
+    } finally {
+      setNotesLoading(false);
+    }
+  }, []);
+
+  // 對話切換 → reset + 拉備註；notesRefreshKey = socket note:new 訊號（parent 重拉）
+  useEffect(() => {
+    setNotes([]);
+    setNotesExpanded(false);
+    setNoteDraft("");
+    setNoteReceipts([]);
+    setShowLabelEditor(false);
+    if (!conversation?.id) return;
+    void loadNotes(conversation.id);
+  }, [conversation?.id, loadNotes]);
+
+  useEffect(() => {
+    if (conversation?.id && notesRefreshKey > 0) void loadNotes(conversation.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notesRefreshKey]);
+
+  async function addNote() {
+    const conv = conversation;
+    if (!conv || noteBusy || !noteDraft.trim()) return;
+    setNoteBusy(true);
+    try {
+      const res = await fetch(`/api/conversations/${conv.id}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: noteDraft.trim() }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(j?.error ?? `HTTP ${res.status}`);
+      }
+      setNoteDraft("");
+      await loadNotes(conv.id);
+    } catch {
+      /* fail-soft：保留 draft 俾用戶重試 */
+    } finally {
+      setNoteBusy(false);
+    }
+  }
 
   // 故意只對 conversation?.id 敏感（conversation object identity 每次列表更新都變 — 入 deps 會過度重拉）
   // ctxRefreshKey = socket booking:changed / 寫入後 parent 重拉訊號
@@ -285,81 +364,136 @@ export function DetailPane({
   // 共用內容（桌面側欄 + 手機 bottom sheet 各渲染一次；state 喺呢個 component 層，兩份同步）
   const content = (
     <div className="p-[18px] space-y-3">
-      {/* contact 頂部：大 avatar 居中（Organic：62px brand 圓 + Caprasimo） */}
-      <div className="flex flex-col items-center gap-1.5 pt-1">
-        <div className="w-[62px] h-[62px] rounded-full bg-brand text-panel flex items-center justify-center font-display text-[26px]">
-          {(c.contact?.profileName?.trim() || "?").charAt(0)}
-        </div>
-        <div className="font-display text-[18px] text-t1">
-          {c.contact?.profileName || "未命名聯絡人"}
-        </div>
-        <div className="text-[11px] text-t3 font-mono">{c.contact?.waId ?? "—"}</div>
-      </div>
-
-      {/* contact 編輯（獨立卡） */}
-      <div className="bg-panel-2 rounded-[22px] p-4">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2.5">聯絡人</div>
-        <label className="block mb-2.5">
-          <span className="text-[11px] text-t3">姓名（可編輯）</span>
+      {/* ★ cwi-h6 §4：聯絡人卡壓一格（32px avatar + 姓名 input flex-1 同一行 + 標籤圖標按鈕展開；padding 10px 12px） */}
+      <div className="bg-panel-2 rounded-[16px] px-3 py-2.5">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-full bg-brand text-panel flex items-center justify-center font-display text-sm shrink-0">
+            {(name.trim() || c.contact?.profileName || "?").charAt(0)}
+          </div>
           <input
             value={name}
             onChange={(e) => {
               setName(e.target.value);
               setDirty(true);
             }}
-            placeholder="未設姓名"
-            className="mt-1 w-full text-sm rounded-full bg-panel border border-line px-3.5 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand"
+            placeholder="姓名（撳入編輯）"
+            aria-label="聯絡人姓名"
+            className="flex-1 min-w-0 bg-transparent text-sm text-t1 placeholder:text-t3 focus:outline-none"
           />
-        </label>
-        <div>
-          <span className="text-[11px] text-t3">標籤</span>
-          <div className="flex flex-wrap gap-1 mt-1">
-            {labels.map((l) => (
-              <span
-                key={l}
-                className="inline-flex items-center gap-1 text-[11px] bg-brand-soft text-brand-text rounded-full pl-2 pr-1 py-0.5"
-              >
-                {l}
-                <button
-                  onClick={() => {
-                    setLabels(labels.filter((x) => x !== l));
-                    setDirty(true);
-                  }}
-                  aria-label={`移除標籤 ${l}`}
-                  className="text-brand-text/60 hover:text-danger-text"
-                >
-                  <X size={11} strokeWidth={2.75} />
-                </button>
-              </span>
-            ))}
-          </div>
-          <input
-            value={newLabel}
-            onChange={(e) => setNewLabel(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && newLabel.trim()) {
-                e.preventDefault();
-                const l = newLabel.trim();
-                if (!labels.includes(l)) {
-                  setLabels([...labels, l]);
-                  setDirty(true);
-                }
-                setNewLabel("");
-              }
-            }}
-            placeholder="+ 標籤（Enter 確認）"
-            className="mt-1.5 w-full text-xs rounded-full border border-dashed border-line-strong bg-transparent px-3.5 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand"
-          />
+          <button
+            onClick={() => setShowLabelEditor((v) => !v)}
+            aria-label="編輯標籤"
+            title="標籤"
+            className={`shrink-0 w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${showLabelEditor || labels.length > 0 ? "border-brand text-brand" : "border-line text-t3 hover:text-brand"}`}
+          >
+            <Tag size={13} strokeWidth={2.5} />
+          </button>
         </div>
+        {showLabelEditor && (
+          <div className="mt-2 pl-10">
+            <div className="flex flex-wrap gap-1">
+              {labels.map((l) => (
+                <span
+                  key={l}
+                  className="inline-flex items-center gap-1 text-[11px] bg-brand-soft text-brand-text rounded-full pl-2 pr-1 py-0.5"
+                >
+                  {l}
+                  <button
+                    onClick={() => {
+                      setLabels(labels.filter((x) => x !== l));
+                      setDirty(true);
+                    }}
+                    aria-label={`移除標籤 ${l}`}
+                    className="text-brand-text/60 hover:text-danger-text"
+                  >
+                    <X size={11} strokeWidth={2.75} />
+                  </button>
+                </span>
+              ))}
+            </div>
+            <input
+              value={newLabel}
+              onChange={(e) => setNewLabel(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && newLabel.trim()) {
+                  e.preventDefault();
+                  const l = newLabel.trim();
+                  if (!labels.includes(l)) {
+                    setLabels([...labels, l]);
+                    setDirty(true);
+                  }
+                  setNewLabel("");
+                }
+              }}
+              placeholder="+ 標籤（Enter 確認）"
+              className="mt-1.5 w-full text-xs rounded-full border border-dashed border-line-strong bg-transparent px-3 py-1 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand"
+            />
+          </div>
+        )}
         {dirty && (
           <button
             onClick={() => void saveContact()}
             disabled={saving}
-            className="mt-2.5 w-full text-xs px-3 py-1.5 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-50"
+            className="mt-2 ml-10 text-[11px] px-2.5 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-50"
           >
-            {saving ? "儲存中…" : "儲存聯絡人"}
+            {saving ? "儲存中…" : "儲存"}
           </button>
         )}
+      </div>
+
+      {/* ★ cwi-h6 §4：內部備註卡（staff-only，唔入 AI；5 條 + 展開全部 + 已讀 receipt；realtime = note:new → parent 重拉） */}
+      <div className="bg-panel-2 rounded-[16px] p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 inline-flex items-center gap-1.5">
+            <Lock size={11} strokeWidth={2.75} /> 內部備註
+          </div>
+          <div className="text-[10px] text-t3">staff 獨見 · 唔入 AI</div>
+        </div>
+        {notesLoading && notes.length === 0 && <div className="mt-2 text-[11px] text-t3">載入中…</div>}
+        {!notesLoading && notes.length === 0 && <div className="mt-2 text-[11px] text-t3">未有備註</div>}
+        <div className="mt-2 space-y-1.5">
+          {(notesExpanded ? notes : notes.slice(0, 5)).map((n) => {
+            const readCount = noteReceipts.filter((r) => r.messageId === n.id).length;
+            return (
+              <div key={n.id} className="rounded-[12px] bg-panel border border-line px-2.5 py-1.5">
+                <div className="flex items-center gap-1.5 text-[10px] text-t3">
+                  <span className="text-t2 font-medium">{staff.find((s) => s.id === n.sentByStaffId)?.name ?? "Staff"}</span>
+                  <span>{relTime(n.waTimestamp)}</span>
+                  {readCount > 0 && (
+                    <span className="text-brand inline-flex items-center gap-0.5">
+                      <CheckCheck size={10} strokeWidth={2.5} /> 已讀 {readCount}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-0.5 text-xs text-t1 whitespace-pre-wrap break-words">{n.body}</div>
+              </div>
+            );
+          })}
+        </div>
+        {notes.length > 5 && (
+          <button onClick={() => setNotesExpanded((v) => !v)} className="mt-1.5 text-[11px] text-brand hover:underline">
+            {notesExpanded ? "收起" : `展開全部（${notes.length}）`}
+          </button>
+        )}
+        <div className="mt-2 flex items-center gap-1.5">
+          <input
+            value={noteDraft}
+            onChange={(e) => setNoteDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && noteDraft.trim()) void addNote();
+            }}
+            placeholder="加備註…"
+            aria-label="新增內部備註"
+            className="flex-1 min-w-0 text-xs rounded-full bg-panel border border-line px-3 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand"
+          />
+          <button
+            onClick={() => void addNote()}
+            disabled={noteBusy || !noteDraft.trim()}
+            className="shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-50"
+          >
+            加
+          </button>
+        </div>
       </div>
 
       {/* ★ booking-ui（A）：病人 context — 獨立卡 + 18px 內卡（Organic） */}
