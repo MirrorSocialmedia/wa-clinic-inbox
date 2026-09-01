@@ -2,28 +2,33 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
-import { fetchDutyRoster, hkToday, type DutyEntry } from "@/lib/duty/client";
+import { hkToday } from "@/lib/duty/client";
 import { buildFlowSlots } from "@/lib/flow-slots";
-import { SlotsBoard } from "@/components/inbox/slots-board";
+import { ScheduleBoard } from "@/components/inbox/schedule-board";
 import { ClinicSelect } from "@/components/inbox/clinic-select";
+import { auditScheduleView } from "@/lib/schedule-view-audit";
 import { ArrowLeft, CalendarDays } from "lucide-react";
 
 /**
- * /schedule — 醫生時間表（兩個 view）：
- * - 當值週表（預設）：七日當值（MD「輪一收尾」§C；detail-pane「睇成週 →」link 落點）
- * - 可約時段表（?view=slots）：workforce bookable-slots 四態格（providerslot-20260830 T3；
- *   admin 側欄「醫生時間表」落點）
+ * /schedule — 醫生時間表（cwi-sched-20260901 §1 單入口；取代舊兩 tab）
  *
- * Scope（同 /api/duty-roster 一致 — fail-closed）：
- * - STAFF：只見自己店（?clinicId= 唔一致 → 照舊自己店，唔會洩其他店）。
- * - ADMIN：?clinicId=<clinic code> 選店；唔帶 → 店選單（唔 fetch 任何店數據）。
+ * URL state（分享 / refresh 保持位置）：
+ *   /schedule?clinic=<code>&view=week|day&date=YYYY-MM-DD&provider=<id>
+ *   - clinic 缺省 = 用戶 primary clinic（STAFF 自己店；ADMIN 無 → 店選單）
+ *   - view 缺省 = week（週視圖 default）
+ *   - date 只係 view=day 用；provider 只係日視圖 chips 用（都可以缺省）
+ *   - ⚠️ CEO 指令：URL 參數用 `clinic`（新）；同時接受舊 `clinicId` 作**只讀 fallback**
+ *     （detail-pane「睇成週 →」等舊 link 唔斷）— `clinic` 優先。
  *
- * 數據：服務端 for 今日..今日+6（HK 日期）→ fetchDutyRoster(code, d)（5 分鐘 cache；
- * fail-soft：workforce 離線 / 壞 shape → null → 「未有資料」— 頁照起）。
+ * Scope（§4 全店唯讀）：任何 active 員工可睇任何店時間表（非敏感：醫生名 + 席數，
+ * 零病人資料）。落單 / claim / commit 一律唔受影響（繼續 assertConversationAccess）。
+ * 跨店瀏覽 → SCHEDULE_VIEW audit（meta 只記 clinicCode，零 PII）。
  *
- * 欄位白名單（MD §9.2）：只顯示 staffName / role / shiftStart / shiftEnd — 薪酬/打卡永遠掂唔到。
+ * 數據：服務端 buildFlowSlots（duty + slots 一次過回 — 同一 syncedAt；全程 fail-soft）。
  */
 export const dynamic = "force-dynamic";
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** 今日 + n 日嘅 HK 日期（en-CA + Asia/Hong_Kong — 同 hkToday 慣例）。 */
 function hkDateOffset(days: number, now: Date = new Date()): string {
@@ -32,11 +37,11 @@ function hkDateOffset(days: number, now: Date = new Date()): string {
   });
 }
 
-/** YYYY-MM-DD（HK wall-clock）→ 星期幾 short（確定性 — Intl，唔受 server TZ 影響）。 */
-function weekdayShort(dateStr: string): string {
-  return new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Hong_Kong", weekday: "short" }).format(
-    new Date(`${dateStr}T00:00:00+08:00`)
-  );
+/** 任意 base 日期 + n 日（純日曆日運算 — UTC 午夜慣例，同 board addDays 一致）。 */
+function hkDateOffsetFrom(base: string, days: number): string {
+  const d = new Date(`${base}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 }
 
 export default async function SchedulePage({
@@ -48,62 +53,60 @@ export default async function SchedulePage({
   if (!session) redirect("/login");
 
   const sp = await searchParams;
-  const clinicParam = typeof sp.clinicId === "string" ? sp.clinicId.trim() : "";
-  const view: "duty" | "slots" = sp.view === "slots" ? "slots" : "duty";
+  // clinic（新）優先；clinicId（舊 link）只讀 fallback
+  const rawClinic =
+    (typeof sp.clinic === "string" ? sp.clinic.trim() : "") ||
+    (typeof sp.clinicId === "string" ? sp.clinicId.trim() : "");
+  const view: "week" | "day" = sp.view === "day" ? "day" : "week";
+  const providerParam = typeof sp.provider === "string" ? sp.provider.trim() : "";
   const isStaff = session.role === "STAFF";
+  const today = hkToday();
+  const maxDate = hkDateOffset(20);
 
-  // 店清單（選單用）：STAFF = 自己店；ADMIN = 全部
-  const clinics = isStaff
-    ? await prisma.clinic.findMany({
-        where: { id: session.clinicId! },
-        select: { id: true, code: true, name: true },
-      })
-    : await prisma.clinic.findMany({ orderBy: { code: "asc" }, select: { id: true, code: true, name: true } });
+  // date 參數校驗（week 視圖 = 窗口首日；day 視圖 = 該日）：合法 + 今日..+20 → 否則 fallback today
+  let date = today;
+  {
+    const d = typeof sp.date === "string" ? sp.date.trim() : "";
+    if (DATE_RE.test(d) && d >= today && d <= maxDate) date = d;
+  }
 
-  // 目標店解析（fail-closed）
+  // 店清單（選單用 — §4：所有 STAFF 見晒啟用中診所）
+  const clinics = await prisma.clinic.findMany({
+    orderBy: { code: "asc" },
+    select: { id: true, code: true, name: true },
+  });
+
+  // 目標店解析（§4 全店唯讀：任何店都得；STAFF 無 param → 自己 primary 店）
   const own = clinics.find((c) => c.id === session.clinicId) ?? null;
   let clinic: { id: string; code: string; name: string } | null;
   let clinicMissing = false;
-  if (isStaff) {
-    // STAFF：param 唔一致 → 照舊自己店（同 route 403 嘅 fail-closed 語義 — 頁唔會洩其他店）
-    clinic = own;
+  if (!rawClinic) {
+    clinic = isStaff ? own : null; // STAFF = 自己店；ADMIN → 店選單
   } else {
-    if (!clinicParam) {
-      clinic = null; // → 店選單
-    } else {
-      clinic = clinics.find((c) => c.code === clinicParam) ?? null;
-      clinicMissing = clinic === null;
-    }
+    clinic = clinics.find((c) => c.code === rawClinic) ?? null;
+    clinicMissing = clinic === null;
   }
 
-  // 兩 view 各自 fetch（fail-soft）：duty = 七日當值；slots = 可約時段（today..today+6）
-  //   + held + duty 一次過（cwi-sched §2 v2 shape — 同一 syncedAt）
-  let week: { date: string; entries: DutyEntry[] | null }[] = [];
+  // SSR 初始數據（buildFlowSlots fail-soft — workforce 離線 → connected=false → UI「未接通」）
   let slotsInitial: Awaited<ReturnType<typeof buildFlowSlots>> | null = null;
   if (clinic) {
-    if (view === "duty") {
-      // 七日數據（平行 fetch — 最壞情況 = 一個 3s timeout，唔會 7 倍串行）
-      const dates = Array.from({ length: 7 }, (_, i) => hkDateOffset(i));
-      week = await Promise.all(
-        dates.map(async (d) => ({
-          date: d,
-          entries: await fetchDutyRoster(clinic.code, d).catch(() => null),
-        }))
+    const from = date; // week = 窗口首日；day = 該日
+    const to = view === "day" ? date : hkDateOffsetFrom(date, 6);
+    slotsInitial = await buildFlowSlots(clinic.code, from, to, view).catch(() => null);
+    // 跨店瀏覽審計（SSR 讀路徑；fail-soft）
+    if (isStaff && session.clinicId && session.clinicId !== clinic.id) {
+      void auditScheduleView(
+        { staff: { id: session.staffId, role: "STAFF" as const }, clinicId: session.clinicId },
+        clinic.id,
+        clinic.code
       );
-    } else {
-      // 可約時段（v2 provider 分組）：buildFlowSlots 全程 fail-soft（workforce 離線 → connected=false）
-      const today = hkToday();
-      const to6 = hkDateOffset(6);
-      slotsInitial = await buildFlowSlots(clinic.code, today, to6, "week").catch(() => null);
     }
   }
-  const allEmpty = view === "duty" && week.length > 0 && week.every((d) => d.entries === null);
-  const clinicQuery = clinicParam ? `?clinicId=${encodeURIComponent(clinicParam)}` : "";
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-5xl mx-auto p-4 space-y-3">
-        {/* header：返回 inbox + 標題 + （ADMIN）店選單 */}
+        {/* header：返回 inbox + 標題 + 店選單（所有角色 — §4 全店唯讀） */}
         <div className="flex items-center gap-3 flex-wrap">
           <Link
             href="/inbox"
@@ -113,102 +116,39 @@ export default async function SchedulePage({
           </Link>
           <h1 className="text-lg font-semibold text-t1 inline-flex items-center gap-1.5">
             <CalendarDays size={17} className="text-brand-text" />
-            {view === "slots" ? "醫生時間表" : "當值週表"}
+            醫生時間表
             {clinic ? (
               <span className="text-sm font-normal text-t2">
                 · {clinic.name}（{clinic.code}）
               </span>
             ) : null}
           </h1>
-          {/* view 切換（providerslot-20260830 T3：可約時段四態格） */}
-          <div className="flex items-center gap-0.5 bg-panel-2 rounded-full p-0.5">
-            <a
-              href={`/schedule${clinicQuery}`}
-              className={`text-xs px-2.5 py-1 rounded-full font-medium ${
-                view === "duty" ? "bg-brand text-panel" : "text-t2 hover:text-t1"
-              }`}
-            >
-              當值週表
-            </a>
-            <a
-              href={`/schedule?view=slots${clinicParam ? `&clinicId=${encodeURIComponent(clinicParam)}` : ""}`}
-              className={`text-xs px-2.5 py-1 rounded-full font-medium ${
-                view === "slots" ? "bg-brand text-panel" : "text-t2 hover:text-t1"
-              }`}
-            >
-              可約時段
-            </a>
-          </div>
-          {!isStaff && clinics.length > 0 && (
-            <span className="ml-auto inline-flex items-center gap-1.5 text-xs">
-              <span className="text-t2">店：</span>
-              {/* §5 修復：client select onChange 即刻 router.replace（舊 server form 冇 submit 掣 → 零 fetch） */}
-              <ClinicSelect clinics={clinics} value={clinic?.code ?? ""} view={view} />
-            </span>
-          )}
+          <span className="ml-auto inline-flex items-center gap-1.5 text-xs">
+            <span className="text-t2">店：</span>
+            {/* §5 修復（T-A）：client select onChange → router.replace 帶 clinic + view 保持 */}
+            <ClinicSelect clinics={clinics} value={clinic?.code ?? ""} view={view} paramName="clinic" />
+          </span>
         </div>
 
-        {/* 空狀態：全週冇數據 / 搵唔到店 */}
+        {/* 空狀態：搵唔到店 / 揀店 */}
         {clinicMissing ? (
           <div className="rounded-xl bg-panel-2 p-6 text-sm text-t2 text-center">
-            搵唔到店（{clinicParam}）— 用上面選單重揀。
+            搵唔到店（{rawClinic}）— 用上面選單重揀。
           </div>
         ) : !clinic ? (
           <div className="rounded-xl bg-panel-2 p-6 text-sm text-t2 text-center">
-            揀一間店先睇{view === "slots" ? "醫生時間表" : "當值週表"}。
-          </div>
-        ) : view === "slots" ? (
-          <SlotsBoard
-            clinics={clinics}
-            isStaff={isStaff}
-            initialClinicCode={clinic.code}
-            initialView="week"
-            initialData={slotsInitial}
-            today={hkToday()}
-          />
-        ) : allEmpty ? (
-          <div className="rounded-xl bg-panel-2 p-8 text-center space-y-1">
-            <div className="text-sm text-t1 font-medium">未有資料</div>
-            <div className="text-xs text-t3">當值資料嚟自 clinic-workforce（未接入或本週無排更）</div>
+            揀一間店先睇醫生時間表。
           </div>
         ) : (
-          // 七欄 grid（小螢幕橫向 scroll — min-w 保住每欄可讀）
-          <div className="overflow-x-auto">
-            <div className="min-w-[760px] grid grid-cols-7 gap-2">
-              {week.map((day, i) => (
-                <div
-                  key={day.date}
-                  className={`rounded-xl p-2.5 space-y-2 ${
-                    i === 0 ? "bg-brand-soft/60" : "bg-panel-2"
-                  }`}
-                >
-                  <div className="text-[11px] font-semibold text-t1 flex items-center gap-1">
-                    {weekdayShort(day.date)} {day.date.slice(5).replace("-", "/")}
-                    {i === 0 && (
-                      <span className="text-[9px] px-1 rounded bg-brand-soft text-brand-text">今日</span>
-                    )}
-                  </div>
-                  {day.entries && day.entries.length > 0 ? (
-                    <div className="space-y-1.5 text-[11px]">
-                      {day.entries.map((e) => (
-                        <div key={`${e.staffName}-${e.shiftStart}`} className="rounded bg-canvas/60 p-1.5">
-                          <div className="text-t1">
-                            {e.staffName}
-                            {e.role ? <span className="text-t3">（{e.role}）</span> : null}
-                          </div>
-                          <div className="text-t2 font-mono">
-                            {e.shiftStart}–{e.shiftEnd}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-t3 py-2">未有資料</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
+          <ScheduleBoard
+            clinics={clinics}
+            clinicCode={clinic.code}
+            view={view}
+            date={date}
+            provider={providerParam}
+            initialData={slotsInitial}
+            today={today}
+          />
         )}
       </div>
     </div>

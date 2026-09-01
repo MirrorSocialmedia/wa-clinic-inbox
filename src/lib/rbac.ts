@@ -237,6 +237,21 @@ export function assertClinicAccess(
   }
 }
 
+/**
+ * cwi-sched-20260901 §4：時間表全店唯讀檢查。
+ *
+ * 時間表係非敏感資料（只有醫生名 + 席數，零病人資料）→ 所有 active staff 可讀任何店。
+ *
+ * ⚠️ 只准用喺 /schedule 同 /api/flows/slots?granularity=* 嘅讀路徑。
+ * 落單 / claim / commit 一律唔准用呢個 — 嗰啲繼續用 assertConversationAccess / clinicIds。
+ *
+ * 實作：active 已經由 requireAuth 驗咗（P0-3 isStaffActive fail-closed + 60s cache），
+ * 所以呢度唔重查 DB；職責 = 明確標記讀路徑邊界（全店唯讀、唔查 clinic）+ 未來加緊位。
+ */
+export function assertScheduleReadAccess(_ctx: Pick<AuthContext, "staff">): void {
+  void _ctx; // active 已驗（requireAuth）；呢度刻意唔查 clinic — 全店唯讀
+}
+
 function toContext(data: SessionData, res: AuthContext["res"]): AuthContext {
   // Fail-closed：role 必須係已知值（防壞 session / role 字串注入）
   if (data.role !== "ADMIN" && data.role !== "STAFF") {

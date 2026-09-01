@@ -11,13 +11,15 @@
  *   - 四態：TAKEN（hold 覆蓋）/ ONLINE（offerable）/ CLOSED（其餘）/ MANUAL_ONLY（保留）
  *   - fail-soft：workforce 連唔到 → connected=false + 空 days（UI「未接通」pattern）
  *
- * Scope（T-A 過渡）：STAFF 只可查自己店（fail-closed，同舊行為）。
- *   ⚠️ cwi-sched §4（T-B）改全店唯讀：STAFF 可讀任何店 — 落單/claim/commit 一律唔受影響。
+ * Scope（cwi-sched §4 — T-B）：時間表全店唯讀 — assertScheduleReadAccess
+ *（active 就得，唔查 clinic；⚠️ 只准用喺時間表讀路徑 — 落單/claim/commit 一律唔受影響）。
+ * Audit：STAFF 跨店睇 → SCHEDULE_VIEW（meta 只記 clinicCode，零 PII；fail-soft）。
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth } from "@/lib/rbac";
+import { requireAuth, assertScheduleReadAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
+import { auditScheduleView } from "@/lib/schedule-view-audit";
 import { hkToday } from "@/lib/duty/client";
 import { buildFlowSlots } from "@/lib/flow-slots";
 
@@ -45,13 +47,14 @@ export const GET = handle(async (req: NextRequest) => {
   const span = Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
   if (span > 7) return NextResponse.json({ error: "window too large (max 7 days)" }, { status: 400 });
 
-  // STAFF 只可查自己店（fail-closed）— ⚠️ T-B §4 改 assertScheduleReadAccess（全店唯讀）
-  if (ctx.staff.role === "STAFF") {
-    const own = await prisma.clinic.findUnique({ where: { id: ctx.clinicId! } });
-    if (!own || own.code !== clinicCode) {
-      return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-    }
-  }
+  // cwi-sched §4：全店唯讀（active 已驗；唔查 clinic）
+  assertScheduleReadAccess(ctx);
+
+  // Audit：跨店睇時間表 → SCHEDULE_VIEW（STAFF only；meta 只記 clinicCode — 零 PII；fail-soft）
+  const clinicRow = await prisma.clinic
+    .findUnique({ where: { code: clinicCode }, select: { id: true } })
+    .catch(() => null);
+  if (clinicRow) void auditScheduleView(ctx, clinicRow.id, clinicCode);
 
   const j = await buildFlowSlots(clinicCode, from, to, granularity);
   return NextResponse.json(j);
