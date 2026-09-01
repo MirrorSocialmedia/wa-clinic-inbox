@@ -237,6 +237,8 @@ export async function confirmBookingCore(
         sentByStaffId: isStaff ? actor.staffId : null,
         aiAutoSent: !isStaff, // ★ Phase C：AI 自動確認 = true
         bookingSessionId: isStaff ? null : actor.sessionId, // ★ Phase C：追溯 session 回覆
+        // cwi-window-20260901（P1）：確認預約覆（窗口內）= SERVICE
+        billingCategory: "SERVICE",
         waTimestamp: now,
       },
     });

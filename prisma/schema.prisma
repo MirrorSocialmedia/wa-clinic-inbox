@@ -253,6 +253,10 @@ model Message {
   // ★ PII：只有 template 名/語言/日期時間醫生診所變數 — 零病人自由文本。
   // body 欄 = 預覽文字（UI 顯示；同 template 實際渲染一致）。
   templateMeta   Json?
+  // cwi-window-20260901（P1）：計費類別 — SERVICE（窗口內人手/AI 自由回覆）| UTILITY | MARKETING | AUTH（template 按其類別）| NONE（echo/INTERNAL 備註，唔計費）。
+  // 2026-10-01 WhatsApp 新 API 起每條 OUT 個別計費 → 呢欄係 /admin/usage 用量統計嘅基礎。
+  // 寫入規則（同 backfill 規則一致）：OUT+API+template → 類別；OUT+API 其他 → SERVICE；APP_ECHO/INTERNAL → NONE；IN/HISTORY → NULL（入站唔計費）。
+  billingCategory String?
   waTimestamp    DateTime @db.Timestamptz
   createdAt      DateTime @db.Timestamptz  @default(now())
   @@index([conversationId, waTimestamp])
@@ -313,6 +317,9 @@ model AiDraft {
   //   Conversation.intent 係「最新」會漂移）。歷史 row null → 統計歸 UNKNOWN（唔 backfill）。
   intent             String?
   createdAt          DateTime @db.Timestamptz    @default(now())
+  // cwi-window-20260901（P2）：草稿模式 — NORMAL（默認）| COPY_ONLY（過窗草稿：只可複製去手機 App，
+  // 唔可採用/發送；adoptRate 分母剔除 — 過窗唔係「AI 唔夠好」，唔好拖累自動化升級統計）。
+  mode               String    @default("NORMAL")
   // Phase 2 冪等：同一條 inbound Message 只可有一條 draft。
   // AI job 重試（attempts 3）或部分失敗重跑時，唯一約束 + findUnique 前置檢查
   // 保證唔會生成重複 draft。一條訊息只觸發一次 AI 分類，語義上多 draft 無意義。

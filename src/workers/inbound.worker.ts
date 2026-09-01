@@ -451,6 +451,8 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
             mediaPath: null, // ★ media 下載喺獨立 media queue（R4）
             mediaStatus: mid ? "PENDING" : "READY",
             status: "SENT",
+            // cwi-window-20260901（P1）：手機 App 回音唔經系統計費 → NONE
+            billingCategory: "NONE",
             waTimestamp: waTs,
           },
         });

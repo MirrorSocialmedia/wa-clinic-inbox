@@ -153,6 +153,20 @@
 #   PC-G4 L4 自動落單（pinned + 預設 visit reason）→ CONFIRMED + autoBooked + workforce mock 調用 +
 #       AuditLog(AI_AUTO_BOOKING, staffId=null) + StaffNotice(BOOKING_AUTO) + 「已為你預約」訊息（aiAutoSent）
 #   PC-G5 kill switch：AI_GLOBAL_MAX_LEVEL=L2 → 有 policy row 都唔開 session + 舊 draft 行為（L1/L2 byte-for-byte 實證）
+#
+# WIN（cwi-window-20260901 — 過窗三出路 + COPY_ONLY + 單訊息鐵律 + 用量統計）：
+#   T175 billingCategory 數據層：人手窗口內 text=SERVICE / template=類別（UTILITY+meta 快照）/
+#       APP_ECHO=NONE / legacy NULL row 冪等 backfill（text→SERVICE、template meta category→MARKETING、echo→NONE）+
+#       重跑零變動 + 新寫入 row 唔受 backfill 蓋
+#   T171 過窗 + AUTO → draft mode=COPY_ONLY + 零 OUT（唔產生 FAILED outbound）
+#   T174 窗口內迴歸：draft mode=NORMAL + AUTO 自動發照舊（行為零改變）
+#   T172 過窗三出路 ① 開手機對話：wa.me deep link（E164 無加號 + encodeURIComponent 草稿）+
+#       audit APP_HANDOFF_CLICK（conversationId+staffId，零電話原文）+ INTERNAL 備註「已轉用手機 App 跟進」
+#   T173 過窗三出路 ② 揀 template：只列 APPROVED+UTILITY + 逐條收費標示 + 發送走現有 outbound（202→SENT，UTILITY）
+#   T170 單訊息鐵律：AUTO 一條 QUESTION → 只 1 條 OUT（aiAutoSent）；5s 內同對話第 2 條 AI OUT →
+#       worker log warn `outbound: multi-message burst`（唔擋，觀察期）
+#   T176 /admin/usage：本月按店×類別×人手/AI + App 跟進次數（APP_HANDOFF_CLICK）+ 週趨勢 + AI 自動覆佔比；
+#       STAFF 頁/API → 403
 ##
 set -u
 cd "$(dirname "$0")/.."
@@ -4997,6 +5011,74 @@ rm -f .dev/workforce-mock-extra-providers.json .dev/workforce-mock-held.json .de
 AUDIT_RESID=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='SCHEDULE_VIEW'" | jf c)
 check "SCHED cleanup：SCHEDULE_VIEW audit 零殘留" "$AUDIT_RESID" "0"
 [ "$SCHED_FAIL" = 0 ] && pass "SCHED cwi-sched-20260901 全鏈 e2e（T150–T156）" || fail "SCHED 有項失敗（見上 ❌）"
+
+# ── WIN. cwi-window-20260901 T175: billingCategory 數據層 ─────────────
+echo "[WIN] T175: billingCategory data layer..."
+WIN_FAIL=0
+W175_PAT="8526003${EPOCH}"   # hermetic 新病人（零污染前段斷言）
+W175_WAMID="wamid.E2E_W175_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$W175_PAT" --text "e2e W175 窗口內查詢" --wamid "$W175_WAMID" --name "E2E-W175" >/dev/null || { fail "T175 mock-inbound POST"; WIN_FAIL=1; }
+W175_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$W175_PAT'" | jf id)
+
+if [ -n "$W175_CONV" ]; then
+  # T175a：staff 窗口內人手 text send → SERVICE
+  CODE=$(curl -s -o /tmp/e2e-w175a.json -w '%{http_code}' -b "$COOKIE_TKW" \
+    -X POST "$BASE/api/messages/send" -H 'Content-Type: application/json' \
+    -d "{\"conversationId\":\"$W175_CONV\",\"body\":\"e2e W175 人手覆\"}")
+  check "T175a 窗口內人手 send → 202" "$CODE" "202"
+  W175A_MSG=$(jf messageId < /tmp/e2e-w175a.json)
+  if wait_for "SELECT (\"billingCategory\")::text b FROM \"Message\" WHERE id='$W175A_MSG'" '[{"b":"SERVICE"}]' 10; then
+    pass "T175a 人手窗口內 text = SERVICE"
+  else
+    fail "T175a 人手 text billingCategory（last: $(q "SELECT (\"billingCategory\")::text b FROM \"Message\" WHERE id='$W175A_MSG'")）"; WIN_FAIL=1
+  fi
+  wait_for "SELECT status s FROM \"Message\" WHERE id='$W175A_MSG'" '[{"s":"SENT"}]' 30 >/dev/null || true
+
+  # T175b：template send（appt_reminder_zh + 顯式 templateParams — 對話無 CONFIRMED 預約）→ UTILITY + templateMeta 類別快照
+  CODE=$(curl -s -o /tmp/e2e-w175b.json -w '%{http_code}' -b "$COOKIE_TKW" \
+    -X POST "$BASE/api/messages/send" -H 'Content-Type: application/json' \
+    -d "{\"conversationId\":\"$W175_CONV\",\"templateName\":\"appt_reminder_zh\",\"templateParams\":{\"requestedDate\":\"2026-09-15\",\"requestedTime\":\"14:00\",\"providerName\":\"Dr E2E\"}}")
+  check "T175b template send → 202" "$CODE" "202"
+  W175B_MSG=$(jf messageId < /tmp/e2e-w175b.json)
+  if wait_for "SELECT (\"billingCategory\")::text b, (\"templateMeta\"->>'category')::text c FROM \"Message\" WHERE id='$W175B_MSG'" '[{"b":"UTILITY","c":"UTILITY"}]' 10; then
+    pass "T175b template = UTILITY + templateMeta.category 快照"
+  else
+    fail "T175b template billingCategory（last: $(q "SELECT (\"billingCategory\")::text b, (\"templateMeta\"->>'category')::text c FROM \"Message\" WHERE id='$W175B_MSG'")）"; WIN_FAIL=1
+  fi
+else
+  fail "T175 conv 搵唔到（mock-inbound 失敗）"; WIN_FAIL=1
+fi
+
+# T175c：echo row（T5 本 run 建立）= NONE
+W175C=$(q "SELECT (\"billingCategory\")::text b FROM \"Message\" WHERE \"waMessageId\"='$ECHO_WAMID'" | jf b)
+check "T175c APP_ECHO row = NONE" "$W175C" "NONE"
+
+# T175d：backfill 冪等 — 手插 legacy row（billingCategory NULL）→ 跑 backfill → 斷言填晒 → 再跑一次冪等
+if [ -n "$W175_CONV" ]; then
+  q "INSERT INTO \"Message\" (id, \"conversationId\", \"direction\", \"channel\", \"type\", \"body\", \"status\", \"waTimestamp\") VALUES ('e2e-w175-legacy-text', '$W175_CONV', 'OUT','API','text','e2e legacy text','SENT', now())" >/dev/null
+  q "INSERT INTO \"Message\" (id, \"conversationId\", \"direction\", \"channel\", \"type\", \"body\", \"status\", \"waTimestamp\", \"templateMeta\") VALUES ('e2e-w175-legacy-tpl', '$W175_CONV', 'OUT','API','template','e2e legacy tpl','SENT', now(), '{\"name\":\"legacy_promo\",\"language\":\"en_US\",\"components\":[],\"category\":\"MARKETING\"}'::jsonb)" >/dev/null
+  q "INSERT INTO \"Message\" (id, \"conversationId\", \"direction\", \"channel\", \"type\", \"body\", \"status\", \"waTimestamp\") VALUES ('e2e-w175-legacy-echo', '$W175_CONV', 'OUT','APP_ECHO','text','e2e legacy echo','SENT', now())" >/dev/null
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/backfill-billing-category.sql >/dev/null 2>&1 || { fail "T175d backfill script 執行失敗"; WIN_FAIL=1; }
+  W175D1=$(q "SELECT \"type\" t, (\"billingCategory\")::text b FROM \"Message\" WHERE id IN ('e2e-w175-legacy-text','e2e-w175-legacy-tpl','e2e-w175-legacy-echo') ORDER BY id" | tr -d ' ')
+  check "T175d backfill 填 legacy（text=SERVICE/tpl=MARKETING/echo=NONE）" "$W175D1" "[{\"t\":\"text\",\"b\":\"NONE\"},{\"t\":\"text\",\"b\":\"SERVICE\"},{\"t\":\"template\",\"b\":\"MARKETING\"}]"
+  # 冪等：已填 row 唔會變（再跑一次）
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/backfill-billing-category.sql >/dev/null 2>&1 || true
+  W175D2=$(q "SELECT \"type\" t, (\"billingCategory\")::text b FROM \"Message\" WHERE id IN ('e2e-w175-legacy-text','e2e-w175-legacy-tpl','e2e-w175-legacy-echo') ORDER BY id" | tr -d ' ')
+  check "T175d backfill 冪等（重跑零變動）" "$W175D2" "$W175D1"
+  # 新寫入規則 row（T175a）唔會被 backfill 蓋掉
+  W175D3=$(q "SELECT (\"billingCategory\")::text b FROM \"Message\" WHERE id='$W175A_MSG'" | jf b)
+  check "T175d 新 row（已寫 SERVICE）唔受 backfill 影響" "$W175D3" "SERVICE"
+fi
+
+# WIN cleanup（hermetic：洗走 W175 病人全部殘留）
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$W175_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE id LIKE 'e2e-w175-legacy-%'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$W175_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$W175_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$W175_PAT'" >/dev/null 2>&1
+W175_RESID=$(q "SELECT count(*)::text c FROM \"Contact\" WHERE \"waId\"='$W175_PAT'" | jf c)
+check "WIN cleanup：W175 零殘留" "$W175_RESID" "0"
+[ "$WIN_FAIL" = 0 ] && pass "WIN cwi-window-20260901 T175 全鏈（billingCategory 數據層）" || fail "WIN T175 有項失敗（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

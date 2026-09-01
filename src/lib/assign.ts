@@ -216,6 +216,7 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
         waMessageId: null, // INTERNAL 永唔出 Graph API — 冇 wamid
         sentByStaffId: byStaffId,
         mentions: toStaffId ? [toStaffId] : [],
+        billingCategory: "NONE", // cwi-window-20260901（P1）：INTERNAL 備註唔計費
         waTimestamp: now,
       } satisfies Prisma.MessageCreateInput,
     });

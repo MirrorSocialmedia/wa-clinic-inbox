@@ -115,6 +115,8 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
         body: confirmMessageText(booking),
         status: "QUEUED",
         sentByStaffId: ctx.staff.id,
+        // cwi-window-20260901（P1）：staff 確認預約覆（窗口內）= SERVICE
+        billingCategory: "SERVICE",
         waTimestamp: now,
       },
     });

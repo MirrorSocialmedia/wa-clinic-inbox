@@ -7,6 +7,7 @@ import { requireAuth, assertConversationAccess, clinicScope } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { outboundQueue } from "@/lib/queue";
 import { getWindowState } from "@/lib/wa/window";
+import { billingCategoryForTemplate, BILLING_SERVICE } from "@/lib/wa/billing";
 import { assignConversation } from "@/lib/assign";
 import {
   listMessageTemplates,
@@ -110,6 +111,7 @@ export const POST = handle(async (req: NextRequest) => {
   if (!clinic) return NextResponse.json({ error: "clinic missing" }, { status: 500 });
 
   let templateMeta: Prisma.InputJsonValue | undefined;
+  let templateCategory: string | undefined; // cwi-window-20260901（P1）：template 類別（計費用）
   let templatePreview = "";
   if (isTemplateSend) {
     // ── template 發送校驗（失敗一律唔 claim / 唔落 Message）──
@@ -126,6 +128,7 @@ export const POST = handle(async (req: NextRequest) => {
       return NextResponse.json({ error: "template_list_unavailable" }, { status: 502 });
     }
     const tpl = approved.find((t) => t.name === parsed.data.templateName);
+    if (tpl) templateCategory = tpl.category; // cwi-window-20260901（P1）
     if (!tpl) {
       return NextResponse.json(
         {
@@ -167,6 +170,8 @@ export const POST = handle(async (req: NextRequest) => {
     templateMeta = {
       name: tpl.name,
       language: tpl.language,
+      // cwi-window-20260901（P1）：template 類別快照 — /admin/usage 計費同 backfill 冪等性用
+      category: tpl.category,
       components: buildTemplateComponents(input),
     } as unknown as Prisma.InputJsonValue;
     templatePreview = isReminder ? reminderPreviewText(input) : confirmPreviewText(input);
@@ -254,6 +259,8 @@ export const POST = handle(async (req: NextRequest) => {
         body: isTemplateSend ? templatePreview : parsed.data.body!,
         // Phase B：template row 先有 templateMeta（text row 唔寫呢個欄）
         ...(isTemplateSend ? { templateMeta } : {}),
+        // cwi-window-20260901（P1）：計費類別 — 人手窗口內 text = SERVICE；template 按其類別
+        billingCategory: isTemplateSend ? billingCategoryForTemplate(templateCategory) : BILLING_SERVICE,
         status: "QUEUED" as const,
         sentByStaffId: ctx.staff.id,
         clientMessageId: parsed.data.clientMessageId ?? null,

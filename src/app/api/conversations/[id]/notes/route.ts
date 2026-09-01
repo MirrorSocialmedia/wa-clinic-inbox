@@ -64,6 +64,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
       waMessageId: null, // INTERNAL 永唔出 Graph API — 冇 wamid
       sentByStaffId: auth.staff.id,
       mentions,
+      billingCategory: "NONE", // cwi-window-20260901（P1）：INTERNAL 備註唔計費
       waTimestamp: now,
     },
   });

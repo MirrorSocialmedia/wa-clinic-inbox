@@ -509,6 +509,8 @@ async function handleReschedule(p: {
         status: "QUEUED",
         sentByStaffId: null,
         aiAutoSent: true,
+        // cwi-window-20260901（P1）：改期自動覆（窗口內）= SERVICE
+        billingCategory: "SERVICE",
         waTimestamp: now,
       },
     });
@@ -547,6 +549,8 @@ async function autoReplyAndResend(conv: { id: string; clinicId: string }, reason
         status: "QUEUED",
         sentByStaffId: null,
         aiAutoSent: true,
+        // cwi-window-20260901（P1）：precheck 失敗自動覆（窗口內）= SERVICE
+        billingCategory: "SERVICE",
         waTimestamp: now,
       },
     });

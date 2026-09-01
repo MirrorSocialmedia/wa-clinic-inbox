@@ -110,10 +110,15 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
           templateMeta: {
             name: reminderParams.templateName,
             language: reminderParams.templateLang,
+            // cwi-window-20260901（P1）：類別快照（同 send route 一致）— 預約提醒範本係 UTILITY 類
+            category: "UTILITY",
             components: buildTemplateComponents(input),
           } as unknown as Prisma.InputJsonValue,
           status: "QUEUED",
           sentByStaffId: null,
+          // cwi-window-20260901（P1）：預約提醒 template — 類別 UTILITY（declared：cron 寫入點無辦法讀
+          // WA Manager 即時類別；該範本在 WA Manager 登記為 UTILITY）
+          billingCategory: "UTILITY",
           waTimestamp: new Date(),
         },
       });

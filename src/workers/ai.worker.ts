@@ -507,6 +507,8 @@ async function attemptAutoSend(args: {
       sentByStaffId: null,
       aiAutoSent: true,
       aiDraftId: draft.id,
+      // cwi-window-20260901（P1）：AI 窗口內自動覆 = SERVICE（同人手窗口內回覆同類）
+      billingCategory: "SERVICE",
       waTimestamp: now,
     },
   });
@@ -892,6 +894,8 @@ async function sendSessionReply(
         sentByStaffId: null,
         aiAutoSent: true,
         bookingSessionId: sessionId,
+        // cwi-window-20260901（P1）：session 回覆（窗口內）= SERVICE
+        billingCategory: "SERVICE",
         waTimestamp: now,
       },
     });

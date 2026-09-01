@@ -104,6 +104,8 @@ export async function sendBookingFlow(opts: {
       body: JSON.stringify(config),
       status: "QUEUED",
       sentByStaffId: opts.staffId,
+      // cwi-window-20260901（P1）：apricot flow 卡片（窗口內）= SERVICE
+      billingCategory: "SERVICE",
       waTimestamp: now,
     },
   });

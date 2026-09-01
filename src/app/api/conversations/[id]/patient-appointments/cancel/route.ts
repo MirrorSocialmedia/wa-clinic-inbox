@@ -144,6 +144,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
         status: "QUEUED",
         sentByStaffId: null,
         aiAutoSent: true,
+        billingCategory: "SERVICE", // cwi-window-20260901（P1）：取消預約覆（窗口內）= SERVICE
         waTimestamp: now,
       },
     });
