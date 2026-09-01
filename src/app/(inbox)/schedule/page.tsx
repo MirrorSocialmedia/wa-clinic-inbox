@@ -3,9 +3,9 @@ import { redirect } from "next/navigation";
 import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
 import { fetchDutyRoster, hkToday, type DutyEntry } from "@/lib/duty/client";
-import { getBookableSlots, getHeld } from "@/lib/workforce/client";
-import { getSlotFreshness } from "@/lib/availability";
-import { SlotsBoard, type SlotsData } from "@/components/inbox/slots-board";
+import { buildFlowSlots } from "@/lib/flow-slots";
+import { SlotsBoard } from "@/components/inbox/slots-board";
+import { ClinicSelect } from "@/components/inbox/clinic-select";
 import { ArrowLeft, CalendarDays } from "lucide-react";
 
 /**
@@ -76,9 +76,10 @@ export default async function SchedulePage({
     }
   }
 
-  // 兩 view 各自 fetch（fail-soft）：duty = 七日當值；slots = 可約時段（today..today+6）+ held
+  // 兩 view 各自 fetch（fail-soft）：duty = 七日當值；slots = 可約時段（today..today+6）
+  //   + held + duty 一次過（cwi-sched §2 v2 shape — 同一 syncedAt）
   let week: { date: string; entries: DutyEntry[] | null }[] = [];
-  let slotsInitial: SlotsData | null = null;
+  let slotsInitial: Awaited<ReturnType<typeof buildFlowSlots>> | null = null;
   if (clinic) {
     if (view === "duty") {
       // 七日數據（平行 fetch — 最壞情況 = 一個 3s timeout，唔會 7 倍串行）
@@ -90,24 +91,10 @@ export default async function SchedulePage({
         }))
       );
     } else {
-      // 可約時段：workforce bookable-slots（from ≥ today 契約）+ held（四態格「已佔」橙）
+      // 可約時段（v2 provider 分組）：buildFlowSlots 全程 fail-soft（workforce 離線 → connected=false）
       const today = hkToday();
       const to6 = hkDateOffset(6);
-      const [slotsRes, heldRes, freshness] = await Promise.all([
-        getBookableSlots(clinic.code, today, to6).catch(() => null),
-        getHeld(clinic.code).catch(() => null),
-        // cwi-refresh-20260831 §5：L2 新鮮度（資料截至 / 可能滯後）— fail-soft
-        getSlotFreshness(clinic.id, today, to6),
-      ]);
-      slotsInitial = {
-        connected: slotsRes !== null,
-        slots: slotsRes,
-        held: heldRes?.holds ?? [],
-        holdTimeoutHours: heldRes?.holdTimeoutHours ?? null,
-        fetchedAt: new Date().toISOString(),
-        syncedAt: freshness.maxSyncedAt ? freshness.maxSyncedAt.toISOString() : null,
-        stale: freshness.stale,
-      };
+      slotsInitial = await buildFlowSlots(clinic.code, today, to6, "week").catch(() => null);
     }
   }
   const allEmpty = view === "duty" && week.length > 0 && week.every((d) => d.entries === null);
@@ -153,23 +140,11 @@ export default async function SchedulePage({
             </a>
           </div>
           {!isStaff && clinics.length > 0 && (
-            <form method="GET" action="/schedule" className="ml-auto flex items-center gap-1.5 text-xs">
+            <span className="ml-auto inline-flex items-center gap-1.5 text-xs">
               <span className="text-t2">店：</span>
-              <select
-                name="clinicId"
-                defaultValue={clinic?.code ?? ""}
-                className="px-2 py-1 rounded bg-panel border border-line text-t1"
-              >
-                <option value="" disabled>
-                  揀一間店
-                </option>
-                {clinics.map((c) => (
-                  <option key={c.id} value={c.code}>
-                    {c.name}（{c.code}）
-                  </option>
-                ))}
-              </select>
-            </form>
+              {/* §5 修復：client select onChange 即刻 router.replace（舊 server form 冇 submit 掣 → 零 fetch） */}
+              <ClinicSelect clinics={clinics} value={clinic?.code ?? ""} view={view} />
+            </span>
           )}
         </div>
 

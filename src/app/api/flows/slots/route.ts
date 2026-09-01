@@ -1,20 +1,25 @@
 /**
- * GET /api/flows/slots — 可約時段四態格數據（providerslot-20260830 T3；/schedule?view=slots）
+ * GET /api/flows/slots — 醫生時間表數據（cwi-sched-20260901 §2；provider 分組 v2）
  *
  *   ?clinicCode=&from=&to=（YYYY-MM-DD；from ≥ today（workforce 契約）；span ≤ 7 日）
- *   200 { v:1, clinicCode, from, to, connected, slots, held, holdTimeoutHours }
- *   - slots = workforce bookable-slots（只出 offerable 格）；fail-soft → null + connected=false
- *   - held = workforce held API（HELD/IN_APRICOT — 四態格「已佔」橙 + 監看用；零 PII）
+ *   [&granularity=week|day]（default week）
+ *   200 { ok:true, v:2, clinicCode, from, to, granularity, connected, syncedAt, stale,
+ *         days:[{ date, closed, duty[], providers:[{ providerId, providerName,
+ *                onlineSeats, slots?[] }] }] }
+ *   - duty + slots 一次過回（同一 syncedAt）— 減 round trip
+ *   - granularity=week 唔回 slots（慳 payload）；day 嘅 slots[] 只回非 CLOSED 格
+ *   - 四態：TAKEN（hold 覆蓋）/ ONLINE（offerable）/ CLOSED（其餘）/ MANUAL_ONLY（保留）
+ *   - fail-soft：workforce 連唔到 → connected=false + 空 days（UI「未接通」pattern）
  *
- * Scope：STAFF 只可查自己店（fail-closed，同 /schedule 一致）；ADMIN 任店。
+ * Scope（T-A 過渡）：STAFF 只可查自己店（fail-closed，同舊行為）。
+ *   ⚠️ cwi-sched §4（T-B）改全店唯讀：STAFF 可讀任何店 — 落單/claim/commit 一律唔受影響。
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { requireAuth } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { hkToday } from "@/lib/duty/client";
-import { getBookableSlots, getHeld } from "@/lib/workforce/client";
-import { getSlotFreshness } from "@/lib/availability";
+import { buildFlowSlots } from "@/lib/flow-slots";
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +31,11 @@ export const GET = handle(async (req: NextRequest) => {
   const clinicCode = qp.get("clinicCode")?.trim() ?? "";
   const from = qp.get("from")?.trim() ?? "";
   const to = qp.get("to")?.trim() ?? "";
+  const granularity = qp.get("granularity")?.trim() ?? "week";
 
+  if (granularity !== "week" && granularity !== "day") {
+    return NextResponse.json({ error: "granularity must be week|day" }, { status: 400 });
+  }
   if (!DATE_RE.test(from) || !DATE_RE.test(to) || !clinicCode) {
     return NextResponse.json({ error: "clinicCode + from + to (YYYY-MM-DD) required" }, { status: 400 });
   }
@@ -36,7 +45,7 @@ export const GET = handle(async (req: NextRequest) => {
   const span = Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
   if (span > 7) return NextResponse.json({ error: "window too large (max 7 days)" }, { status: 400 });
 
-  // STAFF 只可查自己店（fail-closed）
+  // STAFF 只可查自己店（fail-closed）— ⚠️ T-B §4 改 assertScheduleReadAccess（全店唯讀）
   if (ctx.staff.role === "STAFF") {
     const own = await prisma.clinic.findUnique({ where: { id: ctx.clinicId! } });
     if (!own || own.code !== clinicCode) {
@@ -44,25 +53,6 @@ export const GET = handle(async (req: NextRequest) => {
     }
   }
 
-  const [slotsRes, heldRes, clinicRow] = await Promise.all([
-    getBookableSlots(clinicCode, from, to).catch(() => null),
-    getHeld(clinicCode).catch(() => null),
-    // cwi-refresh-20260831 §5：L2 新鮮度（資料截至 / 可能滯後）— fail-soft
-    prisma.clinic.findUnique({ where: { code: clinicCode }, select: { id: true } }).catch(() => null),
-  ]);
-  const clinicId = ctx.staff.role === "STAFF" ? ctx.clinicId! : clinicRow?.id ?? null;
-  const freshness = clinicId ? await getSlotFreshness(clinicId, from, to) : { maxSyncedAt: null, stale: false };
-
-  return NextResponse.json({
-    v: 1,
-    clinicCode,
-    from,
-    to,
-    connected: slotsRes !== null,
-    slots: slotsRes,
-    held: heldRes?.holds ?? [],
-    holdTimeoutHours: heldRes?.holdTimeoutHours ?? null,
-    syncedAt: freshness.maxSyncedAt ? freshness.maxSyncedAt.toISOString() : null,
-    stale: freshness.stale,
-  });
+  const j = await buildFlowSlots(clinicCode, from, to, granularity);
+  return NextResponse.json(j);
 });

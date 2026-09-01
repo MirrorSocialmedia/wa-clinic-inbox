@@ -1,29 +1,26 @@
 "use client";
 
 /**
- * 醫生時間表（可約時段）四態格（providerslot-20260830 T3 — MD §六 / 設計稿 3a）
+ * 醫生時間表 board（cwi-sched-20260901 T-A 過渡版）
  *
- * 數據：GET /api/flows/slots → workforce bookable-slots（只出 offerable 格）+ held（HELD/IN_APRICOT）。
- * 四態（inbox 端無碎片數據 — MD §五：碎片格唔顯示）：
- *   綠 = 可出（offerable 存在）｜橙 = 已佔（HELD 覆蓋，未入 Apricot）
- *   灰 = 未出線上（滿 / 早過 lead time / 冇同步數據 — external API 唔會再分）
- *   斜紋 = 休診日（closed）
- * 行為：5 分鐘自動 refetch + 手動刷新；API 連唔到 = 「未接通」pattern（inbox fail-soft 慣例）。
+ * 數據：GET /api/flows/slots?granularity=week|day（v2 provider 分組 — MD §2）
+ *   days[] = { date, closed, duty[], providers[]（providerId/providerName/onlineSeats/slots?[]）}
+ *   四態（MD §3；inbox 端無碎片數據 — MANUAL_ONLY 係保留值，現行管線唔會發出）：
+ *     ONLINE = 可出（offerable）｜TAKEN = 已佔（HELD/IN_APRICOT 覆蓋）
+ *     CLOSED = 未出線上（滿 / 早過 lead time / 冇數據 — external 唔會再分）｜休診日 = closed
+ *   5 分鐘自動 refetch + 手動刷新（cwi-refresh §4 三步鏈）；fail-soft「未接通」pattern。
+ *
+ * 🔴 §5 修復：`useState(initialClinicCode)` 只係 initial — URL 換店（server select /
+ *   舊 link / back-forward）傳新 prop 時 state 唔會跟住變 → 舊版零 fetch 零 network。
+ *   現加 sync effect：prop 變 → setClinicCode → 下方 load effect 重 fetch。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { io } from "socket.io-client";
-import type { BookableSlotsResult, HeldItem } from "@/lib/workforce/client";
+import type { FlowDay, FlowSlotsResult } from "@/lib/flow-slots";
 
-export interface SlotsData {
-  connected: boolean;
-  slots: BookableSlotsResult | null;
-  held: HeldItem[];
-  holdTimeoutHours: number | null;
+export interface SlotsData extends FlowSlotsResult {
   fetchedAt: string | null;
-  // cwi-refresh-20260831 §5：L2 新鮮度（資料截至 / 可能滯後）
-  syncedAt: string | null;
-  stale: boolean;
 }
 
 interface ClinicOpt {
@@ -37,7 +34,7 @@ interface Props {
   isStaff: boolean;
   initialClinicCode: string;
   initialView: "week" | "day";
-  initialData: SlotsData | null;
+  initialData: FlowSlotsResult | null;
   today: string;
 }
 
@@ -69,22 +66,32 @@ function weekdayCn(dateStr: string): string {
   );
 }
 
-type CellState = "offerable" | "held" | "full" | "closed";
+type CellState = "offerable" | "held" | "full";
 
 const CELL_CLS: Record<CellState, string> = {
   offerable: "bg-ok-soft border-ok/50 text-ok-text",
   held: "bg-warn-soft border-warn/70 text-warn-text",
   full: "bg-panel-2 border-line text-t3",
-  closed:
-    "bg-[repeating-linear-gradient(45deg,rgba(0,0,0,0.055)_0,rgba(0,0,0,0.055)_4px,transparent_4px,transparent_9px)] border-line text-t3",
 };
+
+const CLS_CLOSED_DAY =
+  "bg-[repeating-linear-gradient(45deg,rgba(0,0,0,0.055)_0,rgba(0,0,0,0.055)_4px,transparent_4px,transparent_9px)] border-line text-t3";
 
 export function SlotsBoard({ clinics, isStaff, initialClinicCode, initialView, initialData, today }: Props) {
   const [clinicCode, setClinicCode] = useState(initialClinicCode);
   const [view, setView] = useState<"week" | "day">(initialView);
   const [from, setFrom] = useState(today);
-  const [data, setData] = useState<SlotsData | null>(initialData);
+  const [data, setData] = useState<SlotsData | null>(
+    initialData ? { ...initialData, fetchedAt: new Date().toISOString() } : null
+  );
   const [busy, setBusy] = useState(false);
+  const [banner403, setBanner403] = useState(false);
+
+  // 🔴 §5 修復：URL-driven 換店 → sync prop 入 state（漏咗呢個 = 零 fetch 零 network）
+  useEffect(() => {
+    setClinicCode((c) => (c === initialClinicCode ? c : initialClinicCode));
+  }, [initialClinicCode]);
+
   const reqSeq = useRef(0);
 
   const windowEnd = view === "week" ? addDays(from, 6) : from;
@@ -95,30 +102,32 @@ export function SlotsBoard({ clinics, isStaff, initialClinicCode, initialView, i
     setBusy(true);
     try {
       const to = v === "week" ? addDays(f, 6) : f;
-      const res = await fetch(`/api/flows/slots?clinicCode=${encodeURIComponent(cc)}&from=${f}&to=${to}`);
+      const res = await fetch(
+        `/api/flows/slots?clinicCode=${encodeURIComponent(cc)}&from=${f}&to=${to}&granularity=${v}`
+      );
       if (!res.ok) {
         if (seq === reqSeq.current) {
-          setData({ connected: false, slots: null, held: [], holdTimeoutHours: null, fetchedAt: null, syncedAt: null, stale: false });
+          if (res.status === 403) setBanner403(true);
+          setData({ ...EMPTY_DATA, connected: false, fetchedAt: null });
         }
         return;
       }
-      const j = (await res.json()) as Omit<SlotsData, "fetchedAt">;
+      const j = (await res.json()) as FlowSlotsResult;
       if (seq === reqSeq.current) setData({ ...j, fetchedAt: new Date().toISOString() });
     } catch {
       if (seq === reqSeq.current) {
-        setData({ connected: false, slots: null, held: [], holdTimeoutHours: null, fetchedAt: null, syncedAt: null, stale: false });
+        setData({ ...EMPTY_DATA, connected: false, fetchedAt: null });
       }
     } finally {
       if (seq === reqSeq.current) setBusy(false);
     }
   }, []);
 
-  // ── cwi-refresh-20260831 §4/§5：三步刷新鏈 + toast + 429 倒數 + 逐日失敗 + 403 橫額 ──
+  // ── cwi-refresh-20260831 §4/§5：三步刷新鏈 + toast + 429 倒數 + 403 橫額 ──
   const [refreshing, setRefreshing] = useState(false);
   const [disableSec, setDisableSec] = useState(0);
   const [toast, setToast] = useState<{ kind: "warn" | "err"; msg: string } | null>(null);
   const [failedDays, setFailedDays] = useState<string[]>([]);
-  const [banner403, setBanner403] = useState(false);
   const retry409 = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -238,48 +247,12 @@ export function SlotsBoard({ clinics, isStaff, initialClinicCode, initialView, i
     return () => clearInterval(t);
   }, [clinicCode, from, view, load]);
 
-  // ── 索引（days → byStart；held → 格）──────────────────────────────
-  const dayIndex = useMemo(() => {
-    const m = new Map<string, { closed: boolean; byStart: Map<number, BookableSlotsResult["days"][number]["slots"]> }>();
-    for (const d of data?.slots?.days ?? []) {
-      const byStart = new Map<number, BookableSlotsResult["days"][number]["slots"]>();
-      for (const s of d.slots) {
-        // start = "HH:MM"（workforce 契約 — 實測；之前以為 HH:MM:SS 解出 NaN → 全格灰）
-        const [hh, mnt] = s.start.split(":");
-        const startMin = Number(hh) * 60 + Number(mnt);
-        const list = byStart.get(startMin) ?? [];
-        list.push(s);
-        byStart.set(startMin, list);
-      }
-      m.set(d.date, { closed: d.closed, byStart });
-    }
+  // ── 索引（days → byDate）──────────────────────────────────────────────
+  const dayMap = useMemo(() => {
+    const m = new Map<string, FlowDay>();
+    for (const d of data?.days ?? []) m.set(d.date, d);
     return m;
-  }, [data]);
-
-  const heldByCell = useMemo(() => {
-    const m = new Map<string, HeldItem[]>();
-    for (const h of data?.held ?? []) {
-      if (h.status !== "HELD") continue; // IN_APRICOT = 已落單，唔係「線上已佔」
-      const k = `${h.date}|${h.startMin}`;
-      const list = m.get(k) ?? [];
-      list.push(h);
-      m.set(k, list);
-    }
-    return m;
-  }, [data]);
-
-  // 日視圖：該日 provider 清單（offerable ∪ HELD — 全滿但有 hold 嘅醫生都要見到）
-  const dayProviders = useMemo(() => {
-    const set = new Map<string, string>(); // providerId → name
-    const d = dayIndex.get(from);
-    if (d) {
-      for (const list of d.byStart.values()) for (const s of list) set.set(s.providerId, s.providerName);
-    }
-    for (const h of data?.held ?? []) {
-      if (h.date === from && h.status === "HELD") set.set(h.providerId, h.providerName);
-    }
-    return [...set.entries()].sort((a, b) => a[1].localeCompare(b[1], "zh-HK"));
-  }, [dayIndex, data, from]);
+  }, [data?.days]);
 
   if (!clinicCode) {
     return (
@@ -295,12 +268,15 @@ export function SlotsBoard({ clinics, isStaff, initialClinicCode, initialView, i
   const navBtn =
     "inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border border-line bg-panel text-t2 hover:bg-panel-2 disabled:opacity-40 disabled:pointer-events-none";
 
+  const weekDays: string[] = Array.from({ length: 7 }, (_, i) => addDays(from, i));
+  const dayViewDay = dayMap.get(from) ?? null;
+
   return (
     <div className="space-y-3">
-      {/* 工具列：view 切換 + 日/週 nav + 店選單 + 刷新 */}
+      {/* 工具列：view 切換 + 日/週 nav + 刷新 */}
       <div className="flex items-center gap-2 flex-wrap">
         <div className="flex items-center gap-0.5 bg-panel-2 rounded-full p-0.5">
-          {(["day", "week"] as const).map((v) => (
+          {(["week", "day"] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -326,19 +302,6 @@ export function SlotsBoard({ clinics, isStaff, initialClinicCode, initialView, i
         >
           {view === "week" ? "下週" : "下一日"} →
         </button>
-        {!isStaff && clinics.length > 1 && (
-          <select
-            value={clinicCode}
-            onChange={(e) => setClinicCode(e.target.value)}
-            className="text-xs px-2 py-1 rounded bg-panel border border-line text-t1"
-          >
-            {clinics.map((c) => (
-              <option key={c.id} value={c.code}>
-                {c.name}（{c.code}）
-              </option>
-            ))}
-          </select>
-        )}
         <button
           className={`${navBtn} ml-auto`}
           disabled={busy || refreshing || disableSec > 0}
@@ -383,23 +346,30 @@ export function SlotsBoard({ clinics, isStaff, initialClinicCode, initialView, i
         </div>
       )}
 
+      {/* 部分日同步失敗（refresh dates[] 逐日 ok — v2 shape 冇 per-day 狀態，只係橫額提示） */}
+      {failedDays.length > 0 && (
+        <div className="rounded-lg bg-warn-soft border border-warn/70 px-3 py-2 text-xs text-warn-text">
+          部分日同步失敗：{failedDays.join("、")} — 顯示最後已知數據，撳「更新」重試
+        </div>
+      )}
+
       {/* 未接通（fail-soft — 同 /schedule 當值表嘅「未有資料」pattern） */}
       {data && !data.connected ? (
         <div className="rounded-xl bg-danger-soft border border-warn p-6 text-sm text-danger-text text-center">
           clinic-workforce 未接通 — 讀唔到可約時段（key 失效或服務離線；5 分鐘後自動重試）
         </div>
-      ) : data?.slots ? (
+      ) : data ? (
         view === "week" ? (
-          <WeekGrid dayIndex={dayIndex} heldByCell={heldByCell} from={from} today={today} failedDays={failedDays} />
-        ) : (
-          <DayGrid
-            dayIndex={dayIndex}
-            heldByCell={heldByCell}
-            providers={dayProviders}
-            from={from}
+          <WeekCells
+            days={weekDays.map((d) => dayMap.get(d) ?? null)}
             today={today}
-            failedDays={failedDays}
+            onDayClick={(d) => {
+              setFrom(d);
+              setView("day");
+            }}
           />
+        ) : (
+          <DayGrid day={dayViewDay} from={from} today={today} />
         )
       ) : (
         <div className="rounded-xl bg-panel-2 p-8 text-center">
@@ -420,8 +390,7 @@ export function SlotsBoard({ clinics, isStaff, initialClinicCode, initialView, i
           <span className="w-[22px] h-[14px] rounded-[5px] bg-panel-2 border border-line" /> 未出線上（滿 / 早過 lead time）
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <span className="w-[22px] h-[14px] rounded-[5px] bg-[repeating-linear-gradient(45deg,rgba(0,0,0,0.055)_0,rgba(0,0,0,0.055)_4px,transparent_4px,transparent_9px)] border border-line" />
-          休診
+          <span className={`w-[22px] h-[14px] rounded-[5px] ${CLS_CLOSED_DAY}`} /> 休診
         </span>
         <span className="ml-auto text-t3">來源 clinic-workforce · 每 5 分鐘刷新 · 48 格 × 30 分鐘</span>
       </div>
@@ -429,149 +398,104 @@ export function SlotsBoard({ clinics, isStaff, initialClinicCode, initialView, i
   );
 }
 
-// ── 週視圖：7 日 × 48 半時格（aggregate 全醫生）────────────────────────
+/** v2 空數據（load fail fallback — connected=false 觸發「未接通」pattern）。 */
+const EMPTY_DATA: FlowSlotsResult = {
+  ok: true, v: 2, clinicCode: "", from: "", to: "", granularity: "week",
+  connected: false, syncedAt: null, stale: false, days: [],
+};
 
-function WeekGrid({
-  dayIndex,
-  heldByCell,
-  from,
+// ── 週視圖：每日一格 = 日期 + 當值副標題 + 逐醫生一行（名 + 剩餘席）────────
+// 醫生多過 3 個 → 頭 3 個 + 「+N 位只開診冇預約」（MD §1；providers 已按席數降冪排）。
+function WeekCells({
+  days,
   today,
-  failedDays,
+  onDayClick,
 }: {
-  dayIndex: Map<string, { closed: boolean; byStart: Map<number, BookableSlotsResult["days"][number]["slots"]> }>;
-  heldByCell: Map<string, HeldItem[]>;
-  from: string;
+  days: (FlowDay | null)[];
   today: string;
-  failedDays: string[];
+  onDayClick: (date: string) => void;
 }) {
-  const failed = new Set(failedDays);
-  const days = Array.from({ length: 7 }, (_, i) => addDays(from, i));
   return (
-    <div className="overflow-x-auto rounded-xl border border-line bg-panel">
-      <div className="min-w-[720px]">
-        {/* 日 header */}
-        <div className="grid grid-cols-[52px_repeat(7,1fr)] border-b border-line">
-          <div />
-          {days.map((d) => {
-            const closed = dayIndex.get(d)?.closed;
-            const failedDay = failed.has(d);
-            return (
-              <div
-                key={d}
-                title={failedDay ? "呢日同步失敗（顯示最後已知數據）" : undefined}
-                className={`px-1 py-1.5 text-center ${d === today ? "bg-brand-soft/60" : ""} ${failedDay ? "opacity-50" : ""}`}
-              >
-                <div className="text-[11px] font-semibold text-t1">
-                  {weekdayCn(d)} {d.slice(5).replace("-", "/")}
-                </div>
-                {closed && <div className="text-[9.5px] text-t3">休診</div>}
-                {failedDay && <div className="text-[9.5px] text-warn-text">同步失敗</div>}
-              </div>
-            );
-          })}
-        </div>
-        {/* 48 行 */}
-        {SLOT_MINUTES.map((m) => (
-          <div
-            key={m}
-            className={`grid grid-cols-[52px_repeat(7,1fr)] items-stretch ${m % 60 === 0 ? "border-t border-line" : ""}`}
+    <div className="overflow-x-auto">
+      <div className="min-w-[760px] grid grid-cols-7 gap-2">
+        {days.map((day, i) => (
+          <button
+            key={day?.date ?? i}
+            type="button"
+            onClick={() => day && onDayClick(day.date)}
+            title={day ? `睇 ${day.date} 日視圖` : undefined}
+            className={`text-left rounded-xl p-2.5 space-y-2 hover:bg-brand-soft/40 transition-colors ${
+              day?.closed ? CLS_CLOSED_DAY : i === 0 ? "bg-brand-soft/60" : "bg-panel-2"
+            }`}
           >
-            <div
-              className={`px-1 flex items-end justify-end pb-0.5 font-mono ${
-                m % 60 === 0 ? "text-[10.5px] font-semibold text-t1" : "text-[9.5px] text-t3"
-              }`}
-            >
-              {minToHHmm(m)}
+            <div className="text-[11px] font-semibold text-t1 flex items-center gap-1 flex-wrap">
+              {day ? `${weekdayCn(day.date)} ${day.date.slice(5).replace("-", "/")}` : "—"}
+              {day?.date === today && (
+                <span className="text-[9px] px-1 rounded bg-brand-soft text-brand-text">今日</span>
+              )}
+              {day?.closed && <span className="text-[9px] px-1 rounded bg-panel text-t3">休診</span>}
             </div>
-            {days.map((d) => {
-              const day = dayIndex.get(d);
-              const failedDay = failed.has(d);
-              let state: CellState = "full";
-              let label = "";
-              if (!day || day.closed) state = "closed";
-              else if (failedDay) {
-                // 該日同步失敗 → 全格灰 + hover 提示（MD §4）— 保留最後已知數據但降調
-                state = "full";
-              } else {
-                // held 優先於 offerable（3a：橙邊 = 線上已佔未入 Apricot — 有 hold 就要見到，
-                // 唔好俾另一醫生有出位就蓋住）
-                const held = heldByCell.get(`${d}|${m}`);
-                if (held && held.length > 0) {
-                  state = "held";
-                  label = "已佔";
-                } else {
-                  const list = day.byStart.get(m);
-                  if (list && list.length > 0) {
-                    state = "offerable";
-                    label = list.length > 1 ? `${list.length} 格` : "可出";
-                  }
-                }
-              }
-              return (
-                <div key={d} className="p-px">
-                  <div
-                    className={`h-[26px] rounded-[6px] border flex items-center justify-center text-[9.5px] font-medium ${CELL_CLS[state]} ${failedDay ? "opacity-50" : ""}`}
-                    title={failedDay ? `呢日同步失敗 ${d} ${minToHHmm(m)}–${minToHHmm(m + 30)}` : `${d} ${minToHHmm(m)}–${minToHHmm(m + 30)}`}
-                  >
-                    {label}
+            {day && day.duty.length > 0 && (
+              <div className="text-[10.5px] text-t2 leading-snug">
+                當值：{day.duty.map((e) => `${e.staffName}${e.role ? ` · ${e.role}` : ""}`).join("、")}
+              </div>
+            )}
+            {day && day.providers.length > 0 ? (
+              <div className="space-y-1">
+                {day.providers.slice(0, 3).map((p) => (
+                  <div key={p.providerId} className="rounded bg-canvas/60 px-1.5 py-1 text-[11px] leading-snug">
+                    <div className="text-t1">{p.providerName}</div>
+                    <div className={p.onlineSeats > 0 ? "text-ok-text" : "text-t3"}>
+                      {p.onlineSeats > 0 ? `${p.onlineSeats} 席` : "冇位"}
+                    </div>
                   </div>
+                ))}
+                {day.providers.length > 3 && (
+                  <div className="text-[10.5px] text-t3">+{day.providers.length - 3} 位只開診冇預約</div>
+                )}
+              </div>
+            ) : (
+              day && (
+                <div className="text-[11px] text-t3 py-1">
+                  {day.closed ? "冇醫生當值" : "無醫生數據"}
                 </div>
-              );
-            })}
-          </div>
+              )
+            )}
+          </button>
         ))}
       </div>
     </div>
   );
 }
 
-// ── 日視圖：48 半時格 × 醫生欄（provider 層）──────────────────────────
-
-function DayGrid({
-  dayIndex,
-  heldByCell,
-  providers,
-  from,
-  today,
-  failedDays,
-}: {
-  dayIndex: Map<string, { closed: boolean; byStart: Map<number, BookableSlotsResult["days"][number]["slots"]> }>;
-  heldByCell: Map<string, HeldItem[]>;
-  providers: [string, string][];
-  from: string;
-  today: string;
-  failedDays: string[];
-}) {
-  const day = dayIndex.get(from);
-  const failedDay = failedDays.includes(from);
+// ── 日視圖：48 半時格 × 醫生欄（provider 分組 — T-B 會改單醫生 chips）──────
+function DayGrid({ day, from, today }: { day: FlowDay | null; from: string; today: string }) {
   if (!day) {
-    return <div className="rounded-xl bg-panel-2 p-6 text-sm text-t2 text-center">未有資料（該日冇任何可出格或 hold）</div>;
+    return <div className="rounded-xl bg-panel-2 p-6 text-sm text-t2 text-center">未有資料（workforce 未回該日數據）</div>;
   }
   if (day.closed) {
     return (
-      <div className="rounded-xl bg-[repeating-linear-gradient(45deg,rgba(0,0,0,0.055)_0,rgba(0,0,0,0.055)_4px,transparent_4px,transparent_9px)] border border-line p-8 text-sm text-t3 text-center">
+      <div className={`rounded-xl ${CLS_CLOSED_DAY} border p-8 text-sm text-t3 text-center`}>
         休診日（冇醫生當值）
       </div>
     );
   }
-  if (providers.length === 0) {
+  if (day.providers.length === 0) {
     return <div className="rounded-xl bg-panel-2 p-6 text-sm text-t2 text-center">當日無醫生有可出位（全滿或未同步）</div>;
   }
-  const cols = providers.length;
+  const cols = day.providers.length;
   return (
-    <div>
-      {failedDay && (
-        <div className="rounded-lg bg-warn-soft border border-warn/70 px-3 py-2 text-xs text-warn-text mb-2">
-          呢日同步失敗（顯示最後已知數據）— 撳「更新」重試
-        </div>
-      )}
-      <div className={`overflow-x-auto rounded-xl border border-line bg-panel ${failedDay ? "opacity-50" : ""}`}>
+    <div className="overflow-x-auto rounded-xl border border-line bg-panel">
       <div style={{ minWidth: `${52 + cols * 130}px` }}>
         <div className="grid border-b border-line" style={{ gridTemplateColumns: `52px repeat(${cols}, 1fr)` }}>
           <div />
-          {providers.map(([pid, name]) => (
-            <div key={pid} className={`px-1 py-1.5 text-center text-[11px] font-semibold text-t1 ${from === today ? "bg-brand-soft/60" : ""}`}>
-              {name}
+          {day.providers.map((p) => (
+            <div
+              key={p.providerId}
+              className={`px-1 py-1.5 text-center text-[11px] font-semibold text-t1 ${from === today ? "bg-brand-soft/60" : ""}`}
+            >
+              {p.providerName}
+              {p.onlineSeats > 0 && <span className="text-ok-text text-[10px]">（{p.onlineSeats} 席）</span>}
             </div>
           ))}
         </div>
@@ -588,24 +512,23 @@ function DayGrid({
             >
               {minToHHmm(m)}
             </div>
-            {providers.map(([pid, name]) => {
-              const slots = day.byStart.get(m) ?? [];
-              const mine = slots.find((s) => s.providerId === pid);
-              const held = heldByCell.get(`${from}|${m}`)?.find((h) => h.providerId === pid);
+            {day.providers.map((p) => {
+              // day granularity：API 只回非 CLOSED 格 — 缺 = CLOSED（full 格視覺）
+              const slot = p.slots?.find((s) => s.start === minToHHmm(m));
               let state: CellState = "full";
               let label = "";
-              if (mine) {
-                state = "offerable";
-                label = `${mine.seatsFree} 席`;
-              } else if (held) {
+              if (slot?.state === "TAKEN") {
                 state = "held";
                 label = "已佔";
+              } else if (slot?.state === "ONLINE" || slot?.state === "MANUAL_ONLY") {
+                state = "offerable";
+                label = `${slot.seats} 席`;
               }
               return (
-                <div key={pid} className="p-px">
+                <div key={p.providerId} className="p-px">
                   <div
                     className={`h-[26px] rounded-[6px] border flex items-center justify-center text-[10px] font-medium ${CELL_CLS[state]}`}
-                    title={`${name} ${minToHHmm(m)}–${minToHHmm(m + 30)}`}
+                    title={`${p.providerName} ${minToHHmm(m)}–${minToHHmm(m + 30)}`}
                   >
                     {label}
                   </div>
@@ -614,7 +537,6 @@ function DayGrid({
             })}
           </div>
         ))}
-      </div>
       </div>
     </div>
   );
