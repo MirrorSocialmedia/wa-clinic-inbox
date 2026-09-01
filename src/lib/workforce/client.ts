@@ -610,6 +610,8 @@ export const MOCK_WRITE_DISABLED_FLAG = ".dev/workforce-mock-write-disabled.json
 export const MOCK_NEW_PATIENT_FLAG = ".dev/workforce-mock-newpatient.json";
 export const MOCK_SLOT_TAKEN_FLAG = ".dev/workforce-mock-slot-taken.json";
 export const MOCK_HELD_FLAG = ".dev/workforce-mock-held.json";
+// cwi-sched-20260901 T150：mock base day 加 N 個醫生（>3 收埋分支測試用；缺檔 = 0）
+export const MOCK_EXTRA_PROVIDERS_FLAG = ".dev/workforce-mock-extra-providers.json"; // [{ clinicCode, extra }]
 export const MOCK_PATIENTS_FILE = ".dev/workforce-mock-patients.json";
 // T4：mock claim hold store（決定性；零 PII；e2e 完清檔）
 export const MOCK_CLAIMS_FILE = ".dev/workforce-mock-claims.json";
@@ -1195,20 +1197,35 @@ function holdCountAt(clinicCode: string, providerId: string, date: string, start
   ).length;
 }
 
+/** T150：mock 額外醫生數（flag 檔 — 缺檔 = 0；只影響 mock base day 嘅 provider 數）。 */
+function readExtraProviders(): { clinicCode: string; extra: number }[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path.resolve(process.cwd(), MOCK_EXTRA_PROVIDERS_FLAG), "utf8"));
+    return Array.isArray(parsed)
+      ? parsed.filter((e) => e && typeof e.clinicCode === "string" && typeof e.extra === "number" && e.extra > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 /** 該日 base slots（hash seatsFree、未扣 hold）— bookable-slots mock 同 claim mock 共用。 */
 function mockBaseDay(clinicCode: string, date: string): { closed: boolean; slots: BookableSlot[] } {
   const closed = djb2(`${clinicCode}|${date}`) % 7 === 3;
   const slots: BookableSlot[] = [];
   if (!closed) {
-    for (let p = 0; p < MOCK_PROVIDER_NAMES.length; p++) {
+    const extras = readExtraProviders().find((e) => e.clinicCode === clinicCode)?.extra ?? 0;
+    const totalProviders = MOCK_PROVIDER_NAMES.length + extras;
+    for (let p = 0; p < totalProviders; p++) {
       const providerId = `mock-pract-${clinicCode}-${p}`;
+      const providerName = p < MOCK_PROVIDER_NAMES.length ? MOCK_PROVIDER_NAMES[p] : `mock 醫生${p + 1}`;
       for (let s = MOCK_START_MIN; s < MOCK_END_MIN; s += 30) {
         const seatsFree = 1 + (djb2(`${clinicCode}|${date}|${s}|${p}`) % MOCK_CAPACITY);
         slots.push({
           start: minToHHmm(s),
           end: minToHHmm(s + 30),
           providerId,
-          providerName: MOCK_PROVIDER_NAMES[p],
+          providerName,
           seatsFree,
           slotKey: `mock|${clinicCode}|${date}|${minToHHmm(s)}|${providerId}`,
         });

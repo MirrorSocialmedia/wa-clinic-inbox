@@ -3939,44 +3939,44 @@ q "DELETE FROM \"Conversation\" WHERE id='$CONV_T93'" >/dev/null 2>&1
 q "DELETE FROM \"Contact\" WHERE \"waId\"='$PAT_T93'" >/dev/null 2>&1
 [ "$T93" = 0 ] && pass "T93 Flow fail 回滾全鏈（重按唔謊報「已發咗」+ 防連撳保留）" || { fail "T93 有項失敗（見上 ❌）"; R11_FAIL=1; }
 
-# ── T94. /schedule 七日週表頁（STAFF 自己店 / ADMIN 選店 / fail-closed / 空參數） ──
-echo "[R11] T94: /schedule 7-day roster page..."
+# ── T94. /schedule 醫生時間表頁（cwi-sched-20260901 後：單入口 + 全店唯讀）──
+echo "[R11] T94: /schedule doctor-schedule page..."
 T94=0
 MF_NAME=$(q "SELECT name FROM \"Clinic\" WHERE code='MF'" | jf name)
 TKW_NAME=$(q "SELECT name FROM \"Clinic\" WHERE code='TKW'" | jf name)
-# (1) STAFF：自己店七日表（fixture A — DUTY_MOCK 預設 1）
+# (1) STAFF：自己店（primary clinic）週視圖（fixture A — DUTY_MOCK 預設 1）
 CODE94=$(curl -s -o /tmp/e2e-sched-staff.html -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/schedule")
 check "T94 STAFF GET /schedule → 200" "$CODE94" "200"
-grep -qF "當值週表" /tmp/e2e-sched-staff.html && pass "T94 頁標題" || { fail "T94 頁標題缺失"; T94=1; }
-grep -qF "林小曼" /tmp/e2e-sched-staff.html && pass "T94 七日 entries（fixture）" || { fail "T94 七日 entries 冇（fixture 林小曼）"; T94=1; }
+grep -qF "醫生時間表" /tmp/e2e-sched-staff.html && pass "T94 頁標題（醫生時間表）" || { fail "T94 頁標題缺失"; T94=1; }
+grep -qF "林小曼" /tmp/e2e-sched-staff.html && pass "T94 當值 entries（fixture）" || { fail "T94 當值 entries 冇（fixture 林小曼）"; T94=1; }
 [ "$(grep -oF "今日" /tmp/e2e-sched-staff.html | wc -l)" -ge 1 ] && pass "T94 今日 badge" || { fail "T94 今日 badge 缺失"; T94=1; }
 check "T94 STAFF 見自己店名" "$(grep -cF "$TKW_NAME" /tmp/e2e-sched-staff.html)" "1"
-# (2) STAFF 跨店 param → fail-closed（照舊自己店 — MF 名唔出現）
-curl -s -o /tmp/e2e-sched-staff-mf.html -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/schedule?clinicId=MF" > /dev/null
-if grep -qF "$MF_NAME" /tmp/e2e-sched-staff-mf.html; then fail "T94 STAFF 跨店 param 撈咗 MF（scope 漏洞）"; T94=1;
-else pass "T94 STAFF 跨店 param → fail-closed（照舊自己店）"; fi
+# (2) cwi-sched §4（全店唯讀）：STAFF 跨店 param → 200 有 MF 資料（舊版 fail-closed 斷言已反轉）
+CODE94X=$(curl -s -o /tmp/e2e-sched-staff-mf.html -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/schedule?clinic=MF")
+check "T94 STAFF 跨店 ?clinic=MF → 200（全店唯讀）" "$CODE94X" "200"
+grep -qF "$MF_NAME" /tmp/e2e-sched-staff-mf.html && pass "T94 STAFF 跨店有 MF 資料" || { fail "T94 STAFF 跨店 MF 資料冇"; T94=1; }
 # (3) ADMIN 唔帶 param → 店選單（零數據 fetch — fixture 名唔出現）
 CODE94B=$(curl -s -o /tmp/e2e-sched-admin.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule")
 check "T94 ADMIN GET /schedule（無 param）→ 200" "$CODE94B" "200"
 grep -qF "揀一間店" /tmp/e2e-sched-admin.html && pass "T94 ADMIN 店選單" || { fail "T94 ADMIN 店選單缺失"; T94=1; }
 if grep -qF "林小曼" /tmp/e2e-sched-admin.html; then fail "T94 ADMIN 無 param 已 fetch 數據"; T94=1; else pass "T94 ADMIN 無 param 零數據"; fi
-# (4) ADMIN ?clinicId=TKW → TKW 七日
+# (4) ADMIN ?clinicId=TKW（舊 link 只讀 fallback — CEO 指令）→ TKW 數據
 CODE94C=$(curl -s -o /tmp/e2e-sched-admin-tkw.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule?clinicId=TKW")
-check "T94 ADMIN ?clinicId=TKW → 200" "$CODE94C" "200"
-grep -qF "林小曼" /tmp/e2e-sched-admin-tkw.html && pass "T94 ADMIN TKW 七日 entries" || { fail "T94 ADMIN TKW entries 冇"; T94=1; }
-# (5) ADMIN ?clinicId=MF → MF 店名 + 七日
+check "T94 ADMIN ?clinicId=TKW（fallback）→ 200" "$CODE94C" "200"
+grep -qF "林小曼" /tmp/e2e-sched-admin-tkw.html && pass "T94 ADMIN clinicId fallback entries" || { fail "T94 ADMIN clinicId fallback entries 冇"; T94=1; }
+# (5) ADMIN ?clinicId=MF（舊 fallback 參數）→ MF 店名 + 數據
 CODE94D=$(curl -s -o /tmp/e2e-sched-admin-mf.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule?clinicId=MF")
-check "T94 ADMIN ?clinicId=MF → 200" "$CODE94D" "200"
+check "T94 ADMIN ?clinicId=MF（fallback）→ 200" "$CODE94D" "200"
 grep -qF "$MF_NAME" /tmp/e2e-sched-admin-mf.html && pass "T94 ADMIN MF 店名" || { fail "T94 ADMIN MF 店名冇"; T94=1; }
-grep -qF "林小曼" /tmp/e2e-sched-admin-mf.html && pass "T94 ADMIN MF 七日 entries" || { fail "T94 ADMIN MF entries 冇"; T94=1; }
+grep -qF "林小曼" /tmp/e2e-sched-admin-mf.html && pass "T94 ADMIN MF entries" || { fail "T94 ADMIN MF entries 冇"; T94=1; }
 # (6) ADMIN ?clinicId=NOPE → 搵唔到店（唔 500）
 CODE94E=$(curl -s -o /tmp/e2e-sched-admin-nope.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule?clinicId=NOPE")
 check "T94 ADMIN ?clinicId=NOPE → 200（錯誤狀態唔 500）" "$CODE94E" "200"
 grep -qF "搵唔到店" /tmp/e2e-sched-admin-nope.html && pass "T94 搵唔到店狀態" || { fail "T94 搵唔到店狀態缺失"; T94=1; }
-# (7) workforce 離線 → fetchDutyRoster fail-soft（in-process — 頁層 allEmpty 分支渲染「未有資料」×7）
+# (7) workforce 離線 → /api/duty-roster fail-soft（inbox 當值卡數據層 — schedule 頁本身靠 buildFlowSlots connected=false pattern）
 DOWN_OUT=$(pnpm -s e2e:duty --cookie "$COOKIE_TKW" --down 2>&1)
 echo "$DOWN_OUT" | grep -q "DUTY-DOWN-OK" && pass "T94 workforce 離線 → duty null 唔 crash（數據層）" || { fail "T94 workforce 離線 fail-soft"; T94=1; }
-[ "$T94" = 0 ] && pass "T94 /schedule 週表頁全鏈" || { fail "T94 有項失敗（見上 ❌）"; R11_FAIL=1; }
+[ "$T94" = 0 ] && pass "T94 /schedule 醫生時間表全鏈" || { fail "T94 有項失敗（見上 ❌）"; R11_FAIL=1; }
 
 # ── T95. §B2 今日當值卡 client 端刷新（browser-level — mock duty 變更 → 卡更新唔使 reload） ──
 echo "[R11] T95: duty card client refresh (browser)..."
@@ -4935,6 +4935,68 @@ pnpm -s e2e:staff delete --email "$H6M_EMAIL" >/dev/null 2>&1 || echo "    WARN:
 H6M_RESID=$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE email='$H6M_EMAIL'" | jf c)
 check "H6 cleanup：fixture staff 零殘留" "$H6M_RESID" "0"
 [ "$H6" = 0 ] && pass "H6 cwi-h6-20260830 全鏈 e2e（H6-T91–T99）" || fail "H6 有項失敗（見上 ❌）"
+
+# ── SCHED. cwi-sched-20260901 T150–T156（醫生時間表合併重做）────────────────
+echo "[SCHED] T150-T156: doctor schedule merged e2e..."
+SCHED_FAIL=0
+SCHED_TODAY=$(TZ=Asia/Hong_Kong date +%F)
+
+# T150 週視圖：每日當值 + 醫生名 + 席數；>3 醫生收埋「+N 位」（extra-providers mock flag）
+printf '[{"clinicCode":"TKW","extra":2}]' > .dev/workforce-mock-extra-providers.json
+CODE150=$(curl -s -o /tmp/e2e-sched-t150.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule?clinic=TKW")
+check "T150 週視圖 → 200" "$CODE150" "200"
+grep -qF "當值：" /tmp/e2e-sched-t150.html && pass "T150 當值副標題" || { fail "T150 當值副標題缺失"; SCHED_FAIL=1; }
+grep -qF "mock 陳醫師" /tmp/e2e-sched-t150.html && pass "T150 醫生名" || { fail "T150 醫生名缺失"; SCHED_FAIL=1; }
+grep -qE "[0-9]+ 席" /tmp/e2e-sched-t150.html && pass "T150 剩餘席數" || { fail "T150 席數缺失"; SCHED_FAIL=1; }
+# ★ React SSR 喺 expression/text 之間插 <!-- --> 分隔（`+{N} 位…` = 3 個 text node）
+#   raw grep "​+1 位" 假紅 — 先 strip 先 grep（a2 2026-09-01 實測）
+sed 's/<!-- -->//g' /tmp/e2e-sched-t150.html | grep -qF "+1 位只開診冇預約" && pass "T150 >3 醫生收埋（+1）" || { fail "T150 >3 收埋缺失（4 醫生未出）"; SCHED_FAIL=1; }
+rm -f .dev/workforce-mock-extra-providers.json
+
+# T152 前置：mock held flag（TKW 今日 10:00–11:00 mock-pract-TKW-0 HELD → 日視圖 已佔 格）
+printf '[{"holdId":"sched-t152-hold","clinicCode":"TKW","providerId":"mock-pract-TKW-0","providerName":"mock 陳醫師","date":"%s","startMin":600,"endMin":660,"status":"HELD","source":"e2e_flag","createdAt":"%sT00:00:00.000Z","ageHours":0,"appointmentPast":false}]' "$SCHED_TODAY" "$SCHED_TODAY" > .dev/workforce-mock-held.json
+
+# T151 + T152 + T156（browser-level — playwright-core）
+SCHED_UI_OUT=$(pnpm -s e2e:schedule-ui --base "$BASE" --cookie "$COOKIE_ADMIN" 2>&1)
+# a2：UI 失敗 reason 之前被吞（只 grep OK marker）— 落檔 + echo 埋主 log（diagnose 用）
+echo "$SCHED_UI_OUT" > /tmp/e2e-sched-ui-out.log
+echo "$SCHED_UI_OUT" | grep -E "SCHED-T15|WARMUP" | sed 's/^/  [UI] /'
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T151-OK" && pass "T151 揀診所 → 真 fetch + URL 同步（週+日）" || { fail "T151 揀診所 fetch/URL（見 SCHED-T151 行）"; SCHED_FAIL=1; }
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T152-OK" && pass "T152 日格→日視圖 + chips + 48 格四態" || { fail "T152 日視圖（見 SCHED-T152 行）"; SCHED_FAIL=1; }
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T156-OK" && pass "T156 更新掣 7 日/1 日 + 429/409 UI" || { fail "T156 更新掣（見 SCHED-T156 行）"; SCHED_FAIL=1; }
+rm -f .dev/workforce-mock-held.json .dev/workforce-mock-refresh-429.json .dev/workforce-mock-refresh-409.json
+
+# T153 文案：頁面唔再出現「可出」（週 + 日兩 view）
+curl -s -o /tmp/e2e-sched-t153w.html -b "$COOKIE_ADMIN" "$BASE/schedule?clinic=TKW"
+curl -s -o /tmp/e2e-sched-t153d.html -b "$COOKIE_ADMIN" "$BASE/schedule?clinic=TKW&view=day&date=$SCHED_TODAY"
+if grep -q "可出" /tmp/e2e-sched-t153w.html /tmp/e2e-sched-t153d.html; then
+  fail "T153 頁面仍出現「可出」（$(grep -c "可出" /tmp/e2e-sched-t153w.html /tmp/e2e-sched-t153d.html | tr '\n' ' ')）"
+  SCHED_FAIL=1
+else
+  pass "T153 週+日視圖零「可出」"
+fi
+
+# T154 全店唯讀：STAFF A（綁 TKW）開 MF 時間表 → 200 有資料（頁 + API 兩層）
+CODE154=$(curl -s -o /tmp/e2e-sched-t154.html -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/schedule?clinic=MF")
+check "T154 STAFF-TKW 開 MF 頁 → 200" "$CODE154" "200"
+grep -qF "$MF_NAME" /tmp/e2e-sched-t154.html && grep -qF "mock 陳醫師" /tmp/e2e-sched-t154.html \
+  && pass "T154 MF 頁有資料" || { fail "T154 MF 頁資料冇"; SCHED_FAIL=1; }
+CODE154B=$(curl -s -o /tmp/e2e-sched-t154.json -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/flows/slots?clinicCode=MF&from=$SCHED_TODAY&to=$SCHED_TODAY&granularity=day")
+check "T154 STAFF-TKW 跨店 API → 200" "$CODE154B" "200"
+grep -qE '"ok": *true' /tmp/e2e-sched-t154.json && grep -q '"date"' /tmp/e2e-sched-t154.json && pass "T154 API ok:true 有數據" || { fail "T154 API 唔 ok"; SCHED_FAIL=1; }
+
+# T155 邊界：同一 STAFF A 對 MF 寫 → 403（唯讀 ≠ 可寫 — 落單/claim/commit call site 零改動）
+CODE155=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"MF\",\"dates\":[\"$SCHED_TODAY\"]}")
+check "T155 STAFF-TKW 對 MF 寫（availability refresh）→ 403" "$CODE155" "403"
+CODE155B=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/flows/holds/schedt155nopehold000000000/commit" -H 'Content-Type: application/json' -d '{}')
+[ "$CODE155B" = "404" ] || [ "$CODE155B" = "403" ] && pass "T155 外店 commit → 唔會 2xx（$CODE155B）" || { fail "T155 外店 commit 狀態異常（$CODE155B）"; SCHED_FAIL=1; }
+
+# SCHED cleanup（零殘留：SCHEDULE_VIEW audit row + mock flags + claims 冩入）
+q "DELETE FROM \"AuditLog\" WHERE action='SCHEDULE_VIEW'" >/dev/null 2>&1
+rm -f .dev/workforce-mock-extra-providers.json .dev/workforce-mock-held.json .dev/workforce-mock-refresh-429.json .dev/workforce-mock-refresh-409.json
+AUDIT_RESID=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='SCHEDULE_VIEW'" | jf c)
+check "SCHED cleanup：SCHEDULE_VIEW audit 零殘留" "$AUDIT_RESID" "0"
+[ "$SCHED_FAIL" = 0 ] && pass "SCHED cwi-sched-20260901 全鏈 e2e（T150–T156）" || fail "SCHED 有項失敗（見上 ❌）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
