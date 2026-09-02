@@ -57,6 +57,28 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     throw new Error(`outbound: contact missing for conversation ${conv.id}`);
   }
 
+  // cwi-window-20260901（P4 / W-3）：單訊息鐵律觀察點 — 5s burst guard（唔擋，先觀察）。
+  // AI 自動覆拆咗多條（同對話 5s 內第 2 條 aiAutoSent OUT）= prompt 鐵律被違反 → log warn 計數，
+  // 累積多先決定加硬擋。PII：只帶 id metadata，內文永不入 log。
+  if (msg.aiAutoSent && msg.direction === "OUT") {
+    const since = new Date(Date.now() - 5_000);
+    const priorAutoOut = await prisma.message.count({
+      where: {
+        conversationId: conv.id,
+        direction: "OUT",
+        aiAutoSent: true,
+        createdAt: { gte: since },
+        id: { not: msg.id },
+      },
+    });
+    if (priorAutoOut > 0) {
+      log.warn(
+        { messageId, conversationId: conv.id, clinicId: clinic.id, windowSec: 5, priorAutoOut },
+        "outbound: multi-message burst"
+      );
+    }
+  }
+
   // 1) rate limit（per phone_number_id, 80 msg/s）
   await acquireToken({ key: clinic.waPhoneNumberId });
 

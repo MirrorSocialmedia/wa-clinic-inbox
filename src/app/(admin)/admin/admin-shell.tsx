@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 import {
   ArrowLeft,
+  BarChart3,
   Bot,
   Building2,
   CalendarDays,
@@ -63,7 +64,10 @@ export function AdminShell({
   const groups: { title: string; items: NavItem[] }[] = [
     {
       title: "監控",
-      items: [{ href: "/admin", label: "總覽", icon: LayoutDashboard }],
+      items: [
+        { href: "/admin", label: "總覽", icon: LayoutDashboard },
+        { href: "/admin/usage", label: "用量統計", icon: BarChart3 },
+      ],
     },
     {
       title: "診所",

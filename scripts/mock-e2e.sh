@@ -4487,6 +4487,19 @@ $(node -e 'function djb2(s){let h=5381;for(let i=0;i<s.length;i++){h=((h<<5)+h+s
 EOF14
 # L2 該日 max syncedAt（text — 避開 naive timestamp tz 陷阱：只比「變咗冇」/ epoch 比較）
 l2_max() { q "SELECT max(\"syncedAt\")::text m FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"date\"='$1'" | jf m; }
+# a3 2026-09-02：dev manifest flake（loadManifest race → HTML 500）只對 flake 簽名 retry；真 500 照 fail
+#（同下方 400 check 既設；r3 實測 T146 409 撞 flake 返 HTML 500）
+t146_call() { # t146_call <body-json> → 設 T146_R / T146_C
+  local body="$1" i
+  for i in 1 2 3; do
+    T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "$body")
+    T146_C=$(tail -1 <<< "$T146_R")
+    if [ "$T146_C" = "500" ] && grep -qE 'Unexpected end of JSON input|<!DOCTYPE html>' <<< "$(sed '$d' <<< "$T146_R")"; then
+      echo "    (T146 dev manifest flake 500 → retry $i)"; sleep 2; continue
+    fi
+    return 0
+  done
+}
 
 if [ -z "$R14_D" ] || [ -z "$R14_D2" ]; then
   echo "    ❌ R14：mock 30 日內搵唔到兩個 open 日"; R14=1
@@ -4560,27 +4573,27 @@ T145TS
   # ── T146. refresh 錯誤 shape（429/409/404/403/400 — 對齊 S1 真端點）────
   # 429 flag
   echo '{}' > .dev/workforce-mock-refresh-429.json
-  T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
-  check "T146 429" "$(tail -1 <<< "$T146_R")" "429"
+  t146_call "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}"
+  check "T146 429" "$T146_C" "429"
   grep -q '"code":"RATE_LIMITED"' <<< "$(head -1 <<< "$T146_R")" && pass "T146 429 code=RATE_LIMITED" || { echo "    ❌ T146 429 code（=$(head -1 <<< "$T146_R" | head -c 120)）"; R14=1; }
   grep -q '"retryAfterSec":37' <<< "$(head -1 <<< "$T146_R")" && pass "T146 429 retryAfterSec=37" || { echo "    ❌ T146 429 retryAfterSec（=$(head -1 <<< "$T146_R" | head -c 120)）"; R14=1; }
   rm -f .dev/workforce-mock-refresh-429.json
   # 409
   echo '{}' > .dev/workforce-mock-refresh-409.json
-  T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
-  check "T146 409" "$(tail -1 <<< "$T146_R")" "409"
+  t146_call "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}"
+  check "T146 409" "$T146_C" "409"
   grep -q 'APRICOT_BUSY' <<< "$(head -1 <<< "$T146_R")" && pass "T146 409 code=APRICOT_BUSY" || { echo "    ❌ T146 409（=$(head -1 <<< "$T146_R" | head -c 120)）"; R14=1; }
   rm -f .dev/workforce-mock-refresh-409.json
   # 404
   echo '{}' > .dev/workforce-mock-refresh-404.json
-  T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
-  check "T146 404" "$(tail -1 <<< "$T146_R")" "404"
+  t146_call "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}"
+  check "T146 404" "$T146_C" "404"
   grep -q 'CLINIC_NOT_FOUND' <<< "$(head -1 <<< "$T146_R")" && pass "T146 404 code=CLINIC_NOT_FOUND" || { echo "    ❌ T146 404（=$(head -1 <<< "$T146_R" | head -c 120)）"; R14=1; }
   rm -f .dev/workforce-mock-refresh-404.json
   # 403
   echo '{}' > .dev/workforce-mock-refresh-403.json
-  T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
-  check "T146 403" "$(tail -1 <<< "$T146_R")" "403"
+  t146_call "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}"
+  check "T146 403" "$T146_C" "403"
   rm -f .dev/workforce-mock-refresh-403.json
   # 400：8 日（超上限）— POST 可安全 retry：8 日喺 route zod 層即拒，唔到 mock（無 side effect）
   T146_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d '{"clinicCode":"TKW","dates":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05","2026-09-06","2026-09-07","2026-09-08"]}')
@@ -5174,6 +5187,87 @@ q "DELETE FROM \"Contact\" WHERE \"waId\" IN ('$W172_PAT','$W173_PAT')" >/dev/nu
 W17X2_RESID=$(q "SELECT count(*)::text c FROM \"Contact\" WHERE \"waId\" IN ('$W172_PAT','$W173_PAT')" | jf c)
 check "WIN cleanup：W172/W173 零殘留" "$W17X2_RESID" "0"
 [ "$WIN3_FAIL" = 0 ] && pass "WIN cwi-window-20260901 T172/T173 全鏈（三出路 UI + App handoff + picker）" || fail "WIN T172/T173 有項失敗（見上 ❌）"
+# ── WIN. cwi-window-20260901 T170: 單訊息鐵律（1 QUESTION → 恰 1 AI OUT；5s burst → warn 唔擋）──
+echo "[WIN] T170: single-message iron rule + burst guard..."
+W170_FAIL=0
+W170_PAT="8526775${EPOCH}"; W170_WAMID1="wamid.E2E_W170A_${EPOCH}"; W170_WAMID2="wamid.E2E_W170B_${EPOCH}"
+# setup 同 T171 模式：AUTO + QUESTION→L2（cache 容錯：stale L3/L2 都 auto-eligible，gate 行為相同）
+patch_aimode "$TKW_CLINIC_ID" AUTO
+check "T170 setup：TKW aiMode→AUTO" "$PAM_CODE" "200"
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-w170-q-${EPOCH}','$TKW_CLINIC_ID','QUESTION','L2',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\"" >/dev/null 2>&1
+sleep 1
+
+# ①+② 兩條 inbound 連發（back-to-back）→ 1 入 1 出（恰 2 OUT）+ 5s burst warn
+# a2 fix v2：r2 實測 full-run 負載下 δ+q≥3s → 「等第 1 條 OUT 確認先发第 2 條」margin 唔夠（Δ=2+δ+q≥5s）；
+#   改兩條 inbound 連發（Δ ≈ 連發間隔 ~1s + δ 差）→ 結構上喺 5s 窗內
+pnpm -s mock-inbound message --clinic TKW --from "$W170_PAT" --text "e2e W170 窗口內查詢" --wamid "$W170_WAMID1" --name "E2E-W170" >/dev/null 2>&1 || { fail "T170 mock-inbound#1 失敗"; W170_FAIL=1; }
+W170_CONV=""
+for _i in $(seq 1 30); do
+  W170_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$W170_PAT'" | jf id)
+  [ -n "$W170_CONV" ] && break; sleep 1
+done
+if [ -z "$W170_CONV" ]; then
+  fail "T170 conv 搵唔到（mock-inbound 失敗）"; W170_FAIL=1
+else
+  # 第 2 條 back-to-back（conv 找到就即刻发 — 第 1 條 OUT 仲喺 pipeline 入面）
+  pnpm -s mock-inbound message --clinic TKW --from "$W170_PAT" --text "e2e W170 窗口內查詢 2" --wamid "$W170_WAMID2" --name "E2E-W170" >/dev/null 2>&1 || true
+  # ① 1 入 1 出基線：2 條 inbound → 恰 2 條 AI 自動 OUT（無雙發、無漏發）
+  if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W170_CONV' AND direction='OUT' AND channel='API' AND \"aiAutoSent\"=true AND status='SENT'" '[{"c":"2"}]' 45; then
+    pass "T170 ① 兩條 inbound 連發 → 恰 2 條 AI 自動 OUT（1 入 1 出）"
+  else
+    fail "T170 ① OUT 計數（last: $(q "SELECT id, status FROM \"Message\" WHERE \"conversationId\"='$W170_CONV' AND direction='OUT'")）"; W170_FAIL=1
+  fi
+  # ② burst：兩 OUT createdAt 相差 ~1s → 第 2 條發送時第 1 條喺 5s 窗內 → log warn
+  # a3 2026-09-02：e2e 中途會重啟 worker（t93r 等）→ burst warn 可能落咗其他 log 檔；r3 實測 T170 ②
+  # 假紅源 = 死 grep /tmp/e2e-worker.log（v1 舊 worker），而真 burst warn 喺 e2e-worker-t93r.log（產品行為正確）
+  BURST_OK=0
+  for _i in $(seq 1 30); do
+    BURST_CONV=$(grep -h "multi-message burst" /tmp/e2e-worker*.log 2>/dev/null | grep -c "$W170_CONV")
+    [ "${BURST_CONV:-0}" -ge 1 ] 2>/dev/null && { BURST_OK=1; break; }
+    sleep 1
+  done
+  if [ "$BURST_OK" != 1 ]; then
+    # retry：再一組 back-to-back pair（inbound3+4）— pipeline 慢時呢組兩 OUT 一樣貼身
+    pnpm -s mock-inbound message --clinic TKW --from "$W170_PAT" --text "e2e W170 窗口內查詢 3" --wamid "wamid.E2E_W170C_${EPOCH}" --name "E2E-W170" >/dev/null 2>&1 || true
+    pnpm -s mock-inbound message --clinic TKW --from "$W170_PAT" --text "e2e W170 窗口內查詢 4" --wamid "wamid.E2E_W170D_${EPOCH}" --name "E2E-W170" >/dev/null 2>&1 || true
+    for _i in $(seq 1 45); do
+      BURST_CONV=$(grep -h "multi-message burst" /tmp/e2e-worker*.log 2>/dev/null | grep -c "$W170_CONV")
+      [ "${BURST_CONV:-0}" -ge 1 ] 2>/dev/null && { BURST_OK=1; break; }
+      sleep 1
+    done
+  fi
+  if [ "$BURST_OK" = 1 ]; then
+    pass "T170 ② 5s 內第 2 條 AI OUT → worker log warn multi-message burst（含 conv id）"
+  else
+    fail "T170 ② burst warn 未出現（OUT=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W170_CONV' AND direction='OUT' AND channel='API' AND \"aiAutoSent\"=true AND status='SENT'") burstlog=$(grep -h "multi-message burst" /tmp/e2e-worker*.log 2>/dev/null | wc -l)）"; W170_FAIL=1
+  fi
+  # ③ 唔擋：burst 唔阻 auto OUT（全部實 OUT 皆 SENT — 觀察期唔硬擋）
+  OUT_REAL=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W170_CONV' AND direction='OUT' AND channel='API' AND \"aiAutoSent\"=true AND status='SENT'" | jf c)
+  if [ "${OUT_REAL:-0}" -ge 2 ]; then
+    pass "T170 ③ 唔擋：burst 唔阻 auto OUT（$OUT_REAL 條實 OUT 皆 SENT）"
+  else
+    fail "T170 ③ auto OUT 被擋/未齊（OUT_REAL=$OUT_REAL last: $(q "SELECT id, status FROM \"Message\" WHERE \"conversationId\"='$W170_CONV' AND direction='OUT'")）"; W170_FAIL=1
+  fi
+fi
+
+# ④ 負對照：T174 conv（窗口內單條 auto OUT）零 burst warn
+# a3 2026-09-02：同樣跟全部 worker log（見 T170 ② 註）
+W170_NEG=$(grep -h "multi-message burst" /tmp/e2e-worker*.log 2>/dev/null | grep -c "$W174_CONV")
+check "T170 ④ 負對照：T174 conv 零 burst warn" "${W170_NEG:-0}" "0"
+
+# restore + cleanup（policy 清走；aiMode 還原 DRAFT；洗 W170 病人 + fixture 殘留）
+q "DELETE FROM \"AutomationPolicy\" WHERE id='e2e-w170-q-${EPOCH}'" >/dev/null 2>&1
+patch_aimode "$TKW_CLINIC_ID" DRAFT
+if [ -n "$W170_CONV" ]; then
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$W170_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\"='$W170_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id='$W170_CONV'" >/dev/null 2>&1
+fi
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$W170_PAT'" >/dev/null 2>&1
+W170_RESID=$(q "SELECT count(*)::text c FROM \"Contact\" WHERE \"waId\"='$W170_PAT'" | jf c)
+check "T170 cleanup：W170 零殘留（含 fixture）" "$W170_RESID" "0"
+[ "$W170_FAIL" = 0 ] && pass "WIN cwi-window-20260901 T170 全鏈（單訊息鐵律 + burst guard 觀察）" || fail "WIN T170 有項失敗（見上 ❌）"
+
 
 # ── WIN. cwi-window-20260901 T175: billingCategory 數據層 ─────────────
 echo "[WIN] T175: billingCategory data layer..."
@@ -5242,6 +5336,77 @@ q "DELETE FROM \"Contact\" WHERE \"waId\"='$W175_PAT'" >/dev/null 2>&1
 W175_RESID=$(q "SELECT count(*)::text c FROM \"Contact\" WHERE \"waId\"='$W175_PAT'" | jf c)
 check "WIN cleanup：W175 零殘留" "$W175_RESID" "0"
 [ "$WIN_FAIL" = 0 ] && pass "WIN cwi-window-20260901 T175 全鏈（billingCategory 數據層）" || fail "WIN T175 有項失敗（見上 ❌）"
+# ── WIN. cwi-window-20260901 T176: /admin/usage（ADMIN 限定 + 數字對得返 DB + 決策表）──
+echo "[WIN] T176: /admin/usage..."
+
+# ── T176 fixture（hermetic）：獨立對話 + 3 計數行（SERVICE 人手 / SERVICE AI / UTILITY template）+ 1 audit ──
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('e2e-w176-ct','$TKW_CLINIC_ID','8526776${EPOCH}','E2E-W176',ARRAY[]::text[]) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('e2e-w176-cv','$TKW_CLINIC_ID','e2e-w176-ct','OPEN',now()) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Message\" (id, \"conversationId\", \"waMessageId\", direction, channel, type, body, status, \"sentByStaffId\", \"aiAutoSent\", \"billingCategory\", \"waTimestamp\", \"createdAt\") VALUES ('e2e-w176-m1','e2e-w176-cv','mock-wamid-w176-1','OUT','API','text','e2e W176 staff service row','SENT','$TKW_STAFF_ID',false,'SERVICE',now(),now()) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Message\" (id, \"conversationId\", \"waMessageId\", direction, channel, type, body, status, \"sentByStaffId\", \"aiAutoSent\", \"billingCategory\", \"waTimestamp\", \"createdAt\") VALUES ('e2e-w176-m2','e2e-w176-cv','mock-wamid-w176-2','OUT','API','text','e2e W176 ai service row','SENT',null,true,'SERVICE',now(),now()) ON CONFLICT (id) DO NOTHING"
+q "INSERT INTO \"Message\" (id, \"conversationId\", \"waMessageId\", direction, channel, type, body, status, \"sentByStaffId\", \"aiAutoSent\", \"billingCategory\", \"waTimestamp\", \"createdAt\") VALUES ('e2e-w176-m3','e2e-w176-cv','mock-wamid-w176-3','OUT','API','template','e2e W176 utility template row','SENT',null,false,'UTILITY',now(),now()) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"AuditLog\" (id, \"staffId\", action, entity, \"entityId\", meta) VALUES ('e2e-w176-au','$TKW_STAFF_ID','APP_HANDOFF_CLICK','Conversation','e2e-w176-cv','{\"conversationId\":\"e2e-w176-cv\"}'::jsonb) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+
+# 1) RBAC
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/admin/usage")
+check "T176 未登入 → 401" "$CODE" "401"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/admin/usage")
+check "T176 STAFF → 403" "$CODE" "403"
+CODE=$(curl -s -o /tmp/e2e-w176-usage.json -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/api/admin/usage")
+check "T176 ADMIN → 200" "$CODE" "200"
+
+# 2) 數字對得返 DB（本月 OUT API 總數 + App 跟進次數 — 同一 HK 月邊界）
+# a2 fix：DB 對帳查詢要同 API 語義一致（JOIN Conversation ⋈ Clinic）— 裸 count 會數到
+#   孤兒 row（conversation 已刪嘅 e2e 殘留）→ API 少計 = 假紅（r1 實測 120 vs 132）
+W176_RANGE=$(node -e "const t=Date.now()+8*3600e3;const hk=new Date(t);const y=hk.getUTCFullYear();const m=hk.getUTCMonth();const f=Date.UTC(y,m,1)-8*3600e3;const o=Date.UTC(y,m+1,1)-8*3600e3;console.log(new Date(f).toISOString()+' '+new Date(o).toISOString())")
+W176_FROM=$(echo "$W176_RANGE" | cut -d' ' -f1); W176_TO=$(echo "$W176_RANGE" | cut -d' ' -f2)
+W176_DB=$(q "SELECT count(*)::text c FROM \"Message\" m JOIN \"Conversation\" cv ON cv.id=m.\"conversationId\" JOIN \"Clinic\" cl ON cl.id=cv.\"clinicId\" WHERE m.direction='OUT' AND m.channel='API' AND m.\"createdAt\" >= '$W176_FROM' AND m.\"createdAt\" < '$W176_TO'" | jf c)
+W176_API=$(node -e "try{const d=require('/tmp/e2e-w176-usage.json');console.log(d.totals.total)}catch(e){console.log('ERR')}" 2>/dev/null)
+check "T176 本月 API 出街總數對得返 DB" "$W176_API" "$W176_DB"
+W176_HO_DB=$(q "SELECT count(*)::text c FROM \"AuditLog\" a JOIN \"Conversation\" cv ON cv.id=a.\"entityId\" JOIN \"Clinic\" cl ON cl.id=cv.\"clinicId\" WHERE a.action='APP_HANDOFF_CLICK' AND a.\"createdAt\" >= '$W176_FROM' AND a.\"createdAt\" < '$W176_TO'" | jf c)
+W176_HO_API=$(node -e "try{const d=require('/tmp/e2e-w176-usage.json');console.log(d.appHandoff.reduce((a,x)=>a+x.count,0))}catch(e){console.log('ERR')}" 2>/dev/null)
+check "T176 App 跟進次數對得返 DB（APP_HANDOFF_CLICK）" "$W176_HO_API" "$W176_HO_DB"
+
+# 3) 類別分布 + fixture 行入數（TKW·SERVICE 人手≥1 / AI≥1；TKW·UTILITY ≥1）
+W176_CATS=$(node -e "try{const d=require('/tmp/e2e-w176-usage.json');console.log(Array.from(new Set(d.rows.map(r=>r.category))).sort().join(','))}catch(e){console.log('ERR')}" 2>/dev/null)
+echo "  (T176 類別分布: $W176_CATS)"
+if echo "$W176_CATS" | grep -q "SERVICE" && echo "$W176_CATS" | grep -q "UTILITY"; then
+  pass "T176 類別分布含 SERVICE + UTILITY"
+else
+  fail "T176 類別分布缺 SERVICE/UTILITY（actual: $W176_CATS）"
+fi
+W176_FIX=$(node -e "
+try {
+  const d = require('/tmp/e2e-w176-usage.json');
+  const tkwSvc = d.rows.filter(r=>r.clinicCode==='TKW' && r.category==='SERVICE');
+  const tkwUti = d.rows.filter(r=>r.clinicCode==='TKW' && r.category==='UTILITY');
+  const staff = tkwSvc.reduce((a,r)=>a+r.staffSent,0);
+  const ai = tkwSvc.reduce((a,r)=>a+r.aiSent,0);
+  const uti = tkwUti.reduce((a,r)=>a+r.total,0);
+  console.log((staff>=1 && ai>=1 && uti>=1) ? 'OK' : 'BAD staff='+staff+' ai='+ai+' uti='+uti);
+} catch(e) { console.log('ERR'); }" 2>/dev/null)
+check "T176 fixture 行入數（SERVICE 人手≥1 / AI≥1 / UTILITY≥1）" "$W176_FIX" "OK"
+
+# 4) 頁面（layout 擋 STAFF 403；ADMIN 200 + 決策表 render）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/admin/usage")
+check "T176 頁面 STAFF → 403" "$CODE" "403"
+CODE=$(curl -s -o /tmp/e2e-w176-page.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/admin/usage")
+check "T176 頁面 ADMIN → 200" "$CODE" "200"
+grep -q "用量統計" /tmp/e2e-w176-page.html && pass "T176 頁面 render（用量統計）" || fail "T176 頁面缺「用量統計」"
+# a2 fix：§5 決策表係 client 載入後先 render（SSR 只有「載入中…」）→ curl grep HTML 永遠假紅；
+#   改真實瀏覽器級斷言（e2e:usage-ui）
+W176_UI=$(pnpm -s e2e:usage-ui --base "$BASE" --cookie "$COOKIE_ADMIN" 2>&1 | grep -E "USAGE-UI-(OK|FAIL)" | head -1)
+check "T176 頁面 §5 決策表 render（瀏覽器級）" "$W176_UI" "USAGE-UI-OK"
+
+# cleanup（T176 fixture 全清）
+q "DELETE FROM \"Message\" WHERE id IN ('e2e-w176-m1','e2e-w176-m2','e2e-w176-m3')" >/dev/null 2>&1
+q "DELETE FROM \"AuditLog\" WHERE id='e2e-w176-au'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='e2e-w176-cv'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id='e2e-w176-ct'" >/dev/null 2>&1
+W176_RESID=$(q "SELECT count(*)::text c FROM \"Contact\" WHERE id='e2e-w176-ct'" | jf c)
+check "T176 cleanup 零殘留" "$W176_RESID" "0"
+pass "WIN cwi-window-20260901 T176 全鏈（/admin/usage RBAC + 數字對帳 + 決策表）"
+
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

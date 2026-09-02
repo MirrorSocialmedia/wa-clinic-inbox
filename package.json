@@ -60,6 +60,7 @@
     "e2e:totp-code": "tsx scripts/totp-code.ts",
     "e2e:session-ttl": "tsx scripts/e2e-session-ttl.ts",
     "e2e:workforce": "tsx scripts/e2e-workforce.ts",
+    "e2e:usage-ui": "tsx scripts/e2e-usage-ui.ts",
     "e2e:window-ui": "tsx scripts/e2e-window-ui.ts"
   },
   "prisma": {
