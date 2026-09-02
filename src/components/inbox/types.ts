@@ -224,6 +224,8 @@ export interface DraftInfo {
   latencyMs: number;
   status: "PROPOSED" | "SENT_AS_IS" | "SENT_EDITED" | "DISCARDED";
   createdAt: string;
+  /** cwi-window-20260901（P2）：NORMAL（窗口內）/ COPY_ONLY（過窗 — 發唔出，只准複製去手機 App）。舊 row / 舊 server 可能冇 → 預設 NORMAL。 */
+  mode?: "NORMAL" | "COPY_ONLY";
 }
 
 /** socket ai:classified — 每次 AI 分類成功（metadata only，summary 係聊天內容） */
@@ -245,6 +247,8 @@ export interface DraftReadyEvent {
   draftText: string;
   model: string;
   latencyMs: number;
+  /** cwi-window-20260901（P2）：COPY_ONLY = 過窗草稿（UI 只准複製） */
+  mode?: "NORMAL" | "COPY_ONLY";
 }
 
 /** socket urgent:escalation — 急症實時升級（toast + 隊列頂紅） */

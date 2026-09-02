@@ -310,6 +310,8 @@ export function InboxClient({
           latencyMs: e.latencyMs,
           status: "PROPOSED",
           createdAt: new Date().toISOString(),
+          // cwi-window-20260901（P2）：COPY_ONLY = 過窗草稿（UI 只准複製）
+          mode: e.mode ?? "NORMAL",
         },
       }));
     });

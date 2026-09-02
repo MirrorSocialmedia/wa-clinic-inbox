@@ -240,9 +240,15 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     },
   });
 
-  // ── C6：L3+ 開 session（BOOKING_REQUEST + 無人接手 + 文字訊息）──
+  // ── cwi-window-20260901（P2）：窗口狀態（W-2）──
+  // 過窗：AI 草稿照生成但 mode=COPY_ONLY（UI 只准複製）；C6 session 唔開（session reply = 自動覆，
+  // 過窗發唔出 → 避免一堆 FAILED outbound）；AUTO 自動覆本就有 window-closed 閘（下方 blocks）。
+  const win = getWindowState(updatedConv.lastInboundAt);
+
+  // ── C6：L3+ 開 session（BOOKING_REQUEST + 無人接手 + 文字訊息 + ★ P2：窗口內）──
   // 無 AutomationPolicy row 嘅店 = legacy L1/L2 → 一行都唔改（跌落現有 draft/AUTO）
   if (
+    win.open && // cwi-window-20260901（P2）：過窗唔開 session（session reply 係自動覆 — 發唔出）
     result.intent === "BOOKING_REQUEST" &&
     msg.type === "text" &&
     updatedConv.assigneeId === null &&
@@ -269,6 +275,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     id: string;
     draftText: string;
     status: string;
+    /** cwi-window-20260901（P2）：NORMAL（窗口內）/ COPY_ONLY（過窗 — UI 只准複製） */
+    mode: string;
   } | null = null;
   const canDraft =
     result.intent !== "URGENT_PAIN" &&
@@ -297,6 +305,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
             latencyMs: result.latencyMs,
             // ★ Phase E（cwi-ai-20260825-t5）：per-draft intent 快照（統計「當時」值；歷史 row null → UNKNOWN）
             intent: result.intent,
+            // cwi-window-20260901（P2 / W-2）：過窗草稿 = COPY_ONLY（內容有用但發唔出 — UI 只准複製去 App）
+            mode: win.open ? "NORMAL" : "COPY_ONLY",
           },
         });
       } catch (err) {
@@ -327,7 +337,6 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   //   儀表板逐類 L1/L2 先真正生效；〔全店降 L1〕panic（"*"→L1 policy）即真停自動覆。
   //   行為保證：冇 policy row 嘅店 = resolver fallback aiMode（AUTO→L2 / DRAFT→L1）→ byte 不變。
   //   bonus：AI_GLOBAL_MAX_LEVEL=L1 而家連 L2 自動覆都壓到（env kill 全覆蓋）。
-  const win = getWindowState(updatedConv.lastInboundAt);
   let autoSent = false;
   const autoLevel = await getAutomationLevel(conv.clinicId, result.intent);
   if (clinic.aiMode === "AUTO" && autoLevel === "L1") {
@@ -395,6 +404,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       draftText: draft.draftText,
       model: result.model,
       latencyMs: result.latencyMs,
+      // cwi-window-20260901（P2）：COPY_ONLY 草稿 → UI banner + 複製掣（採用/發送 disable）
+      mode: draft.mode,
     });
   }
   const draftId = draft?.id ?? null;
@@ -881,6 +892,16 @@ async function sendSessionReply(
   text: string,
   action: string
 ): Promise<string | null> {
+  // cwi-window-20260901（P2 / W-2）：過窗 → session reply 發唔出（會變 FAILED outbound）— skip 呢輪，
+  // session 照常（病人下條 inbound 會重新開窗接力）。
+  const freshConv = await prisma.conversation.findUnique({
+    where: { id: conv.id },
+    select: { lastInboundAt: true },
+  });
+  if (!getWindowState(freshConv?.lastInboundAt).open) {
+    log.warn({ sessionId, conversationId: conv.id }, "session: reply skipped — window closed（無 outbound）");
+    return null;
+  }
   const now = new Date();
   try {
     const outMsg = await prisma.message.create({

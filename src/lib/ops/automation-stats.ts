@@ -108,7 +108,9 @@ export async function runWeeklyStats(now: Date = new Date()): Promise<{ weekStar
   const weekStart = hkWeekStart(new Date(now.getTime() - 7 * DAY_MS)); // 上週
   const [lo, hi] = weekRangeUtc(weekStart);
   const drafts = await prisma.aiDraft.findMany({
-    where: { createdAt: { gte: lo, lt: hi } },
+    // cwi-window-20260901（P2 / W-2）：COPY_ONLY 過窗草稿剔除 — 佢發唔出，唔計入 adoptRate 分母
+    //（AutomationStat.draftCount → eligibility.ts adoptRate L3 升級判定 同一來源）
+    where: { createdAt: { gte: lo, lt: hi }, mode: { not: "COPY_ONLY" } },
     select: { conversationId: true, intent: true, status: true },
   });
   if (drafts.length === 0) return { weekStart, rows: 0 };

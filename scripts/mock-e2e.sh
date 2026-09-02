@@ -5012,6 +5012,169 @@ AUDIT_RESID=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='SCHEDUL
 check "SCHED cleanup：SCHEDULE_VIEW audit 零殘留" "$AUDIT_RESID" "0"
 [ "$SCHED_FAIL" = 0 ] && pass "SCHED cwi-sched-20260901 全鏈 e2e（T150–T156）" || fail "SCHED 有項失敗（見上 ❌）"
 
+# ── WIN. cwi-window-20260901 T171/T174: AI COPY_ONLY 草稿模式（過窗 AUTO / 窗口內迴歸）────
+echo "[WIN] T171/T174: AI COPY_ONLY mode..."
+WIN2_FAIL=0
+
+# setup（hermetic — 唔靠前段殘留狀態）：
+#   - waId 用 8526771/8526772（專留 block — 2026-09-02 教訓：8526011/8526014 同 T19 PATIENT_AUTO1 / PATIENT_OLD 撞）
+#   - aiMode 明確設 AUTO（patch_aimode 帶重試；前段 W cleanup 還原 DRAFT — 唔好假設 AUTO）
+#   - QUESTION→L2 policy raw INSERT（e2e 環 AUTOMATION_ADMIN_STAFF_IDS=eadm2（E 段 cleanup 已刪）→ API PATCH 會 403）
+#   - cache 容錯：worker level cache 若 stale L3（E1 row）/ L2 — 兩者都 auto-eligible，gate 行為相同
+patch_aimode "$TKW_CLINIC_ID" AUTO
+check "T171 setup：TKW aiMode→AUTO" "$PAM_CODE" "200"
+W171_AIMODE=$(q "SELECT (\"aiMode\")::text m FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf m)
+check "T171 setup：DB 核 aiMode=AUTO" "$W171_AIMODE" "AUTO"
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-w171-q-${EPOCH}','$TKW_CLINIC_ID','QUESTION','L2',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\"" >/dev/null 2>&1
+sleep 1
+
+# ── T171：過窗 + AUTO → draft mode=COPY_ONLY + 零 OUT（唔產生 FAILED outbound）──
+W171_PAT="8526771${EPOCH}"; W171_CONV=""
+W171_FIX=""
+for _try in 1 2 3; do
+  W171_FIX=$(pnpm -s e2e:ai-job old-inbound --clinic TKW --from "$W171_PAT" --text "e2e W171 過窗查詢" 2>&1)
+  W171_CONV=$(echo "$W171_FIX" | grep -oE 'CONV=[^ ]*' | cut -d= -f2)  # a2 fix：sed -n 's/^CONV=//p' 會帶埋 MSG=/CLINIC= 整行（space 唔斷）→ WHERE 0 行假紅；改 T23 同款 pattern
+  [ -n "$W171_CONV" ] && break
+  echo "    (old-inbound retry ${_try}: $(echo "$W171_FIX" | tail -1 | head -c 200))"; sleep 2
+done
+if [ -z "$W171_CONV" ]; then
+  fail "T171 old-inbound fixture 失敗（out: $W171_FIX）"; WIN2_FAIL=1
+else
+  if wait_for "SELECT (\"mode\")::text m, (\"status\")::text s FROM \"AiDraft\" WHERE \"conversationId\"='$W171_CONV'" '[{"m":"COPY_ONLY","s":"PROPOSED"}]' 45; then
+    pass "T171 過窗 draft mode=COPY_ONLY"
+  else
+    fail "T171 draft mode（last: $(q "SELECT (\"mode\")::text m, (\"status\")::text s FROM \"AiDraft\" WHERE \"conversationId\"='$W171_CONV'")）"; WIN2_FAIL=1
+  fi
+  # AUTO+L2 但 window-closed 閘 → 零 OUT（無 auto-send、無 FAILED）
+  sleep 5
+  W171_OUTC=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W171_CONV' AND direction='OUT'" | jf c)
+  check "T171 AUTO 唔自動覆（過窗零 OUT）" "$W171_OUTC" "0"
+  # UI：COPY_ONLY 草稿卡（banner + 複製掣 + 採用並編輯 消失）
+  W171_UI=$(pnpm -s e2e:copyonly-ui --base "$BASE" --cookie "$COOKIE_TKW" --conv "$W171_CONV" 2>&1 | grep -E "COPYONLY-UI-(OK|FAIL)" | head -1)
+  check "T171 UI：COPY_ONLY 卡（banner/複製掣/採用消失）" "$W171_UI" "COPYONLY-UI-OK"
+fi
+
+# ── T174：窗口內行為零改變迴歸（NORMAL + AUTO 自動發照舊）──
+W174_PAT="8526772${EPOCH}"; W174_WAMID="wamid.E2E_W174_${EPOCH}"; W174_CONV=""
+pnpm -s mock-inbound message --clinic TKW --from "$W174_PAT" --text "e2e W174 窗口內查詢" --wamid "$W174_WAMID" --name "E2E-W174" >/dev/null 2>&1 || { fail "T174 mock-inbound 失敗"; WIN2_FAIL=1; }
+for _i in $(seq 1 30); do
+  W174_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$W174_PAT'" | jf id)
+  [ -n "$W174_CONV" ] && break; sleep 1
+done
+if [ -z "$W174_CONV" ]; then
+  fail "T174 conv 搵唔到（mock-inbound 失敗）"; WIN2_FAIL=1
+else
+  if wait_for "SELECT (\"mode\")::text m, (\"status\")::text s FROM \"AiDraft\" WHERE \"conversationId\"='$W174_CONV'" '[{"m":"NORMAL","s":"SENT_AUTO"}]' 45; then
+    pass "T174 窗口內 draft mode=NORMAL + AUTO 自動發（SENT_AUTO）"
+  else
+    fail "T174 draft mode（last: $(q "SELECT (\"mode\")::text m, (\"status\")::text s FROM \"AiDraft\" WHERE \"conversationId\"='$W174_CONV'")）"; WIN2_FAIL=1
+  fi
+  if wait_for "SELECT count(*)::text c, bool_and(\"aiAutoSent\")::text a FROM \"Message\" WHERE \"conversationId\"='$W174_CONV' AND direction='OUT' AND channel='API'" '[{"c":"1","a":"true"}]' 30; then
+    pass "T174 恰一條 AI 自動 OUT（aiAutoSent）— 行為零改變"
+  else
+    fail "T174 OUT 計數（last: $(q "SELECT count(*)::text c, bool_and(\"aiAutoSent\")::text a FROM \"Message\" WHERE \"conversationId\"='$W174_CONV' AND direction='OUT' AND channel='API'")）"; WIN2_FAIL=1
+  fi
+fi
+
+# restore + cleanup（policy row 清走；aiMode 還原 DRAFT；洗 W171/W174 病人殘留）
+q "DELETE FROM \"AutomationPolicy\" WHERE id='e2e-w171-q-${EPOCH}'" >/dev/null 2>&1
+patch_aimode "$TKW_CLINIC_ID" DRAFT
+if [ -n "$W171_CONV" ] || [ -n "$W174_CONV" ]; then
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN ('$W171_CONV','$W174_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$W171_CONV','$W174_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id IN ('$W171_CONV','$W174_CONV')" >/dev/null 2>&1
+fi
+q "DELETE FROM \"Contact\" WHERE \"waId\" IN ('$W171_PAT','$W174_PAT')" >/dev/null 2>&1
+W17X_RESID=$(q "SELECT count(*)::text c FROM \"Contact\" WHERE \"waId\" IN ('$W171_PAT','$W174_PAT')" | jf c)
+check "WIN cleanup：W171/W174 零殘留" "$W17X_RESID" "0"
+[ "$WIN2_FAIL" = 0 ] && pass "WIN cwi-window-20260901 T171/T174 全鏈（COPY_ONLY 模式 + 窗口內迴歸）" || fail "WIN T171/T174 有項失敗（見上 ❌）"
+
+# ── WIN. cwi-window-20260901 T172/T173: 過窗三出路 UI（① App handoff + ② template picker）──
+echo "[WIN] T172/T173: over-window three-exit UI..."
+WIN3_FAIL=0
+
+# ── T172：① 開手機對話 — wa.me deep link + audit APP_HANDOFF_CLICK（零 PII）+ INTERNAL 備註 ──
+W172_PAT="8526773${EPOCH}"; W172_CONV=""; W172_DRAFT=""
+for _try in 1 2 3; do
+  W172_FIX=$(pnpm -s e2e:ai-job old-inbound --clinic TKW --from "$W172_PAT" --text "e2e W172 過窗查詢" 2>&1)
+  W172_CONV=$(echo "$W172_FIX" | grep -oE 'CONV=[^ ]*' | cut -d= -f2)  # a2 fix：同上（CONV= 提取要斷 space）
+  [ -n "$W172_CONV" ] && break
+  echo "    (W172 old-inbound retry ${_try}: $(echo "$W172_FIX" | tail -1 | head -c 200))"; sleep 2
+done
+if [ -z "$W172_CONV" ]; then
+  fail "T172 old-inbound fixture 失敗（out: $W172_FIX）"; WIN3_FAIL=1
+else
+  # 等 COPY_ONLY 草稿（wa.me link 要帶編碼草稿文字）
+  for _i in $(seq 1 45); do
+    W172_DRAFT=$(q "SELECT \"draftText\" d FROM \"AiDraft\" WHERE \"conversationId\"='$W172_CONV' AND \"mode\"='COPY_ONLY'" | jf d)
+    [ -n "$W172_DRAFT" ] && break; sleep 1
+  done
+  if [ -z "$W172_DRAFT" ]; then
+    fail "T172 COPY_ONLY 草稿未生成（wa.me 斷言跳過）"; WIN3_FAIL=1
+  else
+    # 1) API：App handoff
+    CODE=$(curl -s -o /tmp/e2e-w172-ho.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$W172_CONV/app-handoff" -H 'Content-Type: application/json' -d '{}')
+    check "T172 ① App handoff POST → 200" "$CODE" "200"
+    # 2) audit：APP_HANDOFF_CLICK（staffId 正確 + meta 有 conversationId + 零電話原文）
+    W172_AUDIT=$(q "SELECT count(*)::text c, bool_and(\"staffId\"='$TKW_STAFF_ID')::text s, bool_and(meta ? 'conversationId')::text ci FROM \"AuditLog\" WHERE action='APP_HANDOFF_CLICK' AND \"entityId\"='$W172_CONV'" | tr -d ' \n')
+    check "T172 audit APP_HANDOFF_CLICK（staffId + meta.conversationId）" "$W172_AUDIT" "[{\"c\":\"1\",\"s\":\"true\",\"ci\":\"true\"}]"
+    W172_PII=$(q "SELECT count(*) FILTER (WHERE meta::text LIKE '%$W172_PAT%' OR \"entityId\"::text LIKE '%$W172_PAT%')::text c FROM \"AuditLog\" WHERE action='APP_HANDOFF_CLICK' AND \"entityId\"='$W172_CONV'" | jf c)
+    check "T172 audit 零電話原文（零 PII 鐵律）" "$W172_PII" "0"
+    # 3) INTERNAL 備註（billingCategory=NONE + sentByStaffId 正確）
+    W172_NOTE=$(q "SELECT count(*)::text c, bool_and(\"billingCategory\"='NONE')::text b, bool_and(\"sentByStaffId\"='$TKW_STAFF_ID')::text sf FROM \"Message\" WHERE \"conversationId\"='$W172_CONV' AND channel='INTERNAL' AND body LIKE '%已轉用手機 App 跟進%'" | tr -d ' \n')
+    check "T172 INTERNAL 備註（NONE + staffId）" "$W172_NOTE" "[{\"c\":\"1\",\"b\":\"true\",\"sf\":\"true\"}]"
+    # 4) UI：三出路 block + wa.me link（E164 無加號 + 編碼草稿）+ picker + ③
+    W172_UI=$(pnpm -s e2e:window-ui --base "$BASE" --cookie "$COOKIE_TKW" --conv "$W172_CONV" --draft "$W172_DRAFT" 2>&1 | grep -E "WINDOW-UI-(OK|FAIL)" | head -1)
+    check "T172 UI：wa.me link 編碼 + 三出路 block" "$W172_UI" "WINDOW-UI-OK"
+  fi
+fi
+
+# ── T173：② 揀 template — 只列 APPROVED + 變數預填 + 發送成功（走現有 outbound）──
+W173_PAT="8526774${EPOCH}"; W173_CONV=""
+for _try in 1 2 3; do
+  W173_FIX=$(pnpm -s e2e:ai-job old-inbound --clinic TKW --from "$W173_PAT" --text "e2e W173 過窗查詢" 2>&1)
+  W173_CONV=$(echo "$W173_FIX" | grep -oE 'CONV=[^ ]*' | cut -d= -f2)  # a2 fix：同上（CONV= 提取要斷 space）
+  [ -n "$W173_CONV" ] && break
+  echo "    (W173 old-inbound retry ${_try}: $(echo "$W173_FIX" | tail -1 | head -c 200))"; sleep 2
+done
+if [ -z "$W173_CONV" ]; then
+  fail "T173 old-inbound fixture 失敗（out: $W173_FIX）"; WIN3_FAIL=1
+else
+  # CONFIRMED booking fixture（變數預填來源 — raw INSERT 冪等）
+  q "INSERT INTO \"BookingRequest\" (id, \"conversationId\", \"clinicId\", \"flowToken\", \"providerApricotId\", \"providerName\", \"requestedDate\", \"requestedTime\", status, \"createdAt\") VALUES ('e2e-w173-br', '$W173_CONV', '$TKW_CLINIC_ID', 'e2e-w173-flow-${EPOCH}', 'mock-pract-tkw-1', '陳明軒（主理）', '2026-10-01', '10:30', 'CONFIRMED', now()) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+  # picker API：只列 APPROVED（PENDING/REJECTED 唔入）
+  CODE=$(curl -s -o /tmp/e2e-w173-tpl.json -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/conversations/$W173_CONV/templates")
+  check "T173 ② picker GET → 200" "$CODE" "200"
+  W173_NAMES=$(node -e "try{const d=require('/tmp/e2e-w173-tpl.json');console.log(d.templates.map(t=>t.name).sort().join(','))}catch(e){console.log('ERR')}" 2>/dev/null)
+  # a2 fix：預期值要同 node `.sort()`（JS lexicographic）同序 — o<t 所以 appointment_reminder 排前（原寫反 = 假紅）
+  check "T173 只列 APPROVED+UTILITY（2 款）" "$W173_NAMES" "appointment_reminder,appt_reminder_zh"
+  W173_PREFILL=$(node -e "try{const d=require('/tmp/e2e-w173-tpl.json');const p=d.prefill;console.log(p?[p.patientName,p.clinicName,p.requestedDate,p.requestedTime,p.providerName].join('|'):'NULL')}catch(e){console.log('ERR')}" 2>/dev/null)
+  check "T173 變數預填（病人名/診所/日期/時間/醫生）" "$W173_PREFILL" "E2E-A-WINDOW|TKW 診所（試點店）|2026-10-01|10:30|陳明軒（主理）"
+  # 發送成功（picker 掣同一 outbound 路徑：POST /api/messages/send templateName）
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/messages/send" -H 'Content-Type: application/json' -d "{\"conversationId\":\"$W173_CONV\",\"templateName\":\"appt_reminder_zh\"}")
+  check "T173 ② 發送（picker 同路徑）→ 202" "$CODE" "202"
+  if wait_for "SELECT (count(*)>0)::text c FROM \"Message\" WHERE \"conversationId\"='$W173_CONV' AND type='template' AND status='SENT' AND \"billingCategory\"='UTILITY'" '[{"c":"true"}]' 30; then
+    pass "T173 ② template SENT（mock Graph）+ billingCategory=UTILITY"
+  else
+    fail "T173 template 未 SENT（last: $(q "SELECT type t, status s, \"billingCategory\" b FROM \"Message\" WHERE \"conversationId\"='$W173_CONV' AND direction='OUT'")）"; WIN3_FAIL=1
+  fi
+  # UI：picker DOM（select + 預填行 + 發送掣 + ③）
+  W173_UI=$(pnpm -s e2e:window-ui --base "$BASE" --cookie "$COOKIE_TKW" --conv "$W173_CONV" --expect-prefill 1 2>&1 | grep -E "WINDOW-UI-(OK|FAIL)" | head -1)
+  check "T173 UI：picker + 預填行 + 三出路 block" "$W173_UI" "WINDOW-UI-OK"
+fi
+
+# cleanup（W172/W173 病人殘留 + booking row）
+if [ -n "$W172_CONV" ] || [ -n "$W173_CONV" ]; then
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN ('$W172_CONV','$W173_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$W172_CONV','$W173_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"BookingRequest\" WHERE id='e2e-w173-br'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id IN ('$W172_CONV','$W173_CONV')" >/dev/null 2>&1
+fi
+q "DELETE FROM \"Contact\" WHERE \"waId\" IN ('$W172_PAT','$W173_PAT')" >/dev/null 2>&1
+W17X2_RESID=$(q "SELECT count(*)::text c FROM \"Contact\" WHERE \"waId\" IN ('$W172_PAT','$W173_PAT')" | jf c)
+check "WIN cleanup：W172/W173 零殘留" "$W17X2_RESID" "0"
+[ "$WIN3_FAIL" = 0 ] && pass "WIN cwi-window-20260901 T172/T173 全鏈（三出路 UI + App handoff + picker）" || fail "WIN T172/T173 有項失敗（見上 ❌）"
+
 # ── WIN. cwi-window-20260901 T175: billingCategory 數據層 ─────────────
 echo "[WIN] T175: billingCategory data layer..."
 WIN_FAIL=0
