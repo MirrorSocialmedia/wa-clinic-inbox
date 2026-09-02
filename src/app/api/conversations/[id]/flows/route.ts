@@ -10,6 +10,7 @@
  * /api/flows/endpoint（data_exchange）逐步攞（precheck 原則）。
  */
 import { type NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertConversationAccess } from "@/lib/rbac";
@@ -20,9 +21,30 @@ import { sendBookingFlow, WindowClosedError } from "@/lib/flows/send";
 
 export const dynamic = "force-dynamic";
 
+// D.3（cwi-schedv2-20260903）：撳格預選 — body.prefill 可選（舊 caller 唔帶 = 正常 Flow）。
+const PrefillSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  providerId: z.string().min(1).max(200),
+  start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+});
+
 export const POST = handle(async (req: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
   const ctx = await requireAuth(req);
   const { id } = await params;
+
+  // D.3：prefill 可選 — 壞 shape → 400（唔影響其他檢查順序；body 唔合法 JSON = 舊 caller 空 body）
+  let prefill: { date: string; providerId: string; start: string } | undefined;
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown> | null;
+  if (body && typeof body === "object" && body.prefill != null) {
+    const parsed = PrefillSchema.safeParse(body.prefill);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: "invalid prefill", details: parsed.error.flatten() },
+        { status: 400 }
+      );
+    }
+    prefill = parsed.data;
+  }
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
@@ -67,7 +89,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   }
 
   try {
-    const r = await sendBookingFlow({ conversationId: conv.id, staffId: ctx.staff.id });
+    const r = await sendBookingFlow({ conversationId: conv.id, staffId: ctx.staff.id, prefill });
     // cwi-h6-20260830（h5 §1 寫入點 4）：發 Flow 成功 — 負責人自己 → 觸 assigneeLastActionAt
     if (conv.assigneeId === ctx.staff.id) {
       await prisma.$executeRaw`UPDATE "Conversation" SET "assigneeLastActionAt" = ${new Date()} WHERE "id" = ${conv.id}`;

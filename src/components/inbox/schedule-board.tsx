@@ -1,33 +1,36 @@
 "use client";
 
 /**
- * 醫生時間表 board（cwi-sched-20260901 §1/§3/§6 — 合併頁）
+ * 醫生時間表 board(cwi-sched-20260901 §1/§3/§6 - 合併頁)
  *
- * 數據：GET /api/flows/slots?granularity=week|day（v2 provider 分組 — MD §2）
- *   days[] = { date, closed, duty[], providers[]（providerId/providerName/onlineSeats/slots?[]）}
- *   四態（§3 文案表 — 逐字）：
- *     ONLINE      = 可上線約（病人自己約得，Flow／AI 會出呢啲時段）
- *     MANUAL_ONLY = 只可人手約（碎片時段，AI 唔會出，前台可以人手安排）— 保留值，現行管線唔發出
- *     TAKEN       = 已佔（有人揀緊或者已落單，等入 Apricot）
- *     CLOSED      = 唔開診・滿（醫生冇開診，或者已滿／太趕）
+ * 數據:GET /api/flows/slots?granularity=week|day(v2 provider 分組 - MD §2)
+ *   days[] = { date, closed, duty[], providers[](providerId/providerName/onlineSeats/slots?[])}
+ *   四態(§3 文案表 - 逐字):
+ *     ONLINE      = 可上線約(病人自己約得,Flow/AI 會出呢啲時段)
+ *     MANUAL_ONLY = 只可人手約(碎片時段,AI 唔會出,前台可以人手安排)- 保留值,現行管線唔發出
+ *     TAKEN       = 已佔(有人揀緊或者已落單,等入 Apricot)
+ *     CLOSED      = 唔開診・滿(醫生冇開診,或者已滿/太趕)
  *
- * 導航架構（§1 URL 帶齊 state）：**URL = 唯一真相** — 日格 / chips / 返週表 / view 切換 /
- *   週日 nav 全部係 `<a href>` 真導航（server 重 render 出正確 view + 數據）。
- *   實測教訓：client router.replace 喺 server-component 頁會同 RSC 重 render 鬥 —
- *   replace 有時吞咗（URL 唔變）→ 本 board 刻意唔用 client 端 view/date state。
- *   唯一 client 行為：5 分鐘 refetch + socket busted 重讀 + 更新掣（fetch，唔導航）。
+ * 導航架構(§1 URL 帶齊 state):**URL = 唯一真相** - 日格 / chips / 返週表 / view 切換 /
+ *   週日 nav 全部係 `<a href>` 真導航(server 重 render 出正確 view + 數據)。
+ *   實測教訓:client router.replace 喺 server-component 頁會同 RSC 重 render 鬥 -
+ *   replace 有時吞咗(URL 唔變)→ 本 board 刻意唔用 client 端 view/date state。
+ *   唯一 client 行為:5 分鐘 refetch + socket busted 重讀 + 更新掣(fetch,唔導航)。
  *
- * 🔴 §5 修復（T-A）：舊版 `useState(initialClinicCode)` 唔 sync prop → 換店零 fetch。
- *   現 board 冇 clinic state — prop 直接來自 URL（server 已解析），load effect 跟 prop。
+ * 🔴 §5 修復(T-A):舊版 `useState(initialClinicCode)` 唔 sync prop → 換店零 fetch。
+ *   現 board 冇 clinic state - prop 直接來自 URL(server 已解析),load effect 跟 prop。
  *
- * 刷新（§6，承接 cwi-refresh-20260831 §4/§5）：一粒更新掣，三步鏈
- *   ① POST /api/availability/refresh（週視圖 = 當前 7 日；日視圖 = 該日 1 日 — 慳 Apricot）
- *   ② 200 → server 逐日 bust ③ 重讀重繪（load）。新鮮度三態：≤5m 綠 / 5–20m 灰 / >20m 黃底。
+ * 刷新(§6,承接 cwi-refresh-20260831 §4/§5):一粒更新掣,三步鏈
+ *   1 POST /api/availability/refresh(週視圖 = 當前 7 日;日視圖 = 該日 1 日 - 慳 Apricot)
+ *   2 200 → server 逐日 bust 3 重讀重繪(load)。新鮮度三態:≤5m 綠 / 5-20m 灰 / >20m 黃底。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment } from "react";
 import { RefreshCw } from "lucide-react";
 import { io } from "socket.io-client";
-import type { FlowDay, FlowSlotsResult, FlowProvider } from "@/lib/flow-slots";
+import type { FlowDay, FlowSlot, FlowSlotsResult, FlowProvider } from "@/lib/flow-slots";
+import type { ConversationItem } from "./types";
+import { WindowExits } from "./window-exits";
+import { hkNowMin, hhmmToMin } from "./time";
 
 type BoardData = FlowSlotsResult & { fetchedAt: string | null };
 
@@ -39,20 +42,22 @@ interface ClinicOpt {
 
 interface Props {
   clinics: ClinicOpt[];
-  /** 目前店（server 由 URL 解析 — §4 全店唯讀） */
+  /** 目前店(server 由 URL 解析 - §4 全店唯讀) */
   clinicCode: string;
   view: "week" | "day";
-  /** week = 窗口首日；day = 該日（server 已 clamp 今日..+20） */
+  /** week = 窗口首日;day = 該日(server 已 clamp 今日..+20) */
   date: string;
   provider: string;
   initialData: FlowSlotsResult | null;
   today: string;
+  /** D.3(cwi-schedv2-20260903):目前用戶 staffId(popover 三出路 lock 判定用) */
+  myStaffId: string;
 }
 
 const SLOT_MINUTES: number[] = Array.from({ length: 48 }, (_, i) => i * 30);
 const REFETCH_MS = 5 * 60 * 1000;
 const MAX_AHEAD_DAYS = 20;
-// cwi-refresh-20260831 §5：新鮮度三態門檻
+// cwi-refresh-20260831 §5:新鮮度三態門檻
 const FRESH_MS = 5 * 60 * 1000;
 const STALE_MS = 20 * 60 * 1000;
 
@@ -65,7 +70,7 @@ function minToHHmm(min: number): string {
 }
 
 function addDays(dateStr: string, n: number): string {
-  // 純日曆日運算：按 UTC 午夜解（+08:00 解會令 toISOString 跨日界 — 實測 -1 日 bug）
+  // 純日曆日運算:按 UTC 午夜解(+08:00 解會令 toISOString 跨日界 - 實測 -1 日 bug)
   const d = new Date(`${dateStr}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
@@ -77,7 +82,7 @@ function weekdayCn(dateStr: string): string {
   );
 }
 
-/** URL builder — 導航全部經呢度（ clinic 必帶；view/day 視圖帶 date；provider 跟緊）。 */
+/** URL builder - 導航全部經呢度( clinic 必帶;view/day 視圖帶 date;provider 跟緊)。 */
 function href(clinic: string, view: "week" | "day", date?: string, provider?: string): string {
   const p = new URLSearchParams();
   p.set("clinic", clinic);
@@ -88,13 +93,13 @@ function href(clinic: string, view: "week" | "day", date?: string, provider?: st
   return `/schedule?${p.toString()}`;
 }
 
-// §3 文案表（逐字）— 四態 → 顯示文案 + hover 說明
+// §3 文案表(逐字)- 四態 → 顯示文案 + hover 說明
 type CellState = "ONLINE" | "MANUAL_ONLY" | "TAKEN" | "CLOSED";
 const CELL_COPY: Record<CellState, { label: string; hover: string }> = {
-  ONLINE: { label: "可上線約", hover: "病人自己約得，Flow／AI 會出呢啲時段" },
-  MANUAL_ONLY: { label: "只可人手約", hover: "碎片時段，AI 唔會出，前台可以人手安排" },
-  TAKEN: { label: "已佔", hover: "有人揀緊或者已落單，等入 Apricot" },
-  CLOSED: { label: "唔開診・滿", hover: "醫生冇開診，或者已滿／太趕" },
+  ONLINE: { label: "可上線約", hover: "病人自己約得,Flow/AI 會出呢啲時段" },
+  MANUAL_ONLY: { label: "只可人手約", hover: "碎片時段,AI 唔會出,前台可以人手安排" },
+  TAKEN: { label: "已佔", hover: "有人揀緊或者已落單,等入 Apricot" },
+  CLOSED: { label: "唔開診・滿", hover: "醫生冇開診,或者已滿/太趕" },
 };
 
 const CELL_CLS: Record<CellState, string> = {
@@ -120,8 +125,9 @@ export function ScheduleBoard({
   provider,
   initialData,
   today,
+  myStaffId,
 }: Props) {
-  void clinics; // 選單喺 page header（ClinicSelect）
+  void clinics; // 選單喺 page header(ClinicSelect)
   const [data, setData] = useState<BoardData | null>(
     initialData ? { ...initialData, fetchedAt: new Date().toISOString() } : null
   );
@@ -135,7 +141,7 @@ export function ScheduleBoard({
     const seq = ++reqSeq.current;
     setBusy(true);
     try {
-      // 週視圖：d = 窗口首日；日視圖：d = 該日
+      // 週視圖:d = 窗口首日;日視圖:d = 該日
       const fromStr = d;
       const toStr = v === "week" ? addDays(d, 6) : d;
       const res = await fetch(
@@ -157,7 +163,7 @@ export function ScheduleBoard({
     }
   }, []);
 
-  // 店 / 視圖 / 日期（= URL）變 → fetch + 5 分鐘 refetch
+  // 店 / 視圖 / 日期(= URL)變 → fetch + 5 分鐘 refetch
   useEffect(() => {
     argsRef.current = { clinicCode, view, date };
     if (!clinicCode) return;
@@ -166,15 +172,15 @@ export function ScheduleBoard({
     return () => clearInterval(t);
   }, [clinicCode, view, date, load]);
 
-  // ── §6 更新掣：三步刷新鏈 + toast + 429 倒數 + 403 橫額 ─────────────────
+  // ── §6 更新掣:三步刷新鏈 + toast + 429 倒數 + 403 橫額 ─────────────────
   const [refreshing, setRefreshing] = useState(false);
   const [disableSec, setDisableSec] = useState(0);
-  const [toast, setToast] = useState<{ kind: "warn" | "err"; msg: string } | null>(null);
+  const [toast, setToast] = useState<{ kind: "ok" | "warn" | "err"; msg: string } | null>(null);
   const [failedDays, setFailedDays] = useState<string[]>([]);
   const retry409 = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showToast = useCallback((kind: "warn" | "err", msg: string) => {
+  const showToast = useCallback((kind: "ok" | "warn" | "err", msg: string) => {
     setToast({ kind, msg });
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 8000);
@@ -192,7 +198,7 @@ export function ScheduleBoard({
     setFailedDays([]);
   }, [clinicCode]);
 
-  // §6：週視圖刷 7 日 / 日視圖刷 1 日（慳 Apricot）
+  // §6:週視圖刷 7 日 / 日視圖刷 1 日(慳 Apricot)
   const doRefresh = useCallback(
     async (is409Retry = false) => {
       if (refreshing || disableSec > 0 || !clinicCode) return;
@@ -211,33 +217,33 @@ export function ScheduleBoard({
         if (res.ok) {
           setFailedDays((j.refreshed ?? []).filter((d) => !d.ok).map((d) => d.date));
           retry409.current = false;
-          void load(clinicCode, view, date); // ③ 重讀重繪（server 已 bust + 重填）
+          void load(clinicCode, view, date); // 3 重讀重繪(server 已 bust + 重填)
           return;
         }
         setFailedDays([]);
         if (res.status === 429) {
           const n = j.retryAfterSec ?? 60;
           setDisableSec(n);
-          showToast("warn", `啱啱先同步過，${n} 秒後再試`);
+          showToast("warn", `啱啱先同步過,${n} 秒後再試`);
         } else if (res.status === 409) {
           if (!is409Retry && !retry409.current) {
             retry409.current = true;
-            showToast("warn", "Apricot 忙緊，10 秒後自動重試一次");
+            showToast("warn", "Apricot 忙緊,10 秒後自動重試一次");
             setTimeout(() => {
               retry409.current = false;
               void doRefreshRef.current(true);
             }, 10_000);
           } else {
             retry409.current = false;
-            showToast("err", "Apricot 仍然忙緊 — 稍後再手動試");
+            showToast("err", "Apricot 仍然忙緊 - 稍後再手動試");
           }
         } else if (res.status === 403) {
           setBanner403(true);
         } else {
-          showToast("err", "刷新失敗 — 請稍後再試");
+          showToast("err", "刷新失敗 - 請稍後再試");
         }
       } catch {
-        showToast("err", "刷新失敗（網絡錯誤）");
+        showToast("err", "刷新失敗(網絡錯誤)");
       } finally {
         setRefreshing(false);
       }
@@ -250,7 +256,7 @@ export function ScheduleBoard({
     doRefreshRef.current = doRefresh;
   }, [doRefresh]);
 
-  // 寫入（任何 process）→ L2 busted + 重填 → 即時重繪（cwi-refresh §3）
+  // 寫入(任何 process)→ L2 busted + 重填 → 即時重繪(cwi-refresh §3)
   useEffect(() => {
     const socket = io({ withCredentials: true, transports: ["websocket", "polling"] });
     const onBusted = (p: { clinicCode?: string }) => {
@@ -265,14 +271,14 @@ export function ScheduleBoard({
     };
   }, [load]);
 
-  // 新鮮度三態（cwi-refresh §5）
+  // 新鮮度三態(cwi-refresh §5)
   const freshness = useMemo(() => {
     if (!data?.syncedAt) return null;
     const age = Date.now() - new Date(data.syncedAt).getTime();
-    if (data.stale || age > STALE_MS) return { cls: "bg-warn-soft text-warn-text border-warn/70", label: "資料可能滯後 — 撳更新" };
+    if (data.stale || age > STALE_MS) return { cls: "bg-warn-soft text-warn-text border-warn/70", label: "資料可能滯後 - 撳更新" };
     if (age <= FRESH_MS) return { cls: "bg-ok-soft text-ok-text border-ok/50", label: "剛剛更新" };
     return { cls: "bg-panel-2 text-t2 border-line", label: `資料截至 ${hhmm(data.syncedAt)}` };
-    // fetchedAt 入 deps：每次 refetch 後重新評估年齡
+    // fetchedAt 入 deps:每次 refetch 後重新評估年齡
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.syncedAt, data?.stale, data?.fetchedAt]);
 
@@ -283,7 +289,7 @@ export function ScheduleBoard({
     return m;
   }, [data?.days]);
 
-  // 日視圖 provider chips：default 第一個有席嘅醫生（§1）
+  // 日視圖 provider chips:default 第一個有席嘅醫生(§1)
   const dayViewDay = view === "day" ? dayMap.get(date) ?? null : null;
   const chipProviders = dayViewDay?.providers ?? [];
   const activeProvider: FlowProvider | null = useMemo(() => {
@@ -303,13 +309,13 @@ export function ScheduleBoard({
 
   const weekDays: string[] = Array.from({ length: 7 }, (_, i) => addDays(date, i));
 
-  // 日視圖 → 週視圖：返今日嗰個週窗口（date 參數捨去 — 見 href 註）
+  // 日視圖 → 週視圖:返今日嗰個週窗口(date 參數捨去 - 見 href 註)
   const weekFromDay = href(clinicCode, "week");
   const dayFromWeek = href(clinicCode, "day", date);
 
   return (
     <div className="space-y-3">
-      {/* 工具列：view 切換 + 週/日 nav + 更新掣（§6 一粒）+ 新鮮度 */}
+      {/* 工具列:view 切換 + 週/日 nav + 更新掣(§6 一粒)+ 新鮮度 */}
       <div className="flex items-center gap-2 flex-wrap">
         <div className="flex items-center gap-0.5 bg-panel-2 rounded-full p-0.5">
           <a
@@ -340,7 +346,7 @@ export function ScheduleBoard({
         </a>
         <span className="text-xs font-semibold text-t1 font-mono">
           {date}
-          {view === "week" ? ` – ${addDays(date, 6)}` : ""}
+          {view === "week" ? ` - ${addDays(date, 6)}` : ""}
         </span>
         <a
           href={canNext ? href(clinicCode, view, addDays(date, view === "week" ? 7 : 1)) : "#"}
@@ -353,13 +359,13 @@ export function ScheduleBoard({
           className={`${navBtn} ml-auto`}
           disabled={busy || refreshing || disableSec > 0}
           onClick={() => void doRefresh()}
-          title={disableSec > 0 ? `限流中（${disableSec}s 後再試）` : "立即同步（workforce → Apricot → 本地 cache 全鏈）"}
+          title={disableSec > 0 ? `限流中(${disableSec}s 後再試)` : "立即同步(workforce → Apricot → 本地 cache 全鏈)"}
         >
           <RefreshCw size={12} className={refreshing || busy ? "animate-spin" : ""} />
           {disableSec > 0
             ? `${disableSec}s 後再試`
             : refreshing
-              ? "同步中…"
+              ? "同步中..."
               : data?.fetchedAt
                 ? `更新 ${new Date(data.fetchedAt).toLocaleTimeString("zh-HK", { hour: "2-digit", minute: "2-digit" })}`
                 : "更新"}
@@ -371,11 +377,15 @@ export function ScheduleBoard({
         )}
       </div>
 
-      {/* toast（UI 唔准靜靜失敗） */}
+      {/* toast(UI 唔准靜靜失敗) */}
       {toast && (
         <div
           className={`rounded-lg border px-3 py-2 text-xs mb-3 ${
-            toast.kind === "warn" ? "bg-warn-soft border-warn text-warn-text" : "bg-danger-soft border-danger text-danger-text"
+            toast.kind === "ok"
+              ? "bg-ok-soft border-ok text-ok-text"
+              : toast.kind === "warn"
+                ? "bg-warn-soft border-warn text-warn-text"
+                : "bg-danger-soft border-danger text-danger-text"
           }`}
         >
           {toast.msg}
@@ -384,20 +394,20 @@ export function ScheduleBoard({
 
       {banner403 && (
         <div className="rounded-xl bg-danger-soft border border-warn p-3 text-sm text-danger-text text-center mb-3">
-          clinic-workforce 未接通 — 讀唔到時間表（key 失效或服務離線；5 分鐘後自動重試）
+          clinic-workforce 未接通 - 讀唔到時間表(key 失效或服務離線;5 分鐘後自動重試)
         </div>
       )}
 
       {failedDays.length > 0 && (
         <div className="rounded-lg bg-warn-soft border border-warn/70 px-3 py-2 text-xs text-warn-text">
-          部分日同步失敗：{failedDays.join("、")} — 顯示最後已知數據，撳「更新」重試
+          部分日同步失敗:{failedDays.join("、")} - 顯示最後已知數據,撳「更新」重試
         </div>
       )}
 
       {/* 內容 */}
       {data && !data.connected ? (
         <div className="rounded-xl bg-danger-soft border border-warn p-6 text-sm text-danger-text text-center">
-          clinic-workforce 未接通 — 讀唔到時間表（key 失效或服務離線；5 分鐘後自動重試）
+          clinic-workforce 未接通 - 讀唔到時間表(key 失效或服務離線;5 分鐘後自動重試)
         </div>
       ) : data ? (
         view === "week" ? (
@@ -408,18 +418,21 @@ export function ScheduleBoard({
             date={date}
             today={today}
             clinic={clinicCode}
+            clinicId={clinics.find((c) => c.code === clinicCode)?.id ?? ""}
+            myStaffId={myStaffId}
             providers={chipProviders}
             activeProvider={activeProvider}
+            onToast={showToast}
           />
         )
       ) : (
         <div className="rounded-xl bg-panel-2 p-8 text-center">
-          <div className="text-sm text-t1 font-medium">{busy ? "載入中…" : "未有資料"}</div>
-          <div className="text-xs text-t3 mt-1">時間表嚟自 clinic-workforce（未接入或本週無排更）</div>
+          <div className="text-sm text-t1 font-medium">{busy ? "載入中..." : "未有資料"}</div>
+          <div className="text-xs text-t3 mt-1">時間表嚟自 clinic-workforce(未接入或本週無排更)</div>
         </div>
       )}
 
-      {/* 圖例（§3 文案表 — 編碼唔自解，必須有） */}
+      {/* 圖例(§3 文案表 - 編碼唔自解,必須有) */}
       <div className="flex items-center gap-4 flex-wrap text-[11px] text-t2">
         <span className="inline-flex items-center gap-1.5">
           <span className="w-[22px] h-[14px] rounded-[5px] bg-ok-soft border border-ok/50" /> 可上線約
@@ -442,9 +455,9 @@ export function ScheduleBoard({
   );
 }
 
-// ── 週視圖：每日一格 = 日期 + 當值副標題 + 逐醫生一行（名 + 剩餘席）────────
-// 醫生多過 3 個 → 頭 3 個 + 「+N 位只開診冇預約」（§1；providers 已按席數降冪排）。
-// 撳日格 = 真導航 view=day&date=…（§1 URL 帶齊 state）。
+// ── 週視圖:每日一格 = 日期 + 當值副標題 + 逐醫生一行(名 + 剩餘席)────────
+// 醫生多過 3 個 → 頭 3 個 + 「+N 位只開診冇預約」(§1;providers 已按席數降冪排)。
+// 撳日格 = 真導航 view=day&date=...(§1 URL 帶齊 state)。
 function WeekCells({
   days,
   today,
@@ -467,7 +480,7 @@ function WeekCells({
             }`}
           >
             <div className="text-[11px] font-semibold text-t1 flex items-center gap-1 flex-wrap">
-              {day ? `${weekdayCn(day.date)} ${day.date.slice(5).replace("-", "/")}` : "—"}
+              {day ? `${weekdayCn(day.date)} ${day.date.slice(5).replace("-", "/")}` : "-"}
               {day?.date === today && (
                 <span className="text-[9px] px-1 rounded bg-brand-soft text-brand-text">今日</span>
               )}
@@ -475,7 +488,7 @@ function WeekCells({
             </div>
             {day && day.duty.length > 0 && (
               <div className="text-[10.5px] text-t2 leading-snug">
-                當值：{day.duty.map((e) => `${e.staffName}${e.role ? ` · ${e.role}` : ""}`).join("、")}
+                當值:{day.duty.map((e) => `${e.staffName}${e.role ? ` · ${e.role}` : ""}`).join("、")}
               </div>
             )}
             {day && day.providers.length > 0 ? (
@@ -504,22 +517,263 @@ function WeekCells({
   );
 }
 
-// ── 日視圖：頂部醫生 chips（default 第一有席）+ 48 格（30 分鐘）+ 返週表掣（§1）─
+// ── 日視圖：頂部醫生 chips（default 第一有席）+ 時段格（30 分鐘）+ 返週表掣（§1）──
+// D.1（cwi-schedv2-20260903）：只 render API 回嘅非 CLOSED 格；前後 CLOSED 段各摺一行（純 UI 展開，無 refetch）；
+//   今日：past 格 opacity:.45（保留唔摺）+ 首次 auto-scroll 到「而家」行（block:center）+
+//   而家線（— 而家 / 2px var(--brand)）插喺相鄰格之間，60s tick（unmount clear）。
+// D.2：ONLINE 格席位點 ■（剩）/□（佔），共 = capacity（server 端 max(seats) fallback + warn；G-4 補真值）。
+// D.3：ONLINE 格可撳 → 幫病人約 popover（既有對話搜尋 → 揀 → 發 Flow prefill；
+//   過窗 → 三出路；唔預先 claim、冇人手單掣 — G-3）。
+type DayRow =
+  | { kind: "slot"; key: string; m: number; slot: FlowSlot }
+  | { kind: "gap"; key: string; from: number; to: number };
+
+function rangeMins(from: number, to: number): number[] {
+  const out: number[] = [];
+  for (let m = from; m < to; m += 30) out.push(m);
+  return out;
+}
+
+/** D.1 摺疊行（CLOSED 段一行 — 展開/收埋純 UI） */
+function GapRow({ label, onClick, expanded }: { label: string; onClick: () => void; expanded?: boolean }) {
+  return (
+    <div className="grid grid-cols-[52px_1fr] items-stretch">
+      <div />
+      <div className="p-px">
+        <button
+          type="button"
+          onClick={onClick}
+          aria-expanded={expanded}
+          title="展開／收埋唔開診時段"
+          className={`h-[28px] w-full rounded-[6px] border border-dashed text-[10px] cursor-pointer ${
+            expanded ? "bg-panel-2 text-t2 border-line hover:opacity-80" : `${CLS_CLOSED_DAY} hover:opacity-80`
+          }`}
+        >
+          {label}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function DayGrid({
   day,
   date,
   today,
   clinic,
+  clinicId,
+  myStaffId,
   providers,
   activeProvider,
+  onToast,
 }: {
   day: FlowDay | null;
   date: string;
   today: string;
   clinic: string;
+  clinicId: string;
+  myStaffId: string;
   providers: FlowProvider[];
   activeProvider: FlowProvider | null;
+  onToast?: (kind: "ok" | "warn" | "err", msg: string) => void;
 }) {
+  const isToday = date === today;
+  const p = activeProvider;
+
+  // D.1：摺疊段（純 UI state，換日/換醫生重置）
+  const [expandedGaps, setExpandedGaps] = useState<Set<string>>(new Set());
+  const toggleGap = useCallback((key: string) => {
+    setExpandedGaps((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+  // D.1：而家分鐘（今日先有；60s tick，unmount clear）
+  // D.1：nowMin 初始 = -1（SSR 同 client 首 render 一致 → 無 hydration mismatch）；
+  // 而家線喺 mount 後 effect 先出現（實測：SSR 用 server 時間 render 而家線 → 與 frozen/不同時區 client 首 render 位置唔同 → mismatch）
+  const [nowMin, setNowMin] = useState<number>(-1);
+  // D.3 popover state
+  const [pop, setPop] = useState<{ m: number; slot: FlowSlot } | null>(null);
+  const [q, setQ] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState<string | null>(null);
+  const [hits, setHits] = useState<{ id: string; waId: string; profileName: string | null }[] | null>(null);
+  const [convs, setConvs] = useState<ConversationItem[] | null>(null);
+  const [selId, setSelId] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [popErr, setPopErr] = useState<string | null>(null);
+  const [raceConv, setRaceConv] = useState<ConversationItem | null>(null); // 422 競態 → 三出路
+
+  useEffect(() => {
+    setExpandedGaps(new Set());
+    setPop(null);
+    setQ("");
+    setHits(null);
+    setConvs(null);
+    setSelId(null);
+    setPopErr(null);
+    setRaceConv(null);
+  }, [date, p?.providerId]);
+
+  // D.1：60s tick（今日先）
+  useEffect(() => {
+    if (!isToday) {
+      setNowMin(-1);
+      return;
+    }
+    setNowMin(hkNowMin());
+    const t = setInterval(() => setNowMin(hkNowMin()), 60_000);
+    return () => clearInterval(t);
+  }, [isToday]);
+
+  // 行 = 存在格 + 缺口段（缺 = CLOSED）
+  const rows = useMemo<DayRow[]>(() => {
+    if (!p?.slots) return [];
+    const byMin = new Map<number, FlowSlot>();
+    for (const s of p.slots) {
+      const m = hhmmToMin(s.start);
+      if (m !== null) byMin.set(m, s);
+    }
+    const out: DayRow[] = [];
+    let gapStart: number | null = null;
+    for (const m of SLOT_MINUTES) {
+      const slot = byMin.get(m);
+      if (slot) {
+        if (gapStart !== null) {
+          out.push({ kind: "gap", key: `gap-${gapStart}-${m}`, from: gapStart, to: m });
+          gapStart = null;
+        }
+        out.push({ kind: "slot", key: `slot-${m}`, m, slot });
+      } else if (gapStart === null) {
+        gapStart = m;
+      }
+    }
+    if (gapStart !== null) out.push({ kind: "gap", key: `gap-${gapStart}-1440`, from: gapStart, to: 1440 });
+    return out;
+  }, [p]);
+
+  // 而家線位置：第一條 end > nowMin 嘅行之前（全部結束 → 放尾）
+  const nowIdx = useMemo(() => {
+    if (!isToday || nowMin < 0) return -1;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const end = r.kind === "gap" ? r.to : r.m + 30;
+      if (end > nowMin) return i;
+    }
+    return rows.length;
+  }, [rows, isToday, nowMin]);
+
+  // D.1：首次 auto-scroll 到而家線（今日 + 每 date/provider 一次）
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const scrolledKey = useRef("");
+  useEffect(() => {
+    if (!isToday || !p || rows.length === 0) return;
+    const key = `${date}|${p.providerId}`;
+    if (scrolledKey.current === key) return;
+    const el = gridRef.current?.querySelector<HTMLElement>("[data-now-line]");
+    if (!el) return; // rows/nowMin 未 render 完 — rows/nowMin 變會再觸發（nowMin 初始 -1 → effect 後先出線）
+    scrolledKey.current = key;
+    el.scrollIntoView({ block: "center" });
+  }, [isToday, p, date, rows, nowMin]);
+
+  // D.3：popover 開 → 拉既有對話名單（一次）
+  useEffect(() => {
+    if (!pop || !clinicId) return;
+    let alive = true;
+    setConvs(null);
+    fetch(`/api/conversations?clinicId=${encodeURIComponent(clinicId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (alive) setConvs(Array.isArray(j) ? (j as ConversationItem[]) : []);
+      })
+      .catch(() => {
+        if (alive) setConvs([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [pop, clinicId]);
+
+  // D.3：病人搜尋（debounce 300ms）— 搜該店既有 contact
+  useEffect(() => {
+    if (!pop) return;
+    const query = q.trim();
+    if (!query) {
+      setHits(null);
+      setSearching(false);
+      setSearchErr(null);
+      return;
+    }
+    setSearching(true);
+    const t = setTimeout(() => {
+      (async () => {
+        try {
+          const res = await fetch(
+            `/api/search?type=contact&q=${encodeURIComponent(query)}&clinicId=${encodeURIComponent(clinicId)}`
+          );
+          if (!res.ok) {
+            setSearchErr(res.status === 403 ? "你只可以幫自己店嘅病人約" : "搜尋失敗（重試）");
+            setHits([]);
+            return;
+          }
+          const j = (await res.json().catch(() => null)) as {
+            results?: { id: string; waId: string; profileName: string | null }[];
+          } | null;
+          setSearchErr(null);
+          setHits(Array.isArray(j?.results) ? j.results : []);
+        } catch {
+          setSearchErr("搜尋失敗（網絡錯誤）");
+          setHits([]);
+        }
+        setSearching(false);
+      })();
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q, pop, clinicId]);
+
+  const selConv = selId && convs ? convs.find((c) => c.id === selId) ?? null : null;
+
+  async function sendFlow(conv: ConversationItem) {
+    if (!pop || !p || sending) return;
+    setSending(true);
+    setPopErr(null);
+    try {
+      const res = await fetch(`/api/conversations/${conv.id}/flows`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prefill: { date, providerId: p.providerId, start: pop.slot.start },
+        }),
+      });
+      const j = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        reused?: boolean;
+        error?: string;
+      } | null;
+      if (res.ok) {
+        onToast?.("ok", j?.reused ? "呢格 Flow 已經出過（冪等複用）" : "已發預約連結（Flow · 已鎖定呢格）");
+        setPop(null);
+        setQ("");
+        setHits(null);
+        setSelId(null);
+        setRaceConv(null);
+        setPopErr(null);
+      } else if (res.status === 422) {
+        // 窗口剛過（前端 state 之後嘅競態）→ 三出路
+        setRaceConv(conv);
+      } else if (res.status === 423) {
+        setPopErr("此對話已有負責人 — 發唔到 Flow（可喺 inbox 撳接手）");
+      } else {
+        setPopErr(j?.error ?? `發送失敗（${res.status}）`);
+      }
+    } catch {
+      setPopErr("發送失敗（網絡錯誤）");
+    }
+    setSending(false);
+  }
+
   if (!day) {
     return <div className="rounded-xl bg-panel-2 p-6 text-sm text-t2 text-center">未有資料（workforce 未回該日數據）</div>;
   }
@@ -531,7 +785,7 @@ function DayGrid({
       </div>
     );
   }
-  if (providers.length === 0 || !activeProvider) {
+  if (providers.length === 0 || !p) {
     return (
       <div className="space-y-3">
         <BackWeekBar clinic={clinic} />
@@ -539,7 +793,82 @@ function DayGrid({
       </div>
     );
   }
-  const p = activeProvider;
+
+  // D.2 席位點（■ 剩 / □ 佔；共 = capacity）
+  const dots = (slot: FlowSlot) => {
+    const cap = p.capacity;
+    if (cap == null || cap <= 0) return null;
+    const left = Math.max(0, Math.min(slot.seats, cap));
+    const taken = Math.max(0, cap - slot.seats);
+    return (
+      <span
+        aria-label={`剩 ${slot.seats} 席，共 ${cap} 席`}
+        title={`剩 ${slot.seats} 席，共 ${cap} 席`}
+        className="tracking-tighter font-mono"
+      >
+        {"■".repeat(left)}
+        {"□".repeat(taken)}
+      </span>
+    );
+  };
+
+  const gapLabel = (g: { from: number; to: number }) => {
+    if (g.from === 0 && g.to === 1440) return "全日唔開診 · 展開";
+    if (g.from === 0) return `↑ ${minToHHmm(g.to)} 之前（唔開診）· 展開`;
+    if (g.to === 1440) return `↓ ${minToHHmm(g.from)} 之後（唔開診）· 展開`;
+    return `${minToHHmm(g.from)}–${minToHHmm(g.to)} 唔開診 · 展開`;
+  };
+
+  const renderSlotRow = (m: number, slot: FlowSlot | undefined, faded: boolean) => {
+    const state: CellState = slot ? slot.state : "CLOSED";
+    const copy = CELL_COPY[state];
+    const clickable = state === "ONLINE" && !!slot;
+    return (
+      <div
+        key={`slot-${m}`}
+        className={`grid grid-cols-[52px_1fr] items-stretch ${m % 60 === 0 ? "border-t border-line" : ""} ${faded ? "opacity-45" : ""}`}
+      >
+        <div
+          className={`px-1 flex items-end justify-end pb-0.5 font-mono ${
+            m % 60 === 0 ? "text-[10.5px] font-semibold text-t1" : "text-[9.5px] text-t3"
+          }`}
+        >
+          {minToHHmm(m)}
+        </div>
+        <div className="p-px">
+          {clickable ? (
+            <button
+              type="button"
+              onClick={() => setPop({ m, slot: slot! })}
+              className={`h-[26px] w-full rounded-[6px] border flex items-center justify-center gap-1 text-[10px] font-medium cursor-pointer hover:brightness-95 ${CELL_CLS[state]}`}
+              title={`${p.providerName} ${minToHHmm(m)}–${minToHHmm(m + 30)}：${copy.hover}（撳 = 幫病人約）`}
+            >
+              {dots(slot!)}
+              {copy.label}
+              <span className="opacity-75">{slot!.seats} 席</span>
+            </button>
+          ) : (
+            <div
+              className={`h-[26px] rounded-[6px] border flex items-center justify-center gap-1 text-[10px] font-medium ${CELL_CLS[state]}`}
+              title={`${p.providerName} ${minToHHmm(m)}–${minToHHmm(m + 30)}：${copy.hover}`}
+            >
+              {copy.label}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderNowLine = (
+    <div key="now-line" data-now-line="1" aria-label="而家" className="grid grid-cols-[52px_1fr] items-stretch">
+      <div className="px-1 flex items-center justify-end text-[9px] font-bold text-brand-text">— 而家</div>
+      <div className="p-px pt-[4px]">
+        <div className="h-0" style={{ borderTop: "2px solid var(--brand)" }} />
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-3">
       <BackWeekBar clinic={clinic} />
@@ -560,8 +889,8 @@ function DayGrid({
           </a>
         ))}
       </div>
-      {/* 48 格 × 30 分鐘（該醫生；缺格 = CLOSED） */}
-      <div className="overflow-x-auto rounded-xl border border-line bg-panel">
+      {/* 時段格（D.1：只 render 非 CLOSED 格 + 缺口摺行；今日 = 淡化 + 而家線 + auto-scroll） */}
+      <div ref={gridRef} className="overflow-x-auto rounded-xl border border-line bg-panel">
         <div className="min-w-[220px]">
           <div className="grid grid-cols-[52px_1fr] border-b border-line">
             <div />
@@ -569,33 +898,118 @@ function DayGrid({
               {p.providerName}
             </div>
           </div>
-          {SLOT_MINUTES.map((m) => {
-            const slot = p.slots?.find((s) => s.start === minToHHmm(m));
-            const state: CellState = slot ? slot.state : "CLOSED";
-            const copy = CELL_COPY[state];
-            return (
-              <div key={m} className={`grid grid-cols-[52px_1fr] items-stretch ${m % 60 === 0 ? "border-t border-line" : ""}`}>
-                <div
-                  className={`px-1 flex items-end justify-end pb-0.5 font-mono ${
-                    m % 60 === 0 ? "text-[10.5px] font-semibold text-t1" : "text-[9.5px] text-t3"
-                  }`}
-                >
-                  {minToHHmm(m)}
-                </div>
-                <div className="p-px">
-                  <div
-                    className={`h-[26px] rounded-[6px] border flex items-center justify-center gap-1 text-[10px] font-medium ${CELL_CLS[state]}`}
-                    title={`${p.providerName} ${minToHHmm(m)}–${minToHHmm(m + 30)}：${copy.hover}`}
-                  >
-                    {copy.label}
-                    {state === "ONLINE" && slot && <span className="opacity-75">{slot.seats} 席</span>}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+          {rows.length === 0 && (
+            <div className="px-3 py-6 text-center text-xs text-t3">今日冇可約時段（全日唔開診或未同步）</div>
+          )}
+          {rows.map((r, i) => (
+            <Fragment key={r.key}>
+              {nowIdx === i && renderNowLine}
+              {r.kind === "slot" ? (
+                renderSlotRow(r.m, r.slot, isToday && nowMin >= 0 && r.m + 30 <= nowMin)
+              ) : expandedGaps.has(r.key) ? (
+                <>
+                  <GapRow label={gapLabel(r).replace("· 展開", "· 收埋")} onClick={() => toggleGap(r.key)} expanded />
+                  {rangeMins(r.from, r.to).map((m) => renderSlotRow(m, undefined, false))}
+                </>
+              ) : (
+                <GapRow label={gapLabel(r)} onClick={() => toggleGap(r.key)} />
+              )}
+            </Fragment>
+          ))}
+          {nowIdx === rows.length && rows.length > 0 && renderNowLine}
         </div>
       </div>
+      {/* D.3：幫病人約 popover（ONLINE 格撳開 — 既有對話搜尋 → 發 Flow prefill） */}
+      {pop && p && (
+        <div className="rounded-xl border border-line bg-panel p-3 space-y-2.5" aria-label="幫病人約">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-t1">
+              幫病人約 · {p.providerName} · {date} {pop.slot.start}–{pop.slot.end}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setPop(null);
+                setRaceConv(null);
+                setPopErr(null);
+              }}
+              className="ml-auto text-[10px] text-t3 hover:text-t1 px-1.5 py-0.5 rounded hover:bg-panel-2"
+            >
+              ✕ 關閉
+            </button>
+          </div>
+          <input
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setSelId(null);
+              setRaceConv(null);
+            }}
+            placeholder="搜病人（姓名／電話）— 揀返既有對話"
+            aria-label="搜病人"
+            className="w-full text-xs px-2.5 py-1.5 rounded-lg bg-panel-2 border border-line text-t1 placeholder:text-t3"
+          />
+          {searching && <div className="text-[10.5px] text-t3">搜尋中…</div>}
+          {searchErr && <div className="text-xs text-danger-text">{searchErr}</div>}
+          {!searching && hits && hits.length === 0 && (
+            <div className="text-[10.5px] text-t3">搵唔到病人（該店要有既有對話先約得）</div>
+          )}
+          {hits && hits.length > 0 && (
+            <div className="space-y-1 max-h-48 overflow-y-auto">
+              {hits.map((h) => {
+                const conv = convs?.find((c) => c.contactId === h.id) ?? null;
+                const name = h.profileName || h.waId || "病人";
+                return conv ? (
+                  <button
+                    key={h.id}
+                    type="button"
+                    onClick={() => {
+                      setSelId(conv.id);
+                      setRaceConv(null);
+                      setPopErr(null);
+                    }}
+                    className={`w-full text-left px-2.5 py-1.5 rounded-lg border text-xs flex items-center gap-2 ${
+                      selId === conv.id ? "bg-brand-soft border-brand text-t1" : "bg-panel-2 border-line text-t2 hover:bg-panel-2/70"
+                    }`}
+                  >
+                    <span className="font-medium truncate">{name}</span>
+                    {conv.assigneeName && <span className="text-[10px] text-t3">負責：{conv.assigneeName}</span>}
+                    <span className={`ml-auto text-[10px] ${conv.window.open ? "text-ok-text" : "text-warn-text"}`}>
+                      {conv.window.open ? "窗口開緊" : "窗口已過"}
+                    </span>
+                  </button>
+                ) : (
+                  <div key={h.id} className="px-2.5 py-1.5 rounded-lg bg-panel-2/50 text-xs text-t3 flex items-center gap-2">
+                    <span className="truncate">{name}</span>
+                    <span className="ml-auto text-[10px]">未開始對話</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {convs === null && pop && !q.trim() && <div className="text-[10.5px] text-t3">載入既有對話…</div>}
+          {popErr && <div className="text-xs text-danger-text">{popErr}</div>}
+          {selConv ? (
+            raceConv || !selConv.window.open ? (
+              <div className="space-y-1.5">
+                <div className="text-[10.5px] text-t3">呢位病人 24 小時窗口已過 — Flow 出唔到，改出三出路：</div>
+                <WindowExits conversation={raceConv ?? selConv} myStaffId={myStaffId} />
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void sendFlow(selConv)}
+                disabled={sending}
+                className="w-full text-xs px-3 py-2 rounded-lg bg-brand hover:bg-brand-hover text-panel font-semibold disabled:opacity-40"
+              >
+                {sending ? "發送中…" : "發預約連結（Flow · 已鎖定呢格）"}
+              </button>
+            )
+          ) : (
+            <div className="text-[10.5px] text-t3">揀一個既有對話，先可以發預約連結（唔會重複開對話）。</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

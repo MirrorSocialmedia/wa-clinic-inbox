@@ -1,19 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CalendarClock, CheckCheck, Lock, Sparkles, Stethoscope, Tag, X } from "lucide-react";
-import Link from "next/link";
-import type { ConversationItem, ConvStatus, DutyInfo, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
+import { CalendarClock, CheckCheck, Lock, Sparkles, Tag, X } from "lucide-react";
+import type { ConversationItem, ConvStatus, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
 import { relTime } from "./time";
+import { MiniSchedule } from "./mini-schedule";
 
 interface Props {
   conversation: ConversationItem | null;
   staff: StaffInfo[];
   onPatch: (body: { status?: ConvStatus; assigneeId?: string | null; urgent?: boolean }) => Promise<void>;
-  /** Phase 4：今日當值（該對話嘅 clinic；null/空 → 隱藏卡） */
-  duty?: DutyInfo | null;
   /** ★ H1：自己 staffId + 角色 — 判定 canManage（現任 assignee / ADMIN / unassigned 任何 STAFF） */
   myStaffId: string;
+  /** D.4（cwi-schedv2-20260903）：本對話嘅 clinic code（MiniSchedule 拉 /api/flows/slots 用；null → 隱藏表） */
+  clinicCode?: string | null;
   userRole: "ADMIN" | "STAFF";
   /** ★ H1：轉交/派單/放返隊列 — POST /api/conversations/[id]/assign（INTERNAL note + AuditLog + socket） */
   onAssign: (toStaffId: string | null) => Promise<{ ok: boolean; error?: string }>;
@@ -59,8 +59,8 @@ export function DetailPane({
   conversation,
   staff,
   onPatch,
-  duty,
   myStaffId,
+  clinicCode,
   userRole,
   onAssign,
   assignBusy,
@@ -692,34 +692,13 @@ export function DetailPane({
         {assignError && <div className="text-[10px] text-danger-text mt-1">{assignError}</div>}
       </div>
 
-      {/* Phase 4：今日當值（link 去 /schedule 七日週表頁）— brand-soft 強調卡 */}
-      {duty && duty.entries.length > 0 && (
-        <div className="bg-brand-soft rounded-[22px] p-4">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-brand-text mb-2.5 inline-flex items-center gap-1.5">
-            <Stethoscope size={12} strokeWidth={2.75} />
-            當值（{duty.date}）
-            <Link href="/schedule" className="ml-1 text-brand-text font-semibold normal-case tracking-normal hover:underline">
-              睇成週 →
-            </Link>
-          </div>
-          <div className="space-y-1.5">
-            {duty.entries.map((e) => (
-              <div key={`${e.staffName}-${e.shiftStart}`} className="flex items-center gap-2">
-                <span className="w-[26px] h-[26px] rounded-full bg-panel text-brand-text flex items-center justify-center text-[11px] font-semibold shrink-0">
-                  {(e.staffName?.trim() || "?").charAt(0)}
-                </span>
-                <span className="text-xs font-semibold text-t1 flex-1 truncate">
-                  {e.staffName}
-                  {e.role ? <span className="text-t2 font-normal ml-1">（{e.role}）</span> : null}
-                </span>
-                <span className="text-[10.5px] text-brand-text shrink-0 font-mono">
-                  {e.shiftStart}–{e.shiftEnd}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* D.4（cwi-schedv2-20260903）：今日可約迷你表（取代舊「當值卡」— 當值降底行；撳格 = 幫病人約） */}
+      <MiniSchedule
+        conversation={c}
+        myStaffId={myStaffId}
+        clinicCode={clinicCode ?? null}
+        onFlowSent={onBookingUiChanged}
+      />
 
       {/* meta */}
       <div className="text-[11px] text-t3 space-y-1 pt-3 border-t border-line">

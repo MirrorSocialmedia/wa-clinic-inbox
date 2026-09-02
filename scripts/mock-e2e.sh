@@ -4983,14 +4983,25 @@ rm -f .dev/workforce-mock-extra-providers.json
 # T152 前置：mock held flag（TKW 今日 10:00–11:00 mock-pract-TKW-0 HELD → 日視圖 已佔 格）
 printf '[{"holdId":"sched-t152-hold","clinicCode":"TKW","providerId":"mock-pract-TKW-0","providerName":"mock 陳醫師","date":"%s","startMin":600,"endMin":660,"status":"HELD","source":"e2e_flag","createdAt":"%sT00:00:00.000Z","ageHours":0,"appointmentPast":false}]' "$SCHED_TODAY" "$SCHED_TODAY" > .dev/workforce-mock-held.json
 
-# T151 + T152 + T156（browser-level — playwright-core）
-SCHED_UI_OUT=$(pnpm -s e2e:schedule-ui --base "$BASE" --cookie "$COOKIE_ADMIN" 2>&1)
+# T151 + T152 + T156 + D.1–D.4（T180–T186）browser-level — playwright-core
+SCHED_UI_OUT=$(pnpm -s e2e:schedule-ui --base "$BASE" --cookie "$COOKIE_ADMIN" --log /tmp/e2e-server.log 2>&1)
 # a2：UI 失敗 reason 之前被吞（只 grep OK marker）— 落檔 + echo 埋主 log（diagnose 用）
 echo "$SCHED_UI_OUT" > /tmp/e2e-sched-ui-out.log
 echo "$SCHED_UI_OUT" | grep -E "SCHED-T15|WARMUP" | sed 's/^/  [UI] /'
 echo "$SCHED_UI_OUT" | grep -q "SCHED-T151-OK" && pass "T151 揀診所 → 真 fetch + URL 同步（週+日）" || { fail "T151 揀診所 fetch/URL（見 SCHED-T151 行）"; SCHED_FAIL=1; }
 echo "$SCHED_UI_OUT" | grep -q "SCHED-T152-OK" && pass "T152 日格→日視圖 + chips + 48 格四態" || { fail "T152 日視圖（見 SCHED-T152 行）"; SCHED_FAIL=1; }
 echo "$SCHED_UI_OUT" | grep -q "SCHED-T156-OK" && pass "T156 更新掣 7 日/1 日 + 429/409 UI" || { fail "T156 更新掣（見 SCHED-T156 行）"; SCHED_FAIL=1; }
+# D（cwi-schedv2-20260903）：T180–T186 瀏覽器斷言（同一 script 擴充）
+echo "$SCHED_UI_OUT" | grep -E "SCHED-T18" | sed 's/^/  [UI] /'
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T180-OK" && pass "T180 今日 auto-scroll + 淡化 + 摺疊 + 而家線 + 60s tick" || { fail "T180 見 SCHED-T180 行"; SCHED_FAIL=1; }
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T181-OK" && pass "T181 非今日冇而家線/淡化" || { fail "T181 見 SCHED-T181 行"; SCHED_FAIL=1; }
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T182-OK" && pass "T182 capacity fallback warn（每 process 每 key 一次）" || { fail "T182 見 SCHED-T182 行"; SCHED_FAIL=1; }
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T183-OK" && pass "T183 日視圖 popover 搜病人 → Flow prefill" || { fail "T183 見 SCHED-T183 行"; SCHED_FAIL=1; }
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T184-OK" && pass "T184 側欄迷你表撳格直接發 Flow" || { fail "T184 見 SCHED-T184 行"; SCHED_FAIL=1; }
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T185-OK" && pass "T185 過窗改三出路（popover + 側欄）" || { fail "T185 見 SCHED-T185 行"; SCHED_FAIL=1; }
+echo "$SCHED_UI_OUT" | grep -q "SCHED-T186-OK" && pass "T186 迷你表 ≤10 行 + >3 醫生橫捲" || { fail "T186 見 SCHED-T186 行"; SCHED_FAIL=1; }
+# T187：迴歸總 gate（in-script T151/T152/T156 + 本段 curl T150/T153/T154/T155 全綠）
+echo "$SCHED_UI_OUT" | grep -q "SCHED-UI-OK" && pass "T187 T150–T156 全迴歸（script SCHED-UI-OK）" || { fail "T187 迴歸未全綠（見 SCHED-UI-FAIL 行）"; SCHED_FAIL=1; }
 rm -f .dev/workforce-mock-held.json .dev/workforce-mock-refresh-429.json .dev/workforce-mock-refresh-409.json
 
 # T153 文案：頁面唔再出現「可出」（週 + 日兩 view）

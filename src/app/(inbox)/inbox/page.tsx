@@ -1,10 +1,8 @@
 import { redirect } from "next/navigation";
 import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
-import { fetchDutyRoster, hkToday } from "@/lib/duty/client";
 import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
 import { InboxClient } from "@/components/inbox/inbox-client";
-import type { DutyInfo } from "@/components/inbox/types";
 
 /**
  * /inbox — 共用收件箱（MD §6.4 三欄）。
@@ -64,14 +62,7 @@ export default async function InboxPage({
   ).catch(() => new Map());
   const now = Date.now();
 
-  // Phase 4：今日當值（側欄卡 — staff 名+職位+更時；null → 隱藏）。
-  // fail-soft：fetchDutyRoster 永遠唔 throw（3s timeout / 404 / 壞 shape → null）；5 分鐘 TTL cache。
-  const dutyToday = hkToday();
-  const initialDuty: Record<string, DutyInfo | null> = {};
-  for (const c of clinics) {
-    const entries = await fetchDutyRoster(c.code, dutyToday).catch(() => null);
-    initialDuty[c.id] = entries && entries.length > 0 ? { date: dutyToday, entries } : null;
-  }
+  // D.4（cwi-schedv2-20260903）：舊 SSR 當值卡管線移除（側欄改 MiniSchedule 自拉 /api/flows/slots）。
 
   const conversations = convs.map((cv) => {
     const lastIn = cv.lastInboundAt?.getTime() ?? null;
@@ -144,7 +135,6 @@ export default async function InboxPage({
       initialClinics={clinics}
       initialConversations={conversations}
       initialStaff={staff}
-      initialDuty={initialDuty}
       initialSelectedConvId={convParam || null}
     />
   );

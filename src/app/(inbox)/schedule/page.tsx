@@ -148,6 +148,7 @@ export default async function SchedulePage({
             provider={providerParam}
             initialData={slotsInitial}
             today={today}
+            myStaffId={session.staffId}
           />
         )}
       </div>

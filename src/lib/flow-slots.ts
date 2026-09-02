@@ -23,9 +23,19 @@
  *   day  = slots[] 只回非 CLOSED 格（缺 = CLOSED；client 補 48 格 grid）
  */
 import prisma from "@/lib/prisma";
+import log from "@/lib/log";
 import { fetchDutyRoster, type DutyEntry } from "@/lib/duty/client";
 import { getBookableSlots, getHeld, type HeldResult } from "@/lib/workforce/client";
 import { getSlotFreshness } from "@/lib/availability";
+
+// D.2（cwi-schedv2-20260903）：capacity fallback warn 去重（per clinic|date|provider）。
+// ★ 掛 globalThis：Next dev 模組重新實例化（HMR/編譯）會清掉 module-level state → 重複 warn（T182 實測）；
+// process 重啟才重置（每 process 每組合恰一次 — spec「log 一次」）。
+const capacityWarnedKey = Symbol.for("cwi.capacityWarned");
+const globalScope = globalThis as Record<symbol, unknown>;
+const capacityWarned: Set<string> =
+  (globalScope[capacityWarnedKey] as Set<string> | undefined) ?? new Set<string>();
+if (!globalScope[capacityWarnedKey]) globalScope[capacityWarnedKey] = capacityWarned;
 
 export type SlotState = "ONLINE" | "MANUAL_ONLY" | "TAKEN" | "CLOSED";
 
@@ -43,6 +53,12 @@ export interface FlowProvider {
   onlineSeats: number;
   /** granularity=day 先有；只含非 CLOSED 格（缺 = CLOSED） */
   slots?: FlowSlot[];
+  /**
+   * D.2（cwi-schedv2-20260903）：該日該醫生總席（席位點 ■/□ 用）。
+   * 現行 F 契約冇回 per 醫生·日 capacity → fallback = 該日該醫生 max(seats)（server 端
+   * 算 + 每組合 warn 一次）；G-4 補真值（remainingCapacity）後呢度改直傳。
+   */
+  capacity?: number;
 }
 
 export interface FlowDay {
@@ -177,6 +193,20 @@ export async function buildFlowSlots(
             }
           }
           p.slots = slots;
+          // D.2：capacity 缺 → max(seats) fallback + warn 一次（spec；G-4 補真值）
+          const onlineMax = slots.reduce((mx, s) => (s.state === "ONLINE" && s.seats > mx ? s.seats : mx), 0);
+          if (onlineMax > 0) {
+            p.capacity = onlineMax;
+            const warnKey = `${clinicCode}|${date}|${providerId}`;
+            if (!capacityWarned.has(warnKey)) {
+              capacityWarned.add(warnKey);
+              if (capacityWarned.size > 2000) capacityWarned.clear(); // 天花板（長跑 dev process 防無界增長）
+              log.warn(
+                { clinicCode, date, providerId, fallbackCapacity: onlineMax },
+                "flow-slots: capacity 缺 → max(seats) fallback（G-4 補真值）"
+              );
+            }
+          }
         }
         return p;
       })

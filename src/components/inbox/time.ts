@@ -45,3 +45,30 @@ export function windowCountdown(remainingMs: number): string {
   if (h >= 1) return `${h}h ${m}m`;
   return `${m}m`;
 }
+
+/** 而家 HK 分鐘（0..1439）— Intl + Asia/Hong_Kong（同 hkToday 慣例；client 端）。 */
+export function hkNowMin(): number {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Hong_Kong",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  let h = 0;
+  let mi = 0;
+  for (const part of parts) {
+    if (part.type === "hour") h = Number(part.value) % 24;
+    else if (part.type === "minute") mi = Number(part.value);
+  }
+  return h * 60 + mi;
+}
+
+/** "HH:mm" → 分鐘（0..1439）；壞格式 → null */
+export function hhmmToMin(hhmm: string): number | null {
+  const m = /^(\d{2}):(\d{2})$/.exec(hhmm);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mi = Number(m[2]);
+  if (h > 23 || mi > 59) return null;
+  return h * 60 + mi;
+}

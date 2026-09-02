@@ -22,6 +22,7 @@ import { noteTickState } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 import { BookingCard } from "./booking-card";
 import { HoldCard } from "./hold-card";
+import { WindowExits } from "./window-exits";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -157,14 +158,7 @@ export function ChatPane(p: Props) {
   const [templateBusy, setTemplateBusy] = useState(false);
   // cwi-window-20260901（P2）：COPY_ONLY 草稿「複製」掣 feedback（「已複製」2s）
   const [copiedDraft, setCopiedDraft] = useState(false);
-  // cwi-window-20260901（P3）：過窗三出路 ② template picker（GET /templates）+ ① App handoff
-  const [picker, setPicker] = useState<{
-    templates: { name: string; language: string; category: string; supported: boolean; preview: string | null }[];
-    prefill: { patientName: string | null; clinicName: string; requestedDate: string; requestedTime: string; providerName: string } | null;
-  } | null>(null);
-  const [pickerLoading, setPickerLoading] = useState(false);
-  const [pickerSel, setPickerSel] = useState("");
-  const [handoffBusy, setHandoffBusy] = useState(false);
+  // cwi-schedv2-20260903（D.3）：過窗三出路 → 共享組件 <WindowExits/>（喺 composer 分支渲染，markup 不變）
   // ★ Phase E（cwi-ai-20260825-t5）：header「⋯」menu — 標記投訴 / AI 錯誤（即時記帳；STAFF 可用）
   const [flagMenuOpen, setFlagMenuOpen] = useState(false);
   const [flagBusy, setFlagBusy] = useState(false);
@@ -244,34 +238,6 @@ export function ChatPane(p: Props) {
       setFillHint(true);
     }
   }, [p.pendingDraft, draft, p.conversation?.assigneeId, p.myStaffId]);
-
-  // cwi-window-20260901（P3）：過窗 + 未 lock → 拉 ② template picker 名單（APPROVED + UTILITY）
-  const pickerConvId = p.conversation?.id;
-  const pickerWinOpen = p.conversation?.window.open;
-  const pickerLocked = !!p.conversation?.assigneeId && p.conversation?.assigneeId !== p.myStaffId;
-  useEffect(() => {
-    let alive = true;
-    setPicker(null);
-    setPickerSel("");
-    if (!pickerConvId || pickerWinOpen || pickerLocked) return;
-    setPickerLoading(true);
-    fetch(`/api/conversations/${pickerConvId}/templates`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (alive && d && Array.isArray(d.templates)) {
-          setPicker(d);
-          const firstSupported = d.templates.find((t: { supported: boolean }) => t.supported);
-          if (d.templates.length > 0) setPickerSel(firstSupported?.name ?? d.templates[0].name);
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (alive) setPickerLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [pickerConvId, pickerWinOpen, pickerLocked]);
 
   if (!p.conversation) {
     return (
@@ -367,24 +333,6 @@ export function ChatPane(p: Props) {
       setTemplateOptions(null);
     }
     setTemplateBusy(false);
-  }
-
-  // cwi-window-20260901（P3 / W-1）：① 開手機對話 — 撳 <a href=wa.me> 時落 audit + INTERNAL 備註。
-  // link 由 <a> 本身帶（E164 無加號 + encodeURIComponent 草稿 — server 唔經手電話）；呢度只打 audit POST（唔阻 navigation）。
-  async function appHandoffAudit() {
-    if (!c || handoffBusy) return;
-    setHandoffBusy(true);
-    try {
-      const res = await fetch(`/api/conversations/${c.id}/app-handoff`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-      if (!res.ok) setSendError("App handoff 記錄失敗（HTTP " + res.status + "）");
-    } catch {
-      setSendError("App handoff 記錄失敗（網絡錯誤）");
-    }
-    setHandoffBusy(false);
   }
 
   // ★ Phase E：標記投訴 / AI 錯誤 → POST /flag（24h 內冪等 no-op）
@@ -877,75 +825,13 @@ export function ChatPane(p: Props) {
             </div>
           </div>
         ) : (
-          /* cwi-window-20260901（P3 / W-1）：過窗三出路 — 取代舊「只可發 template」一句（MD §1） */
-          <div className="rounded-2xl border border-line bg-panel p-3 flex flex-col gap-2.5">
-            <div className="text-xs font-semibold text-t1 flex items-center gap-1.5">
-              <Clock size={13} strokeWidth={2.5} className="text-warn-text" />
-              24 小時窗口已過 — 揀一個方式跟進
-            </div>
-            <div className="flex flex-col gap-1">
-              <div className="text-[11.5px] font-medium text-t1">① 用手機 WhatsApp 覆（免費 · 建議）</div>
-              <div className="flex items-center gap-2 flex-wrap">
-                {(() => {
-                  const digits = (c.contact?.waId ?? "").replace(/[^0-9]/g, "");
-                  const draftText = p.pendingDraft?.draftText;
-                  const url = digits
-                    ? `https://wa.me/${digits}${draftText ? `?text=${encodeURIComponent(draftText)}` : ""}`
-                    : null;
-                  return url ? (
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={() => void appHandoffAudit()}
-                      className="text-xs px-3 py-1.5 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium inline-flex items-center gap-1"
-                    >
-                      <MessageCircle size={12} strokeWidth={2.5} /> 開手機對話
-                    </a>
-                  ) : (
-                    <span className="text-[10.5px] text-t3">冇有效 WhatsApp 號碼 — 開唔到手機對話</span>
-                  );
-                })()}
-                <span className="text-[10px] text-t3">只適用於主動搵過我哋嘅病人 · 覆完會自動同步返呢度</span>
-              </div>
-            </div>
-            <div className="flex flex-col gap-1">
-              <div className="text-[11.5px] font-medium text-t1">② 發 template（要審批 · 逐條收費）</div>
-              {pickerLoading ? (
-                <div className="text-[10.5px] text-t3">載入 template 名單…</div>
-              ) : picker && picker.templates.length > 0 ? (
-                <div className="flex items-center gap-2 flex-wrap">
-                  <select
-                    value={pickerSel}
-                    onChange={(e) => setPickerSel(e.target.value)}
-                    aria-label="揀 template"
-                    className="text-xs px-2 py-1.5 rounded-full bg-panel-2 border border-line-strong text-t1"
-                  >
-                    {picker.templates.map((t) => (
-                      <option key={t.name} value={t.name} disabled={!t.supported}>
-                        {t.name}（{t.language}）{t.supported ? "" : " · v1 未支援"}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    onClick={() => void sendTemplate(pickerSel)}
-                    disabled={templateBusy || !pickerSel}
-                    className="text-xs px-3 py-1.5 rounded-full bg-warn hover:opacity-90 text-warn-text font-medium disabled:opacity-40"
-                  >
-                    發送（逐條收費）
-                  </button>
-                  <span className="w-full text-[10px] text-t3">
-                    {picker.prefill
-                      ? `變數已填好：${picker.prefill.patientName ?? "病人"} · ${picker.prefill.requestedDate} ${picker.prefill.requestedTime} · ${picker.prefill.providerName} · ${picker.prefill.clinicName}`
-                      : "冇 CONFIRMED 預約 — 呢款 template 需要日期/時間/醫生（落單確認後重試）"}
-                  </span>
-                </div>
-              ) : (
-                <div className="text-[10.5px] text-t3">冇可用 APPROVED template（或名單載入失敗）</div>
-              )}
-            </div>
-            <div className="text-[11.5px] font-medium text-t1">③ 等病人下次搵你（窗口會重開）</div>
-          </div>
+          /* cwi-window-20260901（P3 / W-1）：過窗三出路 — 共享組件（D.3 排班板/迷你表同源複用；markup 同原版本一致） */
+          <WindowExits
+            conversation={c}
+            myStaffId={p.myStaffId}
+            draftText={p.pendingDraft?.draftText}
+            onError={(m) => setSendError(m)}
+          />
         )}
       </div>
       <div className="sr-only">{relTime(c.lastMessageAt)}</div>

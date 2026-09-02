@@ -37,6 +37,11 @@ export async function sendBookingFlow(opts: {
   conversationId: string;
   /** null = 系統自動（precheck 失敗重出 Flow） */
   staffId: string | null;
+  /**
+   * D.3（cwi-schedv2-20260903）：排班板撳格預選 — 塞入 flow_action_payload.data（第一屏預選）。
+   * 唔預先 claim（病人 submit 先 claim — claim@submit_confirm 不變）。
+   */
+  prefill?: { date: string; providerId: string; start: string };
 }): Promise<SendFlowResult> {
   const conv = await prisma.conversation.findUnique({ where: { id: opts.conversationId } });
   if (!conv) throw new Error("conversation not found");
@@ -85,6 +90,10 @@ export async function sendBookingFlow(opts: {
     );
     config = defaultFlowConfig(token);
   }
+  // D.3：撳格預選 — 塞入第一屏預選（canvas 側；舊 canvas 忽略未知欄）
+  if (opts.prefill) {
+    config = { ...config, flow_action_payload: { data: { ...opts.prefill } } };
+  }
   const session = await prisma.flowSession.create({
     data: {
       conversationId: conv.id,
@@ -124,7 +133,13 @@ export async function sendBookingFlow(opts: {
         action: "SEND_FLOW",
         entity: "FlowSession",
         entityId: session.id,
-        meta: { conversationId: conv.id, messageId: msg.id, canvasVariant },
+        meta: {
+          conversationId: conv.id,
+          messageId: msg.id,
+          canvasVariant,
+          // D.3：audit 記預選 metadata（零 PII — 只日期/醫生/時間）
+          ...(opts.prefill ? { prefill: opts.prefill } : {}),
+        },
       },
     })
     .catch(() => undefined);

@@ -12,7 +12,6 @@ import type {
   ConvUpdatedEvent,
   DraftInfo,
   DraftReadyEvent,
-  DutyInfo,
   MessageItem,
   MessageStatusEvent,
   MentionNotifyEvent,
@@ -57,23 +56,19 @@ export function InboxClient({
   initialClinics,
   initialConversations,
   initialStaff,
-  initialDuty,
   initialSelectedConvId,
 }: {
   user: UserCtx;
   initialClinics: ClinicInfo[];
   initialConversations: ConversationItem[];
   initialStaff: StaffInfo[];
-  /** Phase 4：今日當值（per clinicId；null/缺 = 隱藏卡） */
-  initialDuty?: Record<string, DutyInfo | null>;
   /** Phase 3：?conv=<id> 深連結（/bookings 卡「開對話」） */
   initialSelectedConvId?: string | null;
 }) {
   const clinics = initialClinics;
   const staff = initialStaff;
-  // ★ Phase 4 收尾（B2, cwi-r1close-20260827）：當值資料係 client state —
-  //   SSR 快照（initialDuty）只係初始值；開通宵 tab 會 stale，useEffect 刷新（見下）。
-  const [dutyMap, setDutyMap] = useState<Record<string, DutyInfo | null>>(initialDuty ?? {});
+  // D.4（cwi-schedv2-20260903）：舊當值卡管線（dutyMap/refreshDuty/15min）移除 —
+  //   側欄改「今日可約迷你表」（MiniSchedule 自拉 /api/flows/slots）。
   const [conversations, setConversations] = useState<ConversationItem[]>(initialConversations);
   const [activeClinicId, setActiveClinicId] = useState<string | "all">(
     user.role === "STAFF" ? (user.clinicId ?? "all") : "all"
@@ -117,48 +112,6 @@ export function InboxClient({
   selectedIdRef.current = selectedConvId;
   messagesRef.current = messages;
   activeClinicRef.current = activeClinicId;
-
-  // ── ★ Phase 4 收尾（B2, cwi-r1close-20260827）：今日當值卡 client 端刷新 ──
-  // 開通宵 tab 時 SSR 快照會 stale（噚日/冇當值）→ selectedConv 變 或 每 15 分鐘
-  // → GET /api/duty-roster?clinicId=<clinic code>（route 已有 STAFF/ADMIN scope + fail-soft，
-  //   workforce 離線返 {duty:null} 唔會 5xx）。
-  // 成功 → merge dutyMap（duty null/空 → 隱藏卡）；失敗 → 保留舊值唔郁。
-  const refreshDuty = useCallback(
-    (clinicId: string | null | undefined) => {
-      const clinic = clinics.find((c) => c.id === clinicId);
-      if (!clinic?.code) return;
-      fetch(`/api/duty-roster?clinicId=${encodeURIComponent(clinic.code)}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((resp: { duty?: { staffName: string; role: string; shiftStart: string; shiftEnd: string }[] | null; date?: string } | null) => {
-          const date = resp?.date;
-          if (!date) return; // fail / 壞 shape → 保留舊值
-          const entries = Array.isArray(resp.duty) ? resp.duty : null;
-          setDutyMap((prev) => ({
-            ...prev,
-            [clinic.id]: entries && entries.length > 0 ? { date, entries } : null,
-          }));
-        })
-        .catch(() => {
-          /* fail-soft：network/parse 錯 → 保留舊值 */
-        });
-    },
-    [clinics],
-  );
-
-  useEffect(() => {
-    // selectedConv 變 → 即刷新；每 15 分鐘兜底（開通宵 tab 過日/名單更新）。
-    // conversation id → clinic id 要經 conversations 查（selectedConvId 係對話 id 唔係 clinic id）；
-    // 用 ref 避免 interval closure stale。
-    const refresh = () => {
-      const cid = selectedIdRef.current;
-      if (!cid) return;
-      const conv = conversationsRef.current.find((c) => c.id === cid);
-      refreshDuty(conv?.clinicId);
-    };
-    refresh();
-    const t = setInterval(refresh, 15 * 60 * 1000);
-    return () => clearInterval(t);
-  }, [selectedConvId, refreshDuty]);
 
   // ── ★ H2：已讀回執（tick 語義）+ mention 通知（bell badge / 黃點 / Notification） ──
   const [receipts, setReceipts] = useState<NoteReceipt[]>([]); // 選中對話嘅回執（socket note:read 增量更新）
@@ -1262,10 +1215,10 @@ export function InboxClient({
         conversation={selectedConv}
         staff={staff}
         onPatch={patchConversation}
-        duty={selectedConv ? dutyMap[selectedConv.clinicId] ?? null : null}
         mobileOpen={detailOpen}
         onMobileClose={() => setDetailOpen(false)}
         myStaffId={user.staffId}
+        clinicCode={clinics.find((c) => c.id === selectedConv?.clinicId)?.code ?? null}
         userRole={user.role}
         onAssign={assignConversationApi}
         assignBusy={assignBusy}

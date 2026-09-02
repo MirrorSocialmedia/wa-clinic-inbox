@@ -256,6 +256,11 @@ export interface FlowMessageConfig {
   flow_id: string;       // Flow id（publish 後固定）
   flow_cta: string;      // 按鈕文字（「預約」）
   flow_action?: string;  // 預設 NAVIGATE
+  /**
+   * D.3（cwi-schedv2-20260903）：撳格預選 — 塞入第一屏預選（date/providerId/start）。
+   * 只喺 staff 由排班板撳格發 Flow 時有；canvas 收唔到時忽略（向后兼容）。
+   */
+  flow_action_payload?: { data: { date: string; providerId: string; start: string } };
 }
 
 export function defaultFlowConfig(flow_token: string): FlowMessageConfig {
