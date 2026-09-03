@@ -54,6 +54,8 @@ export interface ConversationItem {
   contact: ContactInfo | null;
   /** ★ booking-ui（A）：已釘住舊客（chat 卡藍掣「幫我喺 Apricot 落單」可見性）— null = 未釘住 */
   pinnedPatient: { patientApricotId: string } | null;
+  /** /api/conversations 原樣 flat 欄（G-3 人手落單 gate 用 — 冇 = 未釘住） */
+  pinnedPatientApricotId?: string | null;
   /** Phase 3：最新 PENDING 預約（綠色卡）/ ★ booking-ui（D）：CONFIRMED 卡 — null = 冇 */
   pendingBooking: BookingInfo | null;
   /** providerslot-20260830 T3：Flow 硬保留 hold（HELD/IN_APRICOT/COMMITTED）— null = 冇（RELEASED/EXPIRED 唔帶） */

@@ -69,7 +69,8 @@
     "e2e:usage-ui": "tsx scripts/e2e-usage-ui.ts",
     "e2e:window-ui": "tsx scripts/e2e-window-ui.ts",
     "e2e:notify-ui": "tsx scripts/e2e-notify-ui.ts",
-    "e2e:multiclinic-ui": "tsx scripts/e2e-multiclinic-ui.ts"
+    "e2e:multiclinic-ui": "tsx scripts/e2e-multiclinic-ui.ts",
+    "e2e:manual-booking": "tsx scripts/e2e-manual-booking.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

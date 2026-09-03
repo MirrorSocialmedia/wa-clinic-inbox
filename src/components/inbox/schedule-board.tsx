@@ -523,7 +523,9 @@ function WeekCells({
 //   而家線（— 而家 / 2px var(--brand)）插喺相鄰格之間，60s tick（unmount clear）。
 // D.2：ONLINE 格席位點 ■（剩）/□（佔），共 = capacity（server 端 max(seats) fallback + warn；G-4 補真值）。
 // D.3：ONLINE 格可撳 → 幫病人約 popover（既有對話搜尋 → 揀 → 發 Flow prefill；
-//   過窗 → 三出路；唔預先 claim、冇人手單掣 — G-3）。
+//   過窗 → 三出路）。
+// G-3（cwi-writeword-20260904）：popover 加埋〔人手落單〕掣（同 Flow 並存 — 直接行代落單
+//   寫入鏈入 Apricot，病人唔使行 Flow；只收已釘住舊客 — 新客 422 鐵律；Send Lock 423）。
 type DayRow =
   | { kind: "slot"; key: string; m: number; slot: FlowSlot }
   | { kind: "gap"; key: string; from: number; to: number };
@@ -603,6 +605,7 @@ function DayGrid({
   const [convs, setConvs] = useState<ConversationItem[] | null>(null);
   const [selId, setSelId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [manualBusy, setManualBusy] = useState(false); // G-3 人手落單
   const [popErr, setPopErr] = useState<string | null>(null);
   const [raceConv, setRaceConv] = useState<ConversationItem | null>(null); // 422 競態 → 三出路
 
@@ -615,6 +618,7 @@ function DayGrid({
     setSelId(null);
     setPopErr(null);
     setRaceConv(null);
+    setManualBusy(false);
   }, [date, p?.providerId]);
 
   // D.1：60s tick（今日先）
@@ -772,6 +776,65 @@ function DayGrid({
       setPopErr("發送失敗（網絡錯誤）");
     }
     setSending(false);
+  }
+
+  // G-3：人手落單 — 直接行代落單寫入鏈入 Apricot（病人唔使行 Flow）。
+  // 前端預檢：selConv 要有已釘住舊客（pinnedPatientApricotId）— 無 = 新客路徑唔存在（422 鐵律）。
+  // visit reason 唔帶 = server 用 BOOKING_DEFAULT_VISIT_REASON_CODE env 模式（跟 cwi-bkui 現狀）。
+  // 成功後 board 經 availability:busted socket 自動重繪（createBooking 已 bust 該日 L2）。
+  async function sendManual(conv: ConversationItem) {
+    if (!pop || !p || manualBusy) return;
+    if (!conv.pinnedPatientApricotId) return; // UI gate（server 再擋一道 422）
+    setManualBusy(true);
+    setPopErr(null);
+    try {
+      const res = await fetch("/api/bookings/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversationId: conv.id,
+          providerApricotId: p.providerId,
+          providerName: p.providerName,
+          date,
+          start: pop.slot.start,
+        }),
+      });
+      const j = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        apricotApptId?: string;
+        error?: string;
+        message?: string;
+        autoMessage?: { sent: boolean; reason?: string; hint?: string };
+      } | null;
+      if (res.ok) {
+        // 200：成功 + 窗口內自動確認訊息已入隊
+        onToast?.("ok", `已喺 Apricot 落單（單號 ${j?.apricotApptId ?? "…"}）— 確認訊息已自動發`);
+        setPop(null);
+        setQ("");
+        setHits(null);
+        setSelId(null);
+        setRaceConv(null);
+        setPopErr(null);
+      } else if (res.status === 422 && j?.ok === true) {
+        // 200 語義但 422：booking 已成（CONFIRMED），只是自動確認訊息出唔到（過窗/隊列）
+        onToast?.("warn", `已喺 Apricot 落單（單號 ${j?.apricotApptId ?? "…"}）— ${j?.autoMessage?.hint ?? "請手動覆病人"}`);
+        setPop(null);
+        setQ("");
+        setHits(null);
+        setSelId(null);
+        setRaceConv(null);
+        setPopErr(null);
+      } else if (res.status === 409) {
+        setPopErr(j?.error === "pending_exists" ? "呢個時段已有待處理預約（對話卡可跟進）" : (j?.message ?? "時段啱啱滿咗 — 撳更新重揀"));
+      } else if (res.status === 423) {
+        setPopErr("此對話已有負責人 — 落唔到單（可喺 inbox 撳接手）");
+      } else {
+        setPopErr(j?.message ?? `落單失敗（${res.status}）`);
+      }
+    } catch {
+      setPopErr("落單失敗（網絡錯誤）");
+    }
+    setManualBusy(false);
   }
 
   if (!day) {
@@ -990,23 +1053,44 @@ function DayGrid({
           {convs === null && pop && !q.trim() && <div className="text-[10.5px] text-t3">載入既有對話…</div>}
           {popErr && <div className="text-xs text-danger-text">{popErr}</div>}
           {selConv ? (
-            raceConv || !selConv.window.open ? (
-              <div className="space-y-1.5">
-                <div className="text-[10.5px] text-t3">呢位病人 24 小時窗口已過 — Flow 出唔到，改出三出路：</div>
-                <WindowExits conversation={raceConv ?? selConv} myStaffId={myStaffId} />
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => void sendFlow(selConv)}
-                disabled={sending}
-                className="w-full text-xs px-3 py-2 rounded-lg bg-brand hover:bg-brand-hover text-panel font-semibold disabled:opacity-40"
-              >
-                {sending ? "發送中…" : "發預約連結（Flow · 已鎖定呢格）"}
-              </button>
-            )
+            <div className="space-y-2">
+              {raceConv || !selConv.window.open ? (
+                <>
+                  <div className="text-[10.5px] text-t3">呢位病人 24 小時窗口已過 — Flow 出唔到，改出三出路：</div>
+                  <WindowExits conversation={raceConv ?? selConv} myStaffId={myStaffId} />
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void sendFlow(selConv)}
+                  disabled={sending}
+                  className="w-full text-xs px-3 py-2 rounded-lg bg-brand hover:bg-brand-hover text-panel font-semibold disabled:opacity-40"
+                >
+                  {sending ? "發送中…" : "發預約連結（Flow · 已鎖定呢格）"}
+                </button>
+              )}
+              {/* G-3：人手落單（同 Flow 並存 — 直接入 Apricot；窗口唔阻落單本身，只影響自動確認訊息） */}
+              {selConv.pinnedPatientApricotId ? (
+                <div className="space-y-1">
+                  <button
+                    type="button"
+                    onClick={() => void sendManual(selConv)}
+                    disabled={manualBusy}
+                    className="w-full text-xs px-3 py-2 rounded-lg border border-line bg-panel-2 hover:bg-panel text-t1 font-medium disabled:opacity-40"
+                    title="直接喺 Apricot 落單（15 分鐘），病人唔使行 Flow；成功後側欄出 CONFIRMED 卡"
+                  >
+                    {manualBusy ? "落單中…" : "人手落單（直接入 Apricot）"}
+                  </button>
+                  {!selConv.window.open && (
+                    <div className="text-[10px] text-warn-text">窗口已過 — 落單照行，但確認訊息要用 template 手發</div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-[10.5px] text-t3">人手落單要先喺側欄釘住舊客（新客代落單唔開放）。</div>
+              )}
+            </div>
           ) : (
-            <div className="text-[10.5px] text-t3">揀一個既有對話，先可以發預約連結（唔會重複開對話）。</div>
+            <div className="text-[10.5px] text-t3">揀一個既有對話，先可以發預約連結／人手落單（唔會重複開對話）。</div>
           )}
         </div>
       )}
