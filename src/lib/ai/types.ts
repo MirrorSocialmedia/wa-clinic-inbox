@@ -14,6 +14,9 @@ export const AI_INTENTS = [
   "OUT_OF_SCOPE",
   // ★ Phase C（cwi-sess-20260824-c1）：第 6 類 — 投訴 / 對服務不滿 / 要求退款賠償（needsHuman 必須 true）
   "COMPLAINT",
+  // ★ Part E（cwi-paintriage-20260903，MD E.2）：第 7 類 — 一般痛（無紅旗詞）→ PAIN_TRIAGE 問診。
+  // Conversation.intent 係 String?（非 Prisma enum）→ 零 migration。
+  "PAIN",
   "OTHER",
 ] as const;
 export type AiIntent = (typeof AI_INTENTS)[number];
@@ -52,6 +55,8 @@ export interface ClassifyAndDraftInput {
   clinic: AiClinicInfo;
   /** Phase 4：當日當值（可選；null/空 = 唔注入） */
   dutyRoster?: AiDutyRoster | null;
+  /** ★ Part E（cwi-paintriage-20260903，E.8）：lexicon 注入塊（system prompt 尾；缺省 = 無） */
+  lexiconBlock?: string;
 }
 
 /**

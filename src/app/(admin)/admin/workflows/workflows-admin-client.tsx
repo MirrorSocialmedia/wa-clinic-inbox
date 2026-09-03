@@ -1,7 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { buildGraph, type WorkflowGraph } from "@/lib/workflow/definitions";
+import { buildGraph, type WorkflowGraph, type WorkflowKey } from "@/lib/workflow/definitions";
+// ★ Part E（cwi-paintriage-20260903）：結構化欄編輯器用嘅 pure 常數（零 side-effect，client-safe）
+import { RED_FLAG_FLOOR, RED_FLAG_CATEGORIES } from "@/lib/sessions/red-flags";
+import { IMPRESSION_KEYS, IMPRESSION_META } from "@/lib/sessions/impressions";
 
 /**
  * Workflow 參數化 builder v1 client（Phase D — cwi-ai-20260825-t4）。
@@ -19,7 +22,7 @@ import { buildGraph, type WorkflowGraph } from "@/lib/workflow/definitions";
 interface FieldHint {
   name: string;
   label: string;
-  type: "int" | "number" | "string";
+  type: "int" | "number" | "string" | "bool"; // ★ Part E：bool（pain-triage sleepComboRule）
   min?: number;
   max?: number;
   maxLength?: number;
@@ -50,6 +53,80 @@ interface ClinicRow {
   name: string;
 }
 
+// ★ Part E（cwi-paintriage-20260903）：結構化欄編輯器（questions / redFlagTerms / lexicon entries）
+interface PainQuestionRow {
+  id: string;
+  slot: string;
+  text: string;
+  enabled: boolean;
+  order: number;
+}
+interface LexiconRow {
+  term: string;
+  canonical: string;
+  note?: string;
+}
+
+// ★ Part E（cwi-paintriage-20260903）：questions 編輯器 slot 選項（同 pain-triage.ts PainSlots 欄位）
+const PAIN_SLOT_OPTIONS = [
+  "toothLocation", "durationDays", "stimulusLinger", "spontaneousPain", "nightPain", "bitePain",
+  "recentTreatment", "swelling", "redFlagSymptoms", "severity", "functionalImpact", "photo",
+] as const;
+
+/** 紅旗詞類行：FLOOR 灰色鎖定 chip + 附加詞可刪 chip + 加詞 input（per-row 自帶 state）。 */
+function RfRow({
+  cat,
+  extras,
+  onChange,
+}: {
+  cat: string;
+  extras: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [text, setText] = useState("");
+  const add = () => {
+    const t = text.trim();
+    if (!t) return;
+    if (extras.includes(t)) return;
+    if (t === "post_op") return; // post_op 唔係詞觸發（術後情境 = E.7 自動判）
+    onChange([...extras, t]);
+    setText("");
+  };
+  return (
+    <div className="flex items-start gap-2 py-1">
+      <span className="text-[11px] font-mono text-t3 w-24 shrink-0 pt-1.5">{cat}</span>
+      <div className="flex flex-wrap gap-1 items-center">
+        {(RED_FLAG_FLOOR[cat as keyof typeof RED_FLAG_FLOOR] ?? []).map((t) => (
+          <span key={t} title={`${cat} FLOOR 底詞 — 唔可刪（紅旗 recall 保底）`} className="text-[11px] px-2 py-0.5 rounded-full bg-panel-2 text-t3 border border-line select-none">
+            {t}
+          </span>
+        ))}
+        {extras.map((t) => (
+          <span key={t} className="text-[11px] px-2 py-0.5 rounded-full bg-brand/10 text-t1 border border-brand/40">
+            {t}
+            <button onClick={() => onChange(extras.filter((x) => x !== t))} className="ml-1 text-danger-text hover:text-danger" aria-label={`刪 ${t}`}>✕</button>
+          </span>
+        ))}
+        {cat === "post_op" ? (
+          <span className="text-[11px] text-t3">（術後唔係詞觸發 — E.7 自動判）</span>
+        ) : (
+          <span className="inline-flex items-center gap-1">
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
+              placeholder="+ 加詞（return 確認）"
+              className="text-[11px] w-36 bg-panel border border-line rounded-full px-2 py-1 text-t1"
+              maxLength={20}
+            />
+            <button onClick={add} disabled={!text.trim()} className="text-[11px] px-2 py-1 rounded-full bg-panel-2 border border-line text-t2 disabled:opacity-40">加</button>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 type Tab = "params" | "graph" | "versions";
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -71,6 +148,10 @@ function formToParams(form: Record<string, string>, hints: FieldHint[]): Record<
     const raw = (form[h.name] ?? "").trim();
     if (h.type === "string") {
       out[h.name] = raw;
+      continue;
+    }
+    if (h.type === "bool") {
+      out[h.name] = raw === "true" || raw === "1";
       continue;
     }
     const n = Number(raw);
@@ -186,14 +267,43 @@ function KeyCard({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // ★ Part E（cwi-paintriage-20260903）：結構化欄編輯器狀態（pain-triage / lexicon 專用；其他 key 唔用）
+  const [painQuestions, setPainQuestions] = useState<PainQuestionRow[]>([]);
+  const [painRfExtra, setPainRfExtra] = useState<Record<string, string[]>>({});
+  const [painImpTpl, setPainImpTpl] = useState<Record<string, string>>({});
+  const [lexEntries, setLexEntries] = useState<LexiconRow[]>([]);
+  const [rfAddText, setRfAddText] = useState("");
+
   // active 變咗（publish/revert 後）→ 表單值跟埋 ACTIVE（未保存嘅 edit 會清 — 可接受 v1）
   useEffect(() => {
     setForm(Object.fromEntries(wf.schemaHints.map((h) => [h.name, String(wf.active.params[h.name] ?? "")])));
     setFieldErrors({});
+    // ★ Part E（cwi-paintriage-20260903）：結構化欄跟埋 ACTIVE
+    setPainQuestions(
+      ((wf.active.params.questions as PainQuestionRow[] | undefined) ?? []).map((q) => ({ ...q }))
+    );
+    setPainRfExtra({ ...(wf.active.params.redFlagTerms as Record<string, string[]> | undefined) });
+    setPainImpTpl({ ...(wf.active.params.impressionTemplates as Record<string, string> | undefined) });
+    setLexEntries(((wf.active.params.entries as LexiconRow[] | undefined) ?? []).map((e) => ({ ...e })));
   }, [wf.active.params, wf.schemaHints]);
 
   const hints = wf.schemaHints;
   const active = wf.active.params;
+
+  // ★ Part E（cwi-paintriage-20260903）：結構化欄 dirty（JSON 對照 ACTIVE）
+  const structuredDirty = useMemo(() => {
+    if (wf.key === "pain-triage") {
+      return (
+        JSON.stringify(painQuestions) !== JSON.stringify(active.questions ?? []) ||
+        JSON.stringify(painRfExtra) !== JSON.stringify(active.redFlagTerms ?? {}) ||
+        JSON.stringify(painImpTpl) !== JSON.stringify(active.impressionTemplates ?? {})
+      );
+    }
+    if (wf.key === "lexicon") {
+      return JSON.stringify(lexEntries) !== JSON.stringify(active.entries ?? []);
+    }
+    return false;
+  }, [wf.key, painQuestions, painRfExtra, painImpTpl, lexEntries, active]);
 
   // 發佈前 diff：form（轉數）vs ACTIVE 值 — 紅 = 現行，綠 = 新值
   const diff = useMemo(() => {
@@ -210,7 +320,7 @@ function KeyCard({
     return rows;
   }, [form, hints, active]);
 
-  const dirty = diff !== null && diff.length > 0;
+  const dirty = (diff !== null && diff.length > 0) || structuredDirty;
 
   const saveDraft = async () => {
     setBusy(true);
@@ -221,6 +331,14 @@ function KeyCard({
       if (!params) {
         setError("有數字欄轉唔到有效數字 — 請檢查後再試");
         return;
+      }
+      // ★ Part E（cwi-paintriage-20260903）：結構化欄合併入 payload（scalar hints 只覆蓋簡值）
+      if (wf.key === "pain-triage") {
+        params.questions = painQuestions.map((q, i) => ({ ...q, order: i }));
+        params.redFlagTerms = painRfExtra;
+        params.impressionTemplates = painImpTpl;
+      } else if (wf.key === "lexicon") {
+        params.entries = lexEntries;
       }
       const out = await api<{ id: string; version: number }>(`/api/admin/workflows/${wf.key}`, {
         method: "PUT",
@@ -288,7 +406,7 @@ function KeyCard({
     }
   };
 
-  const graph = useMemo(() => buildGraph(wf.key as "triage" | "booking-session" | "reminder", wf.active.params), [wf.key, wf.active.params]);
+  const graph = useMemo(() => buildGraph(wf.key as WorkflowKey, wf.active.params), [wf.key, wf.active.params]);
   const maxVersion = versions.length > 0 ? Math.max(...versions.map((v) => v.version)) : 0;
 
   return (
@@ -332,7 +450,16 @@ function KeyCard({
                   <div className="text-[11px] text-t3 font-mono">{h.name}</div>
                 </div>
                 <div className="flex-1">
-                  {h.type === "string" ? (
+                  {h.type === "bool" ? (
+                    <label className="inline-flex items-center gap-2 pt-1.5">
+                      <input
+                        type="checkbox"
+                        checked={(form[h.name] ?? "") === "true"}
+                        onChange={(e) => setForm((f) => ({ ...f, [h.name]: e.target.checked ? "true" : "false" }))}
+                      />
+                      <span className="text-xs text-t2">{String(form[h.name] ?? "false") === "true" ? "開" : "關"}</span>
+                    </label>
+                  ) : h.type === "string" ? (
                     (h.maxLength ?? 0) > 100 ? (
                       <textarea
                         rows={2}
@@ -371,6 +498,124 @@ function KeyCard({
               </div>
             ))}
 
+            {/* ★ Part E（cwi-paintriage-20260903）：pain-triage 結構化欄編輯器 */}
+            {wf.key === "pain-triage" ? (
+              <div className="space-y-4 pt-3 border-t border-line">
+                <div>
+                  <div className="text-sm font-semibold text-t1 mb-1">questions — 問診問題（一 turn 一條；兩條短嘅 ≤24 字自動併埋）</div>
+                  <div className="space-y-1.5">
+                    {painQuestions.map((q, i) => (
+                      <div key={q.id} className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-t3 w-5 text-right tabular-nums shrink-0">{i + 1}</span>
+                        <input
+                          value={q.text}
+                          onChange={(e) => setPainQuestions((arr) => arr.map((x) => (x.id === q.id ? { ...x, text: e.target.value } : x)))}
+                          className="flex-1 min-w-0 text-xs bg-panel border border-line rounded-full px-3 py-1.5 text-t1"
+                          maxLength={80}
+                        />
+                        <select
+                          value={q.slot}
+                          onChange={(e) => setPainQuestions((arr) => arr.map((x) => (x.id === q.id ? { ...x, slot: e.target.value } : x)))}
+                          className="text-[11px] font-mono bg-panel border border-line rounded-full px-2 py-1.5 text-t2 shrink-0"
+                        >
+                          {PAIN_SLOT_OPTIONS.map((s) => (
+                            <option key={s} value={s}>{s}</option>
+                          ))}
+                        </select>
+                        <label className="text-[11px] text-t2 shrink-0" title="enable / disable">
+                          <input
+                            type="checkbox"
+                            checked={q.enabled}
+                            onChange={(e) => setPainQuestions((arr) => arr.map((x) => (x.id === q.id ? { ...x, enabled: e.target.checked } : x)))}
+                          />
+                        </label>
+                        <button
+                          disabled={i === 0}
+                          onClick={() => setPainQuestions((arr) => { const a = [...arr]; [a[i - 1], a[i]] = [a[i], a[i - 1]]; return a; })}
+                          className="text-xs px-1.5 py-1 rounded-full bg-panel-2 border border-line text-t2 disabled:opacity-30 shrink-0"
+                        >↑</button>
+                        <button
+                          disabled={i === painQuestions.length - 1}
+                          onClick={() => setPainQuestions((arr) => { const a = [...arr]; [a[i + 1], a[i]] = [a[i], a[i + 1]]; return a; })}
+                          className="text-xs px-1.5 py-1 rounded-full bg-panel-2 border border-line text-t2 disabled:opacity-30 shrink-0"
+                        >↓</button>
+                        <button
+                          onClick={() => setPainQuestions((arr) => arr.filter((x) => x.id !== q.id))}
+                          className="text-xs px-1.5 py-1 rounded-full text-danger-text hover:bg-panel-2 shrink-0"
+                          aria-label="刪問題"
+                        >✕</button>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => setPainQuestions((arr) => [...arr, { id: `q-${Date.now().toString(36)}`, slot: arr.length === 0 ? "toothLocation" : "durationDays", text: "", enabled: true, order: arr.length }])}
+                    className="mt-1.5 text-xs px-3 py-1.5 rounded-full bg-panel-2 border border-line text-t2 hover:border-brand"
+                  >+ 加問題</button>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-t1 mb-1">redFlagTerms — 紅旗詞（灰 = 系統 FLOOR 唔可刪；彩 = 附加可刪；server 拒收 FLOOR 詞入附加欄）</div>
+                  {RED_FLAG_CATEGORIES.map((c) => (
+                    <RfRow key={c} cat={c} extras={painRfExtra[c] ?? []} onChange={(next) => setPainRfExtra((m) => ({ ...m, [c]: next }))} />
+                  ))}
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-t1 mb-1">impressionTemplates — ①句覆寫（留空 = 內建措辭；禁詞「確診／你係／一定要」server 拒收）</div>
+                  <div className="space-y-1">
+                    {IMPRESSION_KEYS.map((k) => (
+                      <div key={k} className="flex items-center gap-2">
+                        <span className="text-[11px] font-mono text-t3 w-24 shrink-0">{k}</span>
+                        <input
+                          value={painImpTpl[k] ?? ""}
+                          onChange={(e) => setPainImpTpl((m) => ({ ...m, [k]: e.target.value }))}
+                          placeholder={IMPRESSION_META[k].defaultText}
+                          className="flex-1 text-xs bg-panel border border-line rounded-full px-3 py-1.5 text-t1"
+                          maxLength={80}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {/* ★ Part E（cwi-paintriage-20260903）：lexicon entries 編輯器 */}
+            {wf.key === "lexicon" ? (
+              <div>
+                <div className="text-sm font-semibold text-t1 mb-1">entries — 術語 → canonical（{lexEntries.length}/60；同 term per-clinic 優先；運行時超 60 截斷 + log warn）</div>
+                <div className="space-y-1.5">
+                  {lexEntries.map((e, i) => (
+                    <div key={i} className="flex items-center gap-1.5">
+                      <input
+                        value={e.term}
+                        onChange={(ev) => setLexEntries((arr) => arr.map((x, j) => (j === i ? { ...x, term: ev.target.value } : x)))}
+                        placeholder="術語（例：cool牙）"
+                        className="flex-1 min-w-0 text-xs bg-panel border border-line rounded-full px-3 py-1.5 text-t1"
+                        maxLength={40}
+                      />
+                      <span className="text-t3 text-xs">→</span>
+                      <input
+                        value={e.canonical}
+                        onChange={(ev) => setLexEntries((arr) => arr.map((x, j) => (j === i ? { ...x, canonical: ev.target.value } : x)))}
+                        placeholder="canonical（例：矯齒）"
+                        className="flex-1 min-w-0 text-xs bg-panel border border-line rounded-full px-3 py-1.5 text-t1"
+                        maxLength={40}
+                      />
+                      <button
+                        onClick={() => setLexEntries((arr) => arr.filter((_, j) => j !== i))}
+                        className="text-xs px-1.5 py-1 rounded-full text-danger-text hover:bg-panel-2 shrink-0"
+                        aria-label="刪詞"
+                      >✕</button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  disabled={lexEntries.length >= 60}
+                  onClick={() => setLexEntries((arr) => [...arr, { term: "", canonical: "" }])}
+                  className="mt-1.5 text-xs px-3 py-1.5 rounded-full bg-panel-2 border border-line text-t2 hover:border-brand disabled:opacity-40"
+                >+ 加詞（上限 60）</button>
+              </div>
+            ) : null}
+
             {/* 發佈前 diff（紅 = 現行 ACTIVE 值，綠 = 新值） */}
             {dirty && diff && diff.length > 0 ? (
               <div className="mt-4 border border-line rounded-[18px] p-3 bg-panel-2">
@@ -404,9 +649,13 @@ function KeyCard({
                 </button>
               ) : null}
               <button
-                onClick={() =>
-                  setForm(Object.fromEntries(hints.map((h) => [h.name, String(wf.defaults[h.name] ?? "")])))
-                }
+                onClick={() => {
+                  setForm(Object.fromEntries(hints.map((h) => [h.name, String(wf.defaults[h.name] ?? "")])));
+                  setPainQuestions(((wf.defaults.questions as PainQuestionRow[] | undefined) ?? []).map((q) => ({ ...q })));
+                  setPainRfExtra({ ...(wf.defaults.redFlagTerms as Record<string, string[]> | undefined) });
+                  setPainImpTpl({ ...(wf.defaults.impressionTemplates as Record<string, string> | undefined) });
+                  setLexEntries(((wf.defaults.entries as LexiconRow[] | undefined) ?? []).map((e) => ({ ...e })));
+                }}
                 disabled={busy}
                 className="text-xs text-t3 hover:text-t1 underline ml-auto"
               >

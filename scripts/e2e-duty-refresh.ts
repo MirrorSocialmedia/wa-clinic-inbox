@@ -117,18 +117,20 @@ async function main(): Promise<void> {
   ]);
   const P = await ctx.newPage();
 
-  let dutyCalls = 0;
+  let flowsCalls = 0;
   P.on("response", (r) => {
-    if (r.url().includes("/api/duty-roster") && r.ok()) dutyCalls++;
+    // ★ cwi-paintriage-20260903 fix（D.4 對齊）：側欄改 MiniSchedule 自拉 /api/conversations/:id/flows（含 duty 欄）— 舊 /api/duty-roster 計數 stale
+    if (r.url().includes("/flows") && r.ok()) flowsCalls++;
   });
 
-  // ── 1) 載入 /inbox?conv=conv1 → SSR 快照應顯示 fixture A（林小曼） ─────────
+  // ── 1) 載入 /inbox?conv=conv1 → client 自拉 flows 快照應顯示 fixture A（林小曼） ─────────
   await P.goto(`${base}/inbox?conv=${conv1}`, { waitUntil: "domcontentloaded" });
-  await P.waitForSelector("text=當值（", { timeout: 30000 });
+  // ★ D.4：舊「今日當值（N 人）」SSR 卡已移除 → 當值降底行「當值：{名}」（client 渲染）
+  await P.waitForSelector("text=當值：", { timeout: 30000 });
   const hasA = await P.getByText("林小曼").first().count();
-  if (hasA === 0) throw new Error("初始卡冇顯示 fixture A（林小曼）— SSR initialDuty 未生效？");
-  const callsAfterLoad = dutyCalls;
-  // client mount 會發一次 /api/duty-roster（refreshDuty effect）— 等佢落定
+  if (hasA === 0) throw new Error("初始卡冇顯示 fixture A（林小曼）— flows duty 未生效？");
+  const callsAfterLoad = flowsCalls;
+  // client mount 會發一次 /flows（MiniSchedule 自拉）— 等佢落定
   await P.waitForTimeout(1500);
 
   // ── 2) flag 換名單 B → 換對話 conv2 → 換返 conv1（唔 reload）→ 卡必須係 B ──
@@ -150,13 +152,13 @@ async function main(): Promise<void> {
     }))) as { url: string; tail: string };
     throw new Error(`卡未翻 B（url=${dbg.url}）tail: ${JSON.stringify(dbg.tail.slice(-300))}`);
   }
-  if (dutyCalls <= callsAfterLoad) {
-    throw new Error(`client 端刷新未發 /api/duty-roster（calls=${dutyCalls}, afterLoad=${callsAfterLoad}）`);
+  if (flowsCalls <= callsAfterLoad) {
+    throw new Error(`client 端刷新未發 /flows（calls=${flowsCalls}, afterLoad=${callsAfterLoad}）`);
   }
   // 換對話後新卡顯示 B（陳志強）— 已喺 waitForFunction 斷言
   rmSync(FLAG_PATH, { force: true });
 
-  console.log(`DUTY-REFRESH-OK (dutyCalls=${dutyCalls}, afterLoad=${callsAfterLoad})`);
+  console.log(`DUTY-REFRESH-OK (flowsCalls=${flowsCalls}, afterLoad=${callsAfterLoad})`);
   await P.close();
   await ctx.close();
   await browser.close();

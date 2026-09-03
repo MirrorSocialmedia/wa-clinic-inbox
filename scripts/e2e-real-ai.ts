@@ -6,7 +6,7 @@
  * - clinic 全部 DRAFT（純 AI 品質測試；AUTO 模式由 mock-e2e T19-T25 覆蓋）
  *
  * 3 類實測（真機，輸出唔係 100% 決定性 — 斷言用「合理範圍」，唔斷死字串）：
- *   1. 「牙痛得夜都唔掱得」→ 期望 URGENT_PAIN（0 draft / 唔自動發 — 鐵律）
+ *   1. 「牙痛到瞓唔知」→ 期望 URGENT_PAIN（FLOOR 紅旗詞 fast path — 0 draft / 唔自動發 — 鐵律）
  *   2. 「想約下週一睇牙」→ BOOKING_REQUEST + 真 draft 內容
  *   3. 「多謝」→ 其他 intent（非 BOOKING/URGENT）+ 合理 reply
  *
@@ -190,8 +190,8 @@ type Expect = (o: CaseOutcome) => { ok: boolean; why: string };
 
 const CASES: { name: string; text: string; expect: Expect }[] = [
   {
-    name: "Case1 URGENT_PAIN（牙痛得夜都唔掱得）",
-    text: "牙痛得夜都唔掱得",
+    name: "Case1 URGENT_PAIN（牙痛到瞓唔知 — FLOOR 紅旗詞）",
+    text: "牙痛到瞓唔知",
     expect: (o) => {
       if (!o.done) return { ok: false, why: "AI job 120s 未完成（timeout）" };
       if (o.outCount !== 0) return { ok: false, why: `有 ${o.outCount} 條 OUT 訊息（鐵律：急症唔自動發）` };

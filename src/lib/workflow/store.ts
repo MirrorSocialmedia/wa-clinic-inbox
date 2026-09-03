@@ -14,6 +14,8 @@ import { Prisma } from "@prisma/client";
 import log from "@/lib/log";
 import { publishControl } from "@/lib/notify";
 import {
+  LEXICON_DEFAULTS,
+  PAIN_TRIAGE_DEFAULTS,
   PARAMS_DEFAULTS,
   PARAMS_SCHEMAS,
   REMINDER_DEFAULTS,
@@ -77,6 +79,9 @@ function codeDefaults<K extends WorkflowKey>(key: K): ParamsOf<K> {
       templateLang: envStr("TEMPLATE_REMINDER_LANG", REMINDER_DEFAULTS.templateLang),
     } as ParamsOf<K>;
   }
+  // ★ Part E（cwi-paintriage-20260903）：兩個新 key 各回自己 defaults（env 救急底 — v1 無）
+  if (key === "pain-triage") return PAIN_TRIAGE_DEFAULTS as ParamsOf<K>;
+  if (key === "lexicon") return LEXICON_DEFAULTS as ParamsOf<K>;
   return SESSION_DEFAULTS as ParamsOf<K>;
 }
 

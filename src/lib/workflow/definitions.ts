@@ -12,7 +12,7 @@
  */
 import { z } from "zod";
 
-export const WORKFLOW_KEYS = ["triage", "booking-session", "reminder"] as const;
+export const WORKFLOW_KEYS = ["triage", "booking-session", "reminder", "pain-triage", "lexicon"] as const;
 export type WorkflowKey = (typeof WORKFLOW_KEYS)[number];
 
 // ── triage ────────────────────────────────────────────────────────────
@@ -62,6 +62,90 @@ export const SESSION_DEFAULTS: z.infer<typeof SessionParams> = {
   staleDisclaimer: "（時段以最終確認為準）",
 };
 
+// ── pain-triage（★ Part E cwi-paintriage-20260903，MD §Part E E.6）──────────────────
+import { DEFAULT_PAIN_QUESTIONS, PainQuestion } from "@/lib/sessions/pain-triage";
+import { floorTermSet } from "@/lib/sessions/red-flags";
+import { EXIT_FORBIDDEN_PHRASES } from "@/lib/sessions/impressions";
+
+/**
+ * 痛症問診 params（playbook 級自訂 — P-6：問題清單/紅旗詞/閾值/文案全開放，流程骨架鎖死）。
+ * 鐵律 enforce（zod refine，API 400）：
+ *   - redFlagTerms 只準收**附加詞** — FLOOR 詞（code 常數）唔准寫入（「刪 FLOOR」物理上無路徑）
+ *   - impressionTemplates / exitDraftTemplate 措辭鐵律 — forbidden 短語零容忍
+ *   - exitDraftTemplate 結構 — ①{impression} ②「先確定」 ③{examination}{window}「想約邊日」必在（文案可改、結構鎖死）
+ */
+export const PainTriageParams = z
+  .object({
+    questions: z.array(PainQuestion).min(3),
+    redFlagTerms: z.record(z.string(), z.array(z.string().min(1).max(40))),
+    severityThreshold: z.number().int().min(5).max(10).default(8),
+    postOpWindowDays: z.number().int().min(1).max(60).default(14),
+    sleepComboRule: z.boolean().default(true),
+    impressionTemplates: z.record(z.string(), z.string().min(1).max(120)).default({}), // 空 = 內建措辭；partial PUT（e2e T102）允許缺省
+    exitDraftTemplate: z.string().min(10).max(240),
+    urgentInternalNote: z.string().min(1).max(160).default("紅旗：{categories} — 請即跟進"),
+    autoReleaseMinutes: z.number().int().min(3).max(240).default(15), // Part A.5 共用
+  })
+  .refine((p) => {
+    const floor = floorTermSet();
+    for (const terms of Object.values(p.redFlagTerms)) {
+      for (const t of terms) if (floor.has(t)) return false; // FLOOR 詞唔准寫入 params
+    }
+    return true;  }, { message: "redFlagTerms 唔准包含內建下限詞（FLOOR）— 佢哋係 code 常數，唔可刪", path: ["redFlagTerms"] })
+  .refine((p) => {
+    for (const v of Object.values(p.impressionTemplates)) {
+      if (EXIT_FORBIDDEN_PHRASES.some((x) => v.includes(x))) return false;
+    }
+    if (EXIT_FORBIDDEN_PHRASES.some((x) => p.exitDraftTemplate.includes(x))) return false;
+    return true;
+  }, { message: "措辭鐵律：模板永唔出現「確診／你係／一定要」", path: ["exitDraftTemplate"] })
+  .refine((p) => {
+    const t = p.exitDraftTemplate;
+    return t.includes("{impression}") && t.includes("{examination}") && t.includes("{window}") && t.includes("先確定") && t.includes("想約邊日");
+  }, { message: "出口模板結構：{impression}、{examination}、{window}、「先確定」、「想約邊日」必在（文案可改、結構鎖死）", path: ["exitDraftTemplate"] });
+export const PAIN_TRIAGE_DEFAULTS: z.infer<typeof PainTriageParams> = {
+  questions: DEFAULT_PAIN_QUESTIONS,
+  redFlagTerms: {}, // 附加詞 only — FLOOR 係 code 常數（red-flags.ts RED_FLAG_FLOOR）
+  severityThreshold: 8,
+  postOpWindowDays: 14,
+  sleepComboRule: true,
+  impressionTemplates: {}, // 空 = 用 impressions.ts 內建措辭
+  exitDraftTemplate: "{impression}實際情況要{examination}睇過先確定。呢類情況建議{window}返嚟檢查，想約邊日？",
+  urgentInternalNote: "紅旗：{categories} — 請即跟進",
+  autoReleaseMinutes: 15,
+};
+
+// ── lexicon（★ Part E E.8 — 新 workflow key）────────────────────────────
+/** 術語 → canonical。全局 ∪ per-clinic（同 term per-clinic 優先）；運行時上限 60 條（超出 log warn 截斷）。 */
+export const LexiconParams = z.object({
+  entries: z.array(
+    z.object({
+      term: z.string().min(1).max(40),
+      canonical: z.string().min(1).max(40),
+      note: z.string().max(80).optional(),
+    })
+  ),
+});
+/** 種子詞表 13 組（MD E.8 完整列表 — 多 term 同 canonical 拆開逐條）。 */
+const L = (term: string, canonical: string, note?: string) => ({ term, canonical, ...(note ? { note } : {}) });
+export const LEXICON_DEFAULTS: z.infer<typeof LexiconParams> = {
+  entries: [
+    L("cool牙", "矯齒"), L("箍牙", "矯齒"), L("戴牙箍", "矯齒"),
+    L("剝牙", "拔牙"), L("脫牙", "拔牙"),
+    L("杜牙根", "根管治療"),
+    L("洗牙", "潔齒"),
+    L("鑲牙", "牙冠"), L("牙套", "牙冠"),
+    L("牙橋", "牙橋"),
+    L("智慧齒", "智慧齒"), L("唪牙", "智慧齒"),
+    L("漂牙", "美白"), L("整白", "美白"),
+    L("崩牙", "崩裂"),
+    L("牙托", "義齒"), L("假牙", "義齒"),
+    L("蛀牙", "齲齒"), L("牙洞", "齲齒"),
+    L("牙肉腫", "牙周問題"), L("牙肉出血", "牙周問題"),
+    L("牙搖", "牙齒鬆動"),
+  ],
+};
+
 // ── reminder ──────────────────────────────────────────────────────────
 /** T-24h 預約提醒掃描（reminder.ts）嘅可調參數。defaults = 原 env 底（REMINDER_MIN/MAX_HOURS、TEMPLATE_REMINDER_NAME/LANG）。 */
 export const ReminderParams = z
@@ -84,10 +168,14 @@ export const PARAMS_SCHEMAS: Record<WorkflowKey, z.ZodType> = {
   triage: TriageParams,
   "booking-session": SessionParams,
   reminder: ReminderParams,
+  "pain-triage": PainTriageParams,
+  lexicon: LexiconParams,
 };
 export type TriageParamsType = z.infer<typeof TriageParams>;
 export type SessionParamsType = z.infer<typeof SessionParams>;
 export type ReminderParamsType = z.infer<typeof ReminderParams>;
+export type PainTriageParamsType = z.infer<typeof PainTriageParams>;
+export type LexiconParamsType = z.infer<typeof LexiconParams>;
 
 // ★ per-key 型（唔好寫成 Record<WorkflowKey, 三選一 union> — 會令 PARAMS_DEFAULTS.triage.x 型檢不過）
 export type ParamsDefaults = {
@@ -95,13 +183,19 @@ export type ParamsDefaults = {
     ? TriageParamsType
     : K extends "booking-session"
       ? SessionParamsType
-      : ReminderParamsType;
+      : K extends "reminder"
+        ? ReminderParamsType
+        : K extends "pain-triage"
+          ? PainTriageParamsType
+          : LexiconParamsType;
 };
 
 export const PARAMS_DEFAULTS: ParamsDefaults = {
   triage: TRIAGE_DEFAULTS,
   "booking-session": SESSION_DEFAULTS,
   reminder: REMINDER_DEFAULTS,
+  "pain-triage": PAIN_TRIAGE_DEFAULTS,
+  lexicon: LEXICON_DEFAULTS,
 };
 
 /** key → params 型別映射（store.getParams 泛型用）。 */
@@ -111,13 +205,16 @@ export type ParamsOf<K extends WorkflowKey> = K extends "triage"
     ? SessionParamsType
     : K extends "reminder"
       ? ReminderParamsType
-      : never;
+      : K extends "pain-triage"
+        ? PainTriageParamsType
+        : LexiconParamsType
+        ;
 
 // ── schemaHints（admin 表單驅動 + API 回傳）— 同 zod schema 一一对应 ────────
 export interface FieldHint {
   name: string;
   label: string;
-  type: "int" | "number" | "string";
+  type: "int" | "number" | "string" | "bool";
   min?: number;
   max?: number;
   maxLength?: number;
@@ -147,6 +244,18 @@ export const SCHEMA_HINTS: Record<WorkflowKey, FieldHint[]> = {
     { name: "templateName", label: "Template 名", type: "string", maxLength: 64 },
     { name: "templateLang", label: "Template 語言", type: "string", maxLength: 16 },
   ],
+  // ★ Part E（cwi-paintriage-20260903）：scalar 欄先入 hints；questions / redFlagTerms / impressionTemplates
+  //   係結構化欄 → UI 自訂編輯器（form JSON 欄）。
+  "pain-triage": [
+    { name: "severityThreshold", label: "痛級紅旗閾值（1–10）", type: "int", min: 5, max: 10 },
+    { name: "postOpWindowDays", label: "術後自動判窗口（日）", type: "int", min: 1, max: 60 },
+    { name: "sleepComboRule", label: "瞓唔到+痛級≥6 組合規則", type: "bool" },
+    { name: "autoReleaseMinutes", label: "auto-release 超時（分鐘）— Part A.5 共用", type: "int", min: 3, max: 240 },
+    { name: "urgentInternalNote", label: "紅旗內部備註模板（{categories}）", type: "string", maxLength: 160 },
+    { name: "exitDraftTemplate", label: "出口草稿模板（{impression}{examination}{window}）", type: "string", maxLength: 240 },
+  ],
+  // lexicon 全部欄 = entries（自訂編輯器）— hints 空。
+  lexicon: [],
 };
 
 /**
@@ -242,6 +351,49 @@ function buildReminderGraph(p: ReminderParamsType): WorkflowGraph {
   };
 }
 
+/** ★ Part E：pain-triage 唯讀流程圖（E.2 fast path + 問診 loop + 紅旗引擎 + 出口）。 */
+function buildPainTriageGraph(p: PainTriageParamsType): WorkflowGraph {
+  const qCount = p.questions.filter((q) => q.enabled).length;
+  return {
+    nodes: [
+      { id: "in", label: "PAIN intent（一般痛，無紅旗詞）", kind: "trigger" },
+      { id: "postop", label: "術後自動判（E.7）", subtitle: `近 ${p.postOpWindowDays} 日治療記錄 → autoPostOp（fail-soft）`, kind: "condition" },
+      { id: "loop", label: "問診 loop", subtitle: `${qCount} 條問句（一 turn 一條）`, kind: "action" },
+      { id: "rf", label: "確定性紅旗 engine（E.4）", subtitle: `FLOOR ∪ 附加詞 / severity≥${p.severityThreshold} / 術後 / 瞓唔到組合${p.sleepComboRule ? "" : "（已關）"}`, kind: "condition" },
+      { id: "urgent", label: "URGENT 全套（P-8）", subtitle: "紅標+StaffNotice+urgent:escalation+AI 收聲 — 鐵律零改動", kind: "action" },
+      { id: "exit", label: "出口 E.5", subtitle: "impression 白名單 + 三句式 L1 草稿俾 staff 發", kind: "action" },
+      { id: "booking", label: "病人覆日期 → BOOKING_REQUEST", subtitle: "現有 booking 流程自然接手（唔使寫橋）", kind: "action" },
+    ],
+    edges: [
+      { from: "in", to: "postop" },
+      { from: "postop", to: "urgent", label: "autoPostOp（即紅旗）" },
+      { from: "postop", to: "loop", label: "未中" },
+      { from: "loop", to: "rf", label: "每輪抽槽後" },
+      { from: "rf", to: "urgent", label: "中即終止" },
+      { from: "rf", to: "loop", label: "未中 → 問下一條" },
+      { from: "loop", to: "exit", label: "齊料 / maxTurns" },
+      { from: "exit", to: "booking", label: "staff 發後" },
+    ],
+  };
+}
+
+/** ★ Part E：lexicon 唯讀圖（纯提示層 — 唔改流程）。 */
+function buildLexiconGraph(p: LexiconParamsType): WorkflowGraph {
+  return {
+    nodes: [
+      { id: "src", label: "全局 ∪ per-店（同 term per-店優先）", subtitle: `${p.entries.length} 條（上限 60，超出截斷+warn）`, kind: "trigger" },
+      { id: "apply", label: "applyLexicon 正規化", subtitle: "紅旗 match 前 + impression 主訴保留原文", kind: "action" },
+      { id: "inject1", label: "注入 classify system prompt 尾", kind: "action" },
+      { id: "inject2", label: "注入 PAIN_TRIAGE 抽槽 prompt", kind: "action" },
+    ],
+    edges: [
+      { from: "src", to: "apply" },
+      { from: "apply", to: "inject1", label: "LLM 理解" },
+      { from: "apply", to: "inject2", label: "LLM 理解" },
+    ],
+  };
+}
+
 /** key + params → 顯示用 graph（store.saveDraft 時生成落庫；admin 前端亦可 live 重算）。
  * 入參鬆型（Record）— admin client 直接餵 DB row 而唔使每 key 具體型別。 */
 export function buildGraph<K extends WorkflowKey>(key: K, params: Record<string, unknown>): WorkflowGraph {
@@ -252,5 +404,9 @@ export function buildGraph<K extends WorkflowKey>(key: K, params: Record<string,
       return buildSessionGraph(params as SessionParamsType);
     case "reminder":
       return buildReminderGraph(params as ReminderParamsType);
+    case "pain-triage":
+      return buildPainTriageGraph(params as PainTriageParamsType);
+    case "lexicon":
+      return buildLexiconGraph(params as LexiconParamsType);
   }
 }

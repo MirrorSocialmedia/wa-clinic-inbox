@@ -216,12 +216,18 @@ void (async () => {
     };
   }
 
-  // (a) 急症：URGENT_PAIN + HIGH + needsHuman + **無 draft**（鐵律 3）
-  const urgent = await mockClassifyAndDraft(mockInput("医生我牙好痛，唔知係點"));
-  assert.strictEqual(urgent.intent, "URGENT_PAIN", "痛 → URGENT_PAIN");
+  // (a) 急症：URGENT_PAIN + HIGH + needsHuman + **無 draft**（鐵律 3）— ★ Part E：只係 FLOOR 紅旗詞直升
+  const urgent = await mockClassifyAndDraft(mockInput("医生我牙痛到瞓唔著，唔知係點"));
+  assert.strictEqual(urgent.intent, "URGENT_PAIN", "FLOOR 紅旗詞 → URGENT_PAIN");
   assert.strictEqual(urgent.urgency, "HIGH", "急症 urgency HIGH");
   assert.strictEqual(urgent.needsHuman, true, "急症 needsHuman=true");
   assert.strictEqual(urgent.draft, null, "URGENT_PAIN 永不生成 draft（鐵律）");
+
+  // (a2) ★ Part E（E.2 新語義）：一般痛（無紅旗詞）→ PAIN（進 PAIN_TRIAGE 問診，唔再自動紅標）
+  const pain = await mockClassifyAndDraft(mockInput("我牙痛"));
+  assert.strictEqual(pain.intent, "PAIN", "「我牙痛」→ PAIN（唔再 URGENT_PAIN）");
+  assert.strictEqual(pain.urgency, "MED", "PAIN urgency MED");
+  assert.strictEqual(pain.draft, null, "PAIN 唔出 draft（問診問題由 session 出）");
 
   // (b) 預約：BOOKING_REQUEST + 有 draft
   const booking = await mockClassifyAndDraft(mockInput("我想預約下週三"));

@@ -9,6 +9,7 @@ import { getWindowState } from "@/lib/wa/window";
 import {
   classifyAndDraft,
   classifySessionTurn,
+  classifyPainTurn,
   getAiConfig,
   isAiMockEnabled,
   recordAiCall,
@@ -32,6 +33,14 @@ import {
 import { confirmBookingCore } from "@/lib/booking/confirm-core";
 // ★ Phase D（cwi-ai-20260825-t4）：workflow 參數化 — 每決策點讀 ACTIVE definition（fail-soft → code defaults）
 import { getParams } from "@/lib/workflow/store";
+import { fillVars } from "@/lib/workflow/definitions";
+// ★ Part E（cwi-paintriage-20260903）：PAIN_TRIAGE 痛症分流（E.2 fast path / E.3 session / E.4 紅旗 / E.7 術後 / E.8 lexicon）
+import { getLexicon, applyLexicon } from "@/lib/sessions/lexicon";
+import { matchRedFlagTerms, effectiveRedFlagTerms } from "@/lib/sessions/red-flags";
+import { painStep, parsePainState, PAIN_SESSION_TTL_MS } from "@/lib/sessions/pain-triage";
+import { phoneHash } from "@/lib/phone-hash";
+import { hkDateOffset } from "@/lib/availability";
+import { lookupPatient, fetchAppointments } from "@/lib/workforce/client";
 import { sendBookingFlow, WindowClosedError } from "@/lib/flows/send";
 
 /**
@@ -156,6 +165,31 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     }
   }
 
+  // ── ★ Part E（cwi-paintriage-20260903，E.3）：痛症問診 session 分流（同 Phase C booking session 模式）──
+  // active PAIN_TRIAGE session → handlePainTriageTurn；真人接手 = session 即讓路
+  const activePainSession = await prisma.painTriageSession.findFirst({
+    where: { conversationId: conv.id, status: "ACTIVE", expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: "desc" },
+  });
+  if (activePainSession) {
+    if (conv.assigneeId !== null) {
+      // 真人接手 = session 即讓路（同七閘 assigned 語義一致）
+      await prisma.painTriageSession.update({
+        where: { id: activePainSession.id },
+        data: { status: "HANDOFF", closeReason: "HANDOFF" },
+      });
+      log.info(
+        { painSessionId: activePainSession.id, conversationId: conv.id },
+        "pain-triage: staff claimed → HANDOFF（讓路，跌落普通 classify）"
+      );
+    } else if (msg.type !== "text") {
+      // 媒體訊息：Phase A 通知照出（上面已行），session 唔郁、唔覆
+      return { ok: true, painSession: activePainSession.id, skipped: "media-in-pain-session" };
+    } else {
+      return await handlePainTriageTurn(activePainSession, msg, conv, clinic);
+    }
+  }
+
   const recent = await prisma.message.findMany({
     // ★ Fix A（cwi-fix-20260825-f1）：INTERNAL 備註（type=note）絕不入 LLM prompt —
     //   msgLine 對非 text 類型會輸出 [type body]，唔 filter = 員工內部討論影響草稿/AUTO 覆文。
@@ -207,6 +241,22 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     throw err;
   }
   await recordAiCall(true, undefined, result.latencyMs, result.tokens);
+
+  // ★ Part E（cwi-paintriage-20260903，E.2）：確定性紅旗 fast path — 訊息本身含 FLOOR ∪ params 紅旗詞
+  //   （lexicon canonical 化後）→ 直升 URGENT_PAIN（fast path 唔問診；E.4 同一份詞表；LLM 只抽槽唔判級）。
+  //   喺 COMPLAINT 通知之前行 — 紅旗 recall 優先（投訴文含紅旗詞 → 紅旗勝）。
+  const ptLex = msg.type === "text" && msg.body ? await getLexicon(conv.clinicId) : [];
+  const ptParams = await getParams("pain-triage", conv.clinicId);
+  if (msg.type === "text" && msg.body) {
+    const rf = matchRedFlagTerms([applyLexicon(msg.body, ptLex)], ptParams);
+    if (rf.hit && result.intent !== "URGENT_PAIN") {
+      log.info(
+        { clinic: clinic.code, wamid: msg.waMessageId, categories: rf.categories, terms: rf.terms },
+        "pain-triage: fast-path red flag (deterministic) → URGENT_PAIN"
+      );
+      result = { ...result, intent: "URGENT_PAIN", urgency: "HIGH", needsHuman: true, draft: null };
+    }
+  }
 
   // ★ Phase C (cwi-sess-20260824-c1)：投訴 → 內部通知軌（HANDOFF_REQUEST — 要真人跟進）
   //   R2 鐵律：commit-then-emit（create 已 commit 先發 socket）。
@@ -267,6 +317,30 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       return await handleSessionTurn(session, msg, conv, clinic); // 觸發訊息本身就係第一輪
     }
     // L1/L2 → 跌落現有 draft/AUTO 行為
+  }
+
+  // ── ★ Part E（cwi-paintriage-20260903，E.2/E.3）：PAIN intent（無紅旗詞）→ 開 PAIN_TRIAGE 問診 session ──
+  //   觸發訊息 = 第一輪（同 booking session 模式）。P-4：出口固定 L1 草稿俾 staff 發（唔受 AutomationPolicy
+  //   level 控制 — 無紅旗出口唔係自動動作）；over-window 唔開（session reply 係自動覆 — 發唔出，同 C6 同語義）。
+  if (
+    win.open &&
+    result.intent === "PAIN" &&
+    msg.type === "text" &&
+    updatedConv.assigneeId === null &&
+    !activePainSession
+  ) {
+    // E.7 術後自動判（fail-soft 零 throw：無 waId / 索引未 build / 無 match / fail → false + 問診 fallback）
+    const autoPostOp = await resolveAutoPostOp(conv, contact, clinic, ptParams.postOpWindowDays);
+    const session = await prisma.painTriageSession.create({
+      data: {
+        conversationId: conv.id,
+        clinicId: conv.clinicId,
+        autoPostOp,
+        slots: { slots: {}, asked: [] } as Prisma.InputJsonValue,
+        expiresAt: new Date(Date.now() + PAIN_SESSION_TTL_MS),
+      },
+    });
+    return await handlePainTriageTurn(session, msg, conv, clinic);
   }
 
   // ── 4. AI 草稿（鐵律：URGENT_PAIN / HIGH 永不生成 — code 層第一重擋） ─────
@@ -890,8 +964,13 @@ async function sendSessionReply(
   sessionId: string,
   conv: { id: string },
   text: string,
-  action: string
+  action: string,
+  // ★ Part E（cwi-paintriage-20260903）：pain session 共用同一 outbound 殼 — bookingSessionId=null + 獨立 audit action
+  opts?: { bookingSessionId?: string | null; auditAction?: string; logTag?: string }
 ): Promise<string | null> {
+  const bookingSessionId = opts?.bookingSessionId === null ? null : (opts?.bookingSessionId ?? sessionId);
+  const auditAction = opts?.auditAction ?? "AI_SESSION_REPLY";
+  const tag = opts?.logTag ?? "session";
   // cwi-window-20260901（P2 / W-2）：過窗 → session reply 發唔出（會變 FAILED outbound）— skip 呢輪，
   // session 照常（病人下條 inbound 會重新開窗接力）。
   const freshConv = await prisma.conversation.findUnique({
@@ -899,7 +978,7 @@ async function sendSessionReply(
     select: { lastInboundAt: true },
   });
   if (!getWindowState(freshConv?.lastInboundAt).open) {
-    log.warn({ sessionId, conversationId: conv.id }, "session: reply skipped — window closed（無 outbound）");
+    log.warn({ sessionId, conversationId: conv.id }, `${tag}: reply skipped — window closed（無 outbound）`);
     return null;
   }
   const now = new Date();
@@ -914,7 +993,7 @@ async function sendSessionReply(
         status: "QUEUED",
         sentByStaffId: null,
         aiAutoSent: true,
-        bookingSessionId: sessionId,
+        bookingSessionId,
         // cwi-window-20260901（P1）：session 回覆（窗口內）= SERVICE
         billingCategory: "SERVICE",
         waTimestamp: now,
@@ -928,7 +1007,7 @@ async function sendSessionReply(
       .create({
         data: {
           staffId: null,
-          action: "AI_SESSION_REPLY",
+          action: auditAction,
           entity: "Message",
           entityId: outMsg.id,
           // metadata only：sessionId + action（零 reply 原文）
@@ -943,7 +1022,7 @@ async function sendSessionReply(
     // enqueue fail → 唔重試，session 照 patch（病人下條訊息自然接力）
     log.error(
       { sessionId, conversationId: conv.id, err: err instanceof Error ? err.message : String(err) },
-      "session: reply enqueue failed（session 照常）"
+      `${tag}: reply enqueue failed（session 照常）`
     );
     return null;
   }
@@ -1001,6 +1080,242 @@ async function writeSessionPatientFacts(opts: {
       },
     });
   }
+}
+
+// ── ★ Part E（cwi-paintriage-20260903）：PAIN_TRIAGE 痛症問診 runner ──────────────────
+// 跟 handleSessionTurn 模式：最近 IN text → classifyPainTurn（LLM 只抽槽唔判級）
+//   → painStep（pure — 即行 evaluateRedFlags，中即終止）→ patch → effects → replyText。
+// PII 鐵律：log metadata only；slots = 症狀 business metadata（零病人自由文本）；reply 原文零 log。
+
+/**
+ * E.7 術後自動判（開波 hook）：phoneHash match → 近 postOpWindowDays 有本店治療記錄 → true（即紅旗）。
+ * fail-soft 零 throw：無 waId / PHONE_HASH_KEY 未設 / workforce 離線 / 無 match / appointments fail → false（問診 fallback）。
+ */
+async function resolveAutoPostOp(
+  conv: { id: string },
+  contact: { waId: string | null } | null,
+  clinic: { code: string },
+  windowDays: number
+): Promise<boolean> {
+  try {
+    if (!contact?.waId) return false;
+    const hash = phoneHash(contact.waId);
+    const lk = await lookupPatient(hash);
+    if (!lk.matches || lk.matches.length === 0) return false; // 索引未 build / 無 match
+    const ids = new Set(lk.matches.map((m) => m.patientApricotId));
+    const appts = await fetchAppointments(hash, hkDateOffset(-windowDays), hkDateOffset(0));
+    const hit = appts.appointments.some(
+      (a) => ids.has(a.patientApricotId) && a.clinicCode === clinic.code
+    );
+    if (hit) {
+      log.info(
+        { clinic: clinic.code, conversationId: conv.id, days: windowDays },
+        "pain-triage: auto post-op hit"
+      );
+    }
+    return hit;
+  } catch (err) {
+    log.warn(
+      { clinic: clinic.code, conversationId: conv.id, err: err instanceof Error ? err.message : String(err) },
+      "pain-triage: post-op check degraded → false（問診 fallback）"
+    );
+    return false;
+  }
+}
+
+async function handlePainTriageTurn(
+  session: {
+    id: string;
+    conversationId: string;
+    clinicId: string;
+    status: string;
+    slots: Prisma.JsonValue;
+    turns: number;
+    noProgress: number;
+    autoPostOp: boolean;
+  },
+  msg: { id: string; waMessageId: string | null; type: string; waTimestamp: Date; aiDraftId: string | null },
+  conv: { id: string; clinicId: string; contactId: string; aiSummary: string | null },
+  clinic: { id: string; code: string; name: string }
+): Promise<Record<string, unknown>> {
+  const sessionId = session.id;
+  const state0 = parsePainState(session.slots);
+  const ptParams = await getParams("pain-triage", conv.clinicId);
+  const lex = await getLexicon(conv.clinicId);
+
+  // 1. 最近 6 條 IN text（canonical = lexicon 正規化後 — 紅旗 match；原文 — impression 主訴，見 lexicon.ts 註）
+  const recent = await prisma.message.findMany({
+    where: { conversationId: conv.id, direction: "IN", type: "text" },
+    // 同秒 tie → createdAt 定序（同 booking session 嘅非確定性修）
+    orderBy: [{ waTimestamp: "desc" }, { createdAt: "desc" }],
+    take: 6,
+  });
+  const recentIn = [...recent].reverse().map((m) => m.body ?? "");
+  const rawTexts = recentIn.map((t) => applyLexicon(t, lex));
+
+  // 2. LLM 抽槽（每條病人訊息一次 call）— 失敗：record + throw（BullMQ retry；session 唔郁、唔覆）
+  const aiOut = await classifyPainTurn({
+    todayHk: hkToday(),
+    clinicName: clinic.name,
+    collected: state0.slots,
+    recentIn,
+    redFlagTerms: effectiveRedFlagTerms(ptParams),
+    lexicon: lex,
+  }).catch(async (err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    await recordAiCall(false, message);
+    log.error(
+      { painSessionId: sessionId, wamid: msg.waMessageId, err: message },
+      "pain-triage: LLM call failed — session 唔郁、唔覆（BullMQ retry）"
+    );
+    throw err;
+  });
+  await recordAiCall(true);
+
+  // 3. engine step（pure — 紅旗即行、中即終止）
+  const out = painStep(
+    { state: state0, status: session.status, turns: session.turns, noProgress: session.noProgress },
+    aiOut,
+    { params: ptParams, rawTexts, autoPostOp: session.autoPostOp }
+  );
+
+  // 4. 落 patch
+  await prisma.painTriageSession.update({
+    where: { id: sessionId },
+    data: {
+      slots: { slots: out.patch.state.slots, asked: out.patch.state.asked } as Prisma.InputJsonValue,
+      status: out.patch.status,
+      turns: out.patch.turns,
+      noProgress: out.patch.noProgress,
+      closeReason: out.patch.closeReason,
+      impression: out.patch.impression,
+    },
+  });
+
+  // 5. effects 逐個執行
+  const reply = out.replyText;
+  for (const eff of out.effects) {
+    switch (eff.kind) {
+      case "NONE":
+        break;
+      case "URGENT_ESCALATE": {
+        // P-8：中紅旗 = 現有 URGENT 全套（紅標 + StaffNotice + urgent:escalation + AI 收聲）— 鐵律零改動
+        const c = await prisma.contact.findUnique({ where: { id: conv.contactId } });
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: { urgent: true, intent: "URGENT_PAIN", urgency: "HIGH" },
+        });
+        await prisma.staffNotice.create({
+          data: {
+            clinicId: conv.clinicId,
+            conversationId: conv.id,
+            kind: "URGENT_ESCALATION",
+            // {categories} = engine 命中類（business metadata — 零病人原文）
+            title: fillVars(ptParams.urgentInternalNote, { categories: eff.categories.join("/") }),
+            meta: { wamid: msg.waMessageId, painSessionId: sessionId, categories: eff.categories },
+          },
+        });
+        publishNotify(conv.clinicId, "urgent:escalation", {
+          conversationId: conv.id,
+          intent: "URGENT_PAIN",
+          urgency: "HIGH",
+          contactId: conv.contactId,
+          contactName: c?.profileName ?? null,
+          waMessageId: msg.waMessageId,
+        });
+        break;
+      }
+      case "NOTIFY_STAFF": {
+        await prisma.staffNotice.create({
+          data: {
+            clinicId: conv.clinicId,
+            conversationId: conv.id,
+            kind: "HANDOFF_REQUEST",
+            title: eff.title,
+            meta: { painSessionId: sessionId },
+          },
+        });
+        publishNotify(conv.clinicId, "notice:new", { conversationId: conv.id, kind: "HANDOFF_REQUEST" });
+        break;
+      }
+      case "CREATE_DRAFT": {
+        // 出口 E.5：L1 草稿俾 staff 發（P-4：唔自動入 booking session）；冪等同主流程（unique + 前置查）
+        let existing = await prisma.aiDraft.findUnique({
+          where: { conversationId_inReplyToMessageId: { conversationId: conv.id, inReplyToMessageId: msg.id } },
+        });
+        if (!existing) {
+          try {
+            const freshConv = await prisma.conversation.findUnique({
+              where: { id: conv.id },
+              select: { lastInboundAt: true },
+            });
+            existing = await prisma.aiDraft.create({
+              data: {
+                conversationId: conv.id,
+                inReplyToMessageId: msg.id,
+                draftText: eff.draftText,
+                model: "pain-triage-engine", // deterministic — 零 LLM
+                latencyMs: 0,
+                intent: "PAIN",
+                mode: getWindowState(freshConv?.lastInboundAt).open ? "NORMAL" : "COPY_ONLY",
+              },
+            });
+          } catch (err) {
+            if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+              existing = await prisma.aiDraft.findUnique({
+                where: { conversationId_inReplyToMessageId: { conversationId: conv.id, inReplyToMessageId: msg.id } },
+              });
+            } else {
+              throw err;
+            }
+          }
+        }
+        if (existing && msg.aiDraftId !== existing.id) {
+          await prisma.message.update({ where: { id: msg.id }, data: { aiDraftId: existing.id } });
+        }
+        break;
+      }
+    }
+  }
+
+  // 6. 出口（非紅旗 COMPLETED）：AI 分析側欄 = triage 結構化摘要（deterministic — 零 LLM）
+  if (out.patch.status === "COMPLETED" && out.patch.closeReason !== "RED_FLAG") {
+    const s = out.patch.state.slots;
+    const parts: string[] = [];
+    if (s.toothLocation) parts.push(s.toothLocation);
+    if (s.severity !== null) parts.push(`痛級 ${s.severity}/10`);
+    if (s.durationDays !== null) parts.push(`痛咗 ${s.durationDays} 日`);
+    if (out.patch.impression) parts.push(`傾向 ${out.patch.impression}`);
+    const c = await prisma.contact.findUnique({ where: { id: conv.contactId } });
+    const summary = scrubAiSummary(`痛症問診：${parts.join("、") || "資料未齊"}`, {
+      profileName: c?.profileName,
+      waId: c?.waId,
+    }).slice(0, 50);
+    await prisma.conversation.update({ where: { id: conv.id }, data: { aiSummary: summary } });
+  }
+
+  // 7. replyText 非 null → 共用 session reply 殼（bookingSessionId=null；過窗 skip 喺殼內）
+  if (reply !== null) {
+    await sendSessionReply(sessionId, conv, reply, aiOut.action, {
+      bookingSessionId: null,
+      auditAction: "AI_PAIN_SESSION_REPLY",
+      logTag: "pain-triage",
+    });
+  }
+
+  // 8. log metadata only（零 reply 原文、零病人姓名）
+  log.info(
+    {
+      painSessionId: sessionId,
+      status: out.patch.status,
+      turns: out.patch.turns,
+      action: aiOut.action,
+      effects: out.effects.map((e) => e.kind),
+    },
+    "pain-triage: turn processed"
+  );
+
+  return { ok: true, painSession: sessionId, status: out.patch.status };
 }
 
 export function startAiWorker(): Worker {

@@ -267,6 +267,7 @@ q "DELETE FROM \"Alert\" WHERE type='backup_failed'" >/dev/null 2>&1 || true  # 
 # cwi-fix-20260825-f1 hermetic：PC 段殘留測試 row（L3 policy / session / booking）—
 #   不清會污染下一 run 嘅 T14/T19/T23/T25 BOOKING_REQUEST 路由（run5 殘留 L3 row 實測 16 項紅事故）
 q "DELETE FROM \"BookingSession\"" >/dev/null 2>&1 || true
+q "DELETE FROM \"PainTriageSession\"" >/dev/null 2>&1 || true  # Part E（cwi-paintriage-20260903）：痛症問診 session hermetic
 q "DELETE FROM \"BookingRequest\"" >/dev/null 2>&1 || true
 q "DELETE FROM \"AutomationPolicy\"" >/dev/null 2>&1 || true
 # 清晒上次 run 殘留嘅 BullMQ job — 舊 job 會被新 worker redeliver → 舊 EPOCH 數據
@@ -475,7 +476,7 @@ curl -sf "$BASE/healthz" >/dev/null 2>&1 && pass "T12 worker/server 存活" || f
 echo "[10/10] T13-T17: AI triage..."
 PATIENT_AI1="8526003${EPOCH}"
 WAMID_AI1="wamid.E2E_AI_URGENT_${EPOCH}"
-pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI1" --text "医生我牙好痛" --wamid "$WAMID_AI1" --name "E2E-A-URGENT" >/dev/null || fail "T13 mock-inbound POST"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AI1" --text "医生我牙痛到瞓唔著" --wamid "$WAMID_AI1" --name "E2E-A-URGENT" >/dev/null || fail "T13 mock-inbound POST"
 if wait_for "SELECT \"intent\" i, \"urgency\" u, (\"urgent\")::text ug FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" \
   '[{"i":"URGENT_PAIN","u":"HIGH","ug":"true"}]' 30; then
   pass "T13 URGENT_PAIN + urgency HIGH + urgent=true（DB）"
@@ -516,7 +517,7 @@ DRAFT2_ID=$(q "SELECT id FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$AI2_MSG
 # ── T14.5. H-3 summary 去識別化：bait（mock AI 回帶 profileName）→ scrub → DB 0 hit ──
 echo "  T14.5: summary scrub bait..."
 BAIT_NAME="E2E-BAIT-SUM-7f3a"   # 同 src/lib/ai/mock.ts E2E_BAIT_SUM_TOKEN（mock summary 固定含佢）
-BAIT_PAT="8526009${EPOCH}1"
+BAIT_PAT="8526009${EPOCH}"   # ★ cwi-paintriage-20260903 fix：原 ${EPOCH}1 = 18 位 → pii-scan idCard regex 誤中（T33 假紅）
 WAMID_BAIT="wamid.E2E_BAIT_${EPOCH}"
 pnpm -s mock-inbound message --clinic TKW --from "$BAIT_PAT" --text "e2e bait 肚痛" --wamid "$WAMID_BAIT" --name "$BAIT_NAME" >/dev/null || fail "T14.5 mock-inbound POST"
 if wait_for "SELECT (\"aiSummary\" IS NOT NULL)::text s FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$BAIT_PAT'" '[{"s":"true"}]' 30; then
@@ -601,7 +602,7 @@ check "T17 HISTORY/APP_ECHO 訊息全部無 aiQueue job" "$HIST_JOB_HIT" "0"
 
 # ── T18. log PII 抽查（鐵律 1：訊息原文永不入 log） ────────────────────────
 LOGPII=0
-for kw in "e2e 第一則" "医生我牙好痛" "我想預約下週" "想問下埋門時間" "再問一次時間" "mf msg" "e2e 店員 App 覆" "e2e 發送測試"; do
+for kw in "e2e 第一則" "医生我牙痛到瞓唔著" "我想預約下週" "想問下埋門時間" "再問一次時間" "mf msg" "e2e 店員 App 覆" "e2e 發送測試"; do
   if grep -qF "$kw" /tmp/e2e-server.log /tmp/e2e-worker.log /tmp/e2e-worker-fail.log /tmp/e2e-worker2.log 2>/dev/null; then
     echo "    ❌ PII leak in log: $kw"
     LOGPII=1
@@ -1159,8 +1160,9 @@ DC=$(grep -oE '"staffName":"[^"]*"' /tmp/e2e-duty.json | wc -l | tr -d ' ')
 check "T38 DUTY_MOCK fixture = 3 人" "$DC" "3"
 INBOX_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_TKW'" | jf id)
 curl -s -b "$COOKIE_TKW" "$BASE/inbox?conv=$INBOX_CONV" -o /tmp/e2e-inbox.html 2>/dev/null
-grep -q "當值（" /tmp/e2e-inbox.html || { echo "    ❌ T38 /inbox 側欄冇「今日當值」卡"; T38=1; }
-grep -q "林小曼" /tmp/e2e-inbox.html || { echo "    ❌ T38 側欄卡冇 fixture 人員"; T38=1; }
+# ★ cwi-paintriage-20260903 fix：D.4（cwi-schedv2-20260903）移除咗 SSR 當值卡管線（側欄改 MiniSchedule client 自拉 /api/flows/slots）
+#   → SSR HTML 冇「當值（」/ 人員文字（stale grep 假紅）；client 端卡已由 T95（browser-level）斷言覆蓋
+grep -q '<html' /tmp/e2e-inbox.html || { echo "    ❌ T38 /inbox 頁面唔存在"; T38=1; }
 DE_OUT=$(pnpm -s e2e:duty --cookie "$COOKIE_TKW" 2>&1)
 echo "$DE_OUT" | grep -q "DUTY-403-OK" || { echo "    ❌ T38 別店 scope 未 403"; T38=1; }
 echo "$DE_OUT" | grep -q "DUTY-WHITELIST-OK" || { echo "    ❌ T38 欄位白名單有漏"; T38=1; }
@@ -2547,7 +2549,9 @@ for i in $(seq 1 20); do
       #   20 併發下 Next dev 偶爾 transient drop 一個 request — 靜默 drop 會令 60/60 計數假負
       T76_OK=0
       for T76_ATT in 1 2 3; do
-        T76_OUT=$(timeout 15 "$TSX" scripts/mock-inbound.ts message --clinic TKW --from "852610${i}${EPOCH}" --text "e2e T76 order $i.$j" --wamid "wamid.E2E_ORDER_${EPOCH}_${i}_${j}" --name "E2E-T76-P${i}" --ts "$((T76_BASE + i * 3 + j))" 2>&1)
+        # ★ cwi-paintriage-20260903 fix：i≥10 時 852610${i}${EPOCH} = 18 位數字 → pii-scan idCard regex 誤中（T33 假紅）→ 換 85262 前綴（17 位）
+        T76_NUM="852610${i}${EPOCH}"; [ "$i" -ge 10 ] && T76_NUM="85262${i}${EPOCH}"
+        T76_OUT=$(timeout 15 "$TSX" scripts/mock-inbound.ts message --clinic TKW --from "$T76_NUM" --text "e2e T76 order $i.$j" --wamid "wamid.E2E_ORDER_${EPOCH}_${i}_${j}" --name "E2E-T76-P${i}" --ts "$((T76_BASE + i * 3 + j))" 2>&1)
         case "$T76_OUT" in *OK*) T76_OK=1; break ;; esac
         sleep 1
       done
@@ -2564,7 +2568,7 @@ if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\" LIKE
 else
   fail "T76 60/60 訊息落庫"
 fi
-check "T76 20 新對話建立" "$(q "SELECT count(*)::text c FROM \"Conversation\" cv JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\" LIKE '852610%${EPOCH}'" | jf c)" "20"
+check "T76 20 新對話建立" "$(q "SELECT count(*)::text c FROM \"Conversation\" cv JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE (x.\"waId\" LIKE '852610%${EPOCH}' OR x.\"waId\" LIKE '85262%${EPOCH}')" | jf c)" "20"
 T76_INVERT=$(q "SELECT count(*)::text c FROM (SELECT \"waTimestamp\" ts, LAG(\"waTimestamp\") OVER (PARTITION BY \"conversationId\" ORDER BY \"createdAt\") prev FROM \"Message\" WHERE \"waMessageId\" LIKE 'wamid.E2E_ORDER_${EPOCH}%') t WHERE prev IS NOT NULL AND prev >= ts" | jf c)
 check "T76 每對話 DB 順序 = 發送順序（0 逆轉）" "$T76_INVERT" "0"
 
@@ -3293,13 +3297,24 @@ q "DELETE FROM \"WorkflowDefinition\" WHERE \"clinicId\" IS NULL" >/dev/null 2>&
 wf_put() { # wf_put <key> <clinicId 可空> <params-json> → $W_CODE $W_OUT
   local cid_json="null"
   [ -n "$2" ] && cid_json="\"$2\""
-  W_CODE=$(curl -s -o /tmp/e2e-wf-put.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT "$BASE/api/admin/workflows/$1" \
-    -H 'Content-Type: application/json' -d "{\"clinicId\":$cid_json,\"params\":$3}")
+  # ★ cwi-paintriage-20260903：dev loadManifest race（已知 flake — TOOLS.md T4）500 重試一次
+  local _att
+  for _att in 1 2; do
+    W_CODE=$(curl -s -o /tmp/e2e-wf-put.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PUT "$BASE/api/admin/workflows/$1" \
+      -H 'Content-Type: application/json' -d "{\"clinicId\":$cid_json,\"params\":$3}")
+    if [ "$W_CODE" = "201" ] || [ "$W_CODE" != "500" ]; then break; fi
+    sleep 1
+  done
   W_OUT=$(cat /tmp/e2e-wf-put.json)
 }
 wf_publish() { # wf_publish <key> <defId> → $W_CODE $W_OUT
-  W_CODE=$(curl -s -o /tmp/e2e-wf-pub.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/workflows/$1/publish" \
-    -H 'Content-Type: application/json' -d "{\"defId\":\"$2\"}")
+  local _att
+  for _att in 1 2; do
+    W_CODE=$(curl -s -o /tmp/e2e-wf-pub.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/workflows/$1/publish" \
+      -H 'Content-Type: application/json' -d "{\"defId\":\"$2\"}")
+    if [ "$W_CODE" = "200" ] || [ "$W_CODE" != "500" ]; then break; fi
+    sleep 1
+  done
   W_OUT=$(cat /tmp/e2e-wf-pub.json)
 }
 wf_revert() { # wf_revert <key> <clinicId 可空> <toVersion> → $W_CODE $W_OUT
@@ -5549,6 +5564,202 @@ pass "WIN cwi-window-20260901 T176 全鏈（/admin/usage RBAC + 數字對帳 + �
 # 詳細見 scripts/e2e-notify-gate.sh（亦可 N_STANDALONE=1 單行 N 段）。
 source scripts/e2e-notify-gate.sh
 run_notify_gate
+
+# ══════════════ E. cwi-master B4（Part E PAIN_TRIAGE + Lexicon）T97–T104 ══════════════
+# 核心：「牙痛」唔再自動紅標（詞觸發 → 流程結論觸發）：牙痛 → PAIN intent → PAIN_TRIAGE 問診 session；
+# 升級由確定性紅旗規則決定（FLOOR ∪ params ∪ slots ∪ severity ∪ 術後），LLM 只抽槽唔判級（鐵律）。
+# T13 = 新語義迴歸（FLOOR 詞仍直升）。七閘 URGENT/COMPLAINT 語義零改動（T13/T20/W/N 段全跑）。
+echo "[E/8] Part E: PAIN_TRIAGE + Lexicon (T97-T104)"
+# 專用 worker：WORKFLOW_PARAMS_TTL_MS=0 → T102 params 即時生效/還原（唔等 TTL）
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+WORKFLOW_PARAMS_TTL_MS=0 nohup pnpm worker >/tmp/e2e-worker-pain.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 60); do grep -q "all workers running" /tmp/e2e-worker-pain.log 2>/dev/null && break; sleep 1; done
+grep -q "all workers running" /tmp/e2e-worker-pain.log 2>/dev/null || { echo "  ❌ FATAL: E worker 未起"; FAIL=$((FAIL + 1)); }
+
+# E0：TKW → DRAFT（L1 草稿唔自動發 — 決定性斷言；T100 出口固定 L1 俾 staff）
+patch_aimode "$TKW_CLINIC_ID" DRAFT /tmp/e2e-e0.json; CODE=$PAM_CODE
+check "E0 TKW aiMode=DRAFT → 200" "$CODE" "200"
+
+# ── T97. 「我牙痛」唔紅標（新語義 — 進 PAIN_TRIAGE 問診）──────────────────────────────
+E97_WA="8526781${EPOCH}"; E97_WID="wamid.E2E_E97_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$E97_WA" --text "我牙痛" --wamid "$E97_WID" --name "E2E E97" >/dev/null || fail "T97 POST"
+if wait_for "SELECT c.\"intent\" i, (c.\"urgent\")::text ug, c.\"urgency\" u FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E97_WA'" '[{"i":"PAIN","ug":"false","u":"MED"}]' 30; then
+  pass "T97 「我牙痛」→ PAIN（唔紅標）"
+else
+  fail "T97 PAIN 唔紅標"
+fi
+E97_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E97_WA'" | jf id)
+check "T97 問診 session ACTIVE" "$(q "SELECT count(*)::text c FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$E97_CONV' AND s.\"status\"='ACTIVE'" | jf c)" "1"
+E97_Q=$(q "SELECT \"body\" b FROM \"Message\" WHERE \"conversationId\"='$E97_CONV' AND \"direction\"='OUT' AND type='text' ORDER BY \"createdAt\" DESC LIMIT 1" | jf b)
+case "$E97_Q" in
+  *邊隻牙痛*) pass "T97 第一問已發（location）" ;;
+  *) fail "T97 第一問已發（got: ${E97_Q:0:40}）" ;;
+esac
+check "T97 零紅旗 notice" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$E97_CONV'" | jf c)" "0"
+check "T97 零 draft（問診中）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$E97_CONV'" | jf c)" "0"
+
+# ── T98. 問診中講腫 → URGENT 全套（紅標 + StaffNotice + escalation + AI 收聲）────────
+E98_WA="8526782${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$E98_WA" --text "我牙痛" --wamid "wamid.E2E_E98a_${EPOCH}" --name "E2E E98" >/dev/null || fail "T98 POST1"
+wait_for "SELECT count(*)::text c FROM \"PainTriageSession\" s JOIN \"Conversation\" c ON c.id=s.\"conversationId\" JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E98_WA' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30
+sleep 2
+E98_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E98_WA'" | jf id)
+E98_OUT_BEFORE=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$E98_CONV' AND \"direction\"='OUT' AND type='text'" | jf c)
+pnpm -s mock-inbound message --clinic TKW --from "$E98_WA" --text "右後牙，塊面腫咗" --wamid "wamid.E2E_E98b_${EPOCH}" --name "E2E E98" >/dev/null || fail "T98 POST2"
+if wait_for "SELECT c.\"intent\" i, (c.\"urgent\")::text ug, c.\"urgency\" u FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E98_WA'" '[{"i":"URGENT_PAIN","ug":"true","u":"HIGH"}]' 30; then
+  pass "T98 問診中紅旗 → URGENT_PAIN（紅標）"
+else
+  fail "T98 URGENT_PAIN"
+fi
+check "T98 session COMPLETED" "$(q "SELECT s.\"status\"::text st FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$E98_CONV'" | jf st)" "COMPLETED"
+check "T98 closeReason=RED_FLAG" "$(q "SELECT s.\"closeReason\" r FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$E98_CONV'" | jf r)" "RED_FLAG"
+check "T98 StaffNotice URGENT_ESCALATION" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$E98_CONV' AND kind='URGENT_ESCALATION'" | jf c)" "1"
+E98_OUT_AFTER=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$E98_CONV' AND \"direction\"='OUT' AND type='text'" | jf c)
+check "T98 AI 收聲（零新 OUT）" "$E98_OUT_AFTER" "$E98_OUT_BEFORE"
+check "T98 零 draft（鐵律 3）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$E98_CONV'" | jf c)" "0"
+grep -q "URGENT_ESCALATE" /tmp/e2e-worker-pain.log 2>/dev/null && pass "T98 worker log URGENT_ESCALATE effect" || fail "T98 worker log URGENT_ESCALATE"
+
+# ── T99. severity threshold 8 分界：9 → 紅旗 / 5 → 唔升級 ──────────────────────────
+E99A_WA="8526783${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$E99A_WA" --text "我牙痛" --wamid "wamid.E2E_E99a1_${EPOCH}" --name "E2E E99A" >/dev/null || fail "T99A POST1"
+wait_for "SELECT count(*)::text c FROM \"PainTriageSession\" s JOIN \"Conversation\" c ON c.id=s.\"conversationId\" JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E99A_WA' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30
+sleep 2
+pnpm -s mock-inbound message --clinic TKW --from "$E99A_WA" --text "右後牙，痛9分" --wamid "wamid.E2E_E99a2_${EPOCH}" --name "E2E E99A" >/dev/null || fail "T99A POST2"
+if wait_for "SELECT (c.\"urgent\")::text ug FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E99A_WA'" '[{"ug":"true"}]' 30; then
+  pass "T99 severity 9 >= 8 → 紅旗（urgent）"
+else
+  fail "T99A severity 9 紅旗"
+fi
+E99B_WA="8526784${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$E99B_WA" --text "我牙痛" --wamid "wamid.E2E_E99b1_${EPOCH}" --name "E2E E99B" >/dev/null || fail "T99B POST1"
+wait_for "SELECT count(*)::text c FROM \"PainTriageSession\" s JOIN \"Conversation\" c ON c.id=s.\"conversationId\" JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E99B_WA' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30
+sleep 2
+pnpm -s mock-inbound message --clinic TKW --from "$E99B_WA" --text "左前牙，痛5分" --wamid "wamid.E2E_E99b2_${EPOCH}" --name "E2E E99B" >/dev/null || fail "T99B POST2"
+wait_for "SELECT s.\"turns\" t FROM \"PainTriageSession\" s JOIN \"Conversation\" c ON c.id=s.\"conversationId\" JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E99B_WA'" '[{"t":2}]' 30
+check "T99 severity 5 < 8 → 唔升級" "$(q "SELECT (c.\"urgent\")::text ug FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E99B_WA'" | jf ug)" "false"
+check "T99 session 仍 ACTIVE（問診繼續）" "$(q "SELECT s.\"status\"::text st FROM \"PainTriageSession\" s JOIN \"Conversation\" c ON c.id=s.\"conversationId\" JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E99B_WA'" | jf st)" "ACTIVE"
+
+# ── T100. 完整問診 → L1 草稿 + 病人覆日期接 booking（自然接手，無橋）────────────────
+E100_WA="8526785${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$E100_WA" --text "我牙痛" --wamid "wamid.E2E_E100a_${EPOCH}" --name "E2E E100" >/dev/null || fail "T100 POST1"
+wait_for "SELECT count(*)::text c FROM \"PainTriageSession\" s JOIN \"Conversation\" c ON c.id=s.\"conversationId\" JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E100_WA' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30
+sleep 2
+# turn 2：一把答晒（mock 決定性抽槽）— 紅旗類（腫/術後/紅旗症狀）+ severity + location 全填
+pnpm -s mock-inbound message --clinic TKW --from "$E100_WA" --text "右後牙，痛咗2日，痛3分，一停就冇，唔會自己痛，夜晚冇，咬唔痛，冇做過，冇腫" --wamid "wamid.E2E_E100b_${EPOCH}" --name "E2E E100" >/dev/null || fail "T100 POST2"
+E100_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E100_WA'" | jf id)
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$E100_CONV' AND \"direction\"='OUT' AND type='text' AND \"body\" LIKE '%流血止唔到%'" '[{"c":"1"}]' 30
+# turn 3：答紅旗問題「冇」→ 完成條件齊（紅旗類問完 + severity + location）→ 出口 E.5
+pnpm -s mock-inbound message --clinic TKW --from "$E100_WA" --text "冇" --wamid "wamid.E2E_E100c_${EPOCH}" --name "E2E E100" >/dev/null || fail "T100 POST3"
+if wait_for "SELECT s.\"status\"::text st, s.\"closeReason\" r, s.\"impression\" im FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$E100_CONV'" '[{"st":"COMPLETED","r":"COMPLETED","im":"sensitivity"}]' 30; then
+  pass "T100 完整問診 → COMPLETED + impression sensitivity"
+else
+  fail "T100 COMPLETED + sensitivity"
+fi
+check "T100 L1 草稿（pain-triage-engine）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$E100_CONV' AND model='pain-triage-engine'" | jf c)" "1"
+E100_DRAFT=$(q "SELECT \"draftText\" d FROM \"AiDraft\" WHERE \"conversationId\"='$E100_CONV' AND model='pain-triage-engine'" | jf d)
+case "$E100_DRAFT" in
+  *先確定*想約邊日*) pass "T100 草稿三句式結構（②未確診 ③下一步）" ;;
+  *) fail "T100 草稿三句式結構（got: ${E100_DRAFT:0:60}）" ;;
+esac
+case "$E100_DRAFT" in
+  *常見原因*) pass "T100 草稿①句 = 白名單措辭（常見原因…）" ;;
+  *) fail "T100 草稿①句白名單措辭（got: ${E100_DRAFT:0:60}）" ;;
+esac
+case "$E100_DRAFT" in
+  *確診*|*你係*|*一定要*) fail "T100 措辭鐵律（禁詞出現）" ;;
+  *) pass "T100 措辭鐵律（零禁詞）" ;;
+esac
+E100_SA=$(q "SELECT (\"aiSummary\" LIKE '%右後牙%')::text a FROM \"Conversation\" WHERE id='$E100_CONV'" | jf a)
+E100_SB=$(q "SELECT (\"aiSummary\" LIKE '%傾向%')::text b FROM \"Conversation\" WHERE id='$E100_CONV'" | jf b)
+check "T100 aiSummary 結構化（右後牙）" "$E100_SA" "true"
+check "T100 aiSummary 結構化（傾向）" "$E100_SB" "true"
+# 病人覆日期 → BOOKING_REQUEST → 現有 booking 流程自然接手（L1 draft — 無 policy = 無 session）
+pnpm -s mock-inbound message --clinic TKW --from "$E100_WA" --text "你好，我想預約下週" --wamid "wamid.E2E_E100d_${EPOCH}" --name "E2E E100" >/dev/null || fail "T100 POST4"
+if wait_for "SELECT \"intent\" i FROM \"Conversation\" WHERE id='$E100_CONV'" '[{"i":"BOOKING_REQUEST"}]' 30; then
+  # a2 fix（2026-09-03）：原 `c.\"intent\"` 冇 alias c → SQLSTATE 42P01 → q() 吞 stderr → 30s 全空假紅（run3 T100 死因；產品行為正確 — worker log + DB 雙證）
+  pass "T100 病人覆日期 → BOOKING_REQUEST（自然接手）"
+else
+  fail "T100 BOOKING_REQUEST"
+fi
+check "T100 booking 流程 draft 生成" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$E100_CONV' AND intent='BOOKING_REQUEST'" | jf c)" "1"
+check "T100 pain draft 保留（總 2）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$E100_CONV'" | jf c)" "2"
+
+# ── T101. lexicon：「cool牙」→ 矯齒（canonical 入 aiSummary — 可觀察渠道）─────────
+E101_WA="8526786${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$E101_WA" --text "我cool牙，牙痛" --wamid "wamid.E2E_E101_${EPOCH}" --name "E2E E101" >/dev/null || fail "T101 POST"
+wait_for "SELECT c.\"intent\" i FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E101_WA'" '[{"i":"PAIN"}]' 30
+E101_SUM=$(q "SELECT c.\"aiSummary\" s FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E101_WA'" | jf s)
+case "$E101_SUM" in
+  *矯齒*) pass "T101 lexicon：cool牙 → 矯齒（canonical）" ;;
+  *) fail "T101 lexicon canonical（got: ${E101_SUM:0:60}）" ;;
+esac
+case "$E101_SUM" in
+  *cool牙*) fail "T101 lexicon：原文 cool牙 仍喺" ;;
+  *) pass "T101 lexicon：原文 cool牙 已 canonical 化" ;;
+esac
+
+# ── T102. params 加詞即生效 + 刪 FLOOR 被拒（zod refine 400）────────────────────────
+# 3 條問題最小合法 params（questions min 3）；exitDraftTemplate 用 code 默認結構
+E_PT_Q3='[{"id":"q-location","slot":"toothLocation","text":"想先了解邊隻牙痛？（例如：右後牙）","enabled":true,"order":0},{"id":"q-duration","slot":"durationDays","text":"痛咗幾耐呀？","enabled":true,"order":1},{"id":"q-severity","slot":"severity","text":"而家痛幾痛？1–10 分","enabled":true,"order":2}]'
+E_PT_TPL='{impression}實際情況要{examination}睇過先確定。呢類情況建議{window}返嚟檢查，想約邊日？'
+wf_put pain-triage "" "{\"questions\":$E_PT_Q3,\"redFlagTerms\":{\"severe_pain\":[\"痛到崩潰\"]},\"exitDraftTemplate\":\"$E_PT_TPL\"}"
+check "T102 PUT pain-triage（附加詞 痛到崩潰）→ 201" "$W_CODE" "201"
+E_PT_V1=$(echo "$W_OUT" | jf id)
+wf_publish pain-triage "$E_PT_V1"
+check "T102 publish v1 → 200" "$W_CODE" "200"
+E102_WA="8526787${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$E102_WA" --text "我牙痛到崩潰" --wamid "wamid.E2E_E102_${EPOCH}" --name "E2E E102" >/dev/null || fail "T102 POST"
+if wait_for "SELECT c.\"intent\" i, (c.\"urgent\")::text ug FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E102_WA'" '[{"i":"URGENT_PAIN","ug":"true"}]' 30; then
+  pass "T102 params 加詞即生效（fast path 確定性 → URGENT_PAIN）"
+else
+  fail "T102 加詞即生效"
+fi
+check "T102 fast path 唔開問診 session" "$(q "SELECT count(*)::text c FROM \"PainTriageSession\" s JOIN \"Conversation\" c ON c.id=s.\"conversationId\" JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E102_WA'" | jf c)" "0"
+# （b）FLOOR 詞寫入附加欄 → 400（「刪 FLOOR」物理上無路徑）
+wf_put pain-triage "" "{\"questions\":$E_PT_Q3,\"redFlagTerms\":{\"bleeding\":[\"流血不止\"]},\"exitDraftTemplate\":\"$E_PT_TPL\"}"
+check "T102 FLOOR 詞入附加欄 → 400（刪 FLOOR 被拒）" "$W_CODE" "400"
+# （c）還原 defaults（12 條全問題 — 保護後續段）
+E_PT_Q12='[{"id":"q-location","slot":"toothLocation","text":"想先了解邊隻牙痛？（例如：右後牙 / 左前牙 / 智慧齒）","enabled":true,"order":0},{"id":"q-duration","slot":"durationDays","text":"痛咗幾耐呀？（例如：2 日 / 一星期）","enabled":true,"order":1},{"id":"q-stimulus","slot":"stimulusLinger","text":"食凍熱嘢嗰陣痛，停咗之後痛會即收，定係持續幾分鐘？","enabled":true,"order":2},{"id":"q-spontaneous","slot":"spontaneousPain","text":"唔食嘢嘅時候會唔會自己痛？","enabled":true,"order":3},{"id":"q-night","slot":"nightPain","text":"瞓覺嗰陣會唔會痛醒？","enabled":true,"order":4},{"id":"q-bite","slot":"bitePain","text":"咬嘢嗰陣會唔會痛？","enabled":true,"order":5},{"id":"q-recent","slot":"recentTreatment","text":"最近兩星期有冇做過牙醫治療（補牙 / 杜牙根 / 拔牙）？","enabled":true,"order":6},{"id":"q-swelling","slot":"swelling","text":"面、頸或者眼有冇腫？","enabled":true,"order":7},{"id":"q-redflag","slot":"redFlagSymptoms","text":"有冇以下情況：流血止唔到、發燒、吞唔到嘢 / 呼吸唔順、外傷？如果有請即刻講。","enabled":true,"order":8},{"id":"q-severity","slot":"severity","text":"而家痛幾痛？1–10 分（10 = 痛到忍唔到）","enabled":true,"order":9},{"id":"q-impact","slot":"functionalImpact","text":"有冇影響到你？（食唔食到嘢 / 講嘢痛 / 瞓唔瞓到）","enabled":true,"order":10},{"id":"q-photo","slot":"photo","text":"方便嘅話俾張痛嗰邊嘅相，醫生可以預先睇（唔強制）。","enabled":true,"order":11}]'
+wf_put pain-triage "" "{\"questions\":$E_PT_Q12,\"redFlagTerms\":{},\"exitDraftTemplate\":\"$E_PT_TPL\"}"
+check "T102 PUT defaults 還原 → 201" "$W_CODE" "201"
+E_PT_V2=$(echo "$W_OUT" | jf id)
+wf_publish pain-triage "$E_PT_V2"
+check "T102 publish defaults → 200" "$W_CODE" "200"
+
+# ── T103. 術後自動判（E.7：phoneHash match + 窗口內 appointment → autoPostOp 即紅旗）─
+E103_WA="8526788${EPOCH}"
+E103_HASH=$(npx tsx -e 'import { phoneHash } from "./src/lib/phone-hash"; console.log(phoneHash(process.argv[1]));' "$E103_WA" 2>/dev/null | tail -1)
+[ "${#E103_HASH}" = "64" ] || fail "T103 phoneHash 計算失敗（${E103_HASH:0:16}）"
+E103_DATE=$(date -d 'yesterday' +%F)
+cat > .dev/workforce-mock-patients.json <<EOJSON
+{"byPhoneHash":{"$E103_HASH":{"matches":[{"patientApricotId":"apr-e2e-t103","patientCode":"E2E-T103","patientName":"E2E T103","lastVisit":{"date":"$E103_DATE","providerName":"E2E DR","visitReasons":["e2e"]}}],"appointments":[{"apricotApptId":"apt-e2e-t103","clinicCode":"TKW","providerApricotId":"prov-e2e-t103","providerName":"E2E DR","date":"$E103_DATE","start":"10:00","end":"10:30","bookingStatus":1,"patientApricotId":"apr-e2e-t103","patientCode":"E2E-T103","patientName":"E2E T103","visitReasons":["e2e"],"remarks":null}]}}}
+EOJSON
+pnpm -s mock-inbound message --clinic TKW --from "$E103_WA" --text "我牙痛" --wamid "wamid.E2E_E103_${EPOCH}" --name "E2E E103" >/dev/null || fail "T103 POST"
+if wait_for "SELECT c.\"intent\" i, (c.\"urgent\")::text ug FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E103_WA'" '[{"i":"URGENT_PAIN","ug":"true"}]' 30; then
+  pass "T103 術後窗口內 → autoPostOp 即紅旗"
+else
+  fail "T103 auto post-op"
+fi
+E103_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E103_WA'" | jf id)
+check "T103 session autoPostOp=true" "$(q "SELECT (s.\"autoPostOp\")::text a FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$E103_CONV'" | jf a)" "true"
+check "T103 closeReason=RED_FLAG" "$(q "SELECT s.\"closeReason\" r FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$E103_CONV'" | jf r)" "RED_FLAG"
+grep -q "pain-triage: auto post-op hit" /tmp/e2e-worker-pain.log 2>/dev/null && pass "T103 log: auto post-op hit" || fail "T103 log auto post-op hit"
+rm -f .dev/workforce-mock-patients.json
+
+# ── T104. 「流血不止」fast path（FLOOR 詞 — 唔問診直接 URGENT）───────────────────────
+E104_WA="8526789${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$E104_WA" --text "我牙流血不止" --wamid "wamid.E2E_E104_${EPOCH}" --name "E2E E104" >/dev/null || fail "T104 POST"
+if wait_for "SELECT c.\"intent\" i, (c.\"urgent\")::text ug, c.\"urgency\" u FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E104_WA'" '[{"i":"URGENT_PAIN","ug":"true","u":"HIGH"}]' 30; then
+  pass "T104 FLOOR 詞（流血不止）fast path → URGENT_PAIN"
+else
+  fail "T104 fast path"
+fi
+check "T104 無問診 session（唔問診）" "$(q "SELECT count(*)::text c FROM \"PainTriageSession\" s JOIN \"Conversation\" c ON c.id=s.\"conversationId\" JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$E104_WA'" | jf c)" "0"
+check "T104 零 draft（鐵律 3）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" d JOIN \"Conversation\" cv ON cv.id=d.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$E104_WA'" | jf c)" "0"
+check "T104 StaffNotice URGENT_ESCALATION" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" n JOIN \"Conversation\" cv ON cv.id=n.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$E104_WA' AND n.kind='URGENT_ESCALATION'" | jf c)" "1"
+pass "E 段完成：PAIN_TRIAGE + Lexicon（T97–T104 8 格）"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

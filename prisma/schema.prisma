@@ -101,6 +101,15 @@ enum BookingSessionStatus {
   CANCELLED
 }
 
+// ★ Part E（cwi-paintriage-20260903，MD §Part E E.3）：PAIN_TRIAGE 痛症問診 session 狀態。
+// ACTIVE = 問診中；COMPLETED = 出口（紅旗 RED_FLAG / 齊料 COMPLETED / 病人取消 CANCELLED / 輪數超限 MAX_TURNS）；
+// HANDOFF = 人手接手（真人要求 / 冇進展 / staff claim 讓路）。
+enum PainTriageStatus {
+  ACTIVE
+  COMPLETED
+  HANDOFF
+}
+
 model Clinic {
   id               String  @id @default(cuid())
   code             String  @unique            // TKW / MF ...（同 clinic-workforce 用同一套 code，方便對照）
@@ -300,6 +309,31 @@ model BookingSession {
   createdAt      DateTime @db.Timestamptz @default(now())
   updatedAt      DateTime @db.Timestamptz @updatedAt
   expiresAt      DateTime @db.Timestamptz
+  @@index([conversationId, status])
+  @@index([status, expiresAt])
+}
+
+// ★ Part E（cwi-paintriage-20260903，MD §Part E E.3）：痛症問診 session — 持久化跟 BookingSession（上面）模式。
+// slots Json = { slots: PainSlots（src/lib/sessions/pain-triage.ts zod）, asked: string[]（已問問題 id）}
+//   — 只存症狀 business metadata，零病人自由文本落庫（PII 鐵律）。
+// closeReason：RED_FLAG（確定性紅旗中 → URGENT 全套）/ COMPLETED / CANCELLED / MAX_TURNS / HANDOFF / TTL。
+// impression：出口 impression key（sensitivity/pulpitis/apical/perio/pericoronitis/fracture；post_op 唔出）。
+// autoPostOp：E.7 術後自動判（開波 hook fail-soft 算好落庫；true = 即紅旗）。
+model PainTriageSession {
+  id             String           @id @default(cuid())
+  conversationId String
+  clinicId       String
+  status         PainTriageStatus @default(ACTIVE)
+  slots          Json
+  turns          Int              @default(0)
+  noProgress     Int              @default(0)
+  closeReason    String?
+  impression     String?
+  autoPostOp     Boolean          @default(false)
+  createdAt      DateTime @db.Timestamptz @default(now())
+  updatedAt      DateTime @db.Timestamptz @updatedAt
+  expiresAt      DateTime @db.Timestamptz
+
   @@index([conversationId, status])
   @@index([status, expiresAt])
 }
