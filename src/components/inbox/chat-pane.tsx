@@ -35,7 +35,7 @@ interface Props {
   loadingOlder: boolean;
   onScrollTop: () => void;
   window: { open: boolean; remainingMs: number; tone: string } | null;
-  onSend: (body: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[] }>;
+  onSend: (body: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null }>;
   staffName: string;
   /** Phase 2：該對話最新嘅 pending AI 草稿（PROPOSED）；null = 無 */
   pendingDraft: DraftInfo | null;
@@ -60,6 +60,12 @@ interface Props {
   onTakeover: () => Promise<{ ok: boolean; error?: string }>;
   /** ★ H1：接手進行中（disable 掣） */
   takeoverBusy: boolean;
+  /** cwi-multiclinic-20260903（MD A.6.1）：角色（放手掣顯隱 — 現任負責人 ∨ ADMIN） */
+  userRole: "ADMIN" | "STAFF";
+  /** cwi-multiclinic-20260903（MD A.6.1）：〔放手〕— release = assign toStaffId:null（server assertCanAssign 守權限） */
+  onRelease?: () => Promise<{ ok: boolean; error?: string }>;
+  /** cwi-multiclinic-20260903：放手進行中（disable 掣） */
+  releaseBusy?: boolean;
   /** ★ H1：店內 staff 列表（INTERNAL note 顯示發送者名 + ★ H2：@ 自動補全） */
   staff: StaffInfo[];
   /** ★ H2：已讀回執（選中對話嘅 receipts — tick 重算 + hover 已讀名單） */
@@ -159,6 +165,21 @@ export function ChatPane(p: Props) {
   // cwi-window-20260901（P2）：COPY_ONLY 草稿「複製」掣 feedback（「已複製」2s）
   const [copiedDraft, setCopiedDraft] = useState(false);
   // cwi-schedv2-20260903（D.3）：過窗三出路 → 共享組件 <WindowExits/>（喺 composer 分支渲染，markup 不變）
+  // ★ cwi-multiclinic-20260903（MD A.6.1）：〔放手〕兩段確認 — 第一次撳 arm（3 秒內再撳一次先真 release）
+  const [releaseArmed, setReleaseArmed] = useState(false);
+  useEffect(() => {
+    setReleaseArmed(false);
+  }, [p.conversation?.id]);
+  useEffect(() => {
+    if (!releaseArmed) return;
+    const t = setTimeout(() => setReleaseArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [releaseArmed]);
+  const [releaseError, setReleaseError] = useState<string | null>(null);
+  const canRelease =
+    !!p.conversation?.assigneeId &&
+    (p.conversation.assigneeId === p.myStaffId || p.userRole === "ADMIN") &&
+    !!p.onRelease;
   // ★ Phase E（cwi-ai-20260825-t5）：header「⋯」menu — 標記投訴 / AI 錯誤（即時記帳；STAFF 可用）
   const [flagMenuOpen, setFlagMenuOpen] = useState(false);
   const [flagBusy, setFlagBusy] = useState(false);
@@ -316,7 +337,9 @@ export function ChatPane(p: Props) {
     setSendError(null);
     const r = await p.onSend(body);
     if (!r.ok) {
-      setSendError(r.error ?? "發送失敗");
+      // cwi-multiclinic-20260903（MD A.6.2）：423 打字保護 — 文字保留（setDraft 唔郁）；
+      // toast「{name} 已接手呢個對話」由 parent（inbox-client）發出；header 負責人名 optimistic 更新。
+      setSendError(r.takenOverBy ? "對話已被接手 — 你而家只可發內部備註" : r.error ?? "發送失敗");
       // Phase B：過窗 422 帶 templates 名單 → 出 template 揀選
       if (r.templates && r.templates.length > 0) setTemplateOptions(r.templates);
     } else setDraft("");
@@ -419,6 +442,34 @@ export function ChatPane(p: Props) {
             </>
           ) : null}
         </div>
+        {/* cwi-multiclinic-20260903（MD A.6.1）：〔放手〕— 現任負責人 ∨ ADMIN 見；兩段確認防誤觸 */}
+        {canRelease && (
+          <button
+            data-e2e="release-btn"
+            onClick={() => {
+              setReleaseError(null);
+              if (!releaseArmed) {
+                setReleaseArmed(true);
+                return;
+              }
+              setReleaseArmed(false);
+              void (async () => {
+                const r = await p.onRelease!();
+                if (!r.ok) setReleaseError(r.error ?? "放手失敗");
+              })();
+            }}
+            title="放手：取消自己負責人 — 呢條線放返隊列（其他人可以接手）"
+            className={`px-2.5 py-1 rounded-full text-[11px] border ${
+              releaseArmed
+                ? "border-warn-text text-warn-text bg-warn-soft"
+                : "border-line text-t2 hover:text-t1 hover:bg-black/[.04]"
+            } disabled:opacity-50 whitespace-nowrap`}
+            disabled={p.releaseBusy}
+          >
+            {p.releaseBusy ? "放手緊…" : releaseArmed ? "再撳一次放手？" : "放手"}
+          </button>
+        )}
+        {releaseError && <span className="text-[10px] text-warn-text whitespace-nowrap">{releaseError}</span>}
         <span
           className={`ml-auto text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${windowChipCls}`}
           title="24 小時客服窗口倒數｜窗口內：用 API（呢度覆）｜過窗三出路：① 開手機 App 免費覆（W-5：只覆主動搵過我哋嘅人、唔好複製同一段派多人、叫停即停）② 發 template（逐條收費）③ 等病人下次搵你"

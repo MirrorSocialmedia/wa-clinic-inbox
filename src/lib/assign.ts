@@ -139,11 +139,29 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
     let toName: string | null = null;
     let byName: string | null = null;
     let fromName: string | null = null;
+    const staffPrimary = (s: {
+      clinicId: string | null;
+      clinics: { clinicId: string }[];
+    } | null): string | null => (s ? (s.clinics[0]?.clinicId ?? s.clinicId) : null);
     const [target, byUser, fromUser] = await Promise.all([
-      toStaffId ? tx.staffUser.findUnique({ where: { id: toStaffId } }) : Promise.resolve(null),
+      toStaffId
+        ? tx.staffUser.findUnique({
+            where: { id: toStaffId },
+            select: {
+              name: true,
+              active: true,
+              clinicId: true,
+              // cwi-multiclinic-20260903（A.4）：primary 店（跨店 takeover 判定 + note「· 由 {店名}」）
+              clinics: { where: { isPrimary: true }, select: { clinicId: true }, take: 1 },
+            },
+          })
+        : Promise.resolve(null),
       byStaffId ? tx.staffUser.findUnique({ where: { id: byStaffId }, select: { name: true } }) : Promise.resolve(null),
       conv.assigneeId
-        ? tx.staffUser.findUnique({ where: { id: conv.assigneeId }, select: { name: true } })
+        ? tx.staffUser.findUnique({
+            where: { id: conv.assigneeId },
+            select: { name: true, clinicId: true, clinics: { where: { isPrimary: true }, select: { clinicId: true }, take: 1 } },
+          })
         : Promise.resolve(null),
     ]);
     if (toStaffId) {
@@ -156,6 +174,15 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
     fromName = fromUser?.name ?? null;
     // cwi-h6-20260830（h5 §2.3）：takeover = 換人接手（舊 owner 非空 → 新 owner 唔同）
     const isTakeover = !!conv.assigneeId && !!toStaffId && toStaffId !== conv.assigneeId;
+    // cwi-multiclinic-20260903（A.4 副作用 3）：跨店 takeover = from/to 嘅 primary 店唔同
+    // （ADMIN 無 primary → 唔計跨店）。note 加「· 由 {新負責人店名}」+ audit meta crossClinic:true。
+    const fromPrimary = staffPrimary(fromUser);
+    const toPrimary = staffPrimary(target);
+    const isCrossClinicTakeover = isTakeover && fromPrimary !== null && toPrimary !== null && fromPrimary !== toPrimary;
+    let toClinicName: string | null = null;
+    if (isCrossClinicTakeover && toPrimary) {
+      toClinicName = (await tx.clinic.findUnique({ where: { id: toPrimary }, select: { name: true } }))?.name ?? null;
+    }
 
     // SYSTEM（H3 自動派單）只准操作 unassigned 對話（避免蓋過人手分配）
     if (by === "SYSTEM" && conv.assigneeId) {
@@ -192,6 +219,9 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
     }
 
     // 3) 自動 INTERNAL note（轉交原因永遠留喺 thread — MD §3.1 步 3）
+    // cwi-multiclinic-20260903（A.4 副作用 1）：跨店接手加「· 由 {新負責人店名}」
+    //   （兩個人手 branch 都加：self-接手「接手咗呢條線…」+ 管理者轉交「已轉交畀…」）
+    const crossSuffix = isCrossClinicTakeover && toClinicName ? ` · 由 ${toClinicName}` : "";
     const noteText =
       by === "AUTO_CLAIM"
         ? `${byName ?? "Staff"} 接手咗（首次發送自動 claim）`
@@ -201,9 +231,9 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
             ? toStaffId === byStaffId
               ? note ??
                   (isTakeover
-                    ? `${byName ?? "Staff"} 接手咗呢條線（原負責人：${fromName ?? "?"}）`
+                    ? `${byName ?? "Staff"} 接手咗呢條線（原負責人：${fromName ?? "?"}）${crossSuffix}`
                     : `${byName ?? "Staff"} 接手咗`)
-              : note ?? `已轉交畀 ${toName ?? "Staff"}`
+              : note ?? `已轉交畀 ${toName ?? "Staff"}${crossSuffix}`
             : note ?? `${byName ?? "Staff"} 放咗返隊列`;
     const noteMsg = await tx.message.create({
       data: {
@@ -232,8 +262,9 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
         action: auditAction,
         entity: "Conversation",
         entityId: conv.id,
-        // cwi-h6-20260830（h5 §2.3 副作用 3）：takeover 必帶 takeover:true；by 記來源（人手/自動）
-        meta: { fromStaffId: conv.assigneeId, toStaffId, ...(isTakeover ? { takeover: true } : {}), by },
+        // cwi-h6-20260830（h5 §2.3 副作用 3）：takeover 必帶 takeover:true；by 記來源（人手/自動）；
+        // cwi-multiclinic-20260903（A.4）：跨店 takeover 加 crossClinic:true
+        meta: { fromStaffId: conv.assigneeId, toStaffId, ...(isTakeover ? { takeover: true } : {}), ...(isCrossClinicTakeover ? { crossClinic: true } : {}), by },
       },
     });
 

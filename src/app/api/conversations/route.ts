@@ -31,7 +31,14 @@ export const GET = handle(async (req: NextRequest) => {
     if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
       return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
     }
-    where.clinicId = clinicParam;
+    if (ctx.staff.role === "STAFF") {
+      // ★ MD A.3：店 tab filter 只限縮 clinic-scope 支路；assignee 支路保留 —
+      // 多店 staff 睇自己店 tab 時，指派俾自己嘅外店線仍要見到（A.6.4 badge + §9「見晒覆到」）。
+      // 外店未指派線依然唔見（assignee ≠ 自己）。
+      where.OR = [{ clinicId: clinicParam }, { assigneeId: ctx.staff.id }];
+    } else {
+      where.clinicId = clinicParam;
+    }
   }
   if (statusParam) {
     if (!["OPEN", "PENDING", "RESOLVED"].includes(statusParam)) {
@@ -56,9 +63,12 @@ export const GET = handle(async (req: NextRequest) => {
     orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }],
     take: 200,
   });
-  const [contacts, staff, pendingBookings] = await Promise.all([
+  const [contacts, staff, clinics, pendingBookings] = await Promise.all([
     prisma.contact.findMany({ select: { id: true, waId: true, profileName: true, labels: true } }),
     prisma.staffUser.findMany({ select: { id: true, name: true } }),
+    // cwi-multiclinic-20260903（MD A.3）：clinicName — 跨店線 UI 標店名 badge 用
+    // （全 row 都有值：本店/ADMIN 線一樣有，前端自己決定顯唔顯示）
+    prisma.clinic.findMany({ select: { id: true, name: true, code: true } }),
     // Phase 3：綠色卡 — 每對話最新 PENDING 預約（staff 一眼見到「有預約等處理」）
     // ★ booking-ui（D）：CONFIRMED 亦要顯示（Apricot 單號 + 撤銷倒數）— PENDING 優先
     prisma.bookingRequest.findMany({
@@ -68,6 +78,7 @@ export const GET = handle(async (req: NextRequest) => {
   ]);
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
+  const clinicMap = new Map(clinics.map((c) => [c.id, c]));
   // providerslot-20260830 T3：hold 卡 — 每個 WA 號最新非終態 hold（join key = Contact.waId）。
   // scope 跟對話一樣（STAFF 自己店 / ADMIN ?clinicId=）；fail-soft → 空 Map。
   const holdClinicFilter: string | string[] | undefined = clinicParam
@@ -94,6 +105,9 @@ export const GET = handle(async (req: NextRequest) => {
       return {
         id: cv.id,
         clinicId: cv.clinicId,
+        // cwi-multiclinic-20260903（MD A.6.4）：跨店線店名 badge（code + 全名；前端決定顯示）
+        clinicName: clinicMap.get(cv.clinicId)?.name ?? null,
+        clinicCode: clinicMap.get(cv.clinicId)?.code ?? null,
         contactId: cv.contactId,
         status: cv.status,
         assigneeId: cv.assigneeId,

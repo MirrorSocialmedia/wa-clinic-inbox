@@ -6,6 +6,7 @@ import type {
   AiClassifiedEvent,
   BookingEvent,
   ClinicInfo,
+  ClinicLite,
   ConversationAssignedEvent,
   ConversationItem,
   ConvStatus,
@@ -79,6 +80,45 @@ export function InboxClient({
 }) {
   const clinics = initialClinics;
   const staff = initialStaff;
+  // ── cwi-multiclinic-20260903（MD A.6）：全店 staff + 診所清單 ──────────────────
+  //   ① 指派選單二級（「其他分店…」店→員工 — ASSIGN target = 任何 active staff，
+  //      /api/staff 已授權列齊；跨店由 assign 端守）② clinic 名 map（跨店線店名 badge）。
+  //   fail-soft：拉唔到 → 選單降級只本店 / badge 唔顯（唔阻 inbox）。
+  const [allStaff, setAllStaff] = useState<StaffInfo[]>([]);
+  const [allClinics, setAllClinics] = useState<ClinicLite[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [staffRes, clinicRes] = await Promise.all([fetch("/api/staff"), fetch("/api/clinics?scope=schedule")]);
+        if (cancelled) return;
+        if (staffRes.ok) {
+          const s = (await staffRes.json()) as StaffInfo[];
+          if (Array.isArray(s)) setAllStaff(s);
+        }
+        if (clinicRes.ok) {
+          const j = (await clinicRes.json()) as { clinics?: ClinicLite[] };
+          if (Array.isArray(j.clinics)) setAllClinics(j.clinics);
+        }
+      } catch {
+        /* 網絡抖動 — fail-soft（選單/badge 降級，唔阻 inbox） */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const allStaffRef = useRef<StaffInfo[]>([]);
+  allStaffRef.current = allStaff;
+  // clinic id → 基本資料（allClinics 優先；SSR clinics 打底 — STAFF 嘅 SSR 只有自己店）
+  const clinicById = useMemo(() => {
+    const m = new Map<string, ClinicLite>();
+    for (const c of clinics) m.set(c.id, { id: c.id, code: c.code, name: c.name });
+    for (const c of allClinics) m.set(c.id, c);
+    return m;
+  }, [clinics, allClinics]);
+  const clinicByIdRef = useRef(clinicById);
+  clinicByIdRef.current = clinicById;
   // D.4（cwi-schedv2-20260903）：舊當值卡管線（dutyMap/refreshDuty/15min）移除 —
   //   側欄改「今日可約迷你表」（MiniSchedule 自拉 /api/flows/slots）。
   const [conversations, setConversations] = useState<ConversationItem[]>(initialConversations);
@@ -223,6 +263,9 @@ export function InboxClient({
         const item: ConversationItem = {
           id: e.conversationId,
           clinicId: e.clinicId,
+          // cwi-multiclinic-20260903：店名 badge 資料（payload 零 PII 只帶 clinicId → map 補）
+          clinicName: clinicByIdRef.current.get(e.clinicId)?.name ?? null,
+          clinicCode: clinicByIdRef.current.get(e.clinicId)?.code ?? null,
           contactId: e.contact?.id ?? existing?.contactId ?? "",
           status: e.conversation.status,
           assigneeId: existing?.assigneeId ?? null,
@@ -318,7 +361,12 @@ export function InboxClient({
                 ...c,
                 status: e.status,
                 assigneeId: e.assigneeId,
-                assigneeName: e.assigneeId ? staffRef.current.find((s) => s.id === e.assigneeId)?.name ?? null : null,
+                // cwi-multiclinic-20260903：全店 staff 先查（跨店負責人）→ fallback 本店
+                assigneeName: e.assigneeId
+                  ? allStaffRef.current.find((s) => s.id === e.assigneeId)?.name ??
+                    staffRef.current.find((s) => s.id === e.assigneeId)?.name ??
+                    null
+                  : null,
                 // ★ Realtime P0 (R5)：version 同步（PATCH assignee 變動 → server 已 +1）
                 assignVersion: e.assignVersion,
                 unreadCount: e.unreadCount,
@@ -454,8 +502,11 @@ export function InboxClient({
             ? {
                 ...c,
                 assigneeId: e.assigneeId,
+                // cwi-multiclinic-20260903：全店 staff 先查（跨店負責人唔喺 initialStaff）→ fallback 本店
                 assigneeName: e.assigneeId
-                  ? staffRef.current.find((s) => s.id === e.assigneeId)?.name ?? null
+                  ? allStaffRef.current.find((s) => s.id === e.assigneeId)?.name ??
+                    staffRef.current.find((s) => s.id === e.assigneeId)?.name ??
+                    null
                   : null,
                 // ★ Realtime P0 (R5)：version 同步 — 其他 client 之後 assign 先唔會 409
                 assignVersion: e.assignVersion,
@@ -871,7 +922,7 @@ export function InboxClient({
 
   // ── composer ──────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    async (body: string): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[] }> => {
+    async (body: string): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; takenOverBy?: string | null }> => {
       const convId = selectedIdRef.current;
       if (!convId) return { ok: false, error: "未選擇對話" };
       // ★ realtime-p0 R1：一次「邏輯發送」一個 UUID；網絡 retry 用同一 key（chat-pane 嘅
@@ -905,9 +956,30 @@ export function InboxClient({
           idempotentReplay?: boolean;
           // Phase B：422 過窗時 server 帶 APPROVED+UTILITY 名單（UI 轉 template 揀選）
           templates?: { name: string; language: string }[];
+          // cwi-multiclinic-20260903（A.6.2）：423 SEND_LOCKED 帶新負責人 id（header 即時更新）
+          assigneeId?: string | null;
         } | null;
         if (res.status === 422) {
           return { ok: false, error: data?.message ?? "窗口已過，只可發 template", templates: data?.templates };
+        }
+        // ★ cwi-multiclinic-20260903（MD A.6.2）423 打字保護：打緊字時有人接手咗 →
+        //   ① toast「{name} 已接手呢個對話」② composer 文字唔清走（chat-pane 只成功先清）
+        //   ③ header 負責人名即時更新 — optimistic 寫入；socket conversation:assigned
+        //      事件（接手時已 emit）會再對齊 assignVersion，唔會雙計。
+        if (res.status === 423) {
+          const newAssigneeId = data?.assigneeId ?? null;
+          if (newAssigneeId) {
+            const name = allStaffRef.current.find((s) => s.id === newAssigneeId)?.name ?? "同事";
+            setNotice(`${name} 已接手呢個對話`);
+            setConversations((prev) =>
+              prev.map((c) =>
+                c.id === convId && c.assigneeId !== newAssigneeId
+                  ? { ...c, assigneeId: newAssigneeId, assigneeName: name, assignVersion: c.assignVersion + 1 }
+                  : c
+              )
+            );
+          }
+          return { ok: false, error: data?.message ?? "此對話已有負責人", takenOverBy: newAssigneeId };
         }
         if (!res.ok) {
           return { ok: false, error: data?.error ?? `發送失敗（${res.status}）` };
@@ -1175,6 +1247,14 @@ export function InboxClient({
     [applyAssignResult, fetchConversations]
   );
 
+  // ── cwi-multiclinic-20260903（MD A.6.1）放手：release = assign toStaffId:null ──────
+  //   權限：現任 assignee ∨ ADMIN（server assertCanAssign 守）；確認一步喺 UI（chat-pane）。
+  const release = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    const r = await assignConversationApi(null);
+    if (r.ok) setNotice("已放手 — 呢條線放返隊列");
+    return r;
+  }, [assignConversationApi]);
+
   const sendFlow = useCallback(async () => {
     const convId = selectedIdRef.current;
     if (!convId) return { ok: false, error: "未選擇對話" };
@@ -1328,6 +1408,8 @@ export function InboxClient({
           setSearchResults(null);
         }}
         myStaffId={user.staffId}
+        myClinicIds={user.clinicIds}
+        clinicById={clinicById}
         mentionUnread={mentionUnread}
         mentionTotal={mentionTotal}
         onBellClick={() => void onBellClick()}
@@ -1378,6 +1460,7 @@ export function InboxClient({
         window={selectedConv?.window ?? null}
         onSend={sendMessage}
         onSendTemplate={sendTemplate}
+        userRole={user.role}
         staffName={user.name}
         pendingDraft={selectedConv ? (pendingDrafts[selectedConv.id] ?? null) : null}
         onAdopt={adoptDraft}
@@ -1389,6 +1472,8 @@ export function InboxClient({
         onSendNote={sendNote}
         onTakeover={takeover}
         takeoverBusy={takeoverBusy}
+        onRelease={release}
+        releaseBusy={assignBusy}
         staff={staff}
         readReceipts={receipts}
         onNoteRead={markNoteRead}
@@ -1405,11 +1490,14 @@ export function InboxClient({
         mobileOpen={detailOpen}
         onMobileClose={() => setDetailOpen(false)}
         myStaffId={user.staffId}
-        clinicCode={clinics.find((c) => c.id === selectedConv?.clinicId)?.code ?? null}
+        // cwi-multiclinic-20260903：clinicById 打底（STAFF 多店 — SSR clinics 只冇主店）
+        clinicCode={clinicById.get(selectedConv?.clinicId ?? "")?.code ?? null}
         userRole={user.role}
         onAssign={assignConversationApi}
         assignBusy={assignBusy}
         assignError={assignError}
+        allStaff={allStaff}
+        allClinics={allClinics}
         onBookingUiChanged={() => {
           void fetchConversations(activeClinicRef.current);
           setCtxRefreshKey((k) => k + 1);

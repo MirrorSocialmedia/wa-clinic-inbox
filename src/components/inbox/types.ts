@@ -8,6 +8,13 @@ export interface ClinicInfo {
   waDisplayNumber: string | null;
 }
 
+/** cwi-multiclinic-20260903：診所基本資料窄型別（/api/clinics?scope=schedule 回 id/code/name；指派選單 + badge 用） */
+export interface ClinicLite {
+  id: string;
+  code: string;
+  name: string;
+}
+
 export interface ContactInfo {
   id: string;
   waId: string;
@@ -27,6 +34,9 @@ export type ConvStatus = "OPEN" | "PENDING" | "RESOLVED";
 export interface ConversationItem {
   id: string;
   clinicId: string;
+  /** cwi-multiclinic-20260903（MD A.3/A.6.4）：跨店線店名 badge（全 row 都有值；前端決定顯唔顯示） */
+  clinicName?: string | null;
+  clinicCode?: string | null;
   contactId: string;
   status: ConvStatus;
   assigneeId: string | null;
@@ -175,6 +185,8 @@ export interface UserCtx {
   email: string;
   role: "ADMIN" | "STAFF";
   clinicId: string | null;
+  /** cwi-multiclinic-20260903：綁定店集合（STAFF = StaffClinic 全部；ADMIN = []）— 跨店 badge 判定用 */
+  clinicIds: string[];
 }
 
 /** socket message:new payload（同 worker notify 對齊） */

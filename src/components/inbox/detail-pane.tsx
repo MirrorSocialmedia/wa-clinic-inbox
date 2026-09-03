@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CalendarClock, CheckCheck, Lock, Sparkles, Tag, X } from "lucide-react";
-import type { ConversationItem, ConvStatus, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
+import { CalendarClock, CheckCheck, ChevronLeft, ChevronRight, Lock, Sparkles, Tag, X } from "lucide-react";
+import type { ClinicLite, ConversationItem, ConvStatus, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
 import { relTime } from "./time";
 import { MiniSchedule } from "./mini-schedule";
 
@@ -19,6 +19,10 @@ interface Props {
   onAssign: (toStaffId: string | null) => Promise<{ ok: boolean; error?: string }>;
   assignBusy: boolean;
   assignError: string | null;
+  /** cwi-multiclinic-20260903（MD A.6.2）：全店 active staff（二級選單「其他分店…」店→員工用） */
+  allStaff?: StaffInfo[];
+  /** cwi-multiclinic-20260903：全診所清單（店→員工分組 + 店名） */
+  allClinics?: ClinicLite[];
   /** <lg：bottom sheet 開關（由 inbox-client 控制；桌面側欄常駐不受影響） */
   mobileOpen: boolean;
   onMobileClose: () => void;
@@ -65,6 +69,8 @@ export function DetailPane({
   onAssign,
   assignBusy,
   assignError,
+  allStaff = [],
+  allClinics = [],
   mobileOpen,
   onMobileClose,
   onBookingUiChanged,
@@ -218,6 +224,21 @@ export function DetailPane({
     };
   }, [mobileOpen]);
 
+  // ── cwi-multiclinic-20260903（MD A.6.2）：指派選單二級（本店 + 「其他分店…」店→員工）──
+  //   view: main = L1（本店 staff + 其他分店…）/ clinics = L2（分店列表）/ staff = L3（該店 staff）
+  //   跨店（L3 揀人）→ confirm「對方將可查閱呢個對話嘅完整記錄」先真 assign（server 權限守）。
+  //   ★ hooks 必須喺 `if (!conversation)` early-return 之前（React rules of hooks — 條件 hooks 會破 hydration）。
+  const [assignMenuOpen, setAssignMenuOpen] = useState(false);
+  const [assignView, setAssignView] = useState<"main" | "clinics" | "staff">("main");
+  const [assignSubClinicId, setAssignSubClinicId] = useState<string | null>(null);
+  const [assignCrossPending, setAssignCrossPending] = useState<StaffInfo | null>(null);
+  useEffect(() => {
+    setAssignMenuOpen(false);
+    setAssignView("main");
+    setAssignSubClinicId(null);
+    setAssignCrossPending(null);
+  }, [conversation?.id]);
+
   if (!conversation) {
     return (
       <aside className="w-[302px] shrink-0 border-l border-line bg-panel hidden lg:flex flex-col items-center justify-center text-t3 gap-2">
@@ -229,6 +250,23 @@ export function DetailPane({
 
   const c = conversation;
   const clinicStaff = staff.filter((s) => !s.clinicId || s.clinicId === c.clinicId);
+
+  const otherClinics = allClinics.filter((cl) => cl.id !== c.clinicId);
+  const clinicLabel = (id: string | null): string => {
+    const cl = allClinics.find((x) => x.id === id);
+    return cl ? `${cl.code} ${cl.name}` : "";
+  };
+  const staffOfClinic = (cid: string): StaffInfo[] => allStaff.filter((s) => s.clinicId === cid || !s.clinicId);
+  const closeAssignMenu = () => {
+    setAssignMenuOpen(false);
+    setAssignView("main");
+    setAssignSubClinicId(null);
+    setAssignCrossPending(null);
+  };
+  const doAssign = (toStaffId: string | null) => {
+    closeAssignMenu();
+    void onAssign(toStaffId);
+  };
 
   async function saveContact() {
     if (!c?.contact || saving) return;
@@ -667,23 +705,141 @@ export function DetailPane({
         </div>
       </div>
 
-      {/* assignee */}
+      {/* assignee — cwi-multiclinic-20260903（MD A.6.2）：二級選單（本店 + 其他分店…店→員工） */}
       <div>
         <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2">負責員工</div>
-        <select
-          value={c.assigneeId ?? ""}
-          onChange={(e) => void onAssign(e.target.value || null)}
-          disabled={!canManage || assignBusy}
-          className="w-full text-sm rounded-full bg-panel-2 border border-line px-3.5 py-1.5 text-t1 focus:outline-none focus:border-brand disabled:opacity-50"
-        >
-          <option value="">（未分配 — 放返隊列）</option>
-          {clinicStaff.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-              {s.role === "ADMIN" ? "（管理員）" : ""}
-            </option>
-          ))}
-        </select>
+        <div className="relative">
+          <button
+            type="button"
+            data-e2e="assign-trigger"
+            onClick={() => {
+              setAssignMenuOpen(!assignMenuOpen);
+              setAssignView("main");
+              setAssignSubClinicId(null);
+            }}
+            disabled={!canManage || assignBusy}
+            className="w-full text-sm rounded-full bg-panel-2 border border-line px-3.5 py-1.5 text-t1 text-left focus:outline-none focus:border-brand disabled:opacity-50"
+          >
+            {c.assigneeId ? (c.assigneeName ?? "—") : "（未分配 — 放返隊列）"}
+          </button>
+          {/* 跨店 confirm（MD A.6.2 文案）— 揀咗其他分店嘅人先出 */}
+          {assignCrossPending ? (
+            <div data-e2e="assign-cross-confirm" className="absolute z-20 mt-1 w-full bg-panel border border-line rounded-2xl shadow-lg p-3">
+              <p className="text-xs text-t1 mb-1">
+                指派俾 <b>{assignCrossPending.name}</b>
+                {assignSubClinicId ? `（${clinicLabel(assignSubClinicId)}）` : ""}
+              </p>
+              <p className="text-[11px] text-warn-text mb-2.5">對方將可查閱呢個對話嘅完整記錄</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => doAssign(assignCrossPending.id)}
+                  disabled={assignBusy}
+                  className="flex-1 py-1.5 rounded-full bg-brand text-panel text-xs font-medium hover:opacity-90 disabled:opacity-50"
+                >
+                  確認指派
+                </button>
+                <button
+                  onClick={() => setAssignCrossPending(null)}
+                  className="flex-1 py-1.5 rounded-full bg-panel-2 border border-line text-t2 text-xs hover:text-t1 disabled:opacity-50"
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          ) : assignMenuOpen ? (
+            <>
+              <div className="fixed inset-0 z-10" onClick={closeAssignMenu} />
+              <div data-e2e="assign-menu" className="absolute z-20 mt-1 w-full bg-panel border border-line rounded-2xl shadow-lg py-1 max-h-80 overflow-y-auto">
+                <button
+                  onClick={() => doAssign(null)}
+                  disabled={assignBusy}
+                  className="w-full text-left px-3.5 py-1.5 text-sm text-t1 hover:bg-panel-2 disabled:opacity-50"
+                >
+                  （未分配 — 放返隊列）
+                </button>
+                {assignView === "main" && (
+                  <>
+                    <div className="px-3.5 pt-2 pb-0.5 text-[10px] text-t3">本店（{clinicLabel(c.clinicId) || "本診所"}）</div>
+                    {clinicStaff.map((s) => (
+                      <button
+                        key={s.id}
+                        onClick={() => doAssign(s.id)}
+                        disabled={assignBusy}
+                        className="w-full text-left px-3.5 py-1.5 text-sm text-t1 hover:bg-panel-2 flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        <span className="truncate">{s.name}</span>
+                        {s.role === "ADMIN" && <span className="ml-auto text-[10px] text-t3 shrink-0">管理員</span>}
+                        {c.assigneeId === s.id && <span className="ml-auto text-[10px] text-brand-text shrink-0">現任</span>}
+                      </button>
+                    ))}
+                    {otherClinics.length > 0 && (
+                      <button
+                        onClick={() => {
+                          setAssignView("clinics");
+                          setAssignSubClinicId(null);
+                        }}
+                        className="w-full text-left px-3.5 py-1.5 text-sm text-brand-text hover:bg-panel-2 flex items-center gap-1"
+                      >
+                        其他分店… <ChevronRight size={13} strokeWidth={2.75} />
+                      </button>
+                    )}
+                  </>
+                )}
+                {assignView === "clinics" && (
+                  <>
+                    <button
+                      onClick={() => setAssignView("main")}
+                      className="w-full text-left px-3.5 py-1.5 text-sm text-t2 hover:bg-panel-2 flex items-center gap-1"
+                    >
+                      <ChevronLeft size={13} strokeWidth={2.75} /> 返回
+                    </button>
+                    {otherClinics.map((cl) => (
+                      <button
+                        key={cl.id}
+                        onClick={() => {
+                          setAssignSubClinicId(cl.id);
+                          setAssignView("staff");
+                        }}
+                        className="w-full text-left px-3.5 py-1.5 text-sm text-t1 hover:bg-panel-2 flex items-center gap-1.5"
+                      >
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel-2 text-t2 font-semibold shrink-0">{cl.code}</span>
+                        <span className="truncate">{cl.name}</span>
+                        <ChevronRight size={13} strokeWidth={2.75} className="ml-auto text-t3 shrink-0" />
+                      </button>
+                    ))}
+                  </>
+                )}
+                {assignView === "staff" && assignSubClinicId && (
+                  <>
+                    <button
+                      onClick={() => setAssignView("clinics")}
+                      className="w-full text-left px-3.5 py-1.5 text-sm text-t2 hover:bg-panel-2 flex items-center gap-1"
+                    >
+                      <ChevronLeft size={13} strokeWidth={2.75} /> 返回
+                    </button>
+                    <div className="px-3.5 pt-2 pb-0.5 text-[10px] text-t3">{clinicLabel(assignSubClinicId)}</div>
+                    {staffOfClinic(assignSubClinicId).map((s) => (
+                      <button
+                        key={s.id}
+                        onClick={() => {
+                          // 跨店 — 先 confirm（MD A.6.2）
+                          setAssignCrossPending(s);
+                        }}
+                        className="w-full text-left px-3.5 py-1.5 text-sm text-t1 hover:bg-panel-2 flex items-center gap-1.5"
+                      >
+                        <span className="truncate">{s.name}</span>
+                        {s.role === "ADMIN" && <span className="ml-auto text-[10px] text-t3 shrink-0">管理員</span>}
+                      </button>
+                    ))}
+                    {staffOfClinic(assignSubClinicId).length === 0 && (
+                      <div className="px-3.5 py-1.5 text-xs text-t3">該店暫無可指派嘅 staff</div>
+                    )}
+                  </>
+                )}
+              </div>
+            </>
+          ) : null}
+        </div>
         {!canManage && (
           <div className="text-[10px] text-warn-text mt-1">
             🔒 只有現任負責人（{c.assigneeName}）或管理員可以改；喺對話欄撳〔接手〕先可以轉交畀自己

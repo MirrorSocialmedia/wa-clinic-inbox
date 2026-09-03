@@ -4941,6 +4941,129 @@ sleep 2
 check "H6-T99 canary：intent = QUESTION（備註「投訴」唔污染分類）" "$(q "SELECT \"intent\"::text i FROM \"Conversation\" WHERE id='$CV91'" | jf i)" "QUESTION"
 check "H6-T99 canary：零 HANDOFF_REQUEST（COMPLAINT 軌未誤觸）" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$CV91' AND kind='HANDOFF_REQUEST'" | jf c)" "0"
 
+# ── H6-MC cwi-multiclinic-20260903（B3）：Part A 缺口補齊斷言（clinicName / crossClinic / UI 四場景）──
+# 前置：H6 fixture（H6M 多店 staff + cookies）已建；T99 之後、H6 cleanup 之前。
+echo "[H6-MC] cwi-multiclinic-20260903 B3: clinicName/crossClinic/UI..."
+MC=0
+# TKW 先還 DRAFT（T92 置 AUTO 做接力測試）— 防 AI auto-OUT 爭「待跟進」badge 斷言
+patch_aimode "$TKW_CLINIC_ID" DRAFT
+code_mc_pam=$PAM_CODE
+check "H6-MC setup TKW→DRAFT" "$code_mc_pam" "200"
+
+# fixtures：R/M/423/F/X = TKW、W = WTC（固定 id + EPOCH 冪等；零 PII；profileName = UI 斷言搜字）
+WTC_CLINIC_NAME=$(q "SELECT name::text name FROM \"Clinic\" WHERE id='$WTC_CLINIC_ID'" | jf name)
+TKW_CLINIC_NAME=$(q "SELECT name::text name FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf name)
+TKW_STAFF_NAME=$(q "SELECT name::text name FROM \"StaffUser\" WHERE id='$TKW_STAFF_ID'" | jf name)
+WTC_STAFF_NAME=$(q "SELECT name::text name FROM \"StaffUser\" WHERE id='$WTC_STAFF_ID'" | jf name)
+Q_MC_R="8526971${EPOCH}"; C_MC_R="h6mc-r-c-${EPOCH}"; CV_MC_R="h6mc-r-conv-${EPOCH}"
+Q_MC_M="8526972${EPOCH}"; C_MC_M="h6mc-m-c-${EPOCH}"; CV_MC_M="h6mc-m-conv-${EPOCH}"
+Q_MC_4="8526973${EPOCH}"; C_MC_4="h6mc-423-c-${EPOCH}"; CV_MC_4="h6mc-423-conv-${EPOCH}"
+Q_MC_F="8526974${EPOCH}"; C_MC_F="h6mc-f-c-${EPOCH}"; CV_MC_F="h6mc-f-conv-${EPOCH}"
+Q_MC_W="8526975${EPOCH}"; C_MC_W="h6mc-w-c-${EPOCH}"; CV_MC_W="h6mc-w-conv-${EPOCH}"
+Q_MC_X="8526976${EPOCH}"; C_MC_X="h6mc-x-c-${EPOCH}"; CV_MC_X="h6mc-x-conv-${EPOCH}"
+Q_MC_W2="8526977${EPOCH}"; C_MC_W2="h6mc-w2-c-${EPOCH}"; CV_MC_W2="h6mc-w2-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_MC_R', '$TKW_CLINIC_ID', '$Q_MC_R', 'E2E MC R', ARRAY[]::text[]) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_MC_M', '$TKW_CLINIC_ID', '$Q_MC_M', 'E2E MC M', ARRAY[]::text[]) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_MC_4', '$TKW_CLINIC_ID', '$Q_MC_4', 'E2E MC 423', ARRAY[]::text[]) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_MC_F', '$TKW_CLINIC_ID', '$Q_MC_F', 'E2E MC F', ARRAY[]::text[]) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_MC_W', '$WTC_CLINIC_ID', '$Q_MC_W', 'E2E MC WTC', ARRAY[]::text[]) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_MC_X', '$TKW_CLINIC_ID', '$Q_MC_X', 'E2E MC X', ARRAY[]::text[]) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_MC_W2', '$WTC_CLINIC_ID', '$Q_MC_W2', 'E2E MC W2', ARRAY[]::text[]) ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+# 交付證明：raw INSERT 靜默失敗防線（q() 吞 stderr）— 7 contact + 7 conv 必齊
+MC_NCONTACT=$(q "SELECT count(*)::text n FROM \"Contact\" WHERE id IN ('$C_MC_R','$C_MC_M','$C_MC_4','$C_MC_F','$C_MC_W','$C_MC_X','$C_MC_W2')" | jf n)
+check "H6-MC fixture：7 contact 入庫（靜默失敗防線）" "$MC_NCONTACT" "7"
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV_MC_R', '$TKW_CLINIC_ID', '$C_MC_R', 'OPEN', '$NOWISO6') ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV_MC_M', '$TKW_CLINIC_ID', '$C_MC_M', 'OPEN', '$NOWISO6') ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV_MC_4', '$TKW_CLINIC_ID', '$C_MC_4', 'OPEN', '$NOWISO6') ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV_MC_F', '$TKW_CLINIC_ID', '$C_MC_F', 'OPEN', '$NOWISO6') ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV_MC_W', '$WTC_CLINIC_ID', '$C_MC_W', 'OPEN', '$NOWISO6') ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV_MC_X', '$TKW_CLINIC_ID', '$C_MC_X', 'OPEN', '$NOWISO6') ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CV_MC_W2', '$WTC_CLINIC_ID', '$C_MC_W2', 'OPEN', '$NOWISO6') ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+MC_NCONV=$(q "SELECT count(*)::text n FROM \"Conversation\" WHERE id IN ('$CV_MC_R','$CV_MC_M','$CV_MC_4','$CV_MC_F','$CV_MC_W','$CV_MC_W2','$CV_MC_X')" | jf n)
+check "H6-MC fixture：7 conv 入庫（靜默失敗防線）" "$MC_NCONV" "7"
+
+# ── H6-MC-1. list：外店指派線（OR path）可見 + clinicName；外店未指派線唔見（T1.1）──
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/conversations/$CV_MC_W/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$H6M_ID\",\"assignVersion\":0}")
+check "H6-MC-1 setup: ADMIN 指派 WTC 線 → H6M（外店 staff）→ 200" "$CODE" "200"
+curl -s -b "$COOKIE_H6M" -o /tmp/e2e-mc-list.json "$BASE/api/conversations"
+MC_LIST=$(node -e 'try{const a=JSON.parse(require("fs").readFileSync("/tmp/e2e-mc-list.json","utf8"));const w=a.find(x=>x.id===process.argv[1]);const x=a.find(x=>x.id===process.argv[2]);const r=a.find(x=>x.id===process.argv[3]);console.log(w&&w.clinicName===process.argv[4]&&!x&&r&&r.clinicName===process.argv[5]?"ok":"bad:"+JSON.stringify({w:w&&{cn:w.clinicName},x:!!x,r:r&&{cn:r.clinicName}}))}catch{console.log("badjson")}' "$CV_MC_W" "$CV_MC_W2" "$CV_MC_R" "$WTC_CLINIC_NAME" "$TKW_CLINIC_NAME")
+check "H6-MC-1 H6M list：WTC 指派線可見（OR path）+ clinicName=店名 + 外店未指派線唔見" "$MC_LIST" "ok"
+# MD A.3 clinic-tab 語義：STAFF 睇自己店 tab（?clinicId=）時，跨店指派自己嘅線仍要可見；外店未指派線依然唔見
+curl -s -b "$COOKIE_H6M" -o /tmp/e2e-mc-list-para.json "$BASE/api/conversations?clinicId=$TKW_CLINIC_ID"
+MC_LISTP=$(node -e 'try{const a=JSON.parse(require("fs").readFileSync("/tmp/e2e-mc-list-para.json","utf8"));const w=a.find(x=>x.id===process.argv[1]);const w2=a.find(x=>x.id===process.argv[2]);const r=a.find(x=>x.id===process.argv[3]);console.log(w&&w.clinicName===process.argv[4]&&!w2&&r?"ok":"bad:"+JSON.stringify({w:!!w,w2:!!w2,r:!!r}))}catch{console.log("badjson")}' "$CV_MC_W" "$CV_MC_W2" "$CV_MC_R" "$WTC_CLINIC_NAME")
+check "H6-MC-1 H6M list?clinicId=TKW：跨店指派線仍可見（clinic-tab OR 語義）+ 外店未指派線仍唔見" "$MC_LISTP" "ok"
+
+# ── H6-MC-2. crossClinic audit meta（T1.2：from=TKW staff → to=WTC staff）──
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CV_MC_X/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$TKW_STAFF_ID\",\"assignVersion\":0}")
+check "H6-MC-2 setup: staff-tkw claim TKW 線 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/conversations/$CV_MC_X/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$WTC_STAFF_ID\",\"assignVersion\":1}")
+check "H6-MC-2 ADMIN 跨店 takeover（TKW staff → WTC staff）→ 200" "$CODE" "200"
+MC_XC=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE entity='Conversation' AND \"entityId\"='$CV_MC_X' AND action='TRANSFER' AND (meta->>'crossClinic')='true' AND (meta->>'takeover')='true'" | jf c)
+check "H6-MC-2 audit meta：crossClinic:true + takeover:true" "$MC_XC" "1"
+MC_XNOTE=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CV_MC_X' AND channel='INTERNAL' AND type='note' AND body LIKE '%· 由 %'" | jf c)
+check "H6-MC-2 takeover note 含「· 由 {店名}」" "$MC_XNOTE" "1"
+
+# ── H6-MC-UI. 四場景瀏覽器斷言（e2e-multiclinic-ui.ts；每次一 browser）──────
+# UI fixtures：R → H6M 接手（release 用）；423/F → 病人開口（開窗 + 待跟進狀態）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/conversations/$CV_MC_R/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$H6M_ID\",\"assignVersion\":0}")
+check "H6-MC-UI setup: R 線 → H6M（release 前態）→ 200" "$CODE" "200"
+pnpm -s mock-inbound message --clinic TKW --from "$Q_MC_4" --text "你哋幾點開門" --wamid "wamid.E2E_MC423_${EPOCH}" --name "E2E MC 423" >/dev/null || fail "H6-MC-UI mock-inbound 423"
+pnpm -s mock-inbound message --clinic TKW --from "$Q_MC_F" --text "你哋幾點開門" --wamid "wamid.E2E_MCF_${EPOCH}" --name "E2E MC F" >/dev/null || fail "H6-MC-UI mock-inbound F"
+# 確定性 gate：F 線待跟進條件必真（lastInboundAt >= lastMessageAt）先放 browser
+if ! wait_for "SELECT (\"lastInboundAt\" >= \"lastMessageAt\")::text f FROM \"Conversation\" WHERE id='$CV_MC_F'" '[{"f":"true"}]' 30; then
+  fail "H6-MC-UI F 線待跟進條件未達（lastInboundAt < lastMessageAt）"; MC=1
+fi
+# dev loadManifest race（已知 flake：JS chunk 500 → 整頁無 hydrate → dead click）— 預熱 /inbox（H6M STAFF 視圖）確保 client chunk 已編譯
+for i in 1 2 3; do
+  PW=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_H6M" "$BASE/inbox")
+  [ "$PW" = "200" ] && break
+  sleep 3
+done
+sleep 2
+
+# UI-1 badges：跨店線店名 badge（WTC 線有 / 本店線無）+ 待跟進 badge（覆咗消失）
+MCUI_OUT=$(pnpm -s e2e:multiclinic-ui --scenario badges --base "$BASE" --cookie "$COOKIE_H6M" \
+  --conv-follower "$CV_MC_F" --conv-wtc "$CV_MC_W" --clinic-wtc-code WTC 2>&1)
+echo "$MCUI_OUT" | grep -E "MCUI-(OK|FAIL)" | sed 's/^/  [UI] /'
+echo "$MCUI_OUT" > /tmp/e2e-mcui-badges.log
+echo "$MCUI_OUT" | grep -q "MCUI-OK badges" && pass "H6-MC-UI badges：跨店店名 badge + 待跟進 badge（覆咗消失）" || { fail "H6-MC-UI badges（見 /tmp/e2e-mcui-badges.log）"; MC=1; }
+
+# UI-2 release：現任負責人 header〔放手〕（兩段確認）→ 負責人 chip 消失 + toast
+MCUI_OUT=$(pnpm -s e2e:multiclinic-ui --scenario release --base "$BASE" --cookie "$COOKIE_H6M" \
+  --conv-release "$CV_MC_R" 2>&1)
+echo "$MCUI_OUT" | grep -E "MCUI-(OK|FAIL)" | sed 's/^/  [UI] /'
+echo "$MCUI_OUT" > /tmp/e2e-mcui-release.log
+echo "$MCUI_OUT" | grep -q "MCUI-OK release" && pass "H6-MC-UI release：放手掣兩段確認 → 放返隊列" || { fail "H6-MC-UI release（見 /tmp/e2e-mcui-release.log）"; MC=1; }
+
+# UI-3 send423：打緊字時 staff-tkw 接手 → composer 文字保留 + toast + header 即時更新
+MCUI_OUT=$(pnpm -s e2e:multiclinic-ui --scenario send423 --base "$BASE" \
+  --cookie "$COOKIE_H6M" --cookie2 "$COOKIE_TKW" --conv-423 "$CV_MC_4" \
+  --staff-tkw-id "$TKW_STAFF_ID" --staff-tkw-name "$TKW_STAFF_NAME" 2>&1)
+echo "$MCUI_OUT" | grep -E "MCUI-(OK|FAIL)" | sed 's/^/  [UI] /'
+echo "$MCUI_OUT" > /tmp/e2e-mcui-423.log
+echo "$MCUI_OUT" | grep -q "MCUI-OK send423" && pass "H6-MC-UI send423：composer 保留 + toast + header 即時更新" || { fail "H6-MC-UI send423（見 /tmp/e2e-mcui-423.log）"; MC=1; }
+
+# UI-4 menu：二級指派選單（其他分店… → WTC → staff）+ 跨店 confirm 文案
+MCUI_OUT=$(pnpm -s e2e:multiclinic-ui --scenario menu --base "$BASE" --cookie "$COOKIE_ADMIN" \
+  --conv-menu "$CV_MC_M" --staff-wtc-name "$WTC_STAFF_NAME" --clinic-wtc-code WTC 2>&1)
+echo "$MCUI_OUT" | grep -E "MCUI-(OK|FAIL)" | sed 's/^/  [UI] /'
+echo "$MCUI_OUT" > /tmp/e2e-mcui-menu.log
+echo "$MCUI_OUT" | grep -q "MCUI-OK menu" && pass "H6-MC-UI menu：二級選單 + 跨店 confirm 文案" || { fail "H6-MC-UI menu（見 /tmp/e2e-mcui-menu.log）"; MC=1; }
+
+# ── H6-MC cleanup（hermetic）──
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN ('$CV_MC_R','$CV_MC_M','$CV_MC_4','$CV_MC_F','$CV_MC_W','$CV_MC_W2','$CV_MC_X')" >/dev/null 2>&1
+q "DELETE FROM \"NoteReadReceipt\" WHERE \"messageId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\" IN ('$CV_MC_R','$CV_MC_M','$CV_MC_4','$CV_MC_F','$CV_MC_W','$CV_MC_W2','$CV_MC_X'))" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$CV_MC_R','$CV_MC_M','$CV_MC_4','$CV_MC_F','$CV_MC_W','$CV_MC_W2','$CV_MC_X')" >/dev/null 2>&1
+q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\" IN ('$CV_MC_R','$CV_MC_M','$CV_MC_4','$CV_MC_F','$CV_MC_W','$CV_MC_W2','$CV_MC_X')" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id IN ('$CV_MC_R','$CV_MC_M','$CV_MC_4','$CV_MC_F','$CV_MC_W','$CV_MC_W2','$CV_MC_X')" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id IN ('$C_MC_R','$C_MC_M','$C_MC_4','$C_MC_F','$C_MC_W','$C_MC_W2','$C_MC_X')" >/dev/null 2>&1
+for QP in "$Q_MC_R" "$Q_MC_M" "$Q_MC_4" "$Q_MC_F" "$Q_MC_W" "$Q_MC_W2" "$Q_MC_X"; do
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN (SELECT id FROM \"Conversation\" WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$QP'))" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$QP')" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE \"waId\"='$QP'" >/dev/null 2>&1
+done
+[ "$MC" = 0 ] && pass "H6-MC cwi-multiclinic-20260903 缺口補齊 e2e（clinicName/crossClinic/UI×4）" || fail "H6-MC 有項失敗（見上 ❌）"
+
 # ── H6 cleanup（hermetic：fixture staff / policy / aiMode / 對話全清）─────
 q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN ('$CV91','$CV92','$CV93A','$CV93B','$CV93C','$CV93D','$CV94W','$CV94M','$CV95','$CV97')" >/dev/null 2>&1
 q "DELETE FROM \"NoteReadReceipt\" WHERE \"messageId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\" IN ('$CV91','$CV92','$CV93A','$CV93B','$CV93C','$CV93D','$CV94W','$CV94M','$CV95','$CV97'))" >/dev/null 2>&1

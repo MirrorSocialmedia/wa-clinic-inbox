@@ -27,14 +27,30 @@ export default async function InboxPage({
   const sp = await searchParams;
   const convParam = typeof sp.conv === "string" ? sp.conv : "";
 
-  const scope = session.role === "STAFF" ? { clinicId: session.clinicId! } : {};
+  // cwi-multiclinic-20260903（MD A.3）：STAFF 列表 scope 同 /api/conversations 一致 —
+  // 自己所有店 ∪ 指派俾自己嘅線（外店單線授權）；SSR 首屏必須包含，headless 無 client refetch 機會。
+  const myClinicIds =
+    session.role === "STAFF"
+      ? session.clinicIds?.length
+        ? session.clinicIds
+        : session.clinicId
+          ? [session.clinicId]
+          : []
+      : [];
+  const scope =
+    session.role === "STAFF" ? { clinicId: { in: myClinicIds } } : {};
+  const convScope =
+    session.role === "STAFF"
+      ? { OR: [{ clinicId: { in: myClinicIds } }, { assigneeId: session.staffId }] }
+      : {};
 
   const [clinics, convs, contacts, staff, pendingBookings] = await Promise.all([
     session.role === "STAFF"
-      ? prisma.clinic.findUnique({ where: { id: session.clinicId! } }).then((c) => (c ? [c] : []))
+      ? prisma.clinic.findMany({ where: { id: { in: myClinicIds } } })
       : prisma.clinic.findMany({ orderBy: { code: "asc" } }),
-    prisma.conversation.findMany({ where: scope, orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }], take: 200 }),
-    prisma.contact.findMany({ where: scope, select: { id: true, waId: true, profileName: true, labels: true } }),
+    prisma.conversation.findMany({ where: convScope, orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }], take: 200 }),
+    // 跟 /api/conversations 一致：全量 fetch（server-side map，只嵌入可見 row 引用嘅 contact）
+    prisma.contact.findMany({ select: { id: true, waId: true, profileName: true, labels: true } }),
     prisma.staffUser.findMany({ where: { active: true, ...scope }, select: { id: true, name: true, role: true, clinicId: true } }),
     // Phase 3：PENDING 預約（綠色卡）/ ★ booking-ui（D）：CONFIRMED 亦顯示 — 同 conversations API 一致
     prisma.bookingRequest.findMany({
@@ -46,6 +62,15 @@ export default async function InboxPage({
 
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
+  // cwi-multiclinic-20260903：clinic map（clinicName badge）+ 補齊指派俾我嘅外店線嘅店
+  // （SSR 首屏 clinicName/店名 badge 完整；client 另有 /api/clinics?scope=schedule fail-soft 補漏）
+  const clinicMap = new Map(clinics.map((c) => [c.id, c]));
+  const rowClinicIds = Array.from(new Set(convs.map((c) => c.clinicId)));
+  const missingClinicIds = rowClinicIds.filter((id) => !clinicMap.has(id));
+  if (missingClinicIds.length > 0) {
+    const extra = await prisma.clinic.findMany({ where: { id: { in: missingClinicIds } } });
+    for (const c of extra) clinicMap.set(c.id, c);
+  }
   // ★ booking-ui（D）：PENDING 優先；冇 PENDING 先顯示最新 CONFIRMED（同 API 一致）
   const pendingBookingMap = new Map<string, (typeof pendingBookings)[number]>();
   for (const b of pendingBookings) {
@@ -58,7 +83,7 @@ export default async function InboxPage({
   // STAFF 限定自己店（fail-closed）；fail-soft：DB 抖動 → 空 Map（卡唔顯示，唔阻首屏）。
   const holdByPhone = await latestHoldsByPhone(
     contacts.map((c) => c.waId),
-    session.role === "STAFF" ? session.clinicId : undefined
+    session.role === "STAFF" ? rowClinicIds : undefined
   ).catch(() => new Map());
   const now = Date.now();
 
@@ -70,6 +95,9 @@ export default async function InboxPage({
     return {
       id: cv.id,
       clinicId: cv.clinicId,
+      // cwi-multiclinic-20260903（MD A.3/A.6.4）：店名 badge（同 API list 對齊）
+      clinicName: clinicMap.get(cv.clinicId)?.name ?? null,
+      clinicCode: clinicMap.get(cv.clinicId)?.code ?? null,
       contactId: cv.contactId,
       status: cv.status,
       assigneeId: cv.assigneeId,
@@ -131,6 +159,15 @@ export default async function InboxPage({
         email: session.email,
         role: session.role,
         clinicId: session.clinicId,
+        // cwi-multiclinic-20260903：店集合（舊 session 無 clinicIds → fallback [clinicId]）
+        clinicIds:
+          session.role === "STAFF"
+            ? session.clinicIds?.length
+              ? session.clinicIds
+              : session.clinicId
+                ? [session.clinicId]
+                : []
+            : [],
       }}
       initialClinics={clinics}
       initialConversations={conversations}

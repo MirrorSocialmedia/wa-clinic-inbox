@@ -24,6 +24,10 @@ interface Props {
   onClearSearch: () => void;
   /** ★ H1：自己 staffId — 負責人 chip 三狀態（自己=綠「你」/ 別人=琥珀名 / unassigned=無 chip） */
   myStaffId: string;
+  /** cwi-multiclinic-20260903（MD A.6.4）：自己綁定店集合（STAFF；ADMIN = []）— 跨店線店名 badge 判定 */
+  myClinicIds?: string[];
+  /** cwi-multiclinic-20260903：clinic id → 基本資料（店名 badge 顯示 code） */
+  clinicById?: Map<string, { code: string; name: string }>;
   /** ★ H2：conversationId → 未讀 @mention 數（黃點） */
   mentionUnread: Record<string, number>;
   /** ★ H2：bell badge 總數 */
@@ -340,6 +344,21 @@ export function ConversationList(p: Props) {
           const intentMeta = c.intent ? INTENT_META[c.intent] : null;
           const urgentRow = c.urgent && c.status !== "RESOLVED";
           const selected = p.selectedId === c.id;
+          // cwi-multiclinic-20260903（MD A.6.4）：badge 導出（零新欄）
+          // 店名 badge：STAFF → 線唔喺自己綁定店；ADMIN → 只喺「全部診所」視圖
+          const myClinicIds = p.myClinicIds ?? [];
+          const showClinicBadge =
+            p.userRole === "STAFF"
+              ? myClinicIds.length > 0 && !myClinicIds.includes(c.clinicId)
+              : p.activeClinicId === "all";
+          const clinicBadgeText = showClinicBadge
+            ? (p.clinicById?.get(c.clinicId)?.code ?? c.clinicCode ?? c.clinicName ?? null)
+            : null;
+          // 待跟進：未指派 + 最後一條訊息係客人來訊（lastInboundAt >= lastMessageAt）
+          const needsFollow =
+            !c.assigneeId &&
+            !!c.lastInboundAt &&
+            new Date(c.lastInboundAt).getTime() >= new Date(c.lastMessageAt).getTime();
           const timeCls =
             c.window.tone === "red"
               ? "text-danger-text font-medium"
@@ -431,8 +450,27 @@ export function ConversationList(p: Props) {
                   )}
                 </div>
                 {/* row 3：badges（急症行加「AI 未出草稿」— 鐵律 3：URGENT_PAIN 永不生成 draft） */}
-                {(urgentRow || c.pendingBooking || intentMeta || c.assigneeName || c.status === "PENDING") && (
+                {(urgentRow || c.pendingBooking || intentMeta || c.assigneeName || c.status === "PENDING" || clinicBadgeText !== null || needsFollow) && (
                   <div className="flex items-center gap-1 mt-1 flex-wrap">
+                    {/* cwi-multiclinic-20260903（MD A.6.4）：跨店線店名 badge — STAFF：線唔喺自己綁定店；
+                        ADMIN：只喺「全部診所」視圖顯（逐店視圖本身就單一店） */}
+                    {clinicBadgeText && (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t2 font-semibold inline-flex items-center gap-0.5"
+                        title={`跨店線：${c.clinicName ?? clinicBadgeText}`}
+                      >
+                        {clinicBadgeText}
+                      </span>
+                    )}
+                    {/* cwi-multiclinic-20260903（MD A.6.4）：「待跟進」— 未指派 + 最後一條係客人來訊（前端導出，零新欄） */}
+                    {needsFollow && (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-warn-soft text-warn-text font-medium"
+                        title="客人有來訊但無人接手 — 撳〔接手〕或者指派"
+                      >
+                        待跟進
+                      </span>
+                    )}
                     {urgentRow && (
                       <>
                         <span className="text-[10px] px-2 py-0.5 rounded-full bg-danger text-panel font-semibold">
