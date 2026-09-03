@@ -5761,6 +5761,262 @@ check "T104 零 draft（鐵律 3）" "$(q "SELECT count(*)::text c FROM \"AiDraf
 check "T104 StaffNotice URGENT_ESCALATION" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" n JOIN \"Conversation\" cv ON cv.id=n.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$E104_WA' AND n.kind='URGENT_ESCALATION'" | jf c)" "1"
 pass "E 段完成：PAIN_TRIAGE + Lexicon（T97–T104 8 格）"
 
+
+# ══════════════ F. cwi-master B5（Part F 知識庫 RAG + GoldenCase 評測）T120–T131 ══════════════
+# MD §Part F + §8 表 F 行。mock worker（AI_MOCK=1）決定性路徑 + 兩支 unit script +
+# eval/sample 真 sglang（T131）。fixture 前綴 852698x/852699x + EPOCH（13 個 waId）。
+echo "[F/12] Part F: Knowledge RAG + GoldenCase (T120-T131)"
+F_FAIL=0
+
+# ── F0. 準備：seed 冪等 + 上輪 e2e GoldenCase 標記行清走（hermetic）──────────────
+pnpm -s seed:knowledge >/tmp/e2e-f-seed.log 2>&1 || F_FAIL=1
+check "F0 KnowledgeDoc 39 骨架（TKW seed 冪等）" "$(q "SELECT count(*)::text c FROM \"KnowledgeDoc\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"enabled\"=true" | jf c)" "39"
+q "DELETE FROM \"GoldenCase\" WHERE \"note\" IN ('e2e-F-gate','e2e-F-deid')" >/dev/null 2>&1
+
+# ── T120. 目錄選 id（stage 1 揀中嘅 id 全部喺 KnowledgeDoc；<knowledge> 入 prompt）──
+F120_WA="8526980${EPOCH}"
+F120_WID="wamid.E2E_F120_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F120_WA" --text "洗牙之後幾耐可以返工" --wamid "$F120_WID" --name "E2E F120" >/dev/null || fail "T120 POST"
+F120_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$F120_WID'" | jf v)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F120_MSG'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T120 QUESTION 出 draft（PROPOSED）"
+else
+  fail "T120 draft PROPOSED"
+fi
+check "T120 traceJson.knowledge.ran=true" "$(q "SELECT (\"traceJson\"->'knowledge'->>'ran')::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F120_MSG'" | jf v)" "true"
+check "T120 picked ≥1（目錄選中）" "$(q "SELECT CASE WHEN jsonb_array_length(\"traceJson\"->'knowledge'->'picked')>=1 THEN 'yes' ELSE 'no' END v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F120_MSG'" | jf v)" "yes"
+F120_P0T=$(q "SELECT (\"traceJson\"->'knowledge'->'picked'->0->>'title') v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F120_MSG'" | jf v)
+case "$F120_P0T" in
+  *洗牙*) pass "T120 picked[0] = 洗牙 相關（${F120_P0T:0:20}）" ;;
+  *) fail "T120 picked[0] 唔係洗牙相關（got: ${F120_P0T:0:30}）" ;;
+esac
+F120_IDS=$(q "SELECT coalesce(string_agg(distinct p->>'id',','),'') v FROM \"AiDraft\" d CROSS JOIN LATERAL jsonb_array_elements(d.\"traceJson\"->'knowledge'->'picked') p WHERE d.\"inReplyToMessageId\"='$F120_MSG'" | jf v)
+F120_N=$(q "SELECT jsonb_array_length(d.\"traceJson\"->'knowledge'->'picked')::text v FROM \"AiDraft\" d WHERE d.\"inReplyToMessageId\"='$F120_MSG'" | jf v)
+F120_MATCH=$(q "SELECT count(*)::text v FROM \"KnowledgeDoc\" WHERE id=ANY(string_to_array('$F120_IDS',','))" | jf v)
+check "T120 picked ids 全部喺 KnowledgeDoc（無幻覺）" "$F120_MATCH" "$F120_N"
+
+# ── T121. 幻覺 id 丟棄（目錄外 id → 丟棄 + log + picked 淨真 id）─────────────────
+F121_WA="8526981${EPOCH}"
+F121_WID="wamid.E2E_F121_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F121_WA" --text "洗牙之後幾耐可以返工 E2E-KNOWLEDGE-HALLUCINATE" --wamid "$F121_WID" --name "E2E F121" >/dev/null || fail "T121 POST"
+F121_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$F121_WID'" | jf v)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F121_MSG'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T121 幻覺後照出 draft（PROPOSED）"
+else
+  fail "T121 draft"
+fi
+check "T121 discarded=1（幻覺 id 計數）" "$(q "SELECT (\"traceJson\"->'knowledge'->>'discarded')::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F121_MSG'" | jf v)" "1"
+check "T121 picked 冇 fake id" "$(q "SELECT count(*)::text v FROM \"AiDraft\" d CROSS JOIN LATERAL jsonb_array_elements(d.\"traceJson\"->'knowledge'->'picked') p WHERE d.\"inReplyToMessageId\"='$F121_MSG' AND (p->>'id')='e2e-hallucinated-id'" | jf v)" "0"
+sleep 1
+grep -q "hallucinated id" /tmp/e2e-worker*.log 2>/dev/null && pass "T121 log: knowledge: hallucinated id — 丟棄" || fail "T121 log hallucinated id"
+
+# ── T122. timeout fail-soft（3s timeout → 跳過 RAG 照出草稿）─────────────────────
+F122_WA="8526982${EPOCH}"
+F122_WID="wamid.E2E_F122_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F122_WA" --text "洗牙之後幾耐可以返工 E2E-KNOWLEDGE-TIMEOUT" --wamid "$F122_WID" --name "E2E F122" >/dev/null || fail "T122 POST"
+F122_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$F122_WID'" | jf v)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F122_MSG'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T122 timeout fail-soft：草稿照出（PROPOSED）"
+else
+  fail "T122 fail-soft draft"
+fi
+check "T122 skipped=timeout" "$(q "SELECT (\"traceJson\"->'knowledge'->>'skipped')::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F122_MSG'" | jf v)" "timeout"
+check "T122 picked=0" "$(q "SELECT jsonb_array_length(\"traceJson\"->'knowledge'->'picked')::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F122_MSG'" | jf v)" "0"
+sleep 1
+grep -q "stage1 mock timeout" /tmp/e2e-worker*.log 2>/dev/null && pass "T122 log: stage1 mock timeout — 跳過 RAG" || fail "T122 log timeout"
+
+# ── T122b. L2 自動覆前提：價錢問題 + 零引用 → 強制降 L1（AUTO 模式實測）──────────────
+#   範圍 = priceIntent（MD F.3；非價錢 QUESTION 維持 F 前行為 — W1/W4 回歸綠）。
+#   洗耳 = 目錄外服務：stage1 timeout + keyword fallback 都撳唔到 PRICE doc → 零引用 → block + needsHuman。
+patch_aimode "$TKW_CLINIC_ID" AUTO
+case "$PAM_CODE" in 200) pass "T122b PATCH TKW aiMode=AUTO → 200" ;; *) fail "T122b PATCH AUTO（code=$PAM_CODE）" ;; esac
+F122B_WA="8526983${EPOCH}"
+F122B_WID="wamid.E2E_F122B_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F122B_WA" --text "洗耳幾錢 E2E-KNOWLEDGE-TIMEOUT" --wamid "$F122B_WID" --name "E2E F122B" >/dev/null || fail "T122b POST"
+F122B_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$F122B_WID'" | jf v)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F122B_MSG'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T122b 價錢問題+零引用唔自動發（draft 停留 PROPOSED）"
+else
+  fail "T122b PROPOSED"
+fi
+sleep 1
+check "T122b 零自動發 OUT" "$(q "SELECT count(*)::text c FROM \"Message\" m JOIN \"Conversation\" cv ON cv.id=m.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$F122B_WA' AND m.direction='OUT' AND m.\"aiAutoSent\"=true" | jf c)" "0"
+grep -q "no-knowledge-citation" /tmp/e2e-worker*.log 2>/dev/null && pass "T122b log: no-knowledge-citation block" || fail "T122b log no-knowledge-citation"
+patch_aimode "$TKW_CLINIC_ID" DRAFT
+case "$PAM_CODE" in 200) pass "T122b 還原 TKW aiMode=DRAFT → 200" ;; *) fail "T122b 還原 DRAFT（code=$PAM_CODE）" ;; esac
+
+# ── T123. price-guard ①：零 PRICE 引用幻覺價 → 棄用改人手提示版 ─────────────────
+F123_WA="8526984${EPOCH}"
+F123_WID="wamid.E2E_F123_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F123_WA" --text "醫院有冇停車場 E2E-PRICE-LEAK" --wamid "$F123_WID" --name "E2E F123" >/dev/null || fail "T123 POST"
+F123_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$F123_WID'" | jf v)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F123_MSG'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T123 draft 存在（PROPOSED）"
+else
+  fail "T123 draft"
+fi
+check "T123 幻覺價被擋 → 人手提示版（無 $ 金額）" "$(q "SELECT CASE WHEN \"draftText\" LIKE '%問返同事%' AND \"draftText\" NOT LIKE '%$%' THEN 'yes' ELSE 'no' END v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F123_MSG'" | jf v)" "yes"
+check "T123 trace guard.blocked=true" "$(q "SELECT (\"traceJson\"->'price'->'guard'->>'blocked')::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F123_MSG'" | jf v)" "true"
+sleep 1
+grep -q "unsourced amount blocked" /tmp/e2e-worker*.log 2>/dev/null && pass "T123 log: price: unsourced amount blocked" || fail "T123 log unsourced amount"
+
+# ── T124. price-guard ②：有 PRICE 引用漏 disclaimer → code 自動 append ──────────
+F124_WA="8526985${EPOCH}"
+F124_WID="wamid.E2E_F124_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F124_WA" --text "洗牙有冇需要注意 E2E-PRICE-NODISC" --wamid "$F124_WID" --name "E2E F124" >/dev/null || fail "T124 POST"
+F124_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$F124_WID'" | jf v)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F124_MSG'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T124 draft 存在（PROPOSED）"
+else
+  fail "T124 draft"
+fi
+check "T124 草稿含範圍 600–1200" "$(q "SELECT CASE WHEN \"draftText\" LIKE '%600–1200%' THEN 'yes' ELSE 'no' END v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F124_MSG'" | jf v)" "yes"
+check "T124 disclaimer 自動 append" "$(q "SELECT CASE WHEN \"draftText\" LIKE '%以到診評估同前台報價為準%' THEN 'yes' ELSE 'no' END v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F124_MSG'" | jf v)" "yes"
+check "T124 trace guard.disclaimerAppended=true + blocked=false" "$(q "SELECT (\"traceJson\"->'price'->'guard'->>'disclaimerAppended')::text||'|'||(\"traceJson\"->'price'->'guard'->>'blocked')::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F124_MSG'" | jf v)" "true|false"
+
+# ── T125. price-guard ③：金額出 [priceMin,priceMax] → 棄用改人手提示版 ──────────
+F125_WA="8526986${EPOCH}"
+F125_WID="wamid.E2E_F125_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F125_WA" --text "洗牙有冇需要注意 E2E-PRICE-OUTRANGE" --wamid "$F125_WID" --name "E2E F125" >/dev/null || fail "T125 POST"
+F125_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$F125_WID'" | jf v)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F125_MSG'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T125 draft 存在（PROPOSED）"
+else
+  fail "T125 draft"
+fi
+check "T125 出範圍價被擋 → 人手提示版" "$(q "SELECT CASE WHEN \"draftText\" LIKE '%問返同事%' AND \"draftText\" NOT LIKE '%\$5000%' THEN 'yes' ELSE 'no' END v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F125_MSG'" | jf v)" "yes"
+check "T125 trace guard.outOfRange=true + blocked=true" "$(q "SELECT (\"traceJson\"->'price'->'guard'->>'outOfRange')::text||'|'||(\"traceJson\"->'price'->'guard'->>'blocked')::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F125_MSG'" | jf v)" "true|true"
+sleep 1
+grep -q "out-of-range amount" /tmp/e2e-worker*.log 2>/dev/null && pass "T125 log: price: out-of-range amount" || fail "T125 log out-of-range"
+
+# ── T126. 全鏈：問診 → impression → 報價（同一對話）────────────────────────────
+F126_WA="8526987${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F126_WA" --text "我牙痛" --wamid "wamid.E2E_F126a_${EPOCH}" --name "E2E F126" >/dev/null || fail "T126 POST1"
+if wait_for "SELECT count(*)::text c FROM \"PainTriageSession\" s JOIN \"Conversation\" cv ON cv.id=s.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$F126_WA' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30; then
+  pass "T126 問診 session ACTIVE（PAIN 入場）"
+else
+  fail "T126 session ACTIVE"
+fi
+sleep 2
+pnpm -s mock-inbound message --clinic TKW --from "$F126_WA" --text "右後牙，痛咗2日，痛3分，一停就冇，唔會自己痛，夜晚冇，咬唔痛，冇做過，冇腫" --wamid "wamid.E2E_F126b_${EPOCH}" --name "E2E F126" >/dev/null || fail "T126 POST2"
+F126_CONV=$(q "SELECT c.id v FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$F126_WA'" | jf v)
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$F126_CONV' AND \"direction\"='OUT' AND type='text' AND \"body\" LIKE '%流血止唔到%'" '[{"c":"1"}]' 30
+pnpm -s mock-inbound message --clinic TKW --from "$F126_WA" --text "冇" --wamid "wamid.E2E_F126c_${EPOCH}" --name "E2E F126" >/dev/null || fail "T126 POST3"
+if wait_for "SELECT s.\"status\"::text st, s.\"closeReason\"::text r, s.\"impression\"::text im FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$F126_CONV'" '[{"st":"COMPLETED","r":"COMPLETED","im":"sensitivity"}]' 30; then
+  pass "T126 問診完成 → impression=sensitivity"
+else
+  fail "T126 COMPLETED+sensitivity"
+fi
+F126_PAIN_DRAFT=$(q "SELECT \"draftText\" v FROM \"AiDraft\" WHERE \"conversationId\"='$F126_CONV' AND model='pain-triage-engine'" | jf v)
+case "$F126_PAIN_DRAFT" in
+  *先確定*想約邊日*) pass "T126 impression 三句式出口草稿（②未確診 ③下一步）" ;;
+  *) fail "T126 三句式（got: ${F126_PAIN_DRAFT:0:60}）" ;;
+esac
+# 病人翻轉問價 → 報價鏈
+F126_Q_WID="wamid.E2E_F126d_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F126_WA" --text "洗牙幾錢" --wamid "$F126_Q_WID" --name "E2E F126" >/dev/null || fail "T126 POST4"
+F126_Q_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$F126_Q_WID'" | jf v)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F126_Q_MSG'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T126 報價 QUESTION 出 draft（PROPOSED）"
+else
+  fail "T126 報價 draft"
+fi
+check "T126 報價 = 範圍 + 影響因素 + disclaimer（code 決定性）" "$(q "SELECT CASE WHEN \"draftText\" LIKE '%600–1200%' AND \"draftText\" LIKE '%影響因素%' AND \"draftText\" LIKE '%以到診評估同前台報價為準%' THEN 'yes' ELSE 'no' END v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F126_Q_MSG'" | jf v)" "yes"
+F126_PRICE_DOC=$(q "SELECT id v FROM \"KnowledgeDoc\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND kind='PRICE' AND title='洗牙收費'" | jf v)
+check "T126 trace price.docId = PRICE 洗牙 doc" "$(q "SELECT (\"traceJson\"->'price'->>'docId')::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F126_Q_MSG'" | jf v)" "$F126_PRICE_DOC"
+check "T126 trace price.triggered=true + guard.blocked=false" "$(q "SELECT (\"traceJson\"->'price'->>'triggered')::text||'|'||(\"traceJson\"->'price'->'guard'->>'blocked')::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$F126_Q_MSG'" | jf v)" "true|false"
+check "T126 全鏈：同一對話 2 支 draft（問診 + 報價）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$F126_CONV'" | jf c)" "2"
+
+# ── T127. impression 七條 + fallback（unit：6 impression + post_op 紅旗 + fallback）─
+if pnpm -s test:unit-impressions-f >/tmp/e2e-f-impressions.log 2>&1; then
+  pass "T127 unit-impressions-f 全綠（六 impression + post_op 紅旗 + fallback + 爛模板兜底）"
+else
+  fail "T127 unit-impressions-f（見 /tmp/e2e-f-impressions.log）"
+fi
+check "T127 e2e 出口草稿含 ② 未確診（先確定）" "$(q "SELECT CASE WHEN \"draftText\" LIKE '%先確定%' THEN 'yes' ELSE 'no' END v FROM \"AiDraft\" WHERE \"conversationId\"='$F126_CONV' AND model='pain-triage-engine'" | jf v)" "yes"
+
+# ── T128. 措辭 canary：出口/報價草稿零「確診/你係/一定要」─────────────────────────
+F128_BAD=$(q "SELECT count(*)::text v FROM \"AiDraft\" WHERE \"conversationId\"='$F126_CONV' AND (\"draftText\" LIKE '%確診%' OR \"draftText\" LIKE '%你係%' OR \"draftText\" LIKE '%一定要%')" | jf v)
+check "T128 全鏈草稿零禁詞（確診/你係/一定要）" "$F128_BAD" "0"
+
+# ── T129. 相片只做 signal：唔入 AI 判斷 + 零 draft + 卡標「有相待人手睇」─────────
+F129_WA="8526988${EPOCH}"
+F129_WID="wamid.E2E_F129_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F129_WA" --text "e2e F129 photo" --media image --wamid "$F129_WID" --name "E2E F129" >/dev/null || fail "T129 POST media"
+F129_CONV=$(q "SELECT c.id v FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$F129_WA'" | jf v)
+if wait_for "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$F129_CONV' AND kind='MEDIA_RECEIVED'" '[{"c":"1"}]' 30; then
+  pass "T129 相片 → StaffNotice MEDIA_RECEIVED"
+else
+  fail "T129 MEDIA_RECEIVED"
+fi
+check "T129 卡標：有相待人手睇（AI 唔判斷相片內容）" "$(q "SELECT CASE WHEN \"title\" LIKE '%有相待人手睇（AI 唔判斷相片內容）%' THEN 'yes' ELSE 'no' END v FROM \"StaffNotice\" WHERE \"conversationId\"='$F129_CONV' AND kind='MEDIA_RECEIVED'" | jf v)" "yes"
+sleep 2
+check "T129 相片零 AI draft（唔入判斷）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$F129_CONV'" | jf c)" "0"
+check "T129 相片零自動覆 OUT" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$F129_CONV' AND \"direction\"='OUT'" | jf c)" "0"
+
+# ── T130. deid 零 PII：prefill 去識別 + 入庫二次兜底 + 結構層無 conversationId ────
+F130_WA="8526989${EPOCH}"
+F130_WID="wamid.E2E_F130_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F130_WA" --text "我電話 91234567 想問下洗牙" --wamid "$F130_WID" --name "E2E F130" >/dev/null || fail "T130 POST"
+F130_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$F130_WID'" | jf v)
+[ -n "$F130_MSG" ] || fail "T130 message 未落庫"
+F130_CODE=$(curl -s -o /tmp/e2e-f130-pre.json -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/golden-cases/prefill?messageId=$F130_MSG")
+check "T130 prefill 200（STAFF 自己店對話）" "$F130_CODE" "200"
+F130_UTT=$(node -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync("/tmp/e2e-f130-pre.json","utf8")).utterance||"")}catch{process.stdout.write("")}')
+case "$F130_UTT" in
+  *"<phone>"*) pass "T130 prefill utterance 電話 → <phone>" ;;
+  *) fail "T130 prefill 電話未 deid（got: ${F130_UTT:0:40}）" ;;
+esac
+case "$F130_UTT" in
+  *"91234567"*) fail "T130 prefill 殘留原始電話" ;;
+  *) pass "T130 prefill 零原始電話" ;;
+esac
+node -e 'const u=require("fs").readFileSync("/tmp/e2e-f130-pre.json","utf8");const j=JSON.parse(u);require("fs").writeFileSync("/tmp/e2e-f130-post.json",JSON.stringify({clinicId:process.argv[1],utterance:j.utterance,contextBefore:[],expectIntent:"QUESTION",expectRedFlag:false,expectAutoOk:false,expectDocIds:[],note:"e2e-F-deid"}))' "$TKW_CLINIC_ID"
+F130_POST=$(curl -s -o /tmp/e2e-f130-resp.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/golden-cases" -H 'Content-Type: application/json' -d @/tmp/e2e-f130-post.json)
+check "T130 STAFF 加入測試集 → 201" "$F130_POST" "201"
+F130_GID=$(jf id < /tmp/e2e-f130-resp.json)
+check "T130 入庫 utterance 零原始電話" "$(q "SELECT (NOT (\"utterance\" LIKE '%91234567%'))::text v FROM \"GoldenCase\" WHERE id='$F130_GID'" | jf v)" "true"
+check "T130 GoldenCase 結構層無 conversationId/messageId 欄" "$(q "SELECT count(*)::text v FROM information_schema.columns WHERE table_name='GoldenCase' AND column_name IN ('conversationId','messageId')" | jf v)" "0"
+
+# ── T131. eval 紅旗 gate 退出碼 1 + sample 未審核唔入 eval（真 sglang）──────────
+# (a) MF 控制組：expectRedFlag=true 但句子無任何紅旗 → recall 0% → 硬 gate FAIL
+q "INSERT INTO \"GoldenCase\" (id, \"clinicId\", source, utterance, \"contextBefore\", \"expectIntent\", \"expectRedFlag\", \"expectAutoOk\", \"expectDocIds\", note, enabled) VALUES ('e2e-fgate-${EPOCH}', '$MF_CLINIC_ID', 'MANUAL', '你好，想問下有冇做洗牙', '{}', 'QUESTION', true, false, '{}', 'e2e-F-gate', true)" >/dev/null 2>&1
+pnpm -s eval:golden --clinic MF --limit 10 > /tmp/e2e-eval-mf.log 2>&1
+F131_RC=$?
+check "T131 eval 紅旗 recall 0% → 退出碼 1" "$F131_RC" "1"
+F131_RPT=$(ls -t evals/reports/golden-*.json 2>/dev/null | head -1)
+F131_GATE=$(node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(j.summary&&j.summary.redFlagRecall&&j.summary.redFlagRecall.fail===true?"fail":"pass")}catch(e){console.log("err")}' "$F131_RPT")
+check "T131 報告 redFlagRecall.fail=true" "$F131_GATE" "fail"
+# (b) golden:sample（真 Qwen 預標）→ HISTORY_SAMPLE enabled=false → eval 唔入
+F131B_WA="8526990${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$F131B_WA" --text "你好" --wamid "wamid.E2E_F131a_${EPOCH}" --name "E2E F131" >/dev/null || fail "T131 POST conv"
+F131B_CONV=$(q "SELECT c.id v FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$F131B_WA'" | jf v)
+q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, status, \"waTimestamp\", \"createdAt\") VALUES ('e2e-f131-hist-${EPOCH}', '$F131B_CONV', 'IN', 'HISTORY', 'text', '我電話 98765432 想問洗牙幾耐好', 'RECEIVED', now() - interval '1 hour', now())" >/dev/null 2>&1
+F131_FROM=$(date -u -d '-1 day' +%Y-%m-%dT%H:%M:%SZ)
+pnpm -s golden:sample --clinic TKW --from "$F131_FROM" --limit 5 > /tmp/e2e-sample.log 2>&1
+F131_SAMP=$(q "SELECT id v FROM \"GoldenCase\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND source='HISTORY_SAMPLE' AND \"utterance\" LIKE '%洗牙%' ORDER BY \"createdAt\" DESC LIMIT 1" | jf v)
+[ -n "$F131_SAMP" ] && pass "T131 golden:sample 入庫（HISTORY_SAMPLE）" || fail "T131 sample 未入庫（見 /tmp/e2e-sample.log）"
+check "T131 sample enabled=false（未審核）" "$(q "SELECT (enabled)::text v FROM \"GoldenCase\" WHERE id='$F131_SAMP'" | jf v)" "false"
+check "T131 sample utterance 已 deid（零原始電話）" "$(q "SELECT (NOT (\"utterance\" LIKE '%98765432%'))::text v FROM \"GoldenCase\" WHERE id='$F131_SAMP'" | jf v)" "true"
+pnpm -s eval:golden --clinic TKW --limit 50 > /tmp/e2e-eval-tkw.log 2>&1
+F131B_RPT=$(ls -t evals/reports/golden-*.json 2>/dev/null | head -1)
+F131B_IN=$(node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const sid=process.argv[2];console.log(Array.isArray(j.cases)&&j.cases.some(c=>c.id===sid)?"in":"out")}catch(e){console.log("err")}' "$F131B_RPT" "$F131_SAMP")
+check "T131 未審核 sample 唔入 eval 報告" "$F131B_IN" "out"
+
+# ── F sweep：fixture 病人殘留清走（新表 hermetic；GoldenCase e2e 標記行清走）──────
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852698%' OR x.\"waId\" LIKE '852699%')" >/dev/null 2>&1
+q "DELETE FROM \"PainTriageSession\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852698%' OR x.\"waId\" LIKE '852699%')" >/dev/null 2>&1
+q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852698%' OR x.\"waId\" LIKE '852699%')" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852698%' OR x.\"waId\" LIKE '852699%')" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852698%' OR x.\"waId\" LIKE '852699%')" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\" LIKE '852698%' OR \"waId\" LIKE '852699%'" >/dev/null 2>&1
+q "DELETE FROM \"GoldenCase\" WHERE \"note\" IN ('e2e-F-gate','e2e-F-deid')" >/dev/null 2>&1
+check "F sweep fixture 零殘留" "$(q "SELECT count(*)::text c FROM \"Contact\" WHERE \"waId\" LIKE '852698%' OR \"waId\" LIKE '852699%'" | jf c)" "0"
+
+[ "$F_FAIL" = 0 ] && pass "F 段完成：Knowledge RAG + GoldenCase（T120–T131 12 格）" || fail "F 段有項失敗（見上 ❌）"
+
+# ── summary ────────────────────────────────────────────────────────────
+
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

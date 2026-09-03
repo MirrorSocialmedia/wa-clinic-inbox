@@ -101,8 +101,23 @@ function outOfScopeDraft(input: ClassifyAndDraftInput): string {
   return `多謝你嘅訊息！呢個問題超出了 ${clinicName(input)} 嘅服務範圍，如有牙科相關查詢歡迎隨時問我哋。`;
 }
 
-/** 兜底 QUESTION 草稿 — 唔斷症、唔作價（鐵律）。 */
+/** 兜底 QUESTION 草稿 — 唔斷症、唔作價（鐵律）。
+ * ★ Part F（cwi-raggolden-20260904）：e2e price-guard 靶（keyword token — 決定性，唔使重啟 worker）：
+ * - `E2E-PRICE-LEAK`    → 模擬 LLM 幻覺一個價（無引用 → price-guard ① 必擋）
+ * - `E2E-PRICE-NODISC` → in-range 價但漏 disclaimer（price-guard ② 必 append）— 題目要命中 PRICE 條目 keyword
+ * - `E2E-PRICE-OUTRANGE` → out-range 價（price-guard ③ 必擋）— 同上
+ * 注意：token 題目唔准含價錢意圖詞（幾錢/收費/價錢/貴唔貴/幾多錢）— 否則報價鏈決定性 draft 先食咗。 */
 function questionDraft(input: ClassifyAndDraftInput): string {
+  const body = lastInboundBody(input);
+  if (body.includes("E2E-PRICE-LEAK")) {
+    return "多謝你嘅查詢！照經驗嚟講大概 $999 左右，具體以到店為準。"; // 幻覺價（零 PRICE 引用）
+  }
+  if (body.includes("E2E-PRICE-NODISC")) {
+    return "多謝你嘅查詢！洗牙嘅費用大約係 $600–1200，視乎牙石多寡。"; // in-range、漏 disclaimer
+  }
+  if (body.includes("E2E-PRICE-OUTRANGE")) {
+    return "多謝你嘅查詢！洗牙嘅費用大約係 $5000，包埋全部檢查。"; // out-of-range
+  }
   return (
     `多謝你嘅查詢！${clinicName(input)}收到你嘅訊息，會盡快回覆你。` +
     `如有急事（例如劇痛、流血），請即刻致電診所或盡快到訪俾醫生檢查。`

@@ -238,6 +238,30 @@ export interface DraftInfo {
   createdAt: string;
   /** cwi-window-20260901（P2）：NORMAL（窗口內）/ COPY_ONLY（過窗 — 發唔出，只准複製去手機 App）。舊 row / 舊 server 可能冇 → 預設 NORMAL。 */
   mode?: "NORMAL" | "COPY_ONLY";
+  /** ★ Part F（cwi-raggolden-20260904，F.7）：trace panel 數據源（可展開段）。舊 draft / 痛症出口前可能 null。 */
+  traceJson?: DraftTrace | null;
+}
+
+/** ★ Part F（F.7）：ai.worker 每輪寫入嘅 trace（零 PII — 全 metadata：workflow/params/gates/lexicon/檢索/price/latency）。 */
+export interface DraftTrace {
+  workflow: string;
+  paramsVersion?: Record<string, unknown>;
+  gates?: { autoLevel?: string; blocks?: string[]; autoSent?: boolean; mode?: string };
+  lexicon?: { hits?: string[] };
+  knowledge?: {
+    ran?: boolean;
+    skipped?: string | null;
+    discarded?: number;
+    latencyMs?: number;
+    picked?: { id: string; title: string; kind: string }[];
+  };
+  impression?: string | null;
+  price?: {
+    triggered: boolean;
+    docId: string | null;
+    guard: { blocked: boolean; disclaimerAppended: boolean; outOfRange: boolean };
+  };
+  latencyMs?: number;
 }
 
 /** socket ai:classified — 每次 AI 分類成功（metadata only，summary 係聊天內容） */
@@ -261,6 +285,8 @@ export interface DraftReadyEvent {
   latencyMs: number;
   /** cwi-window-20260901（P2）：COPY_ONLY = 過窗草稿（UI 只准複製） */
   mode?: "NORMAL" | "COPY_ONLY";
+  /** ★ Part F（F.7）：trace panel 數據源 */
+  traceJson?: DraftTrace | null;
 }
 
 /** socket urgent:escalation — 急症實時升級（toast + 隊列頂紅） */

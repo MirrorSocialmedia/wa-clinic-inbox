@@ -74,3 +74,7 @@ next-env.d.ts
 .dev/age.key
 /.dev/bt/
 /.dev/e2e-fixtures.txt
+
+# Part F（cwi-raggolden-20260904）：eval 產出（runtime output，非資產）
+/evals/golden/
+/evals/reports/

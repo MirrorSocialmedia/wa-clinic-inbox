@@ -110,6 +110,46 @@ enum PainTriageStatus {
   HANDOFF
 }
 
+// ★ Part F（cwi-raggolden-20260904，MD §Part F F.2）：知識庫條目種類。
+// 知識庫 = staff 管嘅參數（同 params 同級）— 改即刻生效、可審計、可 rollback（Admin UI + AuditLog）。
+// R-8 事實鐵律：時段/醫生/病人記錄唔准入知識庫（骨架只係「係咩/幾多次/幾耐/痛唔痛」級嘅通用描述）。
+enum KnowledgeKind {
+  SERVICE   // 服務項目（洗牙/補牙/杜牙根/...）
+  POST_OP   // 術後護理
+  POLICY    // 診所政策（改期/付款/... — 唔寫實際時間）
+  PRICE     // 收費範圍（disclaimer 必填，code 強制附加）
+  PREP      // 到診準備
+  FAQ       // 其他常見問題
+}
+
+// ★ Part F（F.2）：診所知識庫（RAG 兩階段檢索嘅語料）。
+// clinicId null = 全局條目；有值 = 該店（覆寫/補充）。
+// title 進目錄（要夠精準）；keywords 口語+書面（檢索匹配用）；body ≤600 字（超長拆條）。
+model KnowledgeDoc {
+  id         String        @id @default(cuid())
+  clinicId   String?                    // null = 全局；有值 = 該店覆寫
+  kind       KnowledgeKind
+  title      String                     // 進目錄，要夠精準
+  keywords   String[]                   // 口語+書面
+  body       String    @db.Text         // ≤600 字，超長拆條
+  disclaimer String?                    // kind=PRICE 必填（zod refine，長度 ≥8）
+  priceMin   Int?
+  priceMax   Int?                       // priceMin <= priceMax
+  enabled    Boolean   @default(true)
+  version    Int       @default(1)
+  updatedBy  String?
+  updatedAt  DateTime  @updatedAt
+
+  @@index([clinicId, enabled])
+}
+
+// ★ Part F（F.5）：GoldenCase 評測集（零 PII — 入庫前強制 deid；唔存 conversationId/messageId）。
+enum GoldenSource {
+  INBOX_BUTTON   // inbox「加入測試集」掣（STAFF 可加，ADMIN 可編輯/停用）
+  HISTORY_SAMPLE // 歷史對話取樣（AI 預標 + 人手審核；未審核 enabled=false 唔入 eval）
+  MANUAL         // 人手建立
+}
+
 model Clinic {
   id               String  @id @default(cuid())
   code             String  @unique            // TKW / MF ...（同 clinic-workforce 用同一套 code，方便對照）
@@ -354,10 +394,36 @@ model AiDraft {
   // cwi-window-20260901（P2）：草稿模式 — NORMAL（默認）| COPY_ONLY（過窗草稿：只可複製去手機 App，
   // 唔可採用/發送；adoptRate 分母剔除 — 過窗唔係「AI 唔夠好」，唔好拖累自動化升級統計）。
   mode               String    @default("NORMAL")
+  // ★ Part F（cwi-raggolden-20260904，F.7）：trace panel 數據源 — ai.worker 每輪寫入
+  // （workflow key + params 版本／過咗邊幾道閘／lexicon 命中詞／檢索揀咗邊幾條 title+id／
+  //   impression key／price-guard 有冇介入／latency）。nullable — 歷史 row null = 舊 draft。
+  traceJson          Json?
   // Phase 2 冪等：同一條 inbound Message 只可有一條 draft。
   // AI job 重試（attempts 3）或部分失敗重跑時，唯一約束 + findUnique 前置檢查
   // 保證唔會生成重複 draft。一條訊息只觸發一次 AI 分類，語義上多 draft 無意義。
   @@unique([conversationId, inReplyToMessageId])
+}
+
+// ★ Part F（F.5）：GoldenCase 評測資產（DB 表 + 定期 export repo evals/golden/）。
+// 零 PII 鐵律：utterance/contextBefore 入庫前強制 deid（src/lib/golden/deid.ts）；
+// 唔存 conversationId/messageId（避免原對話 purge 後穿窿 + 零 PII）。
+// expectDocIds：期望檢索引用嘅 KnowledgeDoc id 集（eval 知識引用命中指標用）。
+model GoldenCase {
+  id             String       @id @default(cuid())
+  clinicId       String?
+  source         GoldenSource
+  utterance      String       @db.Text // 去識別化後
+  contextBefore  String[]                  // 之前 0-2 句（同樣去識別化）
+  expectIntent   String
+  expectRedFlag  Boolean      @default(false)
+  expectAutoOk   Boolean      @default(false)
+  expectDocIds   String[]                  @default([])
+  note           String?
+  enabled        Boolean      @default(true)
+  createdBy      String?
+  createdAt      DateTime     @db.Timestamptz @default(now())
+
+  @@index([clinicId, enabled])
 }
 
 // Phase 2：AI call 統計（singleton row id=1）— admin AI 狀態卡「最近 call 成功率」數據源。

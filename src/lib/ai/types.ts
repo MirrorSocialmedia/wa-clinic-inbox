@@ -57,6 +57,8 @@ export interface ClassifyAndDraftInput {
   dutyRoster?: AiDutyRoster | null;
   /** ★ Part E（cwi-paintriage-20260903，E.8）：lexicon 注入塊（system prompt 尾；缺省 = 無） */
   lexiconBlock?: string;
+  /** ★ Part F（cwi-raggolden-20260904，F.3）：知識庫 `<knowledge>` 段（階段二 — 擺事實段之後、對話歷史之前；缺省/"" = 無） */
+  knowledgeBlock?: string;
 }
 
 /**

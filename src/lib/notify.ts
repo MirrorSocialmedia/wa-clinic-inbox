@@ -62,7 +62,8 @@ export type ControlMessage =
   // C-3 尾批：password reset → 踢晒該 staff 所有 session（hub 側設 cutoff + 斷已連 socket）
   | { cmd: "staff:sessions-invalidated"; staffId: string }
   // ★ Fix B（cwi-fix-20260825-f1）：跨 process cache 失效（web ⇄ worker 各自持 in-memory TTL cache）
-  | { cmd: "cache:bust"; scope: "automation" | "workflow" }
+  // ★ Part F（cwi-raggolden-20260904）：+ knowledge（知識庫目錄字串 cache 5 分鐘 — 更新即刻生效）
+  | { cmd: "cache:bust"; scope: "automation" | "workflow" | "knowledge" }
   // ★ cwi-refresh-20260831 §3：availability L2 該日已 bust + 重填 → web 側 socket emit 俾 UI 即時重繪
   //   （payload 零 PII：clinicCode/clinicId/date 都係營運元數據）
   | { cmd: "availability:busted"; clinicCode: string; clinicId: string; date: string };

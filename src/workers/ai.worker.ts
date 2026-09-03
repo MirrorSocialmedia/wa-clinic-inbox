@@ -32,8 +32,12 @@ import {
 } from "@/lib/booking/session-engine";
 import { confirmBookingCore } from "@/lib/booking/confirm-core";
 // ★ Phase D（cwi-ai-20260825-t4）：workflow 參數化 — 每決策點讀 ACTIVE definition（fail-soft → code defaults）
-import { getParams } from "@/lib/workflow/store";
+import { getParams, getActiveInfo } from "@/lib/workflow/store";
 import { fillVars } from "@/lib/workflow/definitions";
+
+import { pickKnowledge, knowledgePromptBlock, matchPriceDocs } from "@/lib/knowledge/retrieve";
+import { getKnowledgeCatalog, type CatalogDoc } from "@/lib/knowledge/catalog";
+import { isPriceIntent, buildPriceDraft, runPriceGuard, NO_PRICE_TEXT } from "@/lib/ai/price-guard";
 // ★ Part E（cwi-paintriage-20260903）：PAIN_TRIAGE 痛症分流（E.2 fast path / E.3 session / E.4 紅旗 / E.7 術後 / E.8 lexicon）
 import { getLexicon, applyLexicon } from "@/lib/sessions/lexicon";
 import { matchRedFlagTerms, effectiveRedFlagTerms } from "@/lib/sessions/red-flags";
@@ -42,6 +46,17 @@ import { phoneHash } from "@/lib/phone-hash";
 import { hkDateOffset } from "@/lib/availability";
 import { lookupPatient, fetchAppointments } from "@/lib/workforce/client";
 import { sendBookingFlow, WindowClosedError } from "@/lib/flows/send";
+
+// ★ Part F（cwi-raggolden-20260904，F.7）：lexicon 命中詞（trace 用 — 只記 raw term，零 PII 風險：詞表係 staff 配置）
+function lexiconHits(lex: { term: string; canonical: string }[], text: string | null): string[] {
+  if (!text || lex.length === 0) return [];
+  const out: string[] = [];
+  for (const e of lex) {
+    if (e.term === e.canonical) continue;
+    if (text.includes(e.term)) out.push(e.term);
+  }
+  return out;
+}
 
 /**
  * ai worker — Phase 2 triage pipeline（框架 MD §7）。
@@ -135,7 +150,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
         clinicId: conv.clinicId,
         conversationId: conv.id,
         kind: "MEDIA_RECEIVED",
-        title: `病人傳送咗${msg.type === "image" ? "相片" : "檔案"}，請職員查看處理`,
+        // ★ Part F（cwi-raggolden-20260904，T128）：相片只做 signal — AI 唔判斷相片內容，卡標「有相待人手睇」
+        title: `病人傳送咗${msg.type === "image" ? "相片" : "檔案"} — 有相待人手睇（AI 唔判斷相片內容）`,
         meta: { wamid: msg.waMessageId, msgType: msg.type },
       },
     });
@@ -206,6 +222,24 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     waTimestamp: m.waTimestamp,
   }));
 
+  // ── ★ Part F（cwi-raggolden-20260904，F.3）：RAG 兩階段檢索 — 階段一（選 id）喺 classify 前 ──
+  //   只對 text 觸發訊息；**fail-soft：任何失敗 → picked=[] 照出草稿**（pickKnowledge 零 throw，catch 兜底）。
+  const knowledge =
+    msg.type === "text" && msg.body
+      ? await pickKnowledge({
+          clinicId: conv.clinicId,
+          question: msg.body,
+          context: ctxMessages
+            .slice(0, -1) // 觸發訊息本身唔入 context
+            .map((m) => m.body)
+            .filter((b): b is string => typeof b === "string" && b.trim().length > 0)
+            .slice(-3),
+        }).catch((err) => {
+          log.warn({ err: err instanceof Error ? err.message : String(err) }, "knowledge: fail-soft — 跳過 RAG");
+          return { ran: false, picked: [], discarded: 0, skipped: "fail-soft", latencyMs: 0 };
+        })
+      : { ran: false, picked: [], discarded: 0, skipped: "media", latencyMs: 0 };
+
   // ── 2. AI call（失敗 = 降級：record + log metadata + throw 俾 BullMQ retry） ──
   // Phase 4：當日當值名單注入 prompt（AI 可以答「今日邊個喺度」）—
   // fetchDutyRoster 永遠唔 throw（3s timeout / 404 / 壞 shape → null）；5 分鐘 TTL cache。
@@ -220,6 +254,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
         greetingConfig: (clinic.greetingConfig as Record<string, unknown> | null) ?? null,
       },
       dutyRoster: dutyEntries && dutyEntries.length > 0 ? { date: dutyToday, entries: dutyEntries } : null,
+      // ★ Part F（F.3）：`<knowledge>` 段（擺事實段之後、對話歷史之前；連 title 方便 trace）
+      knowledgeBlock: knowledgePromptBlock(knowledge.picked),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -255,6 +291,52 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
         "pain-triage: fast-path red flag (deterministic) → URGENT_PAIN"
       );
       result = { ...result, intent: "URGENT_PAIN", urgency: "HIGH", needsHuman: true, draft: null };
+    }
+  }
+
+  // ── ★ Part F（cwi-raggolden-20260904，F.4）：報價鏈 + price-guard（deterministic）──────────
+  //   報價鏈：intent=QUESTION 且 lexicon normalize 後命中價錢意圖 → 檢索優先 PRICE 其次 SERVICE：
+  //   有 PRICE doc → 決定性報價（範圍 + 影響因素 + disclaimer code 強制）；無 → 唔准報價（人手提示 + needsHuman）。
+  //   price-guard：草稿定稿後、入庫前 3 條 deterministic 檢查（① 零引用幻覺價 ② 漏 disclaimer 自動補 ③ 金額出範圍）。
+  //   純決定性層 — mock/real 同一行為；PAIN/URGENT/COMPLAINT（draft null）唔入呢段。
+  const priceTrace: {
+    triggered: boolean;
+    docId: string | null;
+    guard: { blocked: boolean; disclaimerAppended: boolean; outOfRange: boolean };
+  } = { triggered: false, docId: null, guard: { blocked: false, disclaimerAppended: false, outOfRange: false } };
+  let citedPriceDoc: CatalogDoc | null = knowledge.picked.find((d) => d.kind === "PRICE") ?? null;
+  if (msg.type === "text" && msg.body && result.intent === "QUESTION" && result.draft !== null) {
+    const priceIntent = isPriceIntent(applyLexicon(msg.body, ptLex));
+    priceTrace.triggered = priceIntent;
+    if (priceIntent) {
+      if (!citedPriceDoc) {
+        // stage 1 冇揀到 PRICE → PRICE 目錄 keyword match 撳底（code 層、零 LLM）
+        const catalog = await getKnowledgeCatalog(conv.clinicId);
+        citedPriceDoc = matchPriceDocs(catalog, applyLexicon(msg.body, ptLex))[0] ?? null;
+      }
+      if (citedPriceDoc) {
+        priceTrace.docId = citedPriceDoc.id;
+        const built = buildPriceDraft(citedPriceDoc);
+        if (built.text) {
+          result = { ...result, draft: built.text };
+        } else {
+          // PRICE doc 冇 priceMin/Max → 唔出範圍（唔准報價）
+          result = { ...result, draft: NO_PRICE_TEXT, needsHuman: true };
+        }
+      } else {
+        log.info({ clinic: clinic.code, wamid: msg.waMessageId }, "price: no PRICE doc — 唔准報價（轉人手）");
+        result = { ...result, draft: NO_PRICE_TEXT, needsHuman: true };
+      }
+    }
+    // trace：本輪 citation 咗邊條 PRICE doc（有即記錄 — 不論報價鏈有冇觸發）
+    if (citedPriceDoc) priceTrace.docId = citedPriceDoc.id;
+    // price-guard（deterministic — 草稿生成後入庫前）
+    const guard = runPriceGuard({ draft: result.draft, priceDoc: citedPriceDoc, priceIntent });
+    priceTrace.guard = { blocked: guard.blocked, disclaimerAppended: guard.disclaimerAppended, outOfRange: guard.outOfRange };
+    if (guard.blocked) {
+      result = { ...result, draft: guard.draft, needsHuman: true };
+    } else if (guard.disclaimerAppended) {
+      result = { ...result, draft: guard.draft };
     }
   }
 
@@ -420,12 +502,18 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       "ai: AUTO mode — suppressed by AutomationPolicy L1 (draft only)"
     );
   }
+  // ★ Part F（F.7）：trace gates 用 — autoLevel=L1 時 blocks 固定 ["policy-L1"]（舊行為等價）
+  const blocks: string[] = autoLevel === "L1" ? ["policy-L1"] : [];
   if (autoLevel !== "L1") {
-    const blocks: string[] = [];
     if (result.intent === "URGENT_PAIN") blocks.push("URGENT_PAIN"); // 鐵律：code 第二重擋
     if (result.intent === "COMPLAINT") blocks.push("COMPLAINT");     // ★ Phase C：投訴絕不自動發（要人講）
     if (result.urgency === "HIGH") blocks.push("HIGH");             // 鐵律：code 第二重擋
     if (result.needsHuman) blocks.push("needsHuman");               // 鐵律：人工永遠唔自動發
+    // ★ Part F（cwi-raggolden-20260904，F.3）：L2 自動覆前提 — 價錢問題（priceIntent）有引用先准自動覆，
+    //   零引用強制降 L1（轉人手）。範圍 = priceIntent：「無引用唔准自動覆」嘅風險集中喺價錢聲稱（幻覺價）；
+    //   非價錢 QUESTION 維持 F 前行為（W1/W4 golden 回歸「牙唔啱食嘢」零引用自動覆必須綠 — 七閘+回歸硬要求）。
+    //   priceTrace.triggered = priceIntent；docId = 本輪最終 citation 咗嘅 PRICE doc（stage1 揀 ∪ code keyword fallback）。
+    if (result.intent === "QUESTION" && priceTrace.triggered && !priceTrace.docId) blocks.push("no-knowledge-citation");
     if (draft === null) blocks.push("no-draft");
     if (!win.open) blocks.push("window-closed");
     // ★ Phase A：真人接手 = AI 收聲（Send Lock 語義補完 — 有負責人只佢可發 WhatsApp；
@@ -470,6 +558,37 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
 
   // draft:ready 只喺 draft 仍然 PROPOSED（即 staff 仲要審批）時推 —
   // 已自動發出（SENT_AUTO）唔好再彈「AI 建議」卡俾 staff
+  // ★ Part F（cwi-raggolden-20260904，F.7）：trace panel — 每輪寫入 traceJson（gates/lexicon/檢索/price/latency）。
+  let trace: Record<string, unknown> | null = null;
+  if (draft) {
+    try {
+      const triageInfo = await getActiveInfo("triage", conv.clinicId);
+      trace = {
+        workflow: "triage",
+        paramsVersion: { triage: triageInfo.version || "defaults", triageSource: triageInfo.source },
+        gates: { autoLevel, blocks, autoSent, mode: win.open ? "NORMAL" : "COPY_ONLY" },
+        lexicon: { hits: lexiconHits(ptLex, msg.body) },
+        knowledge: {
+          ran: knowledge.ran,
+          skipped: knowledge.skipped,
+          discarded: knowledge.discarded,
+          latencyMs: knowledge.latencyMs,
+          picked: knowledge.picked.map((d) => ({ id: d.id, title: d.title, kind: d.kind })),
+        },
+        impression: null,
+        price: priceTrace,
+        latencyMs: result.latencyMs,
+      };
+      await prisma.aiDraft.update({
+        where: { id: draft.id },
+        data: { traceJson: trace as Prisma.InputJsonValue },
+      });
+    } catch (err) {
+      // fail-soft：trace 寫失敗唔阻 draft 流程（trace 係可观测性，非業務數據）
+      log.warn({ err: err instanceof Error ? err.message : String(err) }, "trace: write failed（fail-soft）");
+      trace = null;
+    }
+  }
   if (draft && draft.status === "PROPOSED" && !autoSent) {
     publishNotify(conv.clinicId, "draft:ready", {
       conversationId: conv.id,
@@ -480,6 +599,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       latencyMs: result.latencyMs,
       // cwi-window-20260901（P2）：COPY_ONLY 草稿 → UI banner + 複製掣（採用/發送 disable）
       mode: draft.mode,
+      // ★ Part F（F.7）：trace panel 數據源（UI 可展開段）
+      traceJson: trace,
     });
   }
   const draftId = draft?.id ?? null;
@@ -1249,6 +1370,23 @@ async function handlePainTriageTurn(
               where: { id: conv.id },
               select: { lastInboundAt: true },
             });
+            // ★ Part F（cwi-raggolden-20260904，F.7）：痛症出口草稿亦寫 trace（workflow=pain-triage + impression key）
+            let painTrace: Record<string, unknown> | null = null;
+            try {
+              const ptInfo = await getActiveInfo("pain-triage", conv.clinicId);
+              painTrace = {
+                workflow: "pain-triage",
+                paramsVersion: { "pain-triage": ptInfo.version || "defaults", painTriageSource: ptInfo.source },
+                gates: { autoLevel: "L1", blocks: ["pain-l1"], autoSent: false },
+                lexicon: { hits: [] },
+                knowledge: { ran: false, skipped: "pain-exit", discarded: 0, latencyMs: 0, picked: [] },
+                impression: out.patch.impression ?? null,
+                price: { triggered: false, docId: null, guard: { blocked: false, disclaimerAppended: false, outOfRange: false } },
+                latencyMs: 0,
+              };
+            } catch {
+              painTrace = null; // fail-soft
+            }
             existing = await prisma.aiDraft.create({
               data: {
                 conversationId: conv.id,
@@ -1258,6 +1396,7 @@ async function handlePainTriageTurn(
                 latencyMs: 0,
                 intent: "PAIN",
                 mode: getWindowState(freshConv?.lastInboundAt).open ? "NORMAL" : "COPY_ONLY",
+                ...(painTrace ? { traceJson: painTrace as Prisma.InputJsonValue } : {}),
               },
             });
           } catch (err) {

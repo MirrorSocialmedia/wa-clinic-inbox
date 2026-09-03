@@ -4,9 +4,11 @@ import { usePathname } from "next/navigation";
 import {
   ArrowLeft,
   BarChart3,
+  BookOpen,
   Bot,
   Building2,
   CalendarDays,
+  ClipboardCheck,
   FileText,
   LayoutDashboard,
   Lightbulb,
@@ -45,6 +47,8 @@ const SECTION_NAMES: Record<string, string> = {
   "/admin/workflows": "Workflow",
   "/admin/automation": "AI 自動化",
   "/admin/suggestions": "AI 建議",
+  "/admin/knowledge": "知識庫",
+  "/admin/golden": "GoldenCase 評測",
 };
 
 export function AdminShell({
@@ -91,6 +95,8 @@ export function AdminShell({
           badge: pendingSuggestions,
         },
         { href: "/admin/workflows", label: "Workflow", icon: Workflow },
+        { href: "/admin/knowledge", label: "知識庫", icon: BookOpen },
+        { href: "/admin/golden", label: "GoldenCase 評測", icon: ClipboardCheck },
       ],
     },
     {

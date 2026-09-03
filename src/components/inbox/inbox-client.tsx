@@ -406,6 +406,8 @@ export function InboxClient({
           createdAt: new Date().toISOString(),
           // cwi-window-20260901（P2）：COPY_ONLY = 過窗草稿（UI 只准複製）
           mode: e.mode ?? "NORMAL",
+          // ★ Part F（F.7）：trace panel 數據源
+          traceJson: e.traceJson ?? null,
         },
       }));
     });

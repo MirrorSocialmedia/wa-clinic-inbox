@@ -5,10 +5,12 @@
  */
 import { clearAutomationLevelCache } from "@/lib/ai/automation";
 import { bustParamsCache } from "@/lib/workflow/store";
+import { bustKnowledgeCache } from "@/lib/knowledge/catalog";
 import log from "@/lib/log";
 
-export function applyCacheBust(scope: "automation" | "workflow"): void {
+export function applyCacheBust(scope: "automation" | "workflow" | "knowledge"): void {
   if (scope === "automation") clearAutomationLevelCache();
-  else bustParamsCache();
+  else if (scope === "workflow") bustParamsCache();
+  else if (scope === "knowledge") bustKnowledgeCache();
   log.info({ scope }, "control: cache:bust applied");
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CalendarDays,
@@ -17,7 +17,7 @@ import {
   StickyNote,
   Users,
 } from "lucide-react";
-import type { ConversationItem, DraftInfo, MessageItem, NoteReceipt, StaffInfo } from "./types";
+import type { ConversationItem, DraftInfo, DraftTrace, MessageItem, NoteReceipt, StaffInfo } from "./types";
 import { noteTickState } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 import { BookingCard } from "./booking-card";
@@ -138,6 +138,69 @@ function Ticks({ status, errorCode }: { status: string; errorCode: string | null
   return null;
 }
 
+/** ★ Part F（cwi-raggolden-20260904，F.7）：trace panel 可展開段內容（零 PII — 全 metadata）。 */
+function TracePanel({ trace }: { trace: DraftTrace }) {
+  const k = trace.knowledge;
+  const px = trace.price;
+  const rows: { label: string; value: React.ReactNode }[] = [];
+  rows.push({
+    label: "workflow",
+    value: trace.workflow + (trace.paramsVersion ? `（params v${(trace.paramsVersion as Record<string, unknown>)[trace.workflow] ?? "—"}）` : ""),
+  });
+  if (trace.gates) {
+    rows.push({
+      label: "自動覆閘",
+      value: (
+        <span>
+          {trace.gates.autoLevel ?? "—"} · {trace.gates.autoSent ? "已自動發" : `blocks: ${trace.gates.blocks?.length ? trace.gates.blocks.join(", ") : "無"}`}
+        </span>
+      ),
+    });
+  }
+  if (trace.lexicon?.hits?.length) rows.push({ label: "lexicon 命中", value: trace.lexicon.hits.join(", ") });
+  rows.push({
+    label: "知識檢索",
+    value: k ? (
+      <span>
+        {k.ran ? (k.picked?.length ? `引用 ${k.picked.length} 條：` : `無引用（${k.skipped ?? "NONE"}）`) : "未行（目錄空/媒體）"}
+        {k.picked?.map((d) => (
+          <span key={d.id} className="ml-1 inline-block bg-brand-soft text-brand-text rounded px-1 py-0.5 text-[10px] mr-1">
+            {d.title}（{d.kind}）
+          </span>
+        ))}
+        {k.discarded ? <span className="text-danger"> · 幻覺 id 丟棄 {k.discarded}</span> : null} · {k.latencyMs ?? 0}ms
+      </span>
+    ) : (
+      "—"
+    ),
+  });
+  if (trace.impression) rows.push({ label: "impression", value: trace.impression });
+  if (px) {
+    rows.push({
+      label: "price-guard",
+      value: (
+        <span>
+          {px.triggered ? `報價鏈觸發（doc: ${px.docId ?? "無"}）` : "未觸發"}
+          {px.guard.blocked && <span className="text-danger"> · 金額被擋（人手提示版）</span>}
+          {px.guard.outOfRange && <span className="text-danger"> · 金額出範圍</span>}
+          {px.guard.disclaimerAppended && <span className="text-ok-text"> · disclaimer 已自動附加</span>}
+        </span>
+      ),
+    });
+  }
+  if (trace.latencyMs !== undefined) rows.push({ label: "latency", value: `${trace.latencyMs}ms` });
+  return (
+    <div className="px-2.5 pb-2 space-y-1">
+      {rows.map((r) => (
+        <div key={r.label} className="flex gap-2 text-[10.5px] leading-4">
+          <span className="w-20 shrink-0 text-t3">{r.label}</span>
+          <span className="text-t2 min-w-0 break-words">{r.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function mediaSrc(mediaPath: string | null): string | null {
   if (!mediaPath) return null;
   const base = mediaPath.split("/").pop() ?? mediaPath;
@@ -164,6 +227,71 @@ export function ChatPane(p: Props) {
   const [templateBusy, setTemplateBusy] = useState(false);
   // cwi-window-20260901（P2）：COPY_ONLY 草稿「複製」掣 feedback（「已複製」2s）
   const [copiedDraft, setCopiedDraft] = useState(false);
+  // ★ Part F（cwi-raggolden-20260904，F.5）：inbox「加入測試集」— IN 文字 bubble hover 掣 → 預填彈窗
+  //   （server-side deid + AI 當時判斷）→ 員工揀正確 intent/紅旗/自動覆 → POST /api/golden-cases
+  const [goldenMsgId, setGoldenMsgId] = useState<string | null>(null);
+  const [goldenPrefill, setGoldenPrefill] = useState<{
+    clinicId: string;
+    utterance: string;
+    contextBefore: string[];
+    aiJudgment: { intent: string; needsHuman: boolean; urgency: string };
+    expectDocIds: string[];
+    hasDraft: boolean;
+  } | null>(null);
+  const [goldenForm, setGoldenForm] = useState<{ utterance: string; expectIntent: string; expectRedFlag: boolean; expectAutoOk: boolean; expectDocIds: string; note: string } | null>(null);
+  const [goldenErr, setGoldenErr] = useState<string | null>(null);
+  const [goldenBusy, setGoldenBusy] = useState(false);
+  const openGolden = useCallback(async (messageId: string) => {
+    setGoldenMsgId(messageId);
+    setGoldenErr(null);
+    setGoldenPrefill(null);
+    setGoldenForm(null);
+    try {
+      const r = await fetch(`/api/golden-cases/prefill?messageId=${encodeURIComponent(messageId)}`, { credentials: "include" });
+      const j = (await r.json().catch(() => ({}))) as NonNullable<typeof goldenPrefill> & { error?: string };
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      setGoldenPrefill(j);
+      setGoldenForm({
+        utterance: j.utterance,
+        expectIntent: j.aiJudgment?.intent && ["BOOKING_REQUEST","QUESTION","URGENT_PAIN","COMPLAINT","OUT_OF_SCOPE","OTHER"].includes(j.aiJudgment.intent) ? j.aiJudgment.intent : "QUESTION",
+        expectRedFlag: j.aiJudgment?.urgency === "HIGH" || j.aiJudgment?.intent === "URGENT_PAIN",
+        expectAutoOk: false,
+        expectDocIds: (j.expectDocIds ?? []).join(", "),
+        note: "",
+      });
+    } catch (e) {
+      setGoldenErr(e instanceof Error ? e.message : "prefill failed");
+    }
+  }, []);
+  const submitGolden = useCallback(async () => {
+    if (!goldenPrefill || !goldenForm) return;
+    setGoldenErr(null);
+    setGoldenBusy(true);
+    try {
+      const r = await fetch("/api/golden-cases", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clinicId: goldenPrefill.clinicId,
+          utterance: goldenForm.utterance,
+          contextBefore: goldenPrefill.contextBefore,
+          expectIntent: goldenForm.expectIntent,
+          expectRedFlag: goldenForm.expectRedFlag,
+          expectAutoOk: goldenForm.expectAutoOk,
+          expectDocIds: goldenForm.expectDocIds.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean),
+          note: goldenForm.note || null,
+        }),
+      });
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      setGoldenMsgId(null);
+    } catch (e) {
+      setGoldenErr(e instanceof Error ? e.message : "save failed");
+    } finally {
+      setGoldenBusy(false);
+    }
+  }, [goldenPrefill, goldenForm]);
   // cwi-schedv2-20260903（D.3）：過窗三出路 → 共享組件 <WindowExits/>（喺 composer 分支渲染，markup 不變）
   // ★ cwi-multiclinic-20260903（MD A.6.1）：〔放手〕兩段確認 — 第一次撳 arm（3 秒內再撳一次先真 release）
   const [releaseArmed, setReleaseArmed] = useState(false);
@@ -545,7 +673,7 @@ export function ChatPane(p: Props) {
             );
           }
           return (
-            <div key={m.id} id={`msg-${m.id}`} className={`flex ${isOut ? "justify-end" : "justify-start"}`}>
+            <div key={m.id} id={`msg-${m.id}`} className={`group flex ${isOut ? "justify-end" : "justify-start"}`}>
               <div
                 className={`max-w-[70%] px-3.5 py-2.5 text-[13.5px] leading-[1.6] ${
                   isOut
@@ -599,6 +727,16 @@ export function ChatPane(p: Props) {
                     {isAuto ? `AI 自動發出 · ${bubbleTime(m.waTimestamp, prev?.waTimestamp)}` : bubbleTime(m.waTimestamp, prev?.waTimestamp)}
                   </span>
                   {isOut && m.channel === "API" && <Ticks status={m.status} errorCode={m.errorCode} />}
+                  {/* ★ Part F（F.5）：IN 文字 bubble hover「＋測試集」（deid 預填彈窗） */}
+                  {!isOut && m.type === "text" && !!m.body && (
+                    <button
+                      onClick={() => void openGolden(m.id)}
+                      title="加入 GoldenCase 測試集（自動去識別化 + AI 當時判斷預填）"
+                      className="text-[10px] text-t3 hover:text-brand-text opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      ＋測試集
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -700,6 +838,15 @@ export function ChatPane(p: Props) {
             <div className="text-[13px] leading-[1.65] text-t1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
               {p.pendingDraft.draftText}
             </div>
+            {/* ★ Part F（cwi-raggolden-20260904，F.7）：trace panel — 可展開段（workflow/gates/lexicon/檢索/price/latency） */}
+            {p.pendingDraft.traceJson && (
+              <details className="mt-1.5 rounded-xl border border-line bg-panel-2/60">
+                <summary className="cursor-pointer select-none px-2.5 py-1.5 text-[10.5px] text-t2 hover:text-t1">
+                  ⚙ AI trace（workflow / 閘 / 檢索引用 / price-guard）
+                </summary>
+                <TracePanel trace={p.pendingDraft.traceJson} />
+              </details>
+            )}
             <div className="text-[10.5px] text-t2 mt-1.5">
               {isCopyOnly
                 ? "COPY_ONLY：唔計入採用率統計（發唔出唔係模型質素問題）· 複製去手機 App 覆（免費）"
@@ -885,6 +1032,94 @@ export function ChatPane(p: Props) {
           />
         )}
       </div>
+      {/* ★ Part F（cwi-raggolden-20260904，F.5）：加入測試集彈窗（預填去識別化 utterance + AI 當時判斷） */}
+      {goldenMsgId && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-panel rounded-lg w-full max-w-md max-h-[85vh] overflow-auto p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold">加入 GoldenCase 測試集</h2>
+              <button onClick={() => setGoldenMsgId(null)} className="text-t2 hover:text-t1">✕</button>
+            </div>
+            <p className="text-xs text-t2">
+              文字已自動去識別化（電話→&lt;phone&gt;、姓名→&lt;name&gt;；日期/金額保留）。預填咗 AI 當時判斷，請確認正確 intent。
+            </p>
+            {goldenErr && <div className="bg-danger-soft text-danger text-xs rounded px-2 py-1.5">{goldenErr}</div>}
+            {!goldenPrefill && !goldenErr && <div className="text-xs text-t2">載入預填中…</div>}
+            {goldenPrefill && goldenForm && (
+              <>
+                {goldenPrefill.contextBefore.length > 0 && (
+                  <div className="text-xs text-t2 bg-panel-2 rounded px-2 py-1.5">前情（去識別化）：{goldenPrefill.contextBefore.join(" ／ ")}</div>
+                )}
+                <label className="block text-xs text-t2">
+                  病人句（可改 — 必須保持去識別化）
+                  <textarea
+                    value={goldenForm.utterance}
+                    onChange={(e) => setGoldenForm({ ...goldenForm, utterance: e.target.value })}
+                    rows={3}
+                    className="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-panel"
+                  />
+                </label>
+                <label className="block text-xs text-t2">
+                  正確 intent（AI 當時：{goldenPrefill.aiJudgment.intent}{goldenPrefill.hasDraft ? "" : " — 冇 draft，用對話 intent"}）
+                  <select
+                    value={goldenForm.expectIntent}
+                    onChange={(e) => setGoldenForm({ ...goldenForm, expectIntent: e.target.value })}
+                    className="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-panel"
+                  >
+                    {["BOOKING_REQUEST", "QUESTION", "URGENT_PAIN", "COMPLAINT", "OUT_OF_SCOPE", "OTHER"].map((i) => (
+                      <option key={i} value={i}>{i}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={goldenForm.expectRedFlag}
+                    onChange={(e) => setGoldenForm({ ...goldenForm, expectRedFlag: e.target.checked })}
+                  />
+                  應該紅旗（高危/急症）
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={goldenForm.expectAutoOk}
+                    onChange={(e) => setGoldenForm({ ...goldenForm, expectAutoOk: e.target.checked })}
+                  />
+                  應該可自動覆（唔需要人手）
+                </label>
+                <label className="block text-xs text-t2">
+                  期望知識引用 doc id（逗號分隔；可留空）
+                  <input
+                    value={goldenForm.expectDocIds}
+                    onChange={(e) => setGoldenForm({ ...goldenForm, expectDocIds: e.target.value })}
+                    className="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-panel"
+                  />
+                </label>
+                <label className="block text-xs text-t2">
+                  備註
+                  <input
+                    value={goldenForm.note}
+                    onChange={(e) => setGoldenForm({ ...goldenForm, note: e.target.value })}
+                    className="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-panel"
+                  />
+                </label>
+                <div className="flex justify-end gap-2 pt-1">
+                  <button onClick={() => setGoldenMsgId(null)} className="text-sm border rounded px-3 py-1.5 hover:bg-canvas">
+                    取消
+                  </button>
+                  <button
+                    onClick={() => void submitGolden()}
+                    disabled={goldenBusy || !goldenForm.utterance.trim()}
+                    className="text-sm bg-brand text-panel rounded px-3 py-1.5 font-medium disabled:opacity-50"
+                  >
+                    {goldenBusy ? "儲存中…" : "存入測試集"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       <div className="sr-only">{relTime(c.lastMessageAt)}</div>
     </section>
   );

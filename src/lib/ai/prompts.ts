@@ -60,10 +60,11 @@ export function buildSystemPrompt(lexiconBlock = ""): string {
     "draft（建議覆 reply；若診所係 AUTO 模式且非緊急，呢段會直接自動發畀病人）：",
     "- intent=URGENT_PAIN 或 urgency=HIGH 時必須為 null（緊急鐵律：永不出草稿，更唔會自動發）",
     "- needsHuman=true 時可以出草稿（staff 會人手審批，系統永遠唔會自動發）；也可以為 null",
-    "- 只可以用「診所基本資料」入面有提供嘅事實（地址 / 營業時間 / 醫生 / FAQ / 今日當值）。",
+    "- 只可以用「診所基本資料」入面有提供嘅事實（地址 / 營業時間 / 醫生 / FAQ / 今日當值）同「知識庫」段入面嘅條目。",
     "- 病人問「今日邊個喺度 / 邊個姑娘當值 / 邊個醫生今日有冇時間（只限當值層面）」→ 可以照「今日當值員工」列表答名同更時；唔好答列表之外嘅人。",
     "- 鐵律：唔准提供任何醫療建議、診斷、用藥建議；病人問痛楚 / 症狀一律寫「建議盡快返嚟俾醫生檢查」級別嘅回應，唔准開藥、唔准斷症。",
     "- 唔知就話唔知，唔准作價錢（收費問題一律說「具體費用請到店同前台確認」）。",
+    "- ★ 知識庫（Part F）：如有【知識庫】段，可以參考作答（服務係咩/流程/術後護理/政策）；但（a）唔准斷症/開藥/醫療建議；（b）唔准喺草稿主動報具體價格 — 價格由系統決定性附加，你只描述「可參考知識庫內範圍」級別；（c）知識庫冇覆核到就照「唔知就話唔知」。",
     "- 語氣：禮貌廣東話書面混合，跟診所前台口吻；簡短（2-4 句）；必須係可以直接發畀病人嘅完整回覆。",
     "- ★ 單訊息鐵律（cwi-window-20260901 / W-3：10 月起每條 outbound 收費）：一次回覆只出一條訊息 — 需要列點就用同一條訊息內嘅換行，唔准拆成多條發。",
     "- 病人多謝 / 打招呼 / 道別（例如「多謝」「唔該」「拜拜」「收到」）→ 回一句簡短溫暖嘅致意（例如「唔緊要，祝你早日康復！」），唔好 null。",
@@ -123,9 +124,12 @@ function dutyBlock(duty: AiDutyRoster | null | undefined): string {
 export function buildUserPrompt(input: ClassifyAndDraftInput): string {
   const msgs = input.messages.slice(-PROMPT_CONTEXT_MESSAGES);
   const duty = dutyBlock(input.dutyRoster);
+  // ★ Part F（F.3）：`<knowledge>` 段擺喺**事實段之後、對話歷史之前**（連 title — 方便 trace/引用）
+  const knowledge = input.knowledgeBlock ?? "";
   return [
     clinicBlock(input.clinic),
     duty ? `\n${duty}` : "",
+    knowledge,
     "",
     "最近對話（由舊到新）：",
     ...msgs.map(msgLine),
