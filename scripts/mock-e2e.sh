@@ -5419,6 +5419,14 @@ check "T176 cleanup 零殘留" "$W176_RESID" "0"
 pass "WIN cwi-window-20260901 T176 全鏈（/admin/usage RBAC + 數字對帳 + 決策表）"
 
 
+# ── N. cwi-master B2（Part B 通知 v1）T160–T169 ──────────────────────
+# 客人來訊一定要有提示：三觸發（message:new IN / urgent:escalation / notice:new）
+# + N-2 指派/ADMIN 規則 + N-4 零 PII + N-5 開住唔響 + N-6 節流 + N-7 降級 + N-8 設定。
+# 瀏覽器級斷言 = e2e:notify-ui（playwright + Redis publish wa-inbox:notify 真實 socket 路徑）；
+# 詳細見 scripts/e2e-notify-gate.sh（亦可 N_STANDALONE=1 單行 N 段）。
+source scripts/e2e-notify-gate.sh
+run_notify_gate
+
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

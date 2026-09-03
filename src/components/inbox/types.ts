@@ -309,9 +309,14 @@ export interface NoteReceipt {
   readAt: string;
 }
 
+/** ★ Part B：socket notice:new — 內部通知推送（接手/放手/auto-release 等；零內文 — 只有 conversationId + kind） */
+export interface NoticeNewEvent {
+  conversationId: string;
+  kind: string;
+}
+
 /** ★ AI Workflow T1 (A2)：內部通知（staff notice）— 媒體/急症升級，同客戶 unread 完全分開 */
-export interface StaffNoticeItem {
-  id: string;
+export interface StaffNoticeItem {  id: string;
   clinicId: string;
   conversationId: string | null;
   kind: string;

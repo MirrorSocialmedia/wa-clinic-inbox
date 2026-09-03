@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Bell, BellRing, CalendarDays, MessageCircle, Search, X } from "lucide-react";
+import { Bell, BellRing, CalendarDays, MessageCircle, Search, Settings, X } from "lucide-react";
 import type { ClinicInfo, ConversationItem, ConvStatus, StaffNoticeItem } from "./types";
 import { relTime } from "./time";
+import type { NotifyPrefs } from "@/lib/notify-client";
 
 interface Props {
   /** 手機：入咗聊天就藏列表（桌面永遠顯示） */
@@ -33,6 +34,12 @@ interface Props {
   notices: StaffNoticeItem[];
   /** ★ AI Workflow T1 (A2)：撳通知 → 標已讀 + 跳對話 */
   onNoticeClick: (n: StaffNoticeItem) => void;
+  /** ★ Part B（N-7）：客戶未讀總數（badge — 同 OS 通知 permission 無關，一定要有） */
+  unreadTotal: number;
+  /** ★ Part B（N-8）：通知開關（localStorage per-device） */
+  prefs: NotifyPrefs;
+  /** ★ Part B：寫回通知開關 */
+  onPrefsChange: (p: NotifyPrefs) => void;
 }
 
 const STATUS_LABEL: Record<ConvStatus | "ALL", string> = {
@@ -82,6 +89,8 @@ function previewOf(c: ConversationItem): string {
 export function ConversationList(p: Props) {
   // ★ AI Workflow T1 (A2)：內部通知面板（bell 2 開/關）
   const [noticeOpen, setNoticeOpen] = useState(false);
+  // ★ Part B：通知設定面板（bell 旁齒輪；開關存 localStorage per-device）
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const items = useMemo(() => {
     if (p.searchResults) return p.searchResults;
     let list = p.conversations;
@@ -98,7 +107,7 @@ export function ConversationList(p: Props) {
 
   return (
     <aside
-      className={`w-full md:w-[324px] shrink-0 md:border-r border-line bg-panel flex-col min-h-0 ${
+      className={`relative w-full md:w-[324px] shrink-0 md:border-r border-line bg-panel flex-col min-h-0 ${
         p.hidden ? "hidden md:flex" : "flex"
       }`}
     >
@@ -120,6 +129,19 @@ export function ConversationList(p: Props) {
               ))}
             </select>
           )}
+          {/* ★ Part B（N-7）：訊息未讀 badge（state 驅動 — OS 通知 denied/唔支援都一樣見） */}
+          <span
+            aria-label={`訊息未讀（${p.unreadTotal} 則）`}
+            title={p.unreadTotal > 0 ? `${p.unreadTotal} 則未讀訊息` : "訊息未讀"}
+            className={`relative w-7 h-7 rounded-full flex items-center justify-center ${p.unreadTotal > 0 ? "text-t1" : "text-t3"}`}
+          >
+            <MessageCircle size={15} strokeWidth={2.75} />
+            {p.unreadTotal > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-0.5 rounded-full bg-brand text-white text-[9px] font-bold flex items-center justify-center">
+                {p.unreadTotal > 99 ? "99+" : p.unreadTotal}
+              </span>
+            )}
+          </span>
           {/* ★ H2：mention 鈴鐺 badge（數字 = 未讀 mention 總數；撳 → 跳到最近 mention） */}
           <button
             onClick={p.onBellClick}
@@ -148,8 +170,98 @@ export function ConversationList(p: Props) {
               </span>
             )}
           </button>
+          {/* ★ Part B：通知設定（齒輪 → 面板：桌面通知/提示音/逐店靜音/ADMIN opt-in） */}
+          <button
+            onClick={() => setSettingsOpen((v) => !v)}
+            aria-label="通知設定"
+            title="通知設定"
+            className={`relative w-7 h-7 rounded-full flex items-center justify-center hover:bg-black/[.04] ${
+              settingsOpen ? "text-t1" : "text-t2 hover:text-t1"
+            }`}
+          >
+            <Settings size={15} strokeWidth={2.75} />
+          </button>
         </div>
       </div>
+
+      {/* ★ Part B：通知設定面板（N-8 開關存 localStorage per-device；N-9 底部灰字） */}
+      {settingsOpen && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setSettingsOpen(false)} aria-hidden />
+          <div className="absolute right-2 top-12 z-40 w-64 rounded-xl border border-line bg-panel shadow-xl p-3 space-y-2.5">
+            <div className="text-xs font-semibold text-t1">通知設定</div>
+            <label className="flex items-center gap-2 text-xs text-t1 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={p.prefs.desktop}
+                onChange={(e) => p.onPrefsChange({ ...p.prefs, desktop: e.target.checked })}
+              />
+              桌面通知
+            </label>
+            <label className="flex items-center gap-2 text-xs text-t1 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={p.prefs.sound}
+                onChange={(e) => p.onPrefsChange({ ...p.prefs, sound: e.target.checked })}
+              />
+              提示音
+            </label>
+            {p.clinics.length > 1 && (
+              <div className="space-y-1 pt-1.5 border-t border-line">
+                <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">逐店靜音</div>
+                {p.clinics.map((c) => {
+                  const muted = p.prefs.mutedClinics.includes(c.id);
+                  return (
+                    <label key={c.id} className="flex items-center gap-2 text-xs text-t1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!muted}
+                        onChange={() =>
+                          p.onPrefsChange({
+                            ...p.prefs,
+                            mutedClinics: muted
+                              ? p.prefs.mutedClinics.filter((x) => x !== c.id)
+                              : [...p.prefs.mutedClinics, c.id],
+                          })
+                        }
+                      />
+                      {c.code}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            {p.userRole === "ADMIN" && (
+              <div className="space-y-1 pt-1.5 border-t border-line">
+                <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">
+                  接收訊息通知（預設唔收 — 逐店開）
+                </div>
+                {p.clinics.map((c) => {
+                  const on = p.prefs.adminMsgClinics.includes(c.id);
+                  return (
+                    <label key={c.id} className="flex items-center gap-2 text-xs text-t1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() =>
+                          p.onPrefsChange({
+                            ...p.prefs,
+                            adminMsgClinics: on
+                              ? p.prefs.adminMsgClinics.filter((x) => x !== c.id)
+                              : [...p.prefs.adminMsgClinics, c.id],
+                          })
+                        }
+                      />
+                      {c.code}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <div className="text-[10px] text-t3 pt-1.5 border-t border-line">分頁閂咗就收唔到通知</div>
+          </div>
+        </>
+      )}
 
       {/* ★ AI Workflow T1 (A2)：內部通知列（未讀；撳 = 標已讀 + 跳對話） */}
       {noticeOpen && (

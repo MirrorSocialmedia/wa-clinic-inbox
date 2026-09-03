@@ -19,11 +19,23 @@ import type {
   NoteNewEvent,
   NoteReadEvent,
   NoteReceipt,
+  NoticeNewEvent,
   StaffInfo,
   StaffNoticeItem,
   UrgentEscalationEvent,
   UserCtx,
 } from "./types";
+import {
+  DEFAULT_NOTIFY_PREFS,
+  dismissNotifyBanner,
+  ensurePermission,
+  fireNotify,
+  notifyBannerDismissed,
+  notifyPrefs,
+  setNotifyPrefs,
+  shouldNotify,
+  type NotifyPrefs,
+} from "@/lib/notify-client";
 import { ConversationList } from "./conversation-list";
 import { ChatPane } from "./chat-pane";
 import { DetailPane } from "./detail-pane";
@@ -102,6 +114,24 @@ export function InboxClient({
   // ★ Realtime P0 (R5)：assign/接手要讀最新 assignVersion — ref 避免 callback stale closure
   const conversationsRef = useRef<ConversationItem[]>(conversations);
   conversationsRef.current = conversations;
+
+  // ── ★ Part B（N-7）：未讀 → 分頁標題 (N) WA Inbox + favicon 紅點 ─────────────
+  //   由現有 list state 導出（零新 API）；常駐驅動 — permission denied/唔支援都一樣見，
+  //   唔使聲稱 PWA push（N-9：Tab 閂 = 收唔到）。
+  const unreadTotal = conversations.reduce((sum, c) => sum + c.unreadCount, 0);
+  useEffect(() => {
+    document.title = unreadTotal > 0 ? `(${unreadTotal}) WA Inbox` : "WA Inbox";
+  }, [unreadTotal]);
+  useEffect(() => {
+    let link = document.getElementById("wa-inbox-dyn-icon") as HTMLLinkElement | null;
+    if (!link) {
+      link = document.createElement("link");
+      link.id = "wa-inbox-dyn-icon";
+      link.rel = "icon";
+      document.head.appendChild(link);
+    }
+    link.href = unreadTotal > 0 ? unreadFaviconDataUrl(unreadTotal) : "/favicon.ico";
+  }, [unreadTotal]);
   const lastMsgTsRef = useRef<number>(0); // 斷線前最後訊息時間（backlog cursor）
   // ★ Realtime P0 (R3, cwi-rt-20260823-a1)：focus/visibility/3 分鐘 idle refetch 游標
   const lastConvSeenRef = useRef<number>(Date.now()); // 對話列表 lastMessageAt 游標（ms epoch）
@@ -121,6 +151,42 @@ export function InboxClient({
   mentionUnreadRef.current = mentionUnread;
 
   const mentionTotal = Object.values(mentionUnread).reduce((a, b) => a + b, 0);
+
+  // ── ★ Part B 通知 v1（N-8）：開關 localStorage per-device + 首次登入 banner ──
+  //   預設先渲染（SSR 安全），mount 後先讀真實 localStorage — 避 hydration mismatch。
+  const [prefs, setPrefs] = useState<NotifyPrefs>(DEFAULT_NOTIFY_PREFS);
+  const prefsRef = useRef<NotifyPrefs>(prefs);
+  prefsRef.current = prefs;
+  const [notifyBanner, setNotifyBanner] = useState(false);
+  useEffect(() => {
+    setPrefs(notifyPrefs());
+    if (!notifyBannerDismissed()) setNotifyBanner(true);
+  }, []);
+  const updatePrefs = useCallback((next: NotifyPrefs) => {
+    setPrefs(next);
+    setNotifyPrefs(next);
+  }, []);
+
+  // ★ Part B（N-4）：clinic short name 查表 — STAFF SSR 只帶 primary 店（legacy 單店視角），
+  //   多店 staff 收其他店事件時 clinics.find 會 miss → 由 /api/clinics?scope=schedule（零 PII，code/name）補 code 表。
+  const clinicsRef = useRef(clinics);
+  clinicsRef.current = clinics;
+  const clinicCodeMapRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    fetch("/api/clinics?scope=schedule")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: unknown) => {
+        const list = (d as { clinics?: { id: string; code: string }[] } | null)?.clinics;
+        if (Array.isArray(list)) {
+          for (const c of list) clinicCodeMapRef.current[c.id] = c.code;
+        }
+      })
+      .catch(() => {});
+  }, []);
+  const clinicShortOf = (clinicId: string | null | undefined): string => {
+    if (!clinicId) return "WA";
+    return clinicsRef.current.find((x) => x.id === clinicId)?.code ?? clinicCodeMapRef.current[clinicId] ?? "WA";
+  };
 
   // ★ AI Workflow T1 (A2)：內部通知（bell 2 — 媒體/急症；同客戶 unread 分開）
   const [notices, setNotices] = useState<StaffNoticeItem[]>([]);
@@ -208,6 +274,33 @@ export function InboxClient({
           return [...prev, msg].sort((a, b) => new Date(a.waTimestamp).getTime() - new Date(b.waTimestamp).getTime());
         });
       }
+
+      // ★ Part B（N-1）：客人來訊 → 通知（只 IN；outbound/echo 唔算「客人來訊」）。
+      // assigneeId 由 client state 補（payload 無呢欄 — PII 邊界）；新對話 state 未收 → null = 未指派。
+      if (e.message.direction === "IN") {
+        const conv = conversationsRef.current.find((c) => c.id === e.conversationId) ?? null;
+        if (
+          shouldNotify({
+            kind: "message",
+            clinicId: e.clinicId,
+            conversationId: e.conversationId,
+            assigneeId: conv?.assigneeId ?? null,
+            myStaffId: user.staffId,
+            myRole: user.role,
+            activeConversationId: selectedIdRef.current,
+            mutedClinics: prefsRef.current.mutedClinics,
+            adminMsgClinics: prefsRef.current.adminMsgClinics,
+          })
+        ) {
+          void fireNotify({
+            kind: "message",
+            clinicShort: clinicShortOf(e.clinicId),
+            conversationId: e.conversationId,
+            onClick: () => selectConvRef.current(e.conversationId),
+            prefs: prefsRef.current,
+          });
+        }
+      }
     });
 
     socket.on("message:status", (e: MessageStatusEvent) => {
@@ -271,14 +364,61 @@ export function InboxClient({
 
     // 急症升級 → 隊列頂紅標 + toast（12s 自動消）
     // ★ AI Workflow T1 (A2)：內部通知即時 +1（ref — 避 stale closure / deps warning）
-    socket.on("notice:new", () => {
+    socket.on("notice:new", (e: NoticeNewEvent) => {
       void fetchNoticesRef.current();
+      // ★ Part B（N-1）：輕音（接手/放手/auto-release 等）— clinicId/assigneeId 由 state 補（payload 只 conversationId+kind）
+      const convN = conversationsRef.current.find((c) => c.id === e.conversationId) ?? null;
+      if (
+        shouldNotify({
+          kind: "notice",
+          clinicId: convN?.clinicId ?? "",
+          conversationId: e.conversationId,
+          assigneeId: convN?.assigneeId ?? null,
+          myStaffId: user.staffId,
+          myRole: user.role,
+          activeConversationId: selectedIdRef.current,
+          mutedClinics: prefsRef.current.mutedClinics,
+          adminMsgClinics: prefsRef.current.adminMsgClinics,
+        })
+      ) {
+        void fireNotify({
+          kind: "notice",
+          clinicShort: clinicShortOf(convN?.clinicId),
+          conversationId: e.conversationId,
+          onClick: () => selectConvRef.current(e.conversationId),
+          prefs: prefsRef.current,
+        });
+      }
     });
     socket.on("urgent:escalation", (e: UrgentEscalationEvent) => {
       setConversations((prev) =>
         prev.map((c) => (c.id === e.conversationId ? { ...c, urgent: true, intent: e.intent, urgency: e.urgency } : c))
       );
       setUrgentToast({ conversationId: e.conversationId, contactName: e.contactName });
+      // ★ Part B（N-1）：急音（第二音 notify-urgent.mp3）。payload 有 contactName —
+      //   只俾 in-app toast 用（staff 有權睇）；OS 通知零 PII（N-4），文案只 clinic code。
+      const convU = conversationsRef.current.find((c) => c.id === e.conversationId) ?? null;
+      if (
+        shouldNotify({
+          kind: "urgent",
+          clinicId: convU?.clinicId ?? "",
+          conversationId: e.conversationId,
+          assigneeId: convU?.assigneeId ?? null,
+          myStaffId: user.staffId,
+          myRole: user.role,
+          activeConversationId: selectedIdRef.current,
+          mutedClinics: prefsRef.current.mutedClinics,
+          adminMsgClinics: prefsRef.current.adminMsgClinics,
+        })
+      ) {
+        void fireNotify({
+          kind: "urgent",
+          clinicShort: clinicShortOf(convU?.clinicId),
+          conversationId: e.conversationId,
+          onClick: () => selectConvRef.current(e.conversationId),
+          prefs: prefsRef.current,
+        });
+      }
     });
 
     // ── Phase 3：預約卡事件（綠色卡） ─────────────────────
@@ -352,23 +492,33 @@ export function InboxClient({
 
     // ★ H2：@mention 定向通知（只我收）→ bell badge 數字 + 列表黃點 + 提示音 +
     // browser Notification（只喺 permission granted 時彈；撳通知跳到該 note）
+    // ★ Part B：改用 fireNotify 統一節流（N-6）/開關（N-8）— bell/黃點邏輯照舊，
+    //   行為不變（chime + 彈屏 + 撳跳；mention 係定向推送，唔走 N-2 assignee 邏輯）
     socket.on("notify:mention", (e: MentionNotifyEvent) => {
       setMentionUnread((prev) => ({ ...prev, [e.conversationId]: (prev[e.conversationId] ?? 0) + 1 }));
       lastMentionRef.current = { conversationId: e.conversationId, messageId: e.messageId };
-      playChime();
       const fromName = staffRef.current.find((s) => s.id === e.fromStaffId)?.name ?? "同事";
-      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-        try {
-          const n = new Notification("WA Inbox @mention", {
-            body: `${fromName} 喺內部備註 @ 咗你`,
-          });
-          n.onclick = () => {
-            window.focus();
-            void jumpToMention(e.conversationId, e.messageId);
-          };
-        } catch {
-          /* Notification 構建失敗（mobile / 非 secure context）— 靜默 skip，唔擋流程 */
-        }
+      if (
+        shouldNotify({
+          kind: "mention",
+          clinicId: e.clinicId,
+          conversationId: e.conversationId,
+          assigneeId: null,
+          myStaffId: user.staffId,
+          myRole: user.role,
+          activeConversationId: selectedIdRef.current,
+          mutedClinics: prefsRef.current.mutedClinics,
+          adminMsgClinics: prefsRef.current.adminMsgClinics,
+        })
+      ) {
+        void fireNotify({
+          kind: "mention",
+          clinicShort: clinicShortOf(e.clinicId),
+          conversationId: e.conversationId,
+          body: `${fromName} 喺內部備註 @ 咗你`,
+          onClick: () => void jumpToMention(e.conversationId, e.messageId),
+          prefs: prefsRef.current,
+        });
       }
     });
 
@@ -700,6 +850,11 @@ export function InboxClient({
     },
     [fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts]
   );
+  // ★ Part B：socket handler（[] deps）要最新 selectConversation — ref 避 stale closure
+  const selectConvRef = useRef<(id: string) => void>(() => {});
+  selectConvRef.current = (id: string) => {
+    void selectConversation(id);
+  };
 
   async function markRead(id: string) {
     try {
@@ -1178,7 +1333,39 @@ export function InboxClient({
         onBellClick={() => void onBellClick()}
         notices={notices}
         onNoticeClick={onNoticeClick}
+        unreadTotal={unreadTotal}
+        prefs={prefs}
+        onPrefsChange={updatePrefs}
       />
+
+      {/* ★ Part B：首次登入 banner 一次（localStorage flag；啟 = 請求 permission + 開桌面通知） */}
+      {notifyBanner && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 w-[min(94%,540px)] bg-panel border border-line rounded-xl shadow-lg px-4 py-3 flex items-center gap-3">
+          <span className="text-sm text-t1 flex-1">開啟通知？客人嚟訊息即刻知</span>
+          <button
+            onClick={() => {
+              void (async () => {
+                const perm = await ensurePermission();
+                updatePrefs({ ...prefsRef.current, desktop: perm === "granted" });
+                dismissNotifyBanner();
+                setNotifyBanner(false);
+              })();
+            }}
+            className="text-xs px-3 py-1.5 rounded-full bg-brand text-white hover:opacity-90 shrink-0"
+          >
+            開啟通知
+          </button>
+          <button
+            onClick={() => {
+              dismissNotifyBanner();
+              setNotifyBanner(false);
+            }}
+            className="text-xs px-3 py-1.5 rounded-full bg-panel-2 text-t2 hover:text-t1 shrink-0"
+          >
+            唔該
+          </button>
+        </div>
+      )}
 
       <ChatPane
         onBack={() => setSelectedConvId(null)}
@@ -1277,25 +1464,36 @@ function windowFromLastInbound(lastInboundAt: string | null | undefined) {
   };
 }
 
-// ★ H2：mention 提示音（WebAudio 短 beep；任何失敗靜默 skip — 唔擋流程）
-function playChime(): void {
+// ★ Part B（N-7）：favicon 紅點（canvas 畫 — 零新資產；unread>0 時換 data URL，=0 還原）
+function unreadFaviconDataUrl(n: number): string {
   try {
-    const Ctor: typeof AudioContext | undefined =
-      window.AudioContext ??
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!Ctor) return;
-    const ctx = new Ctor();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.type = "sine";
-    osc.frequency.value = 880;
-    gain.gain.value = 0.04;
-    osc.start();
-    osc.stop(ctx.currentTime + 0.18);
-    osc.onended = () => void ctx.close();
+    const S = 64;
+    const canvas = document.createElement("canvas");
+    canvas.width = S;
+    canvas.height = S;
+    const g = canvas.getContext("2d");
+    if (!g) return "/favicon.ico";
+    // 底：品牌綠圓角方塊（同 light theme --brand 一致）
+    g.fillStyle = "#7a8a5e";
+    g.beginPath();
+    if (typeof g.roundRect === "function") g.roundRect(2, 2, 60, 60, 14);
+    else g.rect(2, 2, 60, 60);
+    g.fill();
+    // 紅點（右上角）
+    g.fillStyle = "#e5484d";
+    g.beginPath();
+    g.arc(46, 18, 15, 0, Math.PI * 2);
+    g.fill();
+    // 數字
+    g.fillStyle = "#fff";
+    g.font = `bold ${n > 99 ? 12 : n > 9 ? 14 : 18}px sans-serif`;
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(n > 99 ? "99+" : String(n), 46, 19);
+    return canvas.toDataURL("image/png");
   } catch {
-    /* ignore */
+    return "/favicon.ico";
   }
 }
+
+// playChime 已移去 @/lib/notify-client（Part B — 同 fireNotify 一起統一管理）
