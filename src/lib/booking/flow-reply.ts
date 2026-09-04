@@ -34,7 +34,7 @@ import {
 import { sendBookingFlow } from "@/lib/flows/send";
 import { publishNotify } from "@/lib/notify";
 import { outboundQueue } from "@/lib/queue";
-import { syncWindow, getSlots, hkDateOffset } from "@/lib/availability";
+import { syncWindow, getSlots, hkDateOffset, slotAvailable } from "@/lib/availability";
 import { phoneHash } from "@/lib/phone-hash";
 import { afterBookingWrite } from "@/lib/booking/booking-ops";
 import { rescheduledReply } from "@/lib/booking/booking-text";
@@ -260,7 +260,9 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
           const slotRow = await tx.availabilitySlot.findUnique({
             where: { clinicId_providerApricotId_date_startTime: { clinicId, providerApricotId: provider.apricotId!, date, startTime: time! } },
           });
-          if (!slotRow || !slotRow.isOpen || slotRow.bookedCount > 0) {
+          // G-4（B7，F2）：capacity-aware — 共享池 3 人，remainingCapacity 缺欄 fallback 舊語義；
+          // checkClash（workforce 寫入時）照舊係最終防線
+          if (!slotRow || !slotAvailable(slotRow)) {
             txResult.reason = "slot_taken";
             return;
           }

@@ -157,6 +157,9 @@ const BookableSlotSchema = z.object({
   providerId: z.string(),
   providerName: z.string(),
   seatsFree: z.number().int().min(0),
+  /** G-4（cwi-capacity-20260904 B7，F2）：每醫生每時段剩餘 = capacity − booked
+   *  （問診+覆診共享池）；optional = 老 F 未上欄 → 缺欄當 1（向後兼容） */
+  remainingCapacity: z.number().int().min(0).optional(),
   slotKey: z.string(),
 });
 export const BookableSlotsResponse = z.object({
@@ -177,6 +180,19 @@ export const BookableSlotsResponse = z.object({
 export type BookableSlot = z.infer<typeof BookableSlotSchema>;
 export type BookableDay = BookableSlotsResult["days"][number];
 export type BookableSlotsResult = z.infer<typeof BookableSlotsResponse>;
+
+// ── G-4（cwi-capacity-20260904 B7，F2）：capacity 候選過濾 ────────────────────
+// F2 疊診規則：每醫生每時段最多 3 人，問診（新）+ 覆診（舊）共享同一池。
+// remainingCapacity = capacity − booked（F 側已計）；缺欄 → 當 1（老 F / 未上欄向後兼容）。
+// 鐵律：capacity 係候選過濾層；checkClash（confirm 前）係最終防線 — 兩層唔合併。
+export function slotRemainingCapacity(s: Pick<BookableSlot, "remainingCapacity">): number {
+  return typeof s.remainingCapacity === "number" ? s.remainingCapacity : 1;
+}
+
+/** 候選 filter：remainingCapacity ≤ 0 = 滿格 → 唔出（防禦層 — 現行 F/mock 只出 offerable，實上恒過）。 */
+export function filterBookableSlots<T extends Pick<BookableSlot, "remainingCapacity">>(slots: T[]): T[] {
+  return slots.filter((s) => slotRemainingCapacity(s) > 0);
+}
 
 // held PII-free 讀（T3 警報用 — MD 交貨 #7）：零病人資料；holdTimeoutHours = clinic 設定
 //（response 層帶出，12h MEDIUM / 24h HIGH 唔硬編）。
@@ -1236,13 +1252,14 @@ function mockBaseDay(clinicCode: string, date: string): { closed: boolean; slots
   return { closed, slots };
 }
 
-/** T4：effective offerable = base − 活躍 holds（seatsFree 歸 0 → 唔出，MD §4）。 */
+/** T4：effective offerable = base − 活躍 holds（seatsFree 歸 0 → 唔出，MD §4）。
+ *  G-4（B7）：mock 對齊新 F 契約 — 一併回 remainingCapacity（F2：剩餘 = seatsFree）。 */
 function mockDaySlots(clinicCode: string, date: string): BookableSlot[] {
   const { slots } = mockBaseDay(clinicCode, date);
   return slots
-    .map((s) => {
+    .map((s): BookableSlot | null => {
       const eff = s.seatsFree - holdCountAt(clinicCode, s.providerId, date, hhmmToMin(s.start));
-      return eff > 0 ? { ...s, seatsFree: eff } : null;
+      return eff > 0 ? { ...s, seatsFree: eff, remainingCapacity: eff } : null;
     })
     .filter((s): s is BookableSlot => s !== null);
 }

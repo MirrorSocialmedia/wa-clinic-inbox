@@ -463,26 +463,31 @@ async function main(): Promise<void> {
     fail("SCHED-T156", String(e).slice(0, 160));
   }
 
-  // ══ T182：capacity fallback warn（server log — 每 process 每 clinic|date|provider 一次）═
-  // WARMUP/T150 嘅 TKW 今日請求已觸發 SSR buildFlowSlots → warn 已落 log。
+  // ══ T182：capacity 真值直傳（G-4 / cwi-capacity-20260904 B7，F2）═
+  // D.2 舊語義（缺欄 → max(seats) fallback + warn 一次）只留老 F 向後兼容；
+  // mock 恒帶 capacityPerProvider=3（F2 每醫生每時段共享池）→ response capacity
+  // 必須 = 直傳真值 3，且 server log 零「capacity 缺」fallback warn。
   try {
     if (!existsSync(logPath)) throw new Error(`server log 檔不存在：${logPath}`);
     const logText = readFileSync(logPath, "utf8");
-    const lines = logText
+    const warnLines = logText
       .split("\n")
-      .filter((l) => l.includes("capacity 缺") && l.includes(`"date":"${today}"`) && l.includes('"clinicCode":"TKW"'));
-    if (lines.length < 1) throw new Error("capacity fallback warn 缺失（server log）");
-    const perProvider = new Map<string, number>();
-    for (const l of lines) {
-      const m = /"providerId":"([^"]+)"/.exec(l);
-      const cap = /"fallbackCapacity":(\d+)/.exec(l);
-      if (!m || !cap) throw new Error(`warn 行缺欄：${l.slice(0, 120)}`);
-      perProvider.set(m[1], (perProvider.get(m[1]) ?? 0) + 1);
-    }
-    if (perProvider.size < 1) throw new Error("warn 冇 providerId");
-    for (const [pid, c] of perProvider) {
-      if (c > 1) throw new Error(`provider ${pid} warn 咗 ${c} 次（要恰 1 次）`);
-    }
+      .filter((l) => l.includes("capacity 缺") && l.includes('"clinicCode":"TKW"'));
+    if (warnLines.length > 0)
+      throw Error(`新契約唔應 fallback — 見 ${warnLines.length} 行 capacity 缺 warn：${warnLines[0].slice(0, 100)}`);
+    // 直傳真值斷言：有 ONLINE 格嘅 provider 必有 capacity = mock MOCK_CAPACITY（3）
+    const r = await fetch(`${base}/api/flows/slots?clinicCode=TKW&from=${today}&to=${addDays(today, 6)}&granularity=day`, {
+      headers: { cookie: `wa_inbox_session=${sessionValue}` },
+    });
+    if (r.status !== 200) throw new Error(`flows/slots ${r.status}`);
+    const j = (await r.json()) as {
+      days?: { providers?: { providerId: string; capacity?: number }[] }[];
+    };
+    const caps: number[] = [];
+    for (const d of j.days ?? []) for (const p of d.providers ?? []) if (typeof p.capacity === "number") caps.push(p.capacity);
+    if (caps.length === 0) throw new Error("冇任何 provider 帶 capacity（mock 應有 ONLINE 格 → 必有 capacity）");
+    const bad = caps.filter((c) => c !== 3);
+    if (bad.length > 0) throw new Error(`capacity 唔係直傳真值 3：${bad.slice(0, 5).join(",")}`);
     ok("SCHED-T182");
   } catch (e) {
     fail("SCHED-T182", String(e).slice(0, 160));

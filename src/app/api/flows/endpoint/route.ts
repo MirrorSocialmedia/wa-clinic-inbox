@@ -60,7 +60,7 @@ import {
   type ProviderOption,
 } from "@/lib/flows/screens";
 import { syncWindow, getSlots, hkTodayStr, hkDateOffset } from "@/lib/availability";
-import { getBookableSlots, claimSlot, WorkforceApiError, refreshAvailability, type BookableDay, type BookableSlot } from "@/lib/workforce/client";
+import { getBookableSlots, claimSlot, filterBookableSlots, WorkforceApiError, refreshAvailability, type BookableDay, type BookableSlot } from "@/lib/workforce/client";
 import { getSlotFreshness, invalidateAvailabilityDay } from "@/lib/availability";
 
 export const runtime = "nodejs";
@@ -246,7 +246,12 @@ export async function POST(req: NextRequest) {
 
       let bookableDays: BookableDay[] | null = null;
       try {
-        bookableDays = (await getBookableSlots(clinic.code, dateMin, dateMax)).days;
+        // G-4（cwi-capacity-20260904 B7，F2）：候選 filter — remainingCapacity ≤ 0（滿格）唔出；
+        // 缺欄當 1（老 F 向後兼容）。checkClash 照舊係 confirm 前最終防線（兩層唔合併）。
+        bookableDays = (await getBookableSlots(clinic.code, dateMin, dateMax)).days.map((day) => {
+          const slots = filterBookableSlots(day.slots);
+          return { ...day, slots, offerableCount: slots.length };
+        });
       } catch (e) {
         log.warn({ clinic: clinic.code, err: e instanceof Error ? e.name : "?" }, "flow endpoint: bookable-slots fail → 降級 NONE");
       }

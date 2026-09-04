@@ -34,6 +34,7 @@ import log from "@/lib/log";
 import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { confirmBookingCore } from "@/lib/booking/confirm-core";
+import { slotAvailable } from "@/lib/availability";
 import { confirmMessageText } from "@/lib/booking/booking-text";
 
 export const dynamic = "force-dynamic";
@@ -110,8 +111,8 @@ export const POST = handle(async (req: NextRequest) => {
 
   // 建 PENDING 卡（同 Flow 路徑同形）→ 立即行代落單 core
   // - flowToken = manual-<uuid>（唔會同 Flow JWT 撞；nfm_reply 只匹配 Flow session）
-  // - L2 預檢：slot 行存在且已佔 → 即刻 409（慳一次 workforce call；行唔喺 = 照行，
-  //   最終防線 = F 側 checkClash / mock SLOT_TAKEN flag）
+  // - L2 預檢：slot 行存在且已佔（G-4/B7 F2 capacity-aware — 每格 3 人共享池；缺欄 fallback 舊語義）
+  //   → 即刻 409（慳一次 workforce call；行唔喺 = 照行，最終防線 = F 側 checkClash / mock SLOT_TAKEN flag）
   // - 同 slot 已有 PENDING（Flow 路徑建）→ 409 pending_exists（防雙單 — 兩單同 slot 都喺 Apricot 會撞）
   const clinicId = conv.clinicId;
   // object holder（closure 入面 assign — TS 對 let 變量收窄會誤判 never）
@@ -127,7 +128,7 @@ export const POST = handle(async (req: NextRequest) => {
             clinicId_providerApricotId_date_startTime: { clinicId, providerApricotId, date, startTime: start },
           },
         });
-        if (slotRow && (!slotRow.isOpen || slotRow.bookedCount > 0)) {
+        if (slotRow && !slotAvailable(slotRow)) {
           txOut.err = {
             status: 409,
             body: { error: "SLOT_TAKEN", message: "時段啱啱滿咗", retryable: true },

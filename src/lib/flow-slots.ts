@@ -25,7 +25,7 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { fetchDutyRoster, type DutyEntry } from "@/lib/duty/client";
-import { getBookableSlots, getHeld, type HeldResult } from "@/lib/workforce/client";
+import { getBookableSlots, getHeld, filterBookableSlots, type HeldResult } from "@/lib/workforce/client";
 import { getSlotFreshness } from "@/lib/availability";
 
 // D.2（cwi-schedv2-20260903）：capacity fallback warn 去重（per clinic|date|provider）。
@@ -54,9 +54,9 @@ export interface FlowProvider {
   /** granularity=day 先有；只含非 CLOSED 格（缺 = CLOSED） */
   slots?: FlowSlot[];
   /**
-   * D.2（cwi-schedv2-20260903）：該日該醫生總席（席位點 ■/□ 用）。
-   * 現行 F 契約冇回 per 醫生·日 capacity → fallback = 該日該醫生 max(seats)（server 端
-   * 算 + 每組合 warn 一次）；G-4 補真值（remainingCapacity）後呢度改直傳。
+   * D.2（cwi-schedv2-20260903）+ G-4（cwi-capacity-20260904 B7）：該日該醫生每格總席（席位點 ■/□ 用）。
+   * G-4 已直傳真值 = response 頂層 capacityPerProvider（F2：每醫生每時段容量，問診+覆診共享池）；
+   * 缺欄才 fallback = max(seats)（server 端算 + 每組合 warn 一次）。
    */
   capacity?: number;
 }
@@ -162,7 +162,8 @@ export async function buildFlowSlots(
     // provider 集合 = 該日 offerable slots ∪ active holds（full 但冇 hold 嘅醫生
     // external 契約無數據 → 無法列名 — 已知限制，MD §2 shape 內可表達範圍內做齊）
     const byProvider = new Map<string, { name: string; seats: number; cells: Map<number, number> }>();
-    for (const s of bDay?.slots ?? []) {
+    // G-4（B7）：候選 filter — remainingCapacity ≤ 0（滿格）唔出；缺欄當 1。
+    for (const s of filterBookableSlots(bDay?.slots ?? [])) {
       const e = byProvider.get(s.providerId) ?? { name: s.providerName, seats: 0, cells: new Map<number, number>() };
       e.seats += s.seatsFree;
       const startMin = hhmmToMin(s.start);
@@ -193,18 +194,23 @@ export async function buildFlowSlots(
             }
           }
           p.slots = slots;
-          // D.2：capacity 缺 → max(seats) fallback + warn 一次（spec；G-4 補真值）
+          // D.2 + G-4（B7）：capacity 真值 = 頂層 capacityPerProvider（F2 每格容量）直傳；
+          // 缺欄（老 F）→ max(seats) fallback + warn 一次（向後兼容）。
           const onlineMax = slots.reduce((mx, s) => (s.state === "ONLINE" && s.seats > mx ? s.seats : mx), 0);
           if (onlineMax > 0) {
-            p.capacity = onlineMax;
-            const warnKey = `${clinicCode}|${date}|${providerId}`;
-            if (!capacityWarned.has(warnKey)) {
-              capacityWarned.add(warnKey);
-              if (capacityWarned.size > 2000) capacityWarned.clear(); // 天花板（長跑 dev process 防無界增長）
-              log.warn(
-                { clinicCode, date, providerId, fallbackCapacity: onlineMax },
-                "flow-slots: capacity 缺 → max(seats) fallback（G-4 補真值）"
-              );
+            if (typeof bookable?.capacityPerProvider === "number" && bookable.capacityPerProvider > 0) {
+              p.capacity = bookable.capacityPerProvider;
+            } else {
+              p.capacity = onlineMax;
+              const warnKey = `${clinicCode}|${date}|${providerId}`;
+              if (!capacityWarned.has(warnKey)) {
+                capacityWarned.add(warnKey);
+                if (capacityWarned.size > 2000) capacityWarned.clear(); // 天花板（長跑 dev process 防無界增長）
+                log.warn(
+                  { clinicCode, date, providerId, fallbackCapacity: onlineMax },
+                  "flow-slots: capacity 缺欄 → max(seats) fallback（老 F 向後兼容）"
+                );
+              }
             }
           }
         }
