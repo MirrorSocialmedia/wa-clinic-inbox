@@ -739,6 +739,16 @@ function DayGrid({
 
   const selConv = selId && convs ? convs.find((c) => c.id === selId) ?? null : null;
 
+  // ★ cwi-inboxfix-20260905（MD §4 I-8）：popover 開即見最近 5 條 — 用開 popover 已拉嘅全量 list（同 scope 規則）
+  //   按 lastMessageAt desc 排序 slice 5（免額外加 request；效果 = MD 嘅 limit=5&order=lastMessageAt_desc）
+  const recent5: ConversationItem[] | null = !pop
+    ? null
+    : convs === null
+      ? null
+      : [...convs]
+          .sort((a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime())
+          .slice(0, 5);
+
   async function sendFlow(conv: ConversationItem) {
     if (!pop || !p || sending) return;
     setSending(true);
@@ -1001,6 +1011,43 @@ function DayGrid({
               ✕ 關閉
             </button>
           </div>
+          {/* ★ cwi-inboxfix-20260905（MD §4 I-8）：popover 開即見最近 5 條（病人名 + 窗口狀態）；
+             過窗行淡化、撳落去出三出路（唔出發 Flow）；搜尋 input 置底 */}
+          {!q.trim() &&
+            (convs === null ? (
+              <div className="text-[10.5px] text-t3">載入最近對話…</div>
+            ) : (
+              <div className="space-y-1">
+                {recent5?.map((c) => {
+                  const name = c.contact?.profileName || c.contact?.waId || "病人";
+                  const winOpen = c.window.open;
+                  const hrs = Math.floor(c.window.remainingMs / 3600000);
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => {
+                        setSelId(c.id);
+                        setRaceConv(null);
+                        setPopErr(null);
+                      }}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-lg border text-xs flex items-center gap-2 ${
+                        selId === c.id ? "bg-brand-soft border-brand text-t1" : "bg-panel-2 border-line text-t2 hover:bg-panel-2/70"
+                      } ${winOpen ? "" : "opacity-60"}`}
+                    >
+                      <span className="font-medium truncate">{name}</span>
+                      {c.assigneeName && <span className="text-[10px] text-t3">負責：{c.assigneeName}</span>}
+                      <span className={`ml-auto text-[10px] shrink-0 ${winOpen ? "text-ok-text" : "text-t3"}`}>
+                        {winOpen ? `窗口 ${hrs}h` : "已過窗"}
+                      </span>
+                    </button>
+                  );
+                })}
+                {recent5 && recent5.length === 0 && (
+                  <div className="text-[10.5px] text-t3">無最近對話 — 用下面搜尋</div>
+                )}
+              </div>
+            ))}
           <input
             value={q}
             onChange={(e) => {
@@ -1008,7 +1055,7 @@ function DayGrid({
               setSelId(null);
               setRaceConv(null);
             }}
-            placeholder="搜病人（姓名／電話）— 揀返既有對話"
+            placeholder="搵唔到？打姓名／電話搜尋"
             aria-label="搜病人"
             className="w-full text-xs px-2.5 py-1.5 rounded-lg bg-panel-2 border border-line text-t1 placeholder:text-t3"
           />
@@ -1050,7 +1097,7 @@ function DayGrid({
               })}
             </div>
           )}
-          {convs === null && pop && !q.trim() && <div className="text-[10.5px] text-t3">載入既有對話…</div>}
+          {convs === null && pop && q.trim() && <div className="text-[10.5px] text-t3">載入既有對話…</div>}
           {popErr && <div className="text-xs text-danger-text">{popErr}</div>}
           {selConv ? (
             <div className="space-y-2">

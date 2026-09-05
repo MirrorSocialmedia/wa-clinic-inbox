@@ -3,7 +3,7 @@ import { z } from "zod";
 import argon2 from "argon2";
 import prisma from "@/lib/prisma";
 import { requireAdmin, invalidateActiveCache, invalidateStaffSessions } from "@/lib/rbac";
-import { publishControl } from "@/lib/notify";
+import { publishControl, publishNotify } from "@/lib/notify";
 import log from "@/lib/log";
 import { handle, toResponse } from "@/lib/api-error";
 
@@ -99,7 +99,31 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
     invalidateActiveCache(id);
     publishControl({ cmd: "staff:changed", staffId: id, active: fields.active });
     if (fields.active === false) {
-      log.info({ staffId: id }, "staff: account disabled — active cache invalidated + control broadcast");
+      // ★ cwi-inboxfix-20260905（§7 跌公海表）：負責人帳號停用 → 佢負責嘅對話即時跌返公海。
+      //   現行 P0-3 只切存取（cache + socket），唔郁 conversations（MD：agent 檢查，冇就補）。
+      //   鏡像 [id] route 放手不變式：assignVersion+1（R5）、slaNotifiedAt 保留（唔重新洗版）、
+      //   逐對話 conv:updated（clinicId-scoped socket — 店內列表即時見到跌公海）。
+      const held = await prisma.conversation.findMany({ where: { assigneeId: id } });
+      for (const h of held) {
+        await prisma.conversation.update({
+          where: { id: h.id },
+          data: {
+            assigneeId: null,
+            assignVersion: { increment: 1 },
+            assignedAt: null,
+            assigneeLastActionAt: null,
+          },
+        });
+        publishNotify(h.clinicId, "conv:updated", {
+          conversationId: h.id,
+          clinicId: h.clinicId,
+          status: h.status,
+          assigneeId: null,
+          assignVersion: h.assignVersion + 1,
+          unreadCount: h.unreadCount,
+        });
+      }
+      log.info({ staffId: id, released: held.length }, "staff: account disabled — active cache invalidated + control broadcast + assigned conversations released to public pool");
     } else {
       log.info({ staffId: id }, "staff: account re-enabled — active cache invalidated + control broadcast");
     }

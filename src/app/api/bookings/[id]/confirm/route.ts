@@ -15,7 +15,7 @@ import log from "@/lib/log";
 import { requireAuth, assertClinicAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
-import { outboundQueue } from "@/lib/queue";
+import { enqueueOutboundSend } from "@/lib/queue";
 import { publishNotify } from "@/lib/notify";
 
 export const dynamic = "force-dynamic";
@@ -121,7 +121,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
       },
     });
     await Promise.race([
-      outboundQueue.add("send", { messageId: msg.id }),
+      enqueueOutboundSend(msg.id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
     ]);
     await prisma.$executeRaw`

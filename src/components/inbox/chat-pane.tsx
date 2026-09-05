@@ -8,6 +8,7 @@ import {
   CheckCheck,
   Clock,
   ChevronLeft,
+  Info,
   Lock,
   MessageCircle,
   MoreHorizontal,
@@ -16,6 +17,7 @@ import {
   Sparkles,
   StickyNote,
   Users,
+  XCircle,
 } from "lucide-react";
 import type { ConversationItem, DraftInfo, DraftTrace, MessageItem, NoteReceipt, StaffInfo } from "./types";
 import { noteTickState } from "./types";
@@ -51,6 +53,10 @@ interface Props {
   flowBusy: boolean;
   /** Phase B：過窗 template 發送（422 後 composer 出揀選 → 撳掣帶 templateName 發）；唔傳 = 功能唔啟用 */
   onSendTemplate?: (name: string) => Promise<{ ok: boolean; error?: string }>;
+  /** ★ cwi-inboxfix-20260905（MD §5.2）：8 秒撤回 — DELETE /api/messages/[id]/undo（409 = 已發出） */
+  onUndoMessage: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
+  /** ★ cwi-inboxfix-20260905（MD §5.3）：標記已作廢 — POST /api/messages/[id]/void（純內部） */
+  onVoidMessage: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
   /** ★ H1：自己嘅 staffId（Send Lock 三狀態判定：自己負責/別人負責/unassigned） */
   myStaffId: string;
   /** ★ H1：發內部備註（lock 模式 composer 用；INTERNAL — 唔出 WhatsApp）
@@ -128,6 +134,13 @@ function Ticks({ status, errorCode }: { status: string; errorCode: string | null
         className="text-danger-text text-[11px] font-semibold inline-flex items-center gap-0.5"
       >
         <AlertTriangle size={11} strokeWidth={2.75} /> {errorCode}
+      </span>
+    );
+  }
+  if (status === "CANCELLED") {
+    return (
+      <span title="已撤回（未發出 — 病人收唔到）" className="text-t3 text-[11px] inline-flex items-center gap-0.5">
+        <XCircle size={11} strokeWidth={2.25} /> 已撤回（未發出）
       </span>
     );
   }
@@ -212,6 +225,121 @@ function initialOf(c: ConversationItem): string {
   return n ? n.charAt(0) : "?";
 }
 
+// ── cwi-inboxfix-20260905（MD §5.2/§5.3）：8 秒撤回 + 過窗「標記已作廢 / 更正草稿」 ──
+/** 撤回窗口 — 必同 server src/lib/queue.ts UNDO_WINDOW_MS 一致 */
+const UNDO_WINDOW_MS = 8000;
+/** 更正草稿模板（MD §5.3：一鍵插入更正草稿） */
+const CORRECTION_DRAFT = "對唔住，上一句發錯咗，正確嘅係：";
+
+function UndoControls({
+  m,
+  onUndo,
+  onVoid,
+  onInsertCorrection,
+}: {
+  m: MessageItem;
+  onUndo: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  onVoid: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  onInsertCorrection: (body: string) => void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const createdMs = new Date(m.createdAt).getTime();
+  const elapsed = now - createdMs;
+  // 窗口判定：QUEUED 且距 enqueue < 8s（createdAt = server enqueue 時刻，同 Redis delay 同源）
+  const inWindow = m.status === "QUEUED" && elapsed >= 0 && elapsed < UNDO_WINDOW_MS;
+
+  // 只有窗口開緊先 tick（舊 QUEUED 唔會無限跑 interval）
+  useEffect(() => {
+    if (!inWindow) return;
+    const t = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(t);
+  }, [inWindow]);
+
+  // ── 窗口內：倒數撤回掣（撳 = job.remove + CANCELLED + 草稿還原 composer — MD §5.2） ──
+  if (inWindow) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        {notice && <span className="text-[10px] text-warn-text">{notice}</span>}
+        <button
+          onClick={async () => {
+            setBusy(true);
+            const r = await onUndo(m.id);
+            setBusy(false);
+            if (r.ok) onInsertCorrection(m.body ?? ""); // 草稿保留（MD §5.2）
+            else setNotice(r.error ?? "撤回失敗");
+          }}
+          disabled={busy}
+          title="8 秒內撳撤回 — 訊息唔會發畀病人"
+          className="text-[10px] text-warn-text hover:underline disabled:opacity-50"
+        >
+          撤回 {Math.max(1, Math.ceil((UNDO_WINDOW_MS - elapsed) / 1000))}s
+        </button>
+      </span>
+    );
+  }
+
+  // ── 過窗：hover ⋯ 掣（MD §5.3）— 撤回提示「已發出」/ 標記已作廢 / 插入更正草稿 ──
+  return (
+    <span className="relative inline-flex items-center gap-1">
+      {notice && <span className="text-[10px] text-warn-text">{notice}</span>}
+      {m.voidedAt && (
+        <span title="已作廢（內部標記 — 病人端 WhatsApp 照見原文，以更正訊息為準）" className="text-[10px] text-warn-text">
+          ⚠ 已作廢
+        </span>
+      )}
+      <button
+        onClick={() => setMenuOpen((v) => !v)}
+        className="text-[11px] text-t3 hover:text-t1 opacity-0 group-hover:opacity-100 transition-opacity"
+        title="訊息操作（撤回 / 作廢 / 更正）"
+      >
+        ⋯
+      </button>
+      {menuOpen && (
+        <span className="absolute right-0 bottom-5 z-20 flex flex-col bg-panel border border-line rounded-lg shadow-lg overflow-hidden text-[11px] w-44">
+          <button
+            onClick={async () => {
+              setMenuOpen(false);
+              setBusy(true);
+              const r = await onUndo(m.id);
+              setBusy(false);
+              if (!r.ok) setNotice(r.error ?? "已經發出咗，收唔返。可以再發一句更正。");
+            }}
+            className="px-2.5 py-1.5 text-left hover:bg-line/30"
+          >
+            撤回
+          </button>
+          {!m.voidedAt && (
+            <button
+              onClick={async () => {
+                setMenuOpen(false);
+                setBusy(true);
+                const r = await onVoid(m.id);
+                setBusy(false);
+                if (!r.ok) setNotice(r.error ?? "標記失敗");
+              }}
+              className="px-2.5 py-1.5 text-left hover:bg-line/30"
+            >
+              標記為已作廢
+            </button>
+          )}
+          <button
+            onClick={() => {
+              setMenuOpen(false);
+              onInsertCorrection(m.body ? `${CORRECTION_DRAFT}\n（原句）${m.body}` : CORRECTION_DRAFT);
+            }}
+            className="px-2.5 py-1.5 text-left hover:bg-line/30"
+          >
+            插入更正草稿
+          </button>
+        </span>
+      )}
+    </span>
+  );
+}
+
 /**
  * 對話欄（MD §6.4）v2 — WhatsApp 式氣泡 + brand AI 草稿卡。
  * 邏輯同 v1 完全一樣（auto-fill draft / scroll pin / 分頁 / flow / booking）。
@@ -225,8 +353,12 @@ export function ChatPane(p: Props) {
   // Phase B：過窗 422 後嘅 template 揀選（server 回嘅 APPROVED+UTILITY 名單）
   const [templateOptions, setTemplateOptions] = useState<{ name: string; language: string }[] | null>(null);
   const [templateBusy, setTemplateBusy] = useState(false);
+  // ★ cwi-inboxfix-20260905（MD §5.1）：Flow/template 發送確認彈窗（病人名 + 內容）— 純文字訊息唔使確認
+  const [outConfirm, setOutConfirm] = useState<{ to: string; desc: string; run: () => void } | null>(null);
   // cwi-window-20260901（P2）：COPY_ONLY 草稿「複製」掣 feedback（「已複製」2s）
   const [copiedDraft, setCopiedDraft] = useState(false);
+  // ★ cwi-inboxfix-20260905（MD §2）：AI trace 收埋做 ⓘ 掣 — 撳先展開（內容唔變）
+  const [traceOpen, setTraceOpen] = useState(false);
   // ★ Part F（cwi-raggolden-20260904，F.5）：inbox「加入測試集」— IN 文字 bubble hover 掣 → 預填彈窗
   //   （server-side deid + AI 當時判斷）→ 員工揀正確 intent/紅旗/自動覆 → POST /api/golden-cases
   const [goldenMsgId, setGoldenMsgId] = useState<string | null>(null);
@@ -312,8 +444,6 @@ export function ChatPane(p: Props) {
   const [flagMenuOpen, setFlagMenuOpen] = useState(false);
   const [flagBusy, setFlagBusy] = useState(false);
   const [flagMsg, setFlagMsg] = useState<string | null>(null);
-  // Organic：draft 已填入 composer 時頂部 brand-soft 提示條（純視覺；清空重寫 / 草稿消失就收）
-  const [fillHint, setFillHint] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(false);
   const autoFilledDraftRef = useRef<string | null>(null);
@@ -340,7 +470,6 @@ export function ChatPane(p: Props) {
     setMentionState(null);
     setMentionIdx(0);
     setTemplateOptions(null);
-    setFillHint(false);
     pinnedRef.current = true;
     autoFilledDraftRef.current = null;
     noteReadSentRef.current = new Set();
@@ -370,7 +499,6 @@ export function ChatPane(p: Props) {
   useEffect(() => {
     if (!p.pendingDraft) {
       autoFilledDraftRef.current = null;
-      setFillHint(false);
       setCopiedDraft(false);
       return;
     }
@@ -384,7 +512,6 @@ export function ChatPane(p: Props) {
     if (draft.trim() === "") {
       setDraft(p.pendingDraft.draftText);
       autoFilledDraftRef.current = p.pendingDraft.id;
-      setFillHint(true);
     }
   }, [p.pendingDraft, draft, p.conversation?.assigneeId, p.myStaffId]);
 
@@ -435,6 +562,17 @@ export function ChatPane(p: Props) {
       : c.window.tone === "yellow"
         ? "bg-warn-soft text-warn-text"
         : "bg-ok-soft text-ok-text";
+
+  // ── cwi-inboxfix-20260905（MD §5.1）：外發確認層（Flow/template）─────────────
+  function requireOutConfirm(desc: string, run: () => void) {
+    setOutConfirm({ to: c.contact?.profileName?.trim() || "病人", desc, run });
+  }
+  function runOutConfirm() {
+    const cf = outConfirm;
+    if (!cf) return;
+    setOutConfirm(null);
+    cf.run();
+  }
 
   async function sendFlow() {
     if (flowError) setFlowError(null);
@@ -727,6 +865,18 @@ export function ChatPane(p: Props) {
                     {isAuto ? `AI 自動發出 · ${bubbleTime(m.waTimestamp, prev?.waTimestamp)}` : bubbleTime(m.waTimestamp, prev?.waTimestamp)}
                   </span>
                   {isOut && m.channel === "API" && <Ticks status={m.status} errorCode={m.errorCode} />}
+                  {/* ★ cwi-inboxfix-20260905（MD §5.2/§5.3）：自己發嘅 OUT 文字 — 8 秒撤回倒數 / 過窗 ⋯ 掣 */}
+                  {isOut && m.channel === "API" && m.type === "text" && m.sentByStaffId === p.myStaffId && (
+                    <UndoControls
+                      m={m}
+                      onUndo={p.onUndoMessage}
+                      onVoid={p.onVoidMessage}
+                      onInsertCorrection={(body) => {
+                        setDraft(body);
+                        requestAnimationFrame(() => taRef.current?.focus());
+                      }}
+                    />
+                  )}
                   {/* ★ Part F（F.5）：IN 文字 bubble hover「＋測試集」（deid 預填彈窗） */}
                   {!isOut && m.type === "text" && !!m.body && (
                     <button
@@ -765,7 +915,13 @@ export function ChatPane(p: Props) {
                 病人想預約 — 發預約 Flow 俾病人揀醫生/日期/時間：
               </span>
               <button
-                onClick={() => void sendFlow()}
+                onClick={() => {
+                  const pb = c.pendingBooking;
+                  requireOutConfirm(
+                    `預約 Flow（WhatsApp 預約卡）${pb ? ` · ${pb.requestedDate} ${pb.requestedTime} ${pb.providerName}` : ""}`,
+                    () => void sendFlow()
+                  );
+                }}
                 disabled={p.flowBusy || locked}
                 title={locked ? "Send Lock：只有負責人可以發 Flow" : undefined}
                 className="ml-auto shrink-0 text-xs px-2.5 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-40 inline-flex items-center gap-1"
@@ -785,17 +941,22 @@ export function ChatPane(p: Props) {
             <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
               <Sparkles size={15} strokeWidth={2.75} className={isCopyOnly ? "text-warn-text" : "text-brand-text"} />
               <span className={`text-[12.5px] font-semibold ${isCopyOnly ? "text-warn-text" : "text-brand-text"}`}>
-                AI 草稿{isCopyOnly ? "（只可複製）" : ""}
+                AI 草稿{isCopyOnly ? "（只可複製）" : ""} · {(p.pendingDraft.latencyMs / 1000).toFixed(1)}s
               </span>
-              <span className="text-[10.5px] text-t2">
-                {p.pendingDraft.model} · {(p.pendingDraft.latencyMs / 1000).toFixed(1)}s · {isCopyOnly ? "過窗發唔出 — 複製去手機 App" : "你確認先發出"}
-              </span>
+              {/* ★ cwi-inboxfix-20260905（MD §2）：model 名移入 ⓘ tooltip；AI trace 同係呢粒 ⓘ 撳先展開（內容唔變） */}
+              <button
+                onClick={() => p.pendingDraft?.traceJson && setTraceOpen((v) => !v)}
+                title={p.pendingDraft.model}
+                aria-label="AI model 同 trace"
+                className={isCopyOnly ? "text-warn-text/70 hover:text-warn-text" : "text-t3 hover:text-t1"}
+              >
+                <Info size={12} strokeWidth={2.25} />
+              </button>
               <span className="ml-auto flex gap-1.5 max-md:w-full max-md:order-last max-md:mt-2 max-md:[&>button]:flex-1">
                 {!isCopyOnly && (
                   <button
                     onClick={() => {
                       setDraft(p.pendingDraft!.draftText);
-                      setFillHint(true);
                       void p.onAdopt(p.pendingDraft!.id);
                     }}
                     disabled={p.draftBusy || locked}
@@ -838,20 +999,12 @@ export function ChatPane(p: Props) {
             <div className="text-[13px] leading-[1.65] text-t1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
               {p.pendingDraft.draftText}
             </div>
-            {/* ★ Part F（cwi-raggolden-20260904，F.7）：trace panel — 可展開段（workflow/gates/lexicon/檢索/price/latency） */}
-            {p.pendingDraft.traceJson && (
-              <details className="mt-1.5 rounded-xl border border-line bg-panel-2/60">
-                <summary className="cursor-pointer select-none px-2.5 py-1.5 text-[10.5px] text-t2 hover:text-t1">
-                  ⚙ AI trace（workflow / 閘 / 檢索引用 / price-guard）
-                </summary>
+            {/* ★ Part F（cwi-raggolden-20260904，F.7）：trace panel — ★ cwi-inboxfix-20260905（MD §2）：收埋做 ⓘ 掣展開（內容唔變） */}
+            {p.pendingDraft.traceJson && traceOpen && (
+              <div className="mt-1.5 rounded-xl border border-line bg-panel-2/60">
                 <TracePanel trace={p.pendingDraft.traceJson} />
-              </details>
+              </div>
             )}
-            <div className="text-[10.5px] text-t2 mt-1.5">
-              {isCopyOnly
-                ? "COPY_ONLY：唔計入採用率統計（發唔出唔係模型質素問題）· 複製去手機 App 覆（免費）"
-                : "採用＝記帳（採用率計 SENT_AS_IS／SENT_EDITED）· 棄用＝DISCARDED · 兩者都入週報"}
-            </div>
           </div>
         )}
         {sendError && <div className="text-xs text-danger-text mb-1.5">{sendError}</div>}
@@ -871,7 +1024,7 @@ export function ChatPane(p: Props) {
               {templateOptions.map((t) => (
                 <button
                   key={t.name}
-                  onClick={() => void sendTemplate(t.name)}
+                  onClick={() => requireOutConfirm(`Template：${t.name}`, () => void sendTemplate(t.name))}
                   disabled={templateBusy}
                   className="text-xs px-3 py-1.5 rounded-full bg-panel border border-line-strong text-t1 hover:bg-panel-2 disabled:opacity-40"
                 >
@@ -886,7 +1039,9 @@ export function ChatPane(p: Props) {
           /* ★ H1 Send Lock：amber 內部備註 composer — 發 WhatsApp 已停用，只可發 staff↔staff 備註
              ★ H2：打 @ 彈同店 staff 自動補全（選中 → mentions；發去後端校驗） */
           <div className="rounded-2xl border border-warn bg-warn-soft p-2.5">
-            <div className="flex items-center gap-2 mb-1.5">
+            {/* ★ cwi-inboxfix-20260905（MD §3 I-7）：兩行結構 — 接手掣（行 1 右）同發送掣（行 2）垂直相距 ≥16px；
+                行 2 發送掣 absolute -top-2（8px 凸出）→ 行距要 ≥ 16+8 → mb-7（28px）= 實測 edge gap 20px */}
+            <div className="flex items-center gap-2 mb-7">
               <span className="text-xs font-medium text-warn-text inline-flex items-center gap-1">
                 <Lock size={12} strokeWidth={2.75} />
                 此對話由 {assigneeName ?? "其他同事"} 負責 — 你只可發內部備註
@@ -967,7 +1122,7 @@ export function ChatPane(p: Props) {
                   }
                 }}
                 rows={1}
-                placeholder="內部備註（唔會發去 WhatsApp；打 @ 通知同事；Enter 發送）…"
+                placeholder="寫內部備註…"
                 className="w-full resize-none rounded-full bg-panel border border-warn px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-warn"
               />
               <button
@@ -982,22 +1137,6 @@ export function ChatPane(p: Props) {
           </div>
         ) : c.window.open ? (
           <div className="flex flex-col gap-1.5">
-            {/* Organic：draft 已填入 composer 提示條（清空重寫 = 清空 composer） */}
-            {p.pendingDraft && fillHint && (
-              <div className="flex items-center gap-1.5 rounded-full bg-brand-soft px-3 py-1.5">
-                <Check size={12} strokeWidth={2.75} className="text-brand-text shrink-0" />
-                <span className="text-[11.5px] font-semibold text-brand-text">草稿已填入 composer — 可直接改</span>
-                <button
-                  onClick={() => {
-                    setDraft("");
-                    setFillHint(false);
-                  }}
-                  className="ml-auto text-[11px] font-semibold text-brand-text/75 hover:text-brand-text"
-                >
-                  清空重寫
-                </button>
-              </div>
-            )}
             <div className="flex items-end gap-2">
               <textarea
                 value={draft}
@@ -1117,6 +1256,35 @@ export function ChatPane(p: Props) {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+      {/* ★ cwi-inboxfix-20260905（MD §5.1）：外發確認（Flow/template）— 病人名 + 內容 + 取消/確認 */}
+      {outConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={() => setOutConfirm(null)}
+        >
+          <div className="bg-panel rounded-2xl shadow-xl p-4 w-[340px] border border-line" onClick={(e) => e.stopPropagation()}>
+            <div className="text-sm font-semibold mb-2">確認發送？</div>
+            <div className="text-xs text-t2 mb-1">
+              將發俾：<span className="text-t1 font-medium">{outConfirm.to}</span>
+            </div>
+            <div className="text-xs text-t2 mb-3">內容：{outConfirm.desc}</div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setOutConfirm(null)}
+                className="text-xs px-3 py-1.5 rounded-full border border-line hover:bg-line/30"
+              >
+                取消
+              </button>
+              <button
+                onClick={runOutConfirm}
+                className="text-xs px-3 py-1.5 rounded-full bg-brand text-panel font-medium hover:bg-brand-hover"
+              >
+                確認發送
+              </button>
+            </div>
           </div>
         </div>
       )}

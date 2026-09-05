@@ -5,7 +5,7 @@ import { Prisma } from "@prisma/client";
 import log from "@/lib/log";
 import { requireAuth, assertConversationAccess, clinicScope } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
-import { outboundQueue } from "@/lib/queue";
+import { enqueueOutboundSend } from "@/lib/queue";
 import { getWindowState } from "@/lib/wa/window";
 import { billingCategoryForTemplate, BILLING_SERVICE } from "@/lib/wa/billing";
 import { assignConversation } from "@/lib/assign";
@@ -342,7 +342,7 @@ export const POST = handle(async (req: NextRequest) => {
 
   try {
     await Promise.race([
-      outboundQueue.add("send", { messageId: msg.id }),
+      enqueueOutboundSend(msg.id),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)
       ),

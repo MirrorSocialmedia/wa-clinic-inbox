@@ -24,9 +24,9 @@ import { getParams } from "@/lib/workflow/store";
 // ★ 延遲 import：outboundQueue/publishNotify 會拉起 Redis 連接（BullMQ module-level
 // instance）— unit test（零 Redis）import 呢個 module 時唔想連坐。生產路徑行為不變。
 async function lazyEnqueue(messageId: string) {
-  const { outboundQueue } = await import("@/lib/queue");
+  const { enqueueOutboundSend } = await import("@/lib/queue");
   await Promise.race([
-    outboundQueue.add("send", { messageId }),
+    enqueueOutboundSend(messageId),
     new Promise<never>((_, rej) => setTimeout(() => rej(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
   ]);
 }

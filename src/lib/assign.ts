@@ -208,6 +208,8 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
         assignedAt: now,
         // cwi-h6-20260830（h5 §1 寫入點 1）：assign 成功 → 新負責人嘅動作時點；release → null
         assigneeLastActionAt: toStaffId ? now : null,
+        // cwi-inboxfix-20260905（MD §1.4）：被接手 → 清公海 SLA 提醒旗（release 保留 — 唔重新洗版）
+        slaNotifiedAt: toStaffId ? null : undefined,
         assignVersion: { increment: 1 },
       },
     });
@@ -282,6 +284,26 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
       });
     }
 
+    // 4c) cwi-inboxfix-20260905（MD I-4/§1.3）：指派 → 被派者 StaffNotice（notice 類，零病人資料）：
+    //     title `新指派 · {店簡稱}`，「有一條對話指派咗俾你」。
+    //     只喺「指派畀其他人」時建（自己 claim/接手唔洗 push 畀自己）。
+    const assignedNotice = await (async () => {
+      if (!toStaffId || toStaffId === byStaffId) return null;
+      const code = (await tx.clinic.findUnique({ where: { id: conv.clinicId }, select: { code: true } }))?.code ?? "";
+      return { toStaffId, title: `新指派 · ${code}` };
+    })();
+    if (assignedNotice) {
+      await tx.staffNotice.create({
+        data: {
+          clinicId: conv.clinicId,
+          conversationId: conv.id,
+          kind: "SYSTEM",
+          title: assignedNotice.title,
+          meta: { actorStaffId: byStaffId, toStaffId, reason: "assigned" },
+        },
+      });
+    }
+
     log.info(
       { conversationId: conv.id, clinicId: conv.clinicId, byStaffId, toStaffId, action: auditAction },
       "assign: conversation reassigned"
@@ -315,6 +337,21 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
       conversationId: result.conversationId,
       clinicId: result.clinicId,
       messageId: result.noteMessageId,
+      fromStaffId: byStaffId,
+    });
+  }
+
+  // ★ cwi-inboxfix-20260905（MD I-4）：指派 → 被派者定向 push（notify:assigned）：
+  //   title「新指派 · {店簡稱}」+「有一條對話指派咗俾你」（零病人資料）。
+  //   定向 send  guarantee：跨店被派者唔喺 conv.clinicId 嘅 room，店級 notice:new 未必到佢；
+  //   StaffNotice row 已喺 tx 內落（bell 持久化視角）。
+  if (result.assigneeId && result.assigneeId !== byStaffId) {
+    const clinicCode = (await prisma.clinic.findUnique({ where: { id: result.clinicId }, select: { code: true } }))?.code ?? null;
+    publishNotify(result.clinicId, "notice:new", { conversationId: result.conversationId, kind: "SYSTEM", reason: "assigned" });
+    publishStaffNotify(result.assigneeId, result.clinicId, "notify:assigned", {
+      conversationId: result.conversationId,
+      clinicId: result.clinicId,
+      clinicCode,
       fromStaffId: byStaffId,
     });
   }

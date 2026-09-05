@@ -33,7 +33,7 @@ import {
 } from "@/lib/flows/crypto";
 import { sendBookingFlow } from "@/lib/flows/send";
 import { publishNotify } from "@/lib/notify";
-import { outboundQueue } from "@/lib/queue";
+import { enqueueOutboundSend } from "@/lib/queue";
 import { syncWindow, getSlots, hkDateOffset, slotAvailable } from "@/lib/availability";
 import { phoneHash } from "@/lib/phone-hash";
 import { afterBookingWrite } from "@/lib/booking/booking-ops";
@@ -516,7 +516,7 @@ async function handleReschedule(p: {
         waTimestamp: now,
       },
     });
-    await outboundQueue.add("send", { messageId: msg.id });
+    await enqueueOutboundSend(msg.id);
     await prisma.$executeRaw`
       UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
   } catch (e) {
@@ -556,7 +556,7 @@ async function autoReplyAndResend(conv: { id: string; clinicId: string }, reason
         waTimestamp: now,
       },
     });
-    await outboundQueue.add("send", { messageId: msg.id });
+    await enqueueOutboundSend(msg.id);
     log.info({ conversationId: conv.id, messageId: msg.id, reason }, "flow-reply: auto-reply queued");
   } catch (e) {
     log.error(

@@ -15,6 +15,11 @@ interface Props {
   onActiveClinic: (id: string | "all") => void;
   statusFilter: ConvStatus | "ALL";
   onStatusFilter: (s: ConvStatus | "ALL") => void;
+  /** ★ cwi-inboxfix-20260905（MD I-1/I-2）：膠囊指派維度 — unassigned=公海 / mine=我負責（server 端 filter） */
+  assignedFilter: "all" | "unassigned" | "mine";
+  onAssignedFilter: (f: "all" | "unassigned" | "mine") => void;
+  /** ★ cwi-inboxfix-20260905（MD §1.1）：計數（?counts=1；列表 refetch 順帶更新）— null = 未攞到 */
+  counts: { all: number; unassigned: number; mine: number; pending: number; resolved: number } | null;
   conversations: ConversationItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
@@ -44,6 +49,8 @@ interface Props {
   prefs: NotifyPrefs;
   /** ★ Part B：寫回通知開關 */
   onPrefsChange: (p: NotifyPrefs) => void;
+  /** ★ cwi-inboxfix-20260905（MD I-10）：socket 斷線中 — 列表頂 banner「⚠ 連線中斷 — 重連中…」 */
+  connOffline?: boolean;
 }
 
 const STATUS_LABEL: Record<ConvStatus | "ALL", string> = {
@@ -98,6 +105,13 @@ export function ConversationList(p: Props) {
   const items = useMemo(() => {
     if (p.searchResults) return p.searchResults;
     let list = p.conversations;
+    // ★ cwi-inboxfix-20260905（MD I-1/I-2）：公海/我負責 膠囊 filter（client 端，
+    //   與 server ?assigned= 語義等價 — 見 fetchConversations 註解）
+    if (p.assignedFilter !== "all") {
+      list = list.filter((c) =>
+        p.assignedFilter === "unassigned" ? c.assigneeId == null : c.assigneeId === p.myStaffId
+      );
+    }
     if (p.statusFilter !== "ALL") list = list.filter((c) => c.status === p.statusFilter);
     return [...list].sort((a, b) => {
       const rank = (c: ConversationItem) =>
@@ -107,7 +121,7 @@ export function ConversationList(p: Props) {
       if (ar !== br) return ar - br;
       return new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime();
     });
-  }, [p.conversations, p.searchResults, p.statusFilter]);
+  }, [p.conversations, p.searchResults, p.statusFilter, p.assignedFilter, p.myStaffId]);
 
   return (
     <aside
@@ -115,6 +129,12 @@ export function ConversationList(p: Props) {
         p.hidden ? "hidden md:flex" : "flex"
       }`}
     >
+      {/* ★ cwi-inboxfix-20260905（MD I-10）：連線狀態 — 斷線時常駐提示，避免「靜靜哋唔更新」 */}
+      {p.connOffline && (
+        <div className="mx-2.5 mt-2 px-3 py-1 rounded-full bg-warn-soft text-warn-text text-[11px] font-medium" role="status">
+          ⚠ 連線中斷 — 重連中…（恢復後自動補漏）
+        </div>
+      )}
       {/* header：標題 + clinic dropdown（ADMIN only）+ ★ H2 bell badge */}
       <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-2">
         <span className="font-display text-[19px] text-t1">收件箱</span>
@@ -315,12 +335,39 @@ export function ConversationList(p: Props) {
         )}
       </div>
 
-      {/* status filter */}
-      <div className="flex gap-1.5 px-3 py-2 overflow-x-auto">
-        {(["ALL", "OPEN", "PENDING", "RESOLVED"] as const).map((s) => (
+      {/* ★ cwi-inboxfix-20260905（MD §1.1 I-1）：膠囊行 = 指派維度（全部 · 公海 N · 我負責 N）+ 狀態維度（處理中 · 等回覆 · 已解決）。
+          公海 = 唯一有色膠囊（bg-warn 系）— 佢係唯一「冇人跟＝會漏單」嘅狀態。
+          狀態 chip 撳 active 嗰粒 = 返轉去（無獨立「全部狀態」chip — 指派維度「全部」= 總開關）。 */}
+      <div className="flex gap-1.5 px-3 py-2 overflow-x-auto items-center">
+        {(["all", "unassigned", "mine"] as const).map((f) => {
+          const active = p.assignedFilter === f;
+          const isPool = f === "unassigned";
+          const label =
+            f === "all" ? "全部" : isPool ? `公海 ${p.counts?.unassigned ?? 0}` : `我負責 ${p.counts?.mine ?? 0}`;
+          return (
+            <button
+              key={f}
+              onClick={() => p.onAssignedFilter(f)}
+              aria-pressed={active}
+              className={`px-2.5 py-0.5 rounded-full text-xs whitespace-nowrap ${
+                isPool
+                  ? active
+                    ? "bg-warn text-white font-semibold shadow-sm"
+                    : "bg-warn/25 text-warn-text"
+                  : active
+                    ? "bg-t1 text-canvas"
+                    : "bg-transparent text-t2 border border-line hover:bg-panel-2"
+              }`}
+            >
+              {label}
+            </button>
+          );
+        })}
+        <span className="w-px h-4 bg-line shrink-0" aria-hidden />
+        {(["OPEN", "PENDING", "RESOLVED"] as const).map((s) => (
           <button
             key={s}
-            onClick={() => p.onStatusFilter(s)}
+            onClick={() => p.onStatusFilter(p.statusFilter === s ? "ALL" : s)}
             className={`px-2.5 py-0.5 rounded-full text-xs whitespace-nowrap ${
               p.statusFilter === s
                 ? "bg-t1 text-canvas"
@@ -354,6 +401,13 @@ export function ConversationList(p: Props) {
           const clinicBadgeText = showClinicBadge
             ? (p.clinicById?.get(c.clinicId)?.code ?? c.clinicCode ?? c.clinicName ?? null)
             : null;
+          // cwi-inboxfix-20260905（MD I-4）：跨店指派俾我 — 整行左彩邊 + 「你（由 X 派嚟）」
+          // （判定跟 showClinicBadge 同軌：STAFF = 線唔喺自己綁定店；ADMIN = 只喺「全部診所」視圖）
+          const crossToMe =
+            c.assigneeId === p.myStaffId &&
+            (p.userRole === "STAFF"
+              ? myClinicIds.length > 0 && !myClinicIds.includes(c.clinicId)
+              : p.activeClinicId === "all");
           // 待跟進：未指派 + 最後一條訊息係客人來訊（lastInboundAt >= lastMessageAt）
           const needsFollow =
             !c.assigneeId &&
@@ -375,7 +429,7 @@ export function ConversationList(p: Props) {
                   : selected
                     ? "bg-brand-soft border-transparent"
                     : "border-transparent hover:bg-black/[.04]"
-              } ${c.status === "RESOLVED" ? "opacity-50" : ""}`}
+              } ${crossToMe ? "border-l-[3px] border-l-brand" : ""} ${c.status === "RESOLVED" ? "opacity-50" : ""}`}
             >
               {/* avatar + WA channel badge（急症行 avatar 轉陶土橙；外圈跟行底色） */}
               <div className="relative shrink-0 self-start">
@@ -449,19 +503,19 @@ export function ConversationList(p: Props) {
                     </span>
                   )}
                 </div>
-                {/* row 3：badges（急症行加「AI 未出草稿」— 鐵律 3：URGENT_PAIN 永不生成 draft） */}
-                {(urgentRow || c.pendingBooking || intentMeta || c.assigneeName || c.status === "PENDING" || clinicBadgeText !== null || needsFollow) && (
-                  <div className="flex items-center gap-1 mt-1 flex-wrap">
-                    {/* cwi-multiclinic-20260903（MD A.6.4）：跨店線店名 badge — STAFF：線唔喺自己綁定店；
-                        ADMIN：只喺「全部診所」視圖顯（逐店視圖本身就單一店） */}
-                    {clinicBadgeText && (
-                      <span
-                        className="text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t2 font-semibold inline-flex items-center gap-0.5"
-                        title={`跨店線：${c.clinicName ?? clinicBadgeText}`}
-                      >
-                        {clinicBadgeText}
-                      </span>
-                    )}
+                {/* row 3：badges + 負責人常駐 chip（cwi-inboxfix-20260905 I-3：永遠 render 三態） */}
+                <div className="flex items-center gap-1 mt-1 flex-wrap">
+                  {/* cwi-multiclinic-20260903（MD A.6.4）：跨店線店名 badge — STAFF：線唔喺自己綁定店；
+                      ADMIN：只喺「全部診所」視圖顯（逐店視圖本身就單一店）
+                      cwi-inboxfix-20260905（I-4）：文案加「↔ 跨店 ·」前綴 */}
+                  {clinicBadgeText && (
+                    <span
+                      className="text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t2 font-semibold inline-flex items-center gap-0.5"
+                      title={`跨店線：${c.clinicName ?? clinicBadgeText}`}
+                    >
+                      ↔ 跨店 · {clinicBadgeText}
+                    </span>
+                  )}
                     {/* cwi-multiclinic-20260903（MD A.6.4）：「待跟進」— 未指派 + 最後一條係客人來訊（前端導出，零新欄） */}
                     {needsFollow && (
                       <span
@@ -502,25 +556,31 @@ export function ConversationList(p: Props) {
                         等回覆
                       </span>
                     )}
-                    {/* ★ H1 負責人 chip：自己=綠「你」/ 別人=琥珀（Send Lock 中）/ unassigned=無 */}
-                    {c.assigneeName && (
+                    {/* ★ cwi-inboxfix-20260905（MD I-3）：負責人常駐三態 — 永遠 render：
+                        ⚑ 未指派（橙）/ ● 你（重點色，跨店加「由 X 派嚟」）/ ● 某某（灰） */}
+                    {c.assigneeId == null ? (
                       <span
-                        className={`ml-auto text-[10px] px-2 py-0.5 rounded-full font-medium inline-flex items-center gap-0.5 ${
-                          c.assigneeId === p.myStaffId
-                            ? "bg-ok-soft text-ok-text"
-                            : "bg-warn-soft text-warn-text"
-                        }`}
-                        title={
-                          c.assigneeId === p.myStaffId
-                            ? "你係呢個對話嘅負責人"
-                            : `負責人：${c.assigneeName}（你只可發內部備註）`
-                        }
+                        className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-warn-soft text-warn-text font-semibold inline-flex items-center gap-0.5"
+                        title="未有人負責 — 撳入去覆一句即自動接手"
                       >
-                        {c.assigneeId === p.myStaffId ? "你" : c.assigneeName}
+                        ⚑ 未指派
+                      </span>
+                    ) : c.assigneeId === p.myStaffId ? (
+                      <span
+                        className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-ok-soft text-ok-text font-medium inline-flex items-center gap-0.5"
+                        title={crossToMe ? `你係呢個對話嘅負責人（由 ${c.clinicCode ?? c.clinicName ?? "其他店"} 派嚟）` : "你係呢個對話嘅負責人"}
+                      >
+                        ● {crossToMe ? `你（由 ${c.clinicCode ?? c.clinicName ?? "其他店"} 派嚟）` : "你"}
+                      </span>
+                    ) : (
+                      <span
+                        className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t3 font-medium inline-flex items-center gap-0.5"
+                        title={`負責人：${c.assigneeName}（你只可發內部備註）`}
+                      >
+                        ● {c.assigneeName} 處理緊
                       </span>
                     )}
-                  </div>
-                )}
+                </div>
               </div>
             </button>
           );

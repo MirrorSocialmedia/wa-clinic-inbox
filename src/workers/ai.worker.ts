@@ -1,5 +1,5 @@
 import { Worker, type Job } from "bullmq";
-import { aiQueue, outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { aiQueue, enqueueOutboundSend, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { AI_CONCURRENCY } from "./concurrency";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
@@ -722,7 +722,7 @@ async function attemptAutoSend(args: {
   // 入 outbound queue（mock/real Graph、retries、rate limit 全部沿用）
   try {
     await Promise.race([
-      outboundQueue.add("send", { messageId: outMsg.id }),
+      enqueueOutboundSend(outMsg.id),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("enqueue timeout")), 1500)
       ),
@@ -1121,7 +1121,7 @@ async function sendSessionReply(
       },
     });
     await Promise.race([
-      outboundQueue.add("send", { messageId: outMsg.id }),
+      enqueueOutboundSend(outMsg.id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), 1500)),
     ]);
     await prisma.auditLog

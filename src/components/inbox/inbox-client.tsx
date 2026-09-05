@@ -126,6 +126,19 @@ export function InboxClient({
     user.role === "STAFF" ? (user.clinicId ?? "all") : "all"
   );
   const [statusFilter, setStatusFilter] = useState<ConvStatus | "ALL">("ALL");
+  // ★ cwi-inboxfix-20260905（MD I-10）：連線狀態（斷線時列表頂 banner — 避免「靜靜哋唔更新」）
+  const [connOffline, setConnOffline] = useState(false);
+  // ★ cwi-inboxfix-20260905（MD I-1/I-2）：公海膠囊指派維度 filter（server 端）+ 計數（?counts=1 順帶）
+  const [assignedFilter, setAssignedFilter] = useState<"all" | "unassigned" | "mine">("all");
+  const [convCounts, setConvCounts] = useState<{
+    all: number;
+    unassigned: number;
+    mine: number;
+    pending: number;
+    resolved: number;
+  } | null>(null);
+  const assignedFilterRef = useRef<"all" | "unassigned" | "mine">("all");
+  assignedFilterRef.current = assignedFilter;
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<ConversationItem[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -349,7 +362,17 @@ export function InboxClient({
     socket.on("message:status", (e: MessageStatusEvent) => {
       if (selectedIdRef.current !== e.conversationId) return;
       setMessages((prev) =>
-        prev.map((m) => (m.waMessageId === e.waMessageId || m.id === e.waMessageId ? { ...m, status: e.status, errorCode: e.errorCode } : m))
+        prev.map((m) =>
+          m.waMessageId === e.waMessageId || m.id === e.waMessageId
+            ? {
+                ...m,
+                status: e.status,
+                errorCode: e.errorCode,
+                // ★ cwi-inboxfix-20260905（MD §5.3）：void 事件帶 voidedAt → 氣泡即時加「已作廢」tag
+                ...(e.voidedAt ? { voidedAt: e.voidedAt } : {}),
+              }
+            : m
+        )
       );
     });
 
@@ -491,8 +514,12 @@ export function InboxClient({
       setCtxRefreshKey((k) => k + 1);
     });
 
-    // 斷線重連 → backlog 補漏
+    // ★ cwi-inboxfix-20260905（MD I-10）：socket 重連修復 —
+    //   現況只有 disconnect handler，connect/reconnect 後冇重新註冊/補漏 →
+    //   重連後收唔到 message:new（「唔即時更新」）。
+    //   改：connect → 顯式 emit register（server 冪等 handler）+ 重連後 refetch 補漏 + connState。
     let wasDisconnected = false;
+    let firstConnect = true;
 
     // ── ★ H1：Send Lock / 內部備註 事件 ────────────────────────
 
@@ -575,18 +602,98 @@ export function InboxClient({
       }
     });
 
+    // ★ cwi-inboxfix-20260905（MD I-4）：指派 → 定向 push（title「新指派 · {店簡稱}」/「有一條對話指派咗俾你」）。
+    //   跨店被派者唔喺店 room — server 用 staff:{id} 定向 send 保證到；bell（StaffNotice row）順帶重拉。
+    socket.on("notify:assigned", (e: { conversationId: string; clinicId: string; clinicCode?: string | null }) => {
+      if (
+        shouldNotify({
+          kind: "assigned",
+          clinicId: e.clinicId,
+          conversationId: e.conversationId,
+          assigneeId: null,
+          myStaffId: user.staffId,
+          myRole: user.role,
+          activeConversationId: selectedIdRef.current,
+          mutedClinics: prefsRef.current.mutedClinics,
+          adminMsgClinics: prefsRef.current.adminMsgClinics,
+        })
+      ) {
+        void fireNotify({
+          kind: "assigned",
+          clinicShort: e.clinicCode || clinicShortOf(e.clinicId),
+          conversationId: e.conversationId,
+          body: "有一條對話指派咗俾你",
+          onClick: () => void selectConversation(e.conversationId),
+          prefs: prefsRef.current,
+        });
+      }
+      // 列表即時更新（新指派線要即刻見到）+ bell 重拉（StaffNotice row）
+      void fetchConversations(activeClinicRef.current);
+      fetch("/api/notices", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.notices) setNotices(d.notices);
+        })
+        .catch(() => {});
+    });
+
+    // ★ cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA — 未指派超過 N 分鐘 → 全店 active STAFF 定向 push
+    //   （server 已 filter；body 零病人資料：店 code + 數目 + N）。bell（StaffNotice row）順帶重拉。
+    socket.on(
+      "notify:sla",
+      (e: { clinicId: string; clinicCode?: string | null; conversationId?: string | null; count?: number; n?: number }) => {
+        if (
+          shouldNotify({
+            kind: "sla",
+            clinicId: e.clinicId,
+            conversationId: e.conversationId ?? "",
+            assigneeId: null,
+            myStaffId: user.staffId,
+            myRole: user.role,
+            activeConversationId: selectedIdRef.current,
+            mutedClinics: prefsRef.current.mutedClinics,
+            adminMsgClinics: prefsRef.current.adminMsgClinics,
+          })
+        ) {
+          void fireNotify({
+            kind: "sla",
+            clinicShort: e.clinicCode || clinicShortOf(e.clinicId),
+            conversationId: e.conversationId ?? "",
+            body: `有 ${e.count ?? 1} 條對話未有人跟（超過 ${e.n ?? 10} 分鐘）`,
+            onClick: () => e.conversationId && void selectConversation(e.conversationId),
+            prefs: prefsRef.current,
+          });
+        }
+        // 公海計數可能變（新入公海嘅線要即刻見到）+ bell 重拉（StaffNotice row）
+        void fetchConversations(activeClinicRef.current);
+        fetch("/api/notices", { cache: "no-store" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => {
+            if (d?.notices) setNotices(d.notices);
+          })
+          .catch(() => {});
+      }
+    );
+
     socket.on("disconnect", () => {
       wasDisconnected = true;
+      setConnOffline(true);
     });
     socket.on("connect", () => {
+      // ★ cwi-inboxfix-20260905（MD I-10）：每次 connect（首次/重連）都顯式重註冊 + 恢復 online。
+      socket.emit("register");
+      setConnOffline(false);
+      if (firstConnect) {
+        // 首次 connect：數據由 SSR/initial fetch 提供 — 唔重複 refetch（避免 load 雙拉）
+        firstConnect = false;
+        return;
+      }
       if (wasDisconnected) {
         wasDisconnected = false;
-        // 1) 刷新對話列表
+        // 1) 重連 → 重新註冊已 emit；補返斷線期間漏咗嘅對話列表
         void fetchConversations(activeClinicRef.current);
-        // 2) 選中對話用 after= 補漏
-        if (selectedIdRef.current && lastMsgTsRef.current > 0) {
-          void fetchMessagesAfter(selectedIdRef.current, lastMsgTsRef.current);
-        }
+        // 2) 開住嘅 thread 補漏（full page refetch — 長斷線後 delta cursor 可能漏）
+        if (selectedIdRef.current) void fetchMessagesLatest(selectedIdRef.current);
       }
     });
 
@@ -666,14 +773,31 @@ export function InboxClient({
   // ── data fetchers ─────────────────────────────────────────────────────
   const fetchConversations = useCallback(async (clinicId: string | "all") => {
     try {
-      const qs = clinicId !== "all" ? `?clinicId=${clinicId}` : "";
-      const res = await fetch(`/api/conversations${qs}`);
+      // ★ cwi-inboxfix-20260905：always 全量 list（帶 counts=1 順帶攞計數 — MD §1.1）。
+      //   膠囊指派維度 filter 喺 client 做（與 server ?assigned= 語義完全等價：
+      //   STAFF list scope 本身唔含外店未指派線 → unassigned client filter = I-2 公海；
+      //   ADMIN = 全店 ∪ activeClinicId filter）。理由：state 保持全量 → delta merge /
+      //   unreadTotal / 指派後行離開公海 都一致，唔會出現 stale 行。
+      const qs = new URLSearchParams();
+      if (clinicId !== "all") qs.set("clinicId", clinicId);
+      qs.set("counts", "1");
+      const res = await fetch(`/api/conversations?${qs.toString()}`);
       if (!res.ok) return;
-      const data = (await res.json()) as ConversationItem[];
-      setConversations(data);
+      const data = (await res.json()) as
+        | ConversationItem[]
+        | { items: ConversationItem[]; counts: {
+            all: number;
+            unassigned: number;
+            mine: number;
+            pending: number;
+            resolved: number;
+          } };
+      const items = Array.isArray(data) ? data : data.items;
+      if (!Array.isArray(data)) setConvCounts(data.counts ?? null);
+      setConversations(items);
       // ★ R3：全量 fetch 後游標 = 列表最尾 ts（「我見到咗全部」— 之後 delta 只補新嘅）
       let maxTs = 0;
-      for (const c of data) maxTs = Math.max(maxTs, new Date(c.lastMessageAt).getTime());
+      for (const c of items) maxTs = Math.max(maxTs, new Date(c.lastMessageAt).getTime());
       lastConvSeenRef.current = maxTs;
     } catch {
       /* UI 會喺下次 action 補齊 */
@@ -1085,6 +1209,33 @@ export function InboxClient({
     [user.staffId]
   );
 
+  // ── cwi-inboxfix-20260905（MD §5.2/§5.3）：8 秒撤回 + 標記已作廢 ────────────────
+  const undoMessage = useCallback(async (messageId: string): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await fetch(`/api/messages/${messageId}/undo`, { method: "DELETE" });
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; message?: string } | null;
+      if (res.status === 409) {
+        // 窗口過咗 — chat-pane 會轉 §5.3（更正草稿 + 標記已作廢）
+        return { ok: false, error: data?.message ?? "已經發出，撤回唔到。" };
+      }
+      if (!res.ok) return { ok: false, error: data?.message ?? data?.error ?? `撤回失敗（${res.status}）` };
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "網絡錯誤" };
+    }
+  }, []);
+
+  const voidMessage = useCallback(async (messageId: string): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await fetch(`/api/messages/${messageId}/void`, { method: "POST" });
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; voidedAt?: string; error?: string } | null;
+      if (!res.ok) return { ok: false, error: data?.error ?? `標記失敗（${res.status}）` };
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "網絡錯誤" };
+    }
+  }, []);
+
   // ── Phase 3：發 Booking Flow（📅 掣） ─────────────────────
   const [flowBusy, setFlowBusy] = useState(false);
 
@@ -1399,6 +1550,9 @@ export function InboxClient({
         }}
         statusFilter={statusFilter}
         onStatusFilter={setStatusFilter}
+        assignedFilter={assignedFilter}
+        onAssignedFilter={(f) => setAssignedFilter(f)}
+        counts={convCounts}
         conversations={visibleConversations}
         selectedId={selectedConvId}
         onSelect={(id) => void selectConversation(id)}
@@ -1420,6 +1574,7 @@ export function InboxClient({
         unreadTotal={unreadTotal}
         prefs={prefs}
         onPrefsChange={updatePrefs}
+        connOffline={connOffline}
       />
 
       {/* ★ Part B：首次登入 banner 一次（localStorage flag；啟 = 請求 permission + 開桌面通知） */}
@@ -1462,6 +1617,9 @@ export function InboxClient({
         window={selectedConv?.window ?? null}
         onSend={sendMessage}
         onSendTemplate={sendTemplate}
+        // cwi-inboxfix-20260905（MD §5.2/§5.3）：8 秒撤回 + 標記已作廢
+        onUndoMessage={undoMessage}
+        onVoidMessage={voidMessage}
         userRole={user.role}
         staffName={user.name}
         pendingDraft={selectedConv ? (pendingDrafts[selectedConv.id] ?? null) : null}

@@ -40,6 +40,8 @@ enum MsgStatus {
   DELIVERED
   READ
   FAILED
+  // cwi-inboxfix-20260905（MD §5.2）：8 秒撤回窗口內撤銷 — outbound job remove，病人收唔到
+  CANCELLED
 }
 
 // ★ Realtime P0 (R4, cwi-rt-20260823-a1)：media 下載生命週期。
@@ -257,6 +259,9 @@ model Conversation {
   lastInboundAt    DateTime? @db.Timestamptz                  // ★ 24h 窗口由呢個欄計
   lastMessageAt    DateTime @db.Timestamptz
   unreadCount      Int        @default(0)
+  // cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA 提醒防重複旗（null = 未提醒/已接手；
+  // cron 標 now，assign 成功清返）
+  slaNotifiedAt    DateTime? @db.Timestamptz
 
   @@unique([clinicId, contactId])
   @@index([clinicId, status, lastMessageAt])
@@ -306,6 +311,10 @@ model Message {
   // 2026-10-01 WhatsApp 新 API 起每條 OUT 個別計費 → 呢欄係 /admin/usage 用量統計嘅基礎。
   // 寫入規則（同 backfill 規則一致）：OUT+API+template → 類別；OUT+API 其他 → SERVICE；APP_ECHO/INTERNAL → NONE；IN/HISTORY → NULL（入站唔計費）。
   billingCategory String?
+  // ★ cwi-inboxfix-20260905（MD §5.3）：已作廢標記（純內部 — 8 秒窗過後訊息已出街，
+  //   病人端照見；staff 標記「呢句當佢冇發過」+ UI 內部 tag + 更正草稿入口）。
+  //   唔會通知 Meta — WhatsApp Cloud API 冇刪除已發訊息 endpoint。
+  voidedAt       DateTime? @db.Timestamptz
   waTimestamp    DateTime @db.Timestamptz
   createdAt      DateTime @db.Timestamptz  @default(now())
   @@index([conversationId, waTimestamp])

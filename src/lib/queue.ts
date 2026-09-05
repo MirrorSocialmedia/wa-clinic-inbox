@@ -88,3 +88,18 @@ export const QUEUE_NAMES = {
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
+
+// ── cwi-inboxfix-20260905（MD §5.2）：8 秒撤回窗口 ───────────────────────────────
+/** 8 秒撤回窗口（MD §5.2 拍板）。
+ *  ⚠️ 唔好參數化（MD 原文）：太長會令店員以為訊息即時到達。 */
+export const UNDO_WINDOW_MS = 8000;
+
+/**
+ * outbound 發送 job 統一 enqueue 入口（MD §5.2 8 秒撤回）：
+ * - delay: UNDO_WINDOW_MS — job 擱 8 秒先送，UI 期間可撳撤回（job.remove + status=CANCELLED）
+ * - jobId: messageId — 冪等（client retry / 重複調用唔會建重複 job）
+ * 註：reminder cron / AI AUTO 覆都行同一入口 — 8 秒延遲對佢哋只係無害延後（MD §5.2 註）。
+ */
+export async function enqueueOutboundSend(messageId: string): Promise<void> {
+  await outboundQueue.add("send", { messageId }, { jobId: messageId, delay: UNDO_WINDOW_MS });
+}

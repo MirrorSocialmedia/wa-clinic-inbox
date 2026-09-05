@@ -25,7 +25,7 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { getWindowState } from "@/lib/wa/window";
-import { outboundQueue } from "@/lib/queue";
+import { enqueueOutboundSend } from "@/lib/queue";
 import { publishNotify } from "@/lib/notify";
 import { afterBookingWrite } from "./booking-ops";
 import { buildRemarks, confirmMessageText } from "./booking-text";
@@ -243,7 +243,7 @@ export async function confirmBookingCore(
       },
     });
     await Promise.race([
-      outboundQueue.add("send", { messageId: msg.id }),
+      enqueueOutboundSend(msg.id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
     ]);
     await prisma.$executeRaw`

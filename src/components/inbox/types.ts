@@ -170,6 +170,8 @@ export interface MessageItem {
   clientMessageId?: string | null;
   /** ★ Realtime P0 (R4)：media 下載狀態（PENDING/READY/SKIPPED/FAILED；文字訊息永遠 READY） */
   mediaStatus?: string;
+  /** ★ cwi-inboxfix-20260905（MD §5.3）：已作廢標記（純內部 — 氣泡加「已作廢」tag；病人端照見） */
+  voidedAt?: string | null;
   waTimestamp: string;
   createdAt: string;
 }
@@ -211,6 +213,8 @@ export interface MessageStatusEvent {
   waMessageId: string;
   status: string;
   errorCode: string | null;
+  /** ★ cwi-inboxfix-20260905（MD §5.3）：void route 帶返（UI 即時加「已作廢」tag） */
+  voidedAt?: string | null;
 }
 
 export interface ConvUpdatedEvent {

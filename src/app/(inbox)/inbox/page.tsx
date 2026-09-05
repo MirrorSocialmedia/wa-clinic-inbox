@@ -43,7 +43,9 @@ export default async function InboxPage({
     session.role === "STAFF"
       ? { OR: [{ clinicId: { in: myClinicIds } }, { assigneeId: session.staffId }] }
       : {};
-
+  // staffMap 唔限 clinic scope — cwi-inboxfix-20260905（T9 e2e 發現）：跨店負責人的
+  // 三態 chip（● 某某 處理緊）需要全店 staff 名；同 /api/conversations 對齊（全量 active）。
+  // 零 PII 增量：staff 名對 STAFF 本就喺 API list 回傳（跨店線 assigneeName 一直有值）。
   const [clinics, convs, contacts, staff, pendingBookings] = await Promise.all([
     session.role === "STAFF"
       ? prisma.clinic.findMany({ where: { id: { in: myClinicIds } } })
@@ -51,7 +53,7 @@ export default async function InboxPage({
     prisma.conversation.findMany({ where: convScope, orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }], take: 200 }),
     // 跟 /api/conversations 一致：全量 fetch（server-side map，只嵌入可見 row 引用嘅 contact）
     prisma.contact.findMany({ select: { id: true, waId: true, profileName: true, labels: true } }),
-    prisma.staffUser.findMany({ where: { active: true, ...scope }, select: { id: true, name: true, role: true, clinicId: true } }),
+    prisma.staffUser.findMany({ where: { active: true }, select: { id: true, name: true, role: true, clinicId: true } }),
     // Phase 3：PENDING 預約（綠色卡）/ ★ booking-ui（D）：CONFIRMED 亦顯示 — 同 conversations API 一致
     prisma.bookingRequest.findMany({
       where: { ...scope, status: { in: ["PENDING", "CONFIRMED"] } },

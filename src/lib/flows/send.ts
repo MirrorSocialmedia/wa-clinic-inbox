@@ -11,7 +11,7 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { randomBytes } from "node:crypto";
-import { outboundQueue } from "@/lib/queue";
+import { enqueueOutboundSend } from "@/lib/queue";
 import { getWindowState } from "@/lib/wa/window";
 import { defaultFlowConfig, requirementFlowConfig, type FlowMessageConfig } from "@/lib/wa/graph";
 import { signFlowToken, flowJwtSecret } from "@/lib/flows/crypto";
@@ -146,7 +146,7 @@ export async function sendBookingFlow(opts: {
 
   try {
     await Promise.race([
-      outboundQueue.add("send", { messageId: msg.id }),
+      enqueueOutboundSend(msg.id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
     ]);
   } catch (err) {

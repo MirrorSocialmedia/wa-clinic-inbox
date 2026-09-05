@@ -20,7 +20,7 @@ import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { hkDateOffset } from "@/lib/availability";
 import { phoneHash } from "@/lib/phone-hash";
-import { outboundQueue } from "@/lib/queue";
+import { enqueueOutboundSend } from "@/lib/queue";
 import { afterBookingWrite } from "@/lib/booking/booking-ops";
 import { cancelMessageText } from "@/lib/booking/booking-text";
 import { WorkforceApiError, fetchAppointments, updateBookingStatus } from "@/lib/workforce/client";
@@ -149,7 +149,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
       },
     });
     await Promise.race([
-      outboundQueue.add("send", { messageId: msg.id }),
+      enqueueOutboundSend(msg.id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
     ]);
     await prisma.$executeRaw`

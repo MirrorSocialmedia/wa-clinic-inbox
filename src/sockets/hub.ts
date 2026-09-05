@@ -124,6 +124,34 @@ export function initHub(io: SocketIOServer): void {
         if (set.size === 0) staffSockets.delete(session.staffId);
       }
     });
+
+    // ★ cwi-inboxfix-20260905（MD I-10）：顯式重註冊 — client 喺 connect/reconnect 時 emit "register"。
+    //   常規註冊已喺 connection 時自動做（auth middleware）；呢個 handler 係冪等雙保險
+    //   （重 join room + staffSockets 重複 add 無害）— 防未來自動路徑被改動，
+    //   並提供「socket registered (explicit)」log 線（驗收 grep 用）。
+    socket.on("register", () => {
+      const s = socket.data.session as SessionData;
+      if (!s) return;
+      let ids = staffSockets.get(s.staffId);
+      if (!ids) {
+        ids = new Set();
+        staffSockets.set(s.staffId, ids);
+      }
+      ids.add(socket.id);
+      void socket.join(`staff:${s.staffId}`);
+      if (s.role === "STAFF") {
+        const roomClinics = s.clinicIds?.length ? s.clinicIds : s.clinicId ? [s.clinicId] : [];
+        void Promise.all(roomClinics.map((cid) => socket.join(`clinic:${cid}`)));
+      } else {
+        void prisma
+          .clinic.findMany({ select: { id: true } })
+          .then((clinics) => Promise.all(clinics.map((c) => socket.join(`clinic:${c.id}`))))
+          .catch((err) =>
+            log.warn({ err: err instanceof Error ? err.message : String(err) }, "socket: explicit register admin room join failed")
+          );
+      }
+      log.info({ staffId: s.staffId, socketId: socket.id.slice(-8) }, "socket registered (explicit)");
+    });
   });
 }
 

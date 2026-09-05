@@ -1,13 +1,21 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, conversationScope } from "@/lib/rbac";
+import { requireAuth } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
 
 /**
- * GET /api/conversations?clinicId=&status=&after= — 隊列列表（MD §6.4 隊列欄）。
+ * GET /api/conversations?clinicId=&status=&after=&assigned=&counts=1 — 隊列列表（MD §6.4 隊列欄）。
  * - clinicId：ADMIN 可以指定（tab 切換）；STAFF 忽略（硬性綁自己店，砌別店 → 403 實測）
  * - status：OPEN / PENDING / RESOLVED（filter）
+ * - ★ cwi-inboxfix-20260905（MD §1.1 I-1/I-2）：assigned=unassigned|mine
+ *   - unassigned（公海）→ assigneeId:null AND 嚴格 store scope：
+ *     STAFF = clinicIds（或 clinicParam）；ADMIN = clinicParam（冇 = 全店）。
+ *     ⚠️ 鐵律（MD I-2 警告）：公海絕對唔可以經下方 line-35 嘅 OR 支路
+ *     （`{clinicId},{assigneeId:self}`）— 否則外店指派俾自己嘅線會混入公海視圖。
+ *   - mine → assigneeId = 自己（跨店指派俾自己嘅線保留 — 同 A.3 assignee 支路語義一致）。
+ * - ★ cwi-inboxfix-20260905：counts=1 → 同一 route 返 { items, counts:{all,unassigned,mine,pending,resolved} }
+ *   （一次 groupBy(assigneeId,status)，唔開五個 request；計數 base scope = 無 assigned filter 嘅列表 scope）
  * - ★ Realtime P0 (R3, cwi-rt-20260823-a1)：after=<ISO/epochMs> — delta refetch，
  *   只回 lastMessageAt >= after 嘅對話（MD 寫 /delta 獨立 route；按 MD 授權「現有 list
  *   route 加 param 就得」— client focus/visibility/3 分鐘 idle 補漏用；重疊容許，client 用 id 去重）
@@ -20,24 +28,54 @@ const WINDOW_MS = 24 * 3600 * 1000;
 
 export const GET = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
-  const scope = conversationScope(ctx);
   const url = new URL(req.url);
   const clinicParam = url.searchParams.get("clinicId");
   const statusParam = url.searchParams.get("status");
+  const assignedParam = url.searchParams.get("assigned");
+  const countsParam = url.searchParams.get("counts") === "1";
+  if (assignedParam && !["unassigned", "mine"].includes(assignedParam)) {
+    return NextResponse.json({ error: "invalid assigned (unassigned|mine)" }, { status: 400 });
+  }
 
-  const where: Record<string, unknown> = { ...scope };
-  if (clinicParam) {
-    // STAFF 砌別店 clinicId → 403（RBAC 鐵律，E2E 要實測呢條）
-    if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
-      return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
+  const where: Record<string, unknown> = {};
+  if (assignedParam) {
+    // ★ cwi-inboxfix-20260905（MD I-2 鐵律）：嚴格 scope — 唔經 conversationScope 嘅 OR 支路。
+    // unassigned：clinic 限定 + assigneeId:null（外店線絕對漏唔入嚟）。
+    // mine：assigneeId=自己（跨店指派俾自己嘅線保留；STAFF 唔限 clinic — 同 A.3 assignee 支路一致）。
+    if (clinicParam) {
+      if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
+        return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
+      }
     }
-    if (ctx.staff.role === "STAFF") {
-      // ★ MD A.3：店 tab filter 只限縮 clinic-scope 支路；assignee 支路保留 —
-      // 多店 staff 睇自己店 tab 時，指派俾自己嘅外店線仍要見到（A.6.4 badge + §9「見晒覆到」）。
-      // 外店未指派線依然唔見（assignee ≠ 自己）。
-      where.OR = [{ clinicId: clinicParam }, { assigneeId: ctx.staff.id }];
+    if (assignedParam === "unassigned") {
+      where.assigneeId = null;
+      if (ctx.staff.role === "STAFF") {
+        where.clinicId = clinicParam ?? { in: ctx.clinicIds };
+      } else if (clinicParam) {
+        where.clinicId = clinicParam;
+      }
     } else {
-      where.clinicId = clinicParam;
+      where.assigneeId = ctx.staff.id;
+      if (ctx.staff.role === "ADMIN" && clinicParam) where.clinicId = clinicParam;
+    }
+  } else {
+    // 預設列表（無 assigned filter）：現有 scope 語義完全不變（STAFF = clinic ∪ assignee-me OR）。
+    if (ctx.staff.role === "STAFF") {
+      where.OR = [{ clinicId: { in: ctx.clinicIds } }, { assigneeId: ctx.staff.id }];
+    }
+    if (clinicParam) {
+      // STAFF 砌別店 clinicId → 403（RBAC 鐵律，E2E 要實測呢條）
+      if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
+        return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
+      }
+      if (ctx.staff.role === "STAFF") {
+        // ★ MD A.3：店 tab filter 只限縮 clinic-scope 支路；assignee 支路保留 —
+        // 多店 staff 睇自己店 tab 時，指派俾自己嘅外店線仍要見到（A.6.4 badge + §9「見晒覆到」）。
+        // 外店未指派線依然唔見（assignee ≠ 自己）。
+        where.OR = [{ clinicId: clinicParam }, { assigneeId: ctx.staff.id }];
+      } else {
+        where.clinicId = clinicParam;
+      }
     }
   }
   if (statusParam) {
@@ -97,8 +135,40 @@ export const GET = handle(async (req: NextRequest) => {
   }
   const now = Date.now();
 
-  return NextResponse.json(
-    convs.map((cv) => {
+  // ★ cwi-inboxfix-20260905（MD §1.1）：counts=1 — 一次 groupBy(assigneeId, status) 推五個計數
+  // （唔開五個 request）。base scope = 預設列表 scope（無 assigned filter）：
+  // STAFF = clinic ∪ assignee-me OR（clinicParam 時 clinic 支路收窄）；ADMIN = clinicParam（冇 = 全店）。
+  // OR scope 內 assignee=null 嘅行只會經 clinic 支路命中 → unassigned 計數天然 = I-2 公海語義
+  // （絕唔會經 assignee 支路漏入外店線）。
+  let counts: { all: number; unassigned: number; mine: number; pending: number; resolved: number } | null = null;
+  if (countsParam) {
+    const cWhere: Record<string, unknown> = {};
+    if (ctx.staff.role === "STAFF") {
+      cWhere.OR = [{ clinicId: clinicParam ?? { in: ctx.clinicIds } }, { assigneeId: ctx.staff.id }];
+    } else if (clinicParam) {
+      cWhere.clinicId = clinicParam;
+    }
+    const groups = await prisma.conversation.groupBy({
+      by: ["assigneeId", "status"],
+      where: cWhere,
+      _count: { _all: true },
+    });
+    let all = 0;
+    let unassigned = 0;
+    let mine = 0;
+    let pending = 0;
+    let resolved = 0;
+    for (const g of groups) {
+      all += g._count._all;
+      if (g.assigneeId === null) unassigned += g._count._all;
+      if (g.assigneeId === ctx.staff.id) mine += g._count._all;
+      if (g.status === "PENDING") pending += g._count._all;
+      if (g.status === "RESOLVED") resolved += g._count._all;
+    }
+    counts = { all, unassigned, mine, pending, resolved };
+  }
+
+  const items = convs.map((cv) => {
       const lastIn = cv.lastInboundAt?.getTime() ?? null;
       const remainingMs = lastIn === null ? 0 : Math.max(0, lastIn + WINDOW_MS - now);
       const open = remainingMs > 0;
@@ -162,6 +232,8 @@ export const GET = handle(async (req: NextRequest) => {
           tone: !open ? "red" : remainingMs < 6 * 3600 * 1000 ? "yellow" : "green",
         },
       };
-    })
-  );
+    });
+
+  // ★ cwi-inboxfix-20260905：counts=1 → { items, counts }；否則陣列照舊（舊 client 兼容）
+  return NextResponse.json(countsParam ? { items, counts } : items);
 });

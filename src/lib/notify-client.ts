@@ -17,7 +17,7 @@
  * Notification title/body — clinicShort 係營運代碼（TKW），mention body 只係同事名。
  */
 
-export type NotifyKind = "message" | "urgent" | "notice" | "mention";
+export type NotifyKind = "message" | "urgent" | "notice" | "mention" | "assigned" | "sla";
 
 export interface NotifyPrefs {
   /** OS 桌面通知開關（N-7 斷咗/唔支援時自動降級標題+紅點+badge） */
@@ -130,6 +130,8 @@ export function shouldNotify(a: ShouldNotifyArgs): boolean {
   if (a.activeConversationId === a.conversationId) return false; // N-5
   if (a.mutedClinics.includes(a.clinicId)) return false; // N-3
   if (a.kind === "mention") return true; // 定向推送（server 已 filter）
+  if (a.kind === "assigned") return true; // cwi-inboxfix-20260905（MD I-4）：指派定向推送（server 已 filter）
+  if (a.kind === "sla") return true; // cwi-inboxfix-20260905（MD I-5）：公海 SLA 定向推送（server 已 filter 該店 active STAFF）
   if (a.myRole === "ADMIN") {
     if (a.kind === "urgent") return true; // 七閘/URGENT 語義 — 急症預設全收
     return a.adminMsgClinics.includes(a.clinicId); // N-2 opt-in
@@ -222,6 +224,10 @@ const TITLE_FN: Record<NotifyKind, (clinicShort: string) => string> = {
   urgent: (c) => `⚠ 緊急 · ${c}`,
   notice: (c) => `通知 · ${c}`,
   mention: () => "WA Inbox @mention",
+  // cwi-inboxfix-20260905（MD I-4）：指派 push — title「新指派 · {店簡稱}」+ body「有一條對話指派咗俾你」（零病人資料）
+  assigned: (c) => `新指派 · ${c}`,
+  // cwi-inboxfix-20260905（MD I-5）：公海 SLA — title「公海 SLA · {店簡稱}」（零 PII：只店 code + 營運元數據）
+  sla: (c) => `公海 SLA · ${c}`,
 };
 
 export interface FireNotifyArgs {

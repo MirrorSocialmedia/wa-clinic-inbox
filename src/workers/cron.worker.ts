@@ -20,6 +20,9 @@
  *                                       + held_timeout 警報（HELD age>12h MEDIUM / >24h HIGH；冪等 upsert + auto-resolve）
  * - auto-release       每 5 分鐘 → cwi-h6-20260830（h5 §3）：負責人超時未回覆（三條件）→ 放手回隊列
  *                                       （N = triage.autoReleaseMinutes per-clinic default 15；AI 等病人下一句先接力）
+ * - unassigned-sla     每 5 分鐘 → cwi-inboxfix-20260905（MD §1.4 I-5）：公海未指派超過 N 分鐘
+ *                                       → 該店全部 active STAFF push「{店簡稱} 有病人未有人跟」+ StaffNotice
+ *                                       （N = triage.unassignedSlaMinutes default 10；slaNotifiedAt 防重複洗版；接手清返）
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
  */
@@ -37,6 +40,7 @@ import { runWeeklyStats } from "@/lib/ops/automation-stats";
 import { runMining } from "@/lib/ops/mining";
 import { sweepFlowHolds } from "@/lib/flows/hold-sweep";
 import { runAutoReleaseSweep } from "@/lib/auto-release";
+import { runUnassignedSlaSweep } from "@/lib/unassigned-sla";
 
 export async function startCronWorker(): Promise<Worker | null> {
   const worker = new Worker(
@@ -61,6 +65,15 @@ export async function startCronWorker(): Promise<Worker | null> {
           log.info(
             { checked: r.checked, released: r.released, failed: r.failed },
             "cron: auto-release done"
+          );
+          return { ok: true, ...r };
+        }
+        case "unassigned-sla": {
+          // cwi-inboxfix-20260905（MD §1.4 I-5）：公海未指派超過 N 分鐘 → push 全店 active STAFF（冪等：slaNotifiedAt 防重複）
+          const r = await runUnassignedSlaSweep();
+          log.info(
+            { checked: r.checked, clinics: r.clinicsNotified, staff: r.staffNotified, failed: r.failed },
+            "cron: unassigned-sla done"
           );
           return { ok: true, ...r };
         }

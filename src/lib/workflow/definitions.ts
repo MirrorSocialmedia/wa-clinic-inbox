@@ -27,12 +27,16 @@ export const TriageParams = z.object({
   // ★ cwi-h6-20260830（h5 §3，MD §3 缺口 2）：auto-release 超時 N 分鐘 —
   //   三條件（有未覆訊息 ∧ 病人等夠 N ∧ 負責人齋夠 N）全真 → cron 放手回隊列（default 15）
   autoReleaseMinutes: z.number().int().min(1).max(24 * 60).default(15), // default 15 — 舊 draft（冇呢個欄）照過驗證（W1 迴歸）
+  // ★ cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA — 未指派超過 N 分鐘 → cron 掃
+  //   → 該店全部 active STAFF push「{店簡稱} 有病人未有人跟（N 分鐘）」（default 10，min 3 max 120）
+  unassignedSlaMinutes: z.number().int().min(3).max(120).default(10),
 });
 export const TRIAGE_DEFAULTS: z.infer<typeof TriageParams> = {
   humanCooldownMs: 30 * 60_000,
   confidenceFloor: 0.6,
   autoThanksReply: "唔緊要，祝你早日康復！",
   autoReleaseMinutes: 15,
+  unassignedSlaMinutes: 10,
 };
 
 // ── booking-session ───────────────────────────────────────────────────
@@ -225,6 +229,7 @@ export const SCHEMA_HINTS: Record<WorkflowKey, FieldHint[]> = {
     { name: "humanCooldownMs", label: "真人冷靜期（ms）— 第八閘", type: "int", min: 0, max: 24 * 3_600_000 },
     { name: "confidenceFloor", label: "置信度下閾 — 第九閘 low-confidence", type: "number", min: 0, max: 1 },
     { name: "autoThanksReply", label: "多謝/道別 AUTO 覆語", type: "string", maxLength: 120 },
+    { name: "unassignedSlaMinutes", label: "公海 SLA 提醒（分鐘）— 未指派超過 N 分鐘 push 全店", type: "int", min: 3, max: 120 },
   ],
   "booking-session": [
     { name: "maxTurns", label: "最大輪數", type: "int", min: 4, max: 30 },

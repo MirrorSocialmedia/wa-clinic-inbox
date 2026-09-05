@@ -44,6 +44,11 @@ async function registerSchedulers() {
     name: "auto-release",
     data: {},
   });
+  // cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA — 未指派超過 N 分鐘 → push 全店 active STAFF（冪等：slaNotifiedAt）
+  await cronQueue.upsertJobScheduler("sched-unassigned-sla", { pattern: "*/5 * * * *" }, {
+    name: "unassigned-sla",
+    data: {},
+  });
   await cronQueue.upsertJobScheduler("sched-quality-check", { pattern: "30 6 * * *" }, {
     name: "quality-check",
     data: {},

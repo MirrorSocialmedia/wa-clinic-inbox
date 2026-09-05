@@ -68,6 +68,8 @@ function codeDefaults<K extends WorkflowKey>(key: K): ParamsOf<K> {
       humanCooldownMs: envNum("AI_HUMAN_COOLDOWN_MS", TRIAGE_DEFAULTS.humanCooldownMs),
       // cwi-h6-20260830：auto-release 超時（缺口 2 — env 救急底）
       autoReleaseMinutes: envNum("AI_AUTO_RELEASE_MINUTES", TRIAGE_DEFAULTS.autoReleaseMinutes),
+      // cwi-inboxfix-20260905（MD I-5）：公海 SLA 提醒（env 救急底）
+      unassignedSlaMinutes: envNum("AI_UNASSIGNED_SLA_MINUTES", TRIAGE_DEFAULTS.unassignedSlaMinutes),
     } as ParamsOf<K>;
   }
   if (key === "reminder") {

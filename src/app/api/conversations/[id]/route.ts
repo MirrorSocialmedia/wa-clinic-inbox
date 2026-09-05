@@ -72,6 +72,9 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
             // ★ Realtime P0 (R5)：assignee 變動必 assignVersion+1（同 assign.ts 不變式 —
             //   人手 assign 用 version 樂觀鎖，呢度直接改 assignee 都要推版本）
             assignVersion: { increment: 1 },
+            // cwi-inboxfix-20260905（MD §1.4）：被接手 → 清公海 SLA 旗（同 assign.ts 不變式；
+            //   assigneeId=null 放手保留旗 — 唔重新洗版）
+            ...(assigneeId ? { slaNotifiedAt: null } : {}),
           }
         : {}),
       ...(markRead === true ? { unreadCount: 0 } : {}),

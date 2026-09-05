@@ -43,6 +43,12 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     log.info({ messageId, wamid: msg.waMessageId, status: msg.status }, "outbound: already sent, skip (idempotent)");
     return;
   }
+  // ★ cwi-inboxfix-20260905（MD §5.2）：8 秒撤回窗口 race — job 剛轉 active 嗰刻
+  //   訊息已被 undo（job.remove 抢唔贏 + status=CANCELLED）→ 絕對唔可以送
+  if (msg.status === "CANCELLED") {
+    log.info({ messageId }, "outbound: message CANCELLED during undo window — skip send");
+    return;
+  }
 
   const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
   if (!conv) {
