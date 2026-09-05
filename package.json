@@ -69,6 +69,7 @@
     "e2e:usage-ui": "tsx scripts/e2e-usage-ui.ts",
     "e2e:window-ui": "tsx scripts/e2e-window-ui.ts",
     "e2e:notify-ui": "tsx scripts/e2e-notify-ui.ts",
+    "e2e:push": "tsx scripts/e2e-push.ts",
     "e2e:multiclinic-ui": "tsx scripts/e2e-multiclinic-ui.ts",
     "e2e:manual-booking": "tsx scripts/e2e-manual-booking.ts"
   },
@@ -89,6 +90,7 @@
     "react-dom": "19.1.0",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
+    "web-push": "^3.6.7",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -99,6 +101,7 @@
     "@types/pg": "^8.21.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/web-push": "^3.6.4",
     "embedded-postgres": "18.4.0-beta.17",
     "eslint": "^9",
     "eslint-config-next": "15.5.23",

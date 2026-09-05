@@ -4,6 +4,7 @@ import log from "@/lib/log";
 import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { publishNotify, publishStaffNotify } from "@/lib/notify";
+import { pushToStaff } from "@/lib/push";
 
 /**
  * POST /api/conversations/[id]/app-handoff — cwi-window-20260901（P3 / W-1）
@@ -68,6 +69,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
     clinicId: conv.clinicId,
     messageId: msg.id,
   });
+  const clinicCode = (await prisma.clinic.findUnique({ where: { id: conv.clinicId }, select: { code: true } }))?.code ?? null;
   for (const sid of msg.mentions ?? []) {
     if (sid === auth.staff.id) continue;
     publishStaffNotify(sid, conv.clinicId, "notify:mention", {
@@ -76,6 +78,8 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
       messageId: msg.id,
       fromStaffId: auth.staff.id,
     });
+    // v2 Web Push（cwi-notify-v2）：定向 notice — 被 @ 者 tab 閂咗都收到
+    pushToStaff(sid, { kind: "notice", clinicShort: clinicCode ?? "?", conversationId: conv.id });
   }
 
   return NextResponse.json({ ok: true, noteId: msg.id });

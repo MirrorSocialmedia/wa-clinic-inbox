@@ -1,0 +1,13 @@
+{
+  "name": "WA Clinic Inbox",
+  "short_name": "WA Inbox",
+  "start_url": "/inbox",
+  "display": "standalone",
+  "background_color": "#f5ead8",
+  "theme_color": "#7a8a5e",
+  "description": "WhatsApp 診所收件箱 — 實時病人訊息 / 急症升級 / 預約",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

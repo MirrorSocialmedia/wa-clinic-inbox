@@ -3,6 +3,7 @@ import { getServerSession } from "@/lib/session-server";
 import prisma from "@/lib/prisma";
 import { NavRail } from "@/components/inbox/nav-rail";
 import { BottomTabBar } from "@/components/inbox/bottom-tab-bar";
+import { SwRegistrar } from "@/components/inbox/sw-registrar";
 
 /**
  * (inbox) layout — 所有需要登入嘅頁。
@@ -31,6 +32,9 @@ export default async function InboxLayout({
 
   return (
     <div className="h-dvh bg-canvas flex overflow-hidden theme-transition">
+      {/* v2 PWA（cwi-notify-v2）：manifest + SW 註冊（tab 閂咗都收到通知） */}
+      <link rel="manifest" href="/manifest.webmanifest" />
+      <SwRegistrar />
       <NavRail name={session.name} email={session.email} role={session.role} />
       <div className="flex-1 min-w-0 min-h-0 flex flex-col">
         <main className="flex-1 min-w-0 min-h-0">{children}</main>

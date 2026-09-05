@@ -30,11 +30,14 @@ import {
   DEFAULT_NOTIFY_PREFS,
   dismissNotifyBanner,
   ensurePermission,
+  ensurePushSubscription,
   fireNotify,
   notifyBannerDismissed,
   notifyPrefs,
   setNotifyPrefs,
   shouldNotify,
+  syncPushPrefs,
+  unlockAudio,
   type NotifyPrefs,
 } from "@/lib/notify-client";
 import { ConversationList } from "./conversation-list";
@@ -212,12 +215,25 @@ export function InboxClient({
   prefsRef.current = prefs;
   const [notifyBanner, setNotifyBanner] = useState(false);
   useEffect(() => {
-    setPrefs(notifyPrefs());
+    const p = notifyPrefs();
+    setPrefs(p);
     if (!notifyBannerDismissed()) setNotifyBanner(true);
+    // v2（cwi-notify-v2）：push 偏好同步 DB（server 推送以 DB 為準；localStorage 只做即時 UI）
+    syncPushPrefs(p);
+    // v2 Web Push：每次登入（mount）冪等確保 subscription（endpoint unique — 已授權先）
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      void ensurePushSubscription();
+    }
+    // §4 Android 音效解鎖：首次 pointerdown → 0 音量 chime（一次性；失敗靜默跳過）
+    const onFirstPointerDown = () => unlockAudio();
+    window.addEventListener("pointerdown", onFirstPointerDown, { once: true, capture: true });
+    return () => window.removeEventListener("pointerdown", onFirstPointerDown, { capture: true });
   }, []);
   const updatePrefs = useCallback((next: NotifyPrefs) => {
     setPrefs(next);
     setNotifyPrefs(next);
+    // v2：逐店靜音 / ADMIN opt-in 改動同步 DB（server push 準）
+    syncPushPrefs(next);
   }, []);
 
   // ★ Part B（N-4）：clinic short name 查表 — STAFF SSR 只帶 primary 店（legacy 單店視角），
@@ -1033,6 +1049,18 @@ export function InboxClient({
     void selectConversation(id);
   };
 
+  // v2 Web Push：SW notificationclick → postMessage open-conversation → 選中該對話
+  // （撳 push 通知：focus 本 tab 後由呢度補齊對話選中）
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    const onSwMessage = (e: MessageEvent) => {
+      const d = e.data as { type?: string; conversationId?: string } | null;
+      if (d && d.type === "open-conversation" && d.conversationId) selectConvRef.current(d.conversationId);
+    };
+    navigator.serviceWorker.addEventListener("message", onSwMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onSwMessage);
+  }, []);
+
   async function markRead(id: string) {
     try {
       await fetch(`/api/conversations/${id}`, {
@@ -1588,6 +1616,8 @@ export function InboxClient({
                 updatePrefs({ ...prefsRef.current, desktop: perm === "granted" });
                 dismissNotifyBanner();
                 setNotifyBanner(false);
+                // v2：permission 授予後 → 確保 Web Push subscription（tab 閂咗都收到）
+                if (perm === "granted") void ensurePushSubscription();
               })();
             }}
             className="text-xs px-3 py-1.5 rounded-full bg-brand text-white hover:opacity-90 shrink-0"

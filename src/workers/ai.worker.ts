@@ -5,6 +5,7 @@ import log from "@/lib/log";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import { publishNotify } from "@/lib/notify";
+import { pushEvent } from "@/lib/push";
 import { getWindowState } from "@/lib/wa/window";
 import {
   classifyAndDraft,
@@ -638,6 +639,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       contactName: contact?.profileName ?? null,
       waMessageId: msg.waMessageId,
     });
+    // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
+    pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
   }
 
   // ★ metadata only — 呢度冇 summary / draft / body
@@ -949,6 +952,8 @@ async function handleSessionTurn(
           contactName: contact?.profileName ?? null,
           waMessageId: msg.waMessageId,
         });
+        // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
+        pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
         break;
       }
       case "SEND_FLOW": {
@@ -1344,6 +1349,8 @@ async function handlePainTriageTurn(
           contactName: c?.profileName ?? null,
           waMessageId: msg.waMessageId,
         });
+        // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
+        pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
         break;
       }
       case "NOTIFY_STAFF": {

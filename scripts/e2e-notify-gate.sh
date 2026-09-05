@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════
-# e2e-notify-gate — cwi-master-20260902 B2（Part B 通知 v1）T160–T168 + T169
+# e2e-notify-gate — Part B 通知 v1（T160–T169）+ v2（cwi-notify-v2-20260903 T188–T195）
 #
-# 通知 v1：客人來訊一定要有提示。三觸發（message:new IN / urgent:escalation /
-# notice:new）+ N-2 指派/ADMIN 規則 + N-4 零 PII + N-5 開住唔響 + N-6 節流 +
-# N-7 降級三件套 + N-8 設定面板。
+# v1 迴歸（T163 已改寫做 v2 T188 全域 3s 節流）：三觸發 + N-2/N-4/N-5/N-7/N-8。
+# v2 新增：
+# - T188 全域 3s 節流（通知全出、聲 1 次、3.5s 後再響）— e2e-notify-ui.ts
+# - T189 SW 註冊 + manifest + show 路徑（SW / fallback 雙 browser）— e2e-notify-ui.ts
+# - T190 push payload 零 PII（真 inbound → mock endpoint → http_ece 解密）— e2e-push.ts
+# - T191 push 收件人（未指派全店 / 已指派負責人 / ADMIN DB opt-in / muted DB）— e2e-push.ts
+# - T192 push 410/404 自動刪 + 200 lastOkAt — e2e-push.ts
+# - T193 push 登出清理 + endpoint 換人 ownership — e2e-push.ts
+# - T194 手機登出入口（底部 bar「我的」→ /account 多店列晒 → 登出 → /login）— e2e-notify-ui.ts
+# - T195 = 上面 T160–T168 迴歸全綠（本 gate 內建）
 #
-# 瀏覽器級斷言 = scripts/e2e-notify-ui.ts（playwright + Redis publish
-# wa-inbox:notify → web server 真實 socket 路徑 — 零新事件、零 worker 依賴）。
+# ★ 順序鐵律：t194 會登出 staff C（斷 C cookie）→ 必喺 t193（用 C cookie）之後。
 #
 # 用法：
-#  (a) mock-e2e.sh inline：`source scripts/e2e-notify-gate.sh && run_notify_gate`
-#      （依賴變量：$BASE $TKW_CLINIC_ID $MF_CLINIC_ID $TKW_STAFF_ID $COOKIE_TKW
-#        $COOKIE_ADMIN $H1B_PASS + 函數 q/jf/pass/fail/check）
-#  (b) standalone：`N_STANDALONE=1 bash scripts/e2e-notify-gate.sh`
-#      （自組 env + login；exit 0 = 全綠）— 用嚟單獨驗 N 段而唔使行完整 suite
+# (a) mock-e2e.sh source 入去行 run_notify_gate
+#     （依賴變量：$BASE $TKW_CLINIC_ID $MF_CLINIC_ID $TKW_STAFF_ID $COOKIE_TKW
+#       $COOKIE_ADMIN $H1B_PASS + 函數 q/jf/pass/fail/check）
+# (b) standalone：N_STANDALONE=1 bash scripts/e2e-notify-gate.sh
+#     （自組 env + login；exit 0 = 全綠）— 用嚟單獨驗 N 段而唔使行完整 suite
 #
 # fixture 全部 hermetic（固定 id、DELETE+INSERT 冪等、段尾全清）。
 # ═══════════════════════════════════════════════════════════════════════
@@ -23,7 +29,10 @@ run_notify_gate() {
   echo ""
   echo "── N. cwi-master B2 Part B 通知 v1（T160–T169）────────────────"
 
-  # ── (0) fixture：staff B（TKW 同店）/ C（TKW+MF 多店）/ 8 conv ─────────
+  # ── (0) fixture：staff B（TKW 同店）/ C（TKW+MF 多店）/ 3 conv ─────────
+  # ★ 開工先清晒 PushSubscription：dev DB 呢張表只係 e2e 用；舊 run 留低嘅
+  #   真 GCM endpoint row（斷網 hang）會阻塞 push 循環 — hermetic 鐵律。
+  q "DELETE FROM \"PushSubscription\"" >/dev/null 2>&1
   local N_B_EMAIL="staff-e2e-notify-b@wa-clinic.local"
   local N_C_EMAIL="staff-e2e-notify-c@wa-clinic.local"
   local N_STAFF_B N_STAFF_C N_STAFF_A CODE
@@ -46,40 +55,29 @@ run_notify_gate() {
   check "N-0 staff C 登入 → 200" "$CODE" "200"
 
   # 對話 fixture（raw INSERT 紀律：必帶 id + 必填欄；固定 id 冪等）
+  # v2：t188 用 CVU ×5（同 conv 連發）— 舊 t163 嘅 CT1–CT5 多 conv fixture 已刪
   local C1=e2enotifyct1 C2=e2enotifyct2 C3=e2enotifyct3
-  local C4=e2enotifyct4 C5=e2enotifyct5 C6=e2enotifyct6 C7=e2enotifyct7 C8=e2enotifyct8
   local CVU=e2enotifycvu CVA=e2enotifycva CVM=e2enotifycvm
-  local CT1=e2enotifyctv1 CT2=e2enotifyctv2 CT3=e2enotifyctv3 CT4=e2enotifyctv4 CT5=e2enotifyctv5
-  q "DELETE FROM \"Conversation\" WHERE id IN ('$CVU','$CVA','$CVM','$CT1','$CT2','$CT3','$CT4','$CT5')" >/dev/null 2>&1
-  q "DELETE FROM \"Contact\" WHERE id IN ('$C1','$C2','$C3','$C4','$C5','$C6','$C7','$C8')" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id IN ('$CVU','$CVA','$CVM')" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE id IN ('$C1','$C2','$C3')" >/dev/null 2>&1
   q "INSERT INTO \"Contact\" (id,\"clinicId\",\"waId\",\"profileName\",labels) VALUES
     ('$C1','$TKW_CLINIC_ID','85291234567','PII 張三 E2E',ARRAY[]::text[]),
     ('$C2','$TKW_CLINIC_ID','85291234568','E2E 李四',ARRAY[]::text[]),
-    ('$C3','$MF_CLINIC_ID','85291234569','E2E 王五',ARRAY[]::text[]),
-    ('$C4','$TKW_CLINIC_ID','85291234570','E2E N3-a',ARRAY[]::text[]),
-    ('$C5','$TKW_CLINIC_ID','85291234571','E2E N3-b',ARRAY[]::text[]),
-    ('$C6','$TKW_CLINIC_ID','85291234572','E2E N3-c',ARRAY[]::text[]),
-    ('$C7','$TKW_CLINIC_ID','85291234573','E2E N3-d',ARRAY[]::text[]),
-    ('$C8','$TKW_CLINIC_ID','85291234574','E2E N3-e',ARRAY[]::text[])" >/dev/null 2>&1
+    ('$C3','$MF_CLINIC_ID','85291234569','E2E 王五',ARRAY[]::text[])" >/dev/null 2>&1
   q "INSERT INTO \"Conversation\" (id,\"clinicId\",\"contactId\",status,\"lastMessageAt\") VALUES
     ('$CVU','$TKW_CLINIC_ID','$C1','OPEN',now()),
     ('$CVA','$TKW_CLINIC_ID','$C2','OPEN',now()),
-    ('$CVM','$MF_CLINIC_ID','$C3','OPEN',now()),
-    ('$CT1','$TKW_CLINIC_ID','$C4','OPEN',now()),
-    ('$CT2','$TKW_CLINIC_ID','$C5','OPEN',now()),
-    ('$CT3','$TKW_CLINIC_ID','$C6','OPEN',now()),
-    ('$CT4','$TKW_CLINIC_ID','$C7','OPEN',now()),
-    ('$CT5','$TKW_CLINIC_ID','$C8','OPEN',now())" >/dev/null 2>&1
+    ('$CVM','$MF_CLINIC_ID','$C3','OPEN',now())" >/dev/null 2>&1
   q "UPDATE \"Conversation\" SET \"assigneeId\"='$N_STAFF_A' WHERE id='$CVA'" >/dev/null 2>&1
   local NFIX
-  NFIX=$(q "SELECT count(*)::text c FROM \"Conversation\" WHERE id IN ('$CVU','$CVA','$CVM','$CT1','$CT2','$CT3','$CT4','$CT5')" | jf c)
-  check "N-0 fixture 對話 ×8（冪等）" "$NFIX" "8"
+  NFIX=$(q "SELECT count(*)::text c FROM \"Conversation\" WHERE id IN ('$CVU','$CVA','$CVM')" | jf c)
+  check "N-0 fixture 對話 ×3（冪等）" "$NFIX" "3"
 
   # ── scenario runner（瀏覽器級；dev 首載編譯慢 → script 內已 poll 等 DOM 120s） ──
   nn() { # nn <desc> <e2e:notify-ui args...>
     local desc="$1"; shift
     local out
-    out=$(pnpm -s e2e:notify-ui --base "$BASE" "$@" 2>&1 | grep -E "NOTIFY-UI-(OK|FAIL)" | head -1)
+    out=$(pnpm -s e2e:notify-ui --base "$BASE" "$@" 2>&1 | tee /dev/stderr | grep -E "NOTIFY-UI-(OK|FAIL)" | head -1)
     check "$desc" "$out" "NOTIFY-UI-OK"
   }
 
@@ -97,10 +95,9 @@ run_notify_gate() {
   nn "T162 正開對話 → 唔響唔彈" \
     --scenario t162 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" --conv-u "$CVU"
 
-  # T163：節流（同 conv 30s 一次 + 全域 10s 最多 3 次音）— 最長（含 30s 窗）
-  nn "T163 節流（同 conv 30s + 全域 10s/3 音）" \
-    --scenario t163 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
-    --convs-t "$CT1,$CT2,$CT3,$CT4,$CT5"
+  # T188：v2 全域 3s 節流（T163 改寫）— 同 conv 連發 5 條通知全出 + 聲 1 次；3.5s 後再響
+  nn "T188 全域 3s 節流（通知全出、聲 1 次、3.5s 後再響）" \
+    --scenario t188 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" --conv-u "$CVU"
 
   # T164：OS 零 PII regex（message + urgent 都要 — urgent payload 有 contactName = 陷阱）
   nn "T164 OS 零 PII regex（病人資料零漏出）" \
@@ -131,11 +128,42 @@ run_notify_gate() {
     --scenario t169 --cookie3 "$COOKIE_ADMIN" \
     --clinic "$TKW_CLINIC_ID" --clinic-m "$MF_CLINIC_ID" --conv-u "$CVU" --conv-a "$CVA" --conv-m "$CVM"
 
+  # T189：v2 SW+PWA（SW 註冊 + manifest + show 路徑 SW/fallback 雙 browser）
+  nn "T189 SW 註冊 + manifest + show 路徑（SW / fallback）" \
+    --scenario t189 --cookie "$COOKIE_TKW" --cookie2 /tmp/e2e-cookie-notify-b.txt \
+    --clinic "$TKW_CLINIC_ID" --conv-u "$CVU"
+
+  # ── v2 push（T190–T193）：server 側真 path（mock-inbound → worker → pushEvent → mock endpoint → 解密） ──
+  # ★ 順序：t193 會登出 B（斷 B cookie）→ 最後行；t194 登出 C → 必喺呢段之後
+  pp() { # pp <desc> <e2e:push args...>
+    local desc="$1"; shift
+    local out
+    out=$(pnpm -s e2e:push --base "$BASE" "$@" 2>&1 | tee /dev/stderr | grep -oE "PUSH-(OK|FAIL)" | head -1)
+    check "$desc" "$out" "PUSH-OK"
+  }
+  pp "T190 push 零 PII（真 inbound → 解密 → 只有 kind/clinicShort/convId）" \
+    --scenario t190 --cookie-b /tmp/e2e-cookie-notify-b.txt --staff-b "$N_STAFF_B" --clinic "$TKW_CLINIC_ID"
+  pp "T191 push 收件人（未指派全店 / 已指派負責人 / ADMIN DB opt-in / muted DB）" \
+    --scenario t191 --cookie-b /tmp/e2e-cookie-notify-b.txt --cookie-c /tmp/e2e-cookie-notify-c.txt --cookie-admin "$COOKIE_ADMIN" \
+    --staff-b "$N_STAFF_B" --staff-c "$N_STAFF_C" --clinic "$TKW_CLINIC_ID"
+  pp "T192 push 410/404 自動刪 + 200 lastOkAt" \
+    --scenario t192 --cookie-b /tmp/e2e-cookie-notify-b.txt --staff-b "$N_STAFF_B" --clinic "$TKW_CLINIC_ID"
+  pp "T193 push 登出清理 + endpoint 換人 ownership" \
+    --scenario t193 --cookie-b /tmp/e2e-cookie-notify-b.txt --cookie-c /tmp/e2e-cookie-notify-c.txt \
+    --staff-b "$N_STAFF_B" --staff-c "$N_STAFF_C" --clinic "$TKW_CLINIC_ID"
+
+  # T194：v2 手機登出入口（STAFF 底部 bar「我的」→ /account 多店列晒 → 登出二次確認 → /login）
+  # ★ 必喺 T193 之後（t194 會登出 C，斷 C cookie）
+  nn "T194 手機登出入口（我的 tab → /account 多店 → 登出 → /login）" \
+    --scenario t194 --cookie3 /tmp/e2e-cookie-notify-c.txt --clinic "$TKW_CLINIC_ID" --conv-u "$CVU"
+
   # ── cleanup（hermetic：staff B/C + fixture 全清） ──────────────────────
+  q "DELETE FROM \"PushSubscription\" WHERE \"staffId\" IN ('$N_STAFF_B','$N_STAFF_C')" >/dev/null 2>&1
   q "DELETE FROM \"StaffClinic\" WHERE \"staffId\" IN ('$N_STAFF_B','$N_STAFF_C')" >/dev/null 2>&1
   q "DELETE FROM \"StaffUser\" WHERE id IN ('$N_STAFF_B','$N_STAFF_C')" >/dev/null 2>&1
-  q "DELETE FROM \"Conversation\" WHERE id IN ('$CVU','$CVA','$CVM','$CT1','$CT2','$CT3','$CT4','$CT5')" >/dev/null 2>&1
-  q "DELETE FROM \"Contact\" WHERE id IN ('$C1','$C2','$C3','$C4','$C5','$C6','$C7','$C8')" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id IN ('$CVU','$CVA','$CVM')" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE id IN ('$C1','$C2','$C3')" >/dev/null 2>&1
+  q "DELETE FROM \"PushSubscription\" WHERE \"staffId\" NOT IN (SELECT id FROM \"StaffUser\")" >/dev/null 2>&1
   local NRES
   NRES=$(q "SELECT ((SELECT count(*) FROM \"Conversation\" WHERE id LIKE 'e2enotifycv%') + (SELECT count(*) FROM \"Contact\" WHERE id LIKE 'e2enotifyct%'))::text c" | jf c)
   check "N cleanup 零殘留" "$NRES" "0"

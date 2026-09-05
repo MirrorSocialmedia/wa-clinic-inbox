@@ -1,6 +1,7 @@
 import { Worker, type Job } from "bullmq";
 import { inboundQueue, aiQueue, mediaQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { publishNotify } from "@/lib/notify";
+import { pushEvent } from "@/lib/push";
 import prisma from "@/lib/prisma";
 import log, { redactDeep } from "@/lib/log";
 import { notifyAlert } from "@/lib/health/notify";
@@ -253,6 +254,8 @@ async function notifyNewMessage(clinicId: string, conv: Conversation, msg: Messa
       lastInboundAt: conv.lastInboundAt,
     },
   });
+  // v2 Web Push（cwi-notify-v2）：tab 閂咗/鎖屏都收到 — payload 零 PII（kind/clinicShort/conversationId）
+  pushEvent({ kind: "message", clinicId, conversationId: conv.id });
 }
 
 // ── 各 field 處理 ────────────────────────────────────────────────────────

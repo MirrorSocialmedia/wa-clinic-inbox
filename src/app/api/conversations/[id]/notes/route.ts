@@ -5,6 +5,7 @@ import log from "@/lib/log";
 import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { publishNotify, publishStaffNotify } from "@/lib/notify";
+import { pushToStaff } from "@/lib/push";
 
 /**
  * POST /api/conversations/[id]/notes — 內部備註（MD §4.1）。
@@ -85,6 +86,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   });
 
   // ★ H2：mention 通知 — 被 @ 而唔係自己嗰啲人收定向 socket（零內文；bell badge / 黃點 / Notification）
+  const clinicCode = (await prisma.clinic.findUnique({ where: { id: conv.clinicId }, select: { code: true } }))?.code ?? null;
   for (const sid of mentions) {
     if (sid === auth.staff.id) continue; // 自己 @ 自己唔用通知
     publishStaffNotify(sid, conv.clinicId, "notify:mention", {
@@ -93,6 +95,8 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
       messageId: msg.id,
       fromStaffId: auth.staff.id,
     });
+    // v2 Web Push（cwi-notify-v2）：定向 notice — 被 @ 者 tab 閂咗都收到
+    pushToStaff(sid, { kind: "notice", clinicShort: clinicCode ?? "?", conversationId: conv.id });
   }
 
   // log：零內文（bodyLen + mentions count 只）— 符合 D5 PII 鐵律

@@ -282,7 +282,9 @@ export function ConversationList(p: Props) {
                 })}
               </div>
             )}
-            <div className="text-[10px] text-t3 pt-1.5 border-t border-line">分頁閂咗就收唔到通知</div>
+            <div className="text-[10px] text-t3 pt-1.5 border-t border-line">
+              閂咗分頁都收到通知（Web Push）；逐店靜音 / 訊息通知選項已同步 server（push 都生效）
+            </div>
           </div>
         </>
       )}

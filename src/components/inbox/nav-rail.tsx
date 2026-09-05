@@ -4,11 +4,12 @@ import { useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { CalendarDays, LogOut, MessageCircle, Settings, Stethoscope } from "lucide-react";
+import { logoutWithPushCleanup } from "@/lib/notify-client";
 
 /**
  * 左邊 icon rail（SleekFlow 式），取代舊 TopBar。
  * - 導航：收件箱 / 預約 /（ADMIN）管理
- * - 底部：theme toggle + 用戶 initials（title 顯示全名/email/角色）+ 登出
+ * - 底部：用戶 initials → avatar menu（姓名/email/角色 + 明確「登出」項 — cwi-notify-v2 MD §5）
  */
 export function NavRail({
   name,
@@ -20,16 +21,13 @@ export function NavRail({
   role: "ADMIN" | "STAFF";
 }) {
   const [busy, setBusy] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const pathname = usePathname();
 
   async function logout() {
     setBusy(true);
-    try {
-      await fetch("/api/auth/logout", { method: "POST" });
-      window.location.href = "/login";
-    } finally {
-      setBusy(false);
-    }
+    // MD §3.6：先清 push subscription（client）→ server 兜底 → 清 session → /login
+    await logoutWithPushCleanup();
   }
 
   const items: { href: string; label: string; icon: React.ReactNode; adminOnly?: boolean }[] = [
@@ -72,23 +70,39 @@ export function NavRail({
 
       <div className="mt-auto flex flex-col items-center gap-2">
         {/* ThemeToggle 唔 render（Organic 呢輪無暗色 — 老細指令；[data-theme=dark] block 保留） */}
-        <div
-          title={`${name}\n${email}\n${role === "ADMIN" ? "管理員" : "店員"}`}
-          className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-semibold select-none ${
-            role === "ADMIN" ? "bg-warn-soft text-warn-text" : "bg-brand-soft text-brand-text"
-          }`}
-        >
-          {initials}
+        {/* cwi-notify-v2（MD §5）：avatar menu — 明確登出入口（舊版只有 icon 唔夠明確） */}
+        <div className="relative">
+          <button
+            onClick={() => setMenuOpen((v) => !v)}
+            title={`${name}\n${email}\n${role === "ADMIN" ? "管理員" : "店員"}`}
+            aria-label="帳戶選單"
+            aria-expanded={menuOpen}
+            className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-semibold select-none hover:opacity-85 ${
+              role === "ADMIN" ? "bg-warn-soft text-warn-text" : "bg-brand-soft text-brand-text"
+            }`}
+          >
+            {initials}
+          </button>
+          {menuOpen && (
+            <>
+              {/* 背景 click 關閉 */}
+              <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+              <div className="absolute bottom-0 left-full ml-2.5 z-50 w-56 rounded-xl border border-line bg-panel shadow-xl p-3">
+                <div className="text-sm font-semibold text-t1 truncate">{name}</div>
+                <div className="text-xs text-t3 truncate">{email}</div>
+                <div className="text-xs text-t3">{role === "ADMIN" ? "管理員" : "店員"}</div>
+                <button
+                  onClick={logout}
+                  disabled={busy}
+                  className="mt-2.5 w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-danger-soft text-danger-text hover:bg-danger hover:text-panel disabled:opacity-50"
+                >
+                  <LogOut size={15} strokeWidth={2.75} />
+                  {busy ? "登出中…" : "登出"}
+                </button>
+              </div>
+            </>
+          )}
         </div>
-        <button
-          onClick={logout}
-          disabled={busy}
-          title="登出"
-          aria-label="登出"
-          className="w-[38px] h-[38px] rounded-full flex items-center justify-center text-t3 hover:bg-danger-soft hover:text-danger-text disabled:opacity-50"
-        >
-          <LogOut size={16} strokeWidth={2.75} />
-        </button>
       </div>
     </nav>
   );

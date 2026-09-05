@@ -197,6 +197,10 @@ model StaffUser {
   totpSecretEnc String?
   // ★ H3：自動派單 round-robin 用（「上次被派時間」最耐嗰個先；NULL = 從未派）
   lastAssignedAt DateTime? @db.Timestamptz
+  // ★ cwi-notify-v2-20260903：push 偏好（DB = server 推送之源；localStorage 只做即時 UI）。
+  //   Json: { mutedClinics: string[], adminMsgClinics: string[] } — desktop/sound 係 per-device，唔入 DB。
+  pushPrefs         Json?
+  pushSubscriptions PushSubscription[]
 }
 
 model StaffClinic {
@@ -211,6 +215,22 @@ model StaffClinic {
   clinic    Clinic    @relation(fields: [clinicId], references: [id], onDelete: Cascade)
   @@id([staffId, clinicId])
   @@index([clinicId])
+}
+
+// ★ cwi-notify-v2-20260903：Web Push subscription（VAPID）— 每個 browser/device 一個 endpoint。
+//   endpoint unique（subscribe 冪等 upsert）；lastOkAt = 最後 2xx 發送時間（運維/e2e 驗證）；
+//   staff 刪除/登出 → Cascade 清（共用前台機鐵律：唔好換人登入仲收到上一個人嘅通知）。
+model PushSubscription {
+  id        String    @id @default(cuid())
+  staffId   String
+  endpoint  String    @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime  @default(now()) @db.Timestamptz
+  lastOkAt  DateTime? @db.Timestamptz
+  staff     StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  @@index([staffId])
 }
 
 model Contact {

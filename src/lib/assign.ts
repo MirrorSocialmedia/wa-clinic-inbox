@@ -3,6 +3,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { RbacError, type AuthContext } from "@/lib/rbac";
 import { publishNotify, publishStaffNotify } from "@/lib/notify";
+import { pushToStaff } from "@/lib/push";
 
 /**
  * 轉交 / 派單核心（MD §3.1）— Send Lock 體系嘅唯一 assign 入口。
@@ -332,6 +333,7 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
   });
 
   // ★ H2：mention 通知 — 被派者（唔係自己）收 notify:mention（bell badge / 黃點；MD §5：轉交 = 必有通知）
+  const clinicCode = (await prisma.clinic.findUnique({ where: { id: result.clinicId }, select: { code: true } }))?.code ?? null;
   if (result.assigneeId && result.assigneeId !== byStaffId) {
     publishStaffNotify(result.assigneeId, result.clinicId, "notify:mention", {
       conversationId: result.conversationId,
@@ -339,6 +341,8 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
       messageId: result.noteMessageId,
       fromStaffId: byStaffId,
     });
+    // v2 Web Push（cwi-notify-v2）：定向 notice — 被派者 tab 閂咗都收到
+    pushToStaff(result.assigneeId, { kind: "notice", clinicShort: clinicCode ?? "?", conversationId: result.conversationId });
   }
 
   // ★ cwi-inboxfix-20260905（MD I-4）：指派 → 被派者定向 push（notify:assigned）：
@@ -346,7 +350,6 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
   //   定向 send  guarantee：跨店被派者唔喺 conv.clinicId 嘅 room，店級 notice:new 未必到佢；
   //   StaffNotice row 已喺 tx 內落（bell 持久化視角）。
   if (result.assigneeId && result.assigneeId !== byStaffId) {
-    const clinicCode = (await prisma.clinic.findUnique({ where: { id: result.clinicId }, select: { code: true } }))?.code ?? null;
     publishNotify(result.clinicId, "notice:new", { conversationId: result.conversationId, kind: "SYSTEM", reason: "assigned" });
     publishStaffNotify(result.assigneeId, result.clinicId, "notify:assigned", {
       conversationId: result.conversationId,
@@ -354,6 +357,8 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
       clinicCode,
       fromStaffId: byStaffId,
     });
+    // v2 Web Push（cwi-notify-v2）：定向 notice — 被派者 tab 閂咗都收到
+    pushToStaff(result.assigneeId, { kind: "notice", clinicShort: clinicCode ?? "?", conversationId: result.conversationId });
   }
 
   // ★ cwi-h6-20260830（h5 §2.3 副作用 2 實時軌）：takeover → 原負責人定向 socket（零 PII）。
@@ -366,6 +371,8 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
       clinicId: result.clinicId,
       actorStaffId: byStaffId,
     });
+    // v2 Web Push（cwi-notify-v2）：定向 notice — 原負責人 tab 閂咗都收到
+    pushToStaff(result.fromStaffId, { kind: "notice", clinicShort: clinicCode ?? "?", conversationId: result.conversationId });
   }
 
   return result;

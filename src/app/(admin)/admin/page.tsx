@@ -2,6 +2,7 @@ import { getAiStatusSnapshot } from "@/lib/ai/status";
 import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
 import { relTime } from "@/components/inbox/time";
+import { AccountCard } from "@/components/inbox/account-card";
 import { AlertsPanel, type AlertItem } from "./alerts-panel";
 import { HeldAlertsPanel } from "./held-alerts-panel";
 import { TotpCard } from "./totp-card";
@@ -64,6 +65,9 @@ export default async function AdminOverviewPage() {
     : null;
   const totpEnabled = adminUser?.totpSecretEnc != null;
 
+  // cwi-notify-v2（MD §5）：頁頂帳戶卡（頭像/姓名/角色/診所/登出）— ADMIN 手機「管理」tab 嘅登出入口
+  const adminClinics = await prisma.clinic.findMany({ select: { code: true, name: true }, orderBy: { code: "asc" } });
+
   // KPI 四格數據（Organic P2）：今日訊息（實時）/ 未處理急症（HIGH 未解決）/ 最新週報（FRT+採用率，同 /ops 同源）
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
@@ -123,6 +127,16 @@ export default async function AdminOverviewPage() {
           AI triage 狀態（真數據）＋ 管理入口。AI 永遠本地 vLLM（D4）；斷線 = 降級，inbox 照常。
         </p>
       </div>
+
+      {/* cwi-notify-v2（MD §5）：帳戶卡 — 手機「管理」tab 頂部登出入口（ADMIN） */}
+      {session && (
+        <AccountCard
+          name={session.name}
+          email={session.email}
+          role="ADMIN"
+          clinics={adminClinics}
+        />
+      )}
 
       {/* ── KPI 四格（Organic P2：數字 Caprasimo 30px；急症格底色換 danger-soft，唯一一格變色） ── */}
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">

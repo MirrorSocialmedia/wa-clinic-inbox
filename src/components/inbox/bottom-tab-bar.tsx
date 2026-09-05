@@ -2,11 +2,11 @@
 
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { CalendarDays, MessageCircle, Settings, Stethoscope } from "lucide-react";
+import { CalendarDays, MessageCircle, Settings, Stethoscope, User } from "lucide-react";
 
 /**
  * 手機底部 tab bar（md 以下顯示；桌面用 NavRail）。
- * - 四格：收件箱（unread badge）/ 預約 / 時間表 / 管理（ADMIN only → STAFF 三格）
+ * - 四格：收件箱（unread badge）/ 預約 / 時間表 / 管理（ADMIN）或 我的（STAFF — MD §5 登出入口）
  * - pb-[env(safe-area-inset-bottom)]：iPhone home indicator 唔遮字
  * - Organic 1f：icon 23px / label 10.5px / 每格熱區 ≥48px / strokeWidth 2.75
  */
@@ -23,13 +23,15 @@ export function BottomTabBar({
     { href: "/inbox", label: "收件箱", icon: MessageCircle, badge: unreadCount },
     { href: "/bookings", label: "預約", icon: CalendarDays },
     { href: "/schedule", label: "時間表", icon: Stethoscope },
-    { href: "/admin", label: "管理", icon: Settings, adminOnly: true },
+    // ADMIN → 管理（頁頂有帳戶卡 + 登出）；STAFF → 我的（/account 帳戶卡 + 登出 — MD §5）
+    role === "ADMIN"
+      ? { href: "/admin", label: "管理", icon: Settings }
+      : { href: "/account", label: "我的", icon: User },
   ] as const;
 
   return (
     <nav className="md:hidden shrink-0 border-t border-line bg-panel flex pb-[env(safe-area-inset-bottom)]">
       {items
-        .filter((it) => !("adminOnly" in it && it.adminOnly) || role === "ADMIN")
         .map((it) => {
           const active = pathname === it.href || pathname.startsWith(it.href + "/");
           const Icon = it.icon;
