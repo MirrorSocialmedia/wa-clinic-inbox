@@ -31,9 +31,9 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   if (msg.direction !== "OUT" || msg.channel !== "API") {
     return NextResponse.json({ error: "only outbound API messages can be voided" }, { status: 400 });
   }
-  // 只可以標「已發出」嘅訊息（QUEUED/CANCELLED 冇意義 — 前者用 undo，後者已標記）
+  // 只可以標「已發出」嘅訊息（QUEUED = 未發出，void 唔到；§7 撤回作廢後無 undo 替代路徑）
   if (!msg.waMessageId) {
-    return NextResponse.json({ error: "message not sent yet — use undo within the 8s window" }, { status: 409 });
+    return NextResponse.json({ error: "message not sent yet" }, { status: 409 });
   }
   const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });

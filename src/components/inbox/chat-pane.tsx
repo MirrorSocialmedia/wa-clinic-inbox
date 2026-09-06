@@ -53,8 +53,6 @@ interface Props {
   flowBusy: boolean;
   /** Phase B：過窗 template 發送（422 後 composer 出揀選 → 撳掣帶 templateName 發）；唔傳 = 功能唔啟用 */
   onSendTemplate?: (name: string) => Promise<{ ok: boolean; error?: string }>;
-  /** ★ cwi-inboxfix-20260905（MD §5.2）：8 秒撤回 — DELETE /api/messages/[id]/undo（409 = 已發出） */
-  onUndoMessage: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
   /** ★ cwi-inboxfix-20260905（MD §5.3）：標記已作廢 — POST /api/messages/[id]/void（純內部） */
   onVoidMessage: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
   /** ★ H1：自己嘅 staffId（Send Lock 三狀態判定：自己負責/別人負責/unassigned） */
@@ -225,63 +223,25 @@ function initialOf(c: ConversationItem): string {
   return n ? n.charAt(0) : "?";
 }
 
-// ── cwi-inboxfix-20260905（MD §5.2/§5.3）：8 秒撤回 + 過窗「標記已作廢 / 更正草稿」 ──
-/** 撤回窗口 — 必同 server src/lib/queue.ts UNDO_WINDOW_MS 一致 */
-const UNDO_WINDOW_MS = 8000;
+// ── cwi-inboxfix-20260905（MD §5.3）：「標記已作廢 / 更正草稿」 ──
+// ★ cwi-notify-fix-20260907（§7 撤回作廢）：8 秒撤回窗口 + 倒數掣整節剷（send job 即刻送）。
+// 過窗「撤回」menu item 一併剷（server undo route 已刪）；保留 ⋯ 掣（作廢 / 更正草稿）。
 /** 更正草稿模板（MD §5.3：一鍵插入更正草稿） */
 const CORRECTION_DRAFT = "對唔住，上一句發錯咗，正確嘅係：";
 
 function UndoControls({
   m,
-  onUndo,
   onVoid,
   onInsertCorrection,
 }: {
   m: MessageItem;
-  onUndo: (id: string) => Promise<{ ok: boolean; error?: string }>;
   onVoid: (id: string) => Promise<{ ok: boolean; error?: string }>;
   onInsertCorrection: (body: string) => void;
 }) {
-  const [now, setNow] = useState(() => Date.now());
   const [menuOpen, setMenuOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const createdMs = new Date(m.createdAt).getTime();
-  const elapsed = now - createdMs;
-  // 窗口判定：QUEUED 且距 enqueue < 8s（createdAt = server enqueue 時刻，同 Redis delay 同源）
-  const inWindow = m.status === "QUEUED" && elapsed >= 0 && elapsed < UNDO_WINDOW_MS;
 
-  // 只有窗口開緊先 tick（舊 QUEUED 唔會無限跑 interval）
-  useEffect(() => {
-    if (!inWindow) return;
-    const t = setInterval(() => setNow(Date.now()), 250);
-    return () => clearInterval(t);
-  }, [inWindow]);
-
-  // ── 窗口內：倒數撤回掣（撳 = job.remove + CANCELLED + 草稿還原 composer — MD §5.2） ──
-  if (inWindow) {
-    return (
-      <span className="inline-flex items-center gap-1">
-        {notice && <span className="text-[10px] text-warn-text">{notice}</span>}
-        <button
-          onClick={async () => {
-            setBusy(true);
-            const r = await onUndo(m.id);
-            setBusy(false);
-            if (r.ok) onInsertCorrection(m.body ?? ""); // 草稿保留（MD §5.2）
-            else setNotice(r.error ?? "撤回失敗");
-          }}
-          disabled={busy}
-          title="8 秒內撳撤回 — 訊息唔會發畀病人"
-          className="text-[10px] text-warn-text hover:underline disabled:opacity-50"
-        >
-          撤回 {Math.max(1, Math.ceil((UNDO_WINDOW_MS - elapsed) / 1000))}s
-        </button>
-      </span>
-    );
-  }
-
-  // ── 過窗：hover ⋯ 掣（MD §5.3）— 撤回提示「已發出」/ 標記已作廢 / 插入更正草稿 ──
   return (
     <span className="relative inline-flex items-center gap-1">
       {notice && <span className="text-[10px] text-warn-text">{notice}</span>}
@@ -293,24 +253,12 @@ function UndoControls({
       <button
         onClick={() => setMenuOpen((v) => !v)}
         className="text-[11px] text-t3 hover:text-t1 opacity-0 group-hover:opacity-100 transition-opacity"
-        title="訊息操作（撤回 / 作廢 / 更正）"
+        title="訊息操作（作廢 / 更正）"
       >
         ⋯
       </button>
       {menuOpen && (
         <span className="absolute right-0 bottom-5 z-20 flex flex-col bg-panel border border-line rounded-lg shadow-lg overflow-hidden text-[11px] w-44">
-          <button
-            onClick={async () => {
-              setMenuOpen(false);
-              setBusy(true);
-              const r = await onUndo(m.id);
-              setBusy(false);
-              if (!r.ok) setNotice(r.error ?? "已經發出咗，收唔返。可以再發一句更正。");
-            }}
-            className="px-2.5 py-1.5 text-left hover:bg-line/30"
-          >
-            撤回
-          </button>
           {!m.voidedAt && (
             <button
               onClick={async () => {
@@ -869,7 +817,6 @@ export function ChatPane(p: Props) {
                   {isOut && m.channel === "API" && m.type === "text" && m.sentByStaffId === p.myStaffId && (
                     <UndoControls
                       m={m}
-                      onUndo={p.onUndoMessage}
                       onVoid={p.onVoidMessage}
                       onInsertCorrection={(body) => {
                         setDraft(body);

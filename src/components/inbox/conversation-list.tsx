@@ -102,6 +102,57 @@ export function ConversationList(p: Props) {
   const [noticeOpen, setNoticeOpen] = useState(false);
   // ★ Part B：通知設定面板（bell 旁齒輪；開關存 localStorage per-device）
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // ★ F-6（cwi-notify-fix-20260907）：發測試通知（/api/push/test — 同真通知同一條路）
+  const [testBusy, setTestBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ kind: "muted" | "other"; text: string; clinicId?: string } | null>(null);
+
+  const sendTestNotify = async () => {
+    if (testBusy) return;
+    setTestBusy(true);
+    setTestResult(null);
+    try {
+      // 目標店：現行 active 店；「全部」→ 第一間（server：單店 STAFF 可省略）
+      const target = p.activeClinicId !== "all" ? p.activeClinicId : (p.clinics[0]?.id ?? null);
+      const res = await fetch("/api/push/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(target ? { clinicId: target } : {}),
+      });
+      const d = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        result?: string;
+        count?: number;
+        reason?: string;
+        clinicId?: string;
+        clinicShort?: string;
+        error?: string;
+      } | null;
+      if (!res.ok || !d?.ok) {
+        setTestResult({ kind: "other", text: d?.error ? `測試失敗：${d.error}` : `測試失敗（${res.status}）` });
+        return;
+      }
+      switch (d.result) {
+        case "pushed":
+          setTestResult({ kind: "other", text: `已推送 ${d.count} 部裝置` });
+          break;
+        case "no-subscription":
+          setTestResult({ kind: "other", text: "冇裝置訂閱 — 開咗桌面通知先重試" });
+          break;
+        case "muted":
+          setTestResult({ kind: "muted", text: `呢間店（${d.clinicShort}）被你靜音咗`, clinicId: d.clinicId });
+          break;
+        case "vapid-off":
+          setTestResult({ kind: "other", text: "Web Push 未喺 server 配置（socket 通知唔受影響）" });
+          break;
+        default:
+          setTestResult({ kind: "other", text: `推送失敗：${d.reason ?? "unknown"}` });
+      }
+    } catch (e) {
+      setTestResult({ kind: "other", text: `推送失敗：${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setTestBusy(false);
+    }
+  };
   const items = useMemo(() => {
     if (p.searchResults) return p.searchResults;
     let list = p.conversations;
@@ -282,6 +333,32 @@ export function ConversationList(p: Props) {
                 })}
               </div>
             )}
+            <div className="pt-1.5 border-t border-line space-y-1.5">
+              <button
+                onClick={() => void sendTestNotify()}
+                disabled={testBusy}
+                className="w-full text-xs text-t1 hover:bg-black/[.04] rounded-lg px-2 py-1.5 disabled:opacity-50"
+              >
+                {testBusy ? "發送中…" : "發測試通知"}
+              </button>
+              {testResult && (
+                <div className="text-[11px] text-t2 px-1 flex items-center justify-between gap-1.5">
+                  <span className="min-w-0 break-words">{testResult.text}</span>
+                  {testResult.kind === "muted" && testResult.clinicId && (
+                    <button
+                      onClick={() => {
+                        const cid = testResult.clinicId as string;
+                        p.onPrefsChange({ ...p.prefs, mutedClinics: p.prefs.mutedClinics.filter((x) => x !== cid) });
+                        setTestResult(null);
+                      }}
+                      className="text-brand-text hover:underline shrink-0"
+                    >
+                      [解除]
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="text-[10px] text-t3 pt-1.5 border-t border-line">
               閂咗分頁都收到通知（Web Push）；逐店靜音 / 訊息通知選項已同步 server（push 都生效）
             </div>

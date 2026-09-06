@@ -43,10 +43,12 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     log.info({ messageId, wamid: msg.waMessageId, status: msg.status }, "outbound: already sent, skip (idempotent)");
     return;
   }
-  // ★ cwi-inboxfix-20260905（MD §5.2）：8 秒撤回窗口 race — job 剛轉 active 嗰刻
-  //   訊息已被 undo（job.remove 抢唔贏 + status=CANCELLED）→ 絕對唔可以送
+  // ★ cwi-inboxfix-20260905（MD §5.2）：CANCELLED 双保險 guard —
+  //   cwi-notify-fix-20260907（§7 撤回作廢）後 undo route 已刪、CANCELLED 唔會再產生；
+  //   此 guard 保留做 legacy 在途 job（部署前 enqueue）/ 殘留 CANCELLED row 嘅兜底，
+  //   成本 ~0（一個 status 比較）→ 保留唔刪。
   if (msg.status === "CANCELLED") {
-    log.info({ messageId }, "outbound: message CANCELLED during undo window — skip send");
+    log.info({ messageId }, "outbound: message CANCELLED (legacy) — skip send");
     return;
   }
 

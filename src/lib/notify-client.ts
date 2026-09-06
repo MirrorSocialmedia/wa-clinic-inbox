@@ -96,14 +96,19 @@ export function setNotifyPrefs(p: NotifyPrefs): void {
 
 /**
  * v2：push 偏好同步 server（StaffUser.pushPrefs — server 推送以 DB 為準）。
- * desktop/sound 係 per-device UI 設定，唔同步。失敗靜默（server 會用 DB 現值）。
+ * desktop/sound 係 per-device UI 設定，唔同步。
+ * F-2（cwi-notify-fix-20260907）：一動作一欄 — 只發自己角色嘅欄
+ * （STAFF → mutedClinics；ADMIN → adminMsgClinics）— 唔再整包盲寫（server 側有兜底忽略 + warn）。
+ * 失敗靜默（server 會用 DB 現值）。
  */
-export function syncPushPrefs(p: NotifyPrefs): void {
+export function syncPushPrefs(p: NotifyPrefs, role: "ADMIN" | "STAFF"): void {
   if (typeof window === "undefined") return;
+  const body =
+    role === "ADMIN" ? { adminMsgClinics: p.adminMsgClinics } : { mutedClinics: p.mutedClinics };
   void fetch("/api/push/prefs", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ mutedClinics: p.mutedClinics, adminMsgClinics: p.adminMsgClinics }),
+    body: JSON.stringify(body),
   }).catch(() => {
     /* 靜默 — 下次改動會再同步 */
   });

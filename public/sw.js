@@ -23,6 +23,8 @@ self.addEventListener("push", (event) => {
   })();
   // ★ PII 鐵律：payload 只有 kind / clinicShort / conversationId，冇病人資料
   const title = d.kind === "urgent" ? `⚠ 緊急 · ${d.clinicShort}` : `新訊息 · ${d.clinicShort}`;
+  // F-7（cwi-notify-fix）：通知來源留痕 — SW push 係唯一准觸發通知嘅非 socket 來源
+  console.debug("notify:", "sw:push");
   event.waitUntil(
     self.registration.showNotification(title, {
       tag: d.conversationId,

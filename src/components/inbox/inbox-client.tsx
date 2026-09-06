@@ -219,7 +219,8 @@ export function InboxClient({
     setPrefs(p);
     if (!notifyBannerDismissed()) setNotifyBanner(true);
     // v2（cwi-notify-v2）：push 偏好同步 DB（server 推送以 DB 為準；localStorage 只做即時 UI）
-    syncPushPrefs(p);
+    // F-2（cwi-notify-fix）：只發自己角色嘅欄（user.role 係 session 恆定值 — [] deps 安全）
+    syncPushPrefs(p, user.role);
     // v2 Web Push：每次登入（mount）冪等確保 subscription（endpoint unique — 已授權先）
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       void ensurePushSubscription();
@@ -229,12 +230,15 @@ export function InboxClient({
     window.addEventListener("pointerdown", onFirstPointerDown, { once: true, capture: true });
     return () => window.removeEventListener("pointerdown", onFirstPointerDown, { capture: true });
   }, []);
-  const updatePrefs = useCallback((next: NotifyPrefs) => {
-    setPrefs(next);
-    setNotifyPrefs(next);
-    // v2：逐店靜音 / ADMIN opt-in 改動同步 DB（server push 準）
-    syncPushPrefs(next);
-  }, []);
+  const updatePrefs = useCallback(
+    (next: NotifyPrefs) => {
+      setPrefs(next);
+      setNotifyPrefs(next);
+      // v2：逐店靜音 / ADMIN opt-in 改動同步 DB（server push 準）— F-2：只發自己角色嘅欄
+      syncPushPrefs(next, user.role);
+    },
+    [user.role]
+  );
 
   // ★ Part B（N-4）：clinic short name 查表 — STAFF SSR 只帶 primary 店（legacy 單店視角），
   //   多店 staff 收其他店事件時 clinics.find 會 miss → 由 /api/clinics?scope=schedule（零 PII，code/name）補 code 表。
@@ -364,6 +368,8 @@ export function InboxClient({
             adminMsgClinics: prefsRef.current.adminMsgClinics,
           })
         ) {
+          // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
+          console.debug("notify:", "socket:message:new"); // F-7：通知來源留痕（只准 socket/push 觸發）
           void fireNotify({
             kind: "message",
             clinicShort: clinicShortOf(e.clinicId),
@@ -470,6 +476,8 @@ export function InboxClient({
           adminMsgClinics: prefsRef.current.adminMsgClinics,
         })
       ) {
+        // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
+        console.debug("notify:", "socket:notice:new"); // F-7：通知來源留痕（只准 socket/push 觸發）
         void fireNotify({
           kind: "notice",
           clinicShort: clinicShortOf(convN?.clinicId),
@@ -500,6 +508,8 @@ export function InboxClient({
           adminMsgClinics: prefsRef.current.adminMsgClinics,
         })
       ) {
+        // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
+        console.debug("notify:", "socket:urgent:escalation"); // F-7：通知來源留痕（只准 socket/push 觸發）
         void fireNotify({
           kind: "urgent",
           clinicShort: clinicShortOf(convU?.clinicId),
@@ -607,6 +617,8 @@ export function InboxClient({
           adminMsgClinics: prefsRef.current.adminMsgClinics,
         })
       ) {
+        // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
+        console.debug("notify:", "socket:notify:mention"); // F-7：通知來源留痕（只准 socket/push 觸發）
         void fireNotify({
           kind: "mention",
           clinicShort: clinicShortOf(e.clinicId),
@@ -634,6 +646,8 @@ export function InboxClient({
           adminMsgClinics: prefsRef.current.adminMsgClinics,
         })
       ) {
+        // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
+        console.debug("notify:", "socket:notify:assigned"); // F-7：通知來源留痕（只准 socket/push 觸發）
         void fireNotify({
           kind: "assigned",
           clinicShort: e.clinicCode || clinicShortOf(e.clinicId),
@@ -671,6 +685,8 @@ export function InboxClient({
             adminMsgClinics: prefsRef.current.adminMsgClinics,
           })
         ) {
+          // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
+          console.debug("notify:", "socket:notify:sla"); // F-7：通知來源留痕（只准 socket/push 觸發）
           void fireNotify({
             kind: "sla",
             clinicShort: e.clinicCode || clinicShortOf(e.clinicId),
@@ -825,7 +841,15 @@ export function InboxClient({
       const res = await fetch(`/api/conversations/${convId}/messages?limit=${PAGE_SIZE}`);
       if (!res.ok) return;
       const data = (await res.json()) as { messages: MessageItem[]; hasMore: boolean };
-      setMessages(data.messages);
+      // F-8（cwi-notify-fix）：merge by messageId — socket 已 append 入 state 嘅行（server list
+      // 未反映 / refetch race 回舊 list）唔會因整包覆蓋消失；id 撞車 server row 為準。
+      // 換對話要先喺 call site setMessages([]) 清空（避免 A 嘅行漏入 B）。
+      if (selectedIdRef.current !== convId) return; // fetch 期間已換咗對話 → 舊結果棄
+      setMessages((prev) => {
+        const map = new Map(prev.map((m) => [m.id, m]));
+        for (const m of data.messages) map.set(m.id, m);
+        return [...map.values()].sort((a, b) => new Date(a.waTimestamp).getTime() - new Date(b.waTimestamp).getTime());
+      });
       setHasMore(data.hasMore);
       if (data.messages.length > 0) {
         lastMsgTsRef.current = Math.max(lastMsgTsRef.current, new Date(data.messages[data.messages.length - 1].waTimestamp).getTime());
@@ -900,7 +924,16 @@ export function InboxClient({
   // R3 triggers：tab focus 返 / window focus / 每 3 分鐘 idle 掃一次
   useEffect(() => {
     const onVisibility = () => {
-      if (document.visibilityState === "visible") void refetchDelta();
+      if (document.visibilityState !== "visible") return;
+      // ★ cwi-notify-fix（T4）：背景返前台 — socket 重連/重註冊（冪等）+ 補漏
+      //   （refetchConversations + refetchMessages 走 F-8 merge — 唔會 drop socket append 行）
+      const s = socketRef.current;
+      if (s) {
+        if (s.disconnected) s.connect(); // 斷緊 → 重連（connect handler 會 register + refetch）
+        else s.emit("register"); // 連緊 → 冪等重註冊（server room 重 join 兜底）
+      }
+      void refetchDelta();
+      if (selectedIdRef.current) void fetchMessagesLatest(selectedIdRef.current);
     };
     const onFocus = () => void refetchDelta();
     document.addEventListener("visibilitychange", onVisibility);
@@ -911,7 +944,7 @@ export function InboxClient({
       window.removeEventListener("focus", onFocus);
       clearInterval(timer);
     };
-  }, [refetchDelta]);
+  }, [refetchDelta, fetchMessagesLatest]);
 
   const loadOlder = useCallback(async () => {
     const convId = selectedIdRef.current;
@@ -1012,6 +1045,8 @@ export function InboxClient({
             const match = all.find((c) => c.contactId === contactId);
             if (match) {
               setSelectedConvId(match.id);
+              selectedIdRef.current = match.id; // F-8：ref 同步（fetch guard 要即時准）
+              setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge）
               void fetchMessagesLatest(match.id);
               void fetchPendingDrafts(match.id);
               void fetchNoteReceipts(match.id);
@@ -1028,6 +1063,8 @@ export function InboxClient({
         return;
       }
       setSelectedConvId(id);
+      selectedIdRef.current = id; // F-8：ref 同步（fetch guard 要即時准）
+      setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge — 唔清會混兩對話）
       setNotice(null);
       void fetchMessagesLatest(id);
       void fetchPendingDrafts(id);
@@ -1237,22 +1274,9 @@ export function InboxClient({
     [user.staffId]
   );
 
-  // ── cwi-inboxfix-20260905（MD §5.2/§5.3）：8 秒撤回 + 標記已作廢 ────────────────
-  const undoMessage = useCallback(async (messageId: string): Promise<{ ok: boolean; error?: string }> => {
-    try {
-      const res = await fetch(`/api/messages/${messageId}/undo`, { method: "DELETE" });
-      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; message?: string } | null;
-      if (res.status === 409) {
-        // 窗口過咗 — chat-pane 會轉 §5.3（更正草稿 + 標記已作廢）
-        return { ok: false, error: data?.message ?? "已經發出，撤回唔到。" };
-      }
-      if (!res.ok) return { ok: false, error: data?.message ?? data?.error ?? `撤回失敗（${res.status}）` };
-      return { ok: true };
-    } catch {
-      return { ok: false, error: "網絡錯誤" };
-    }
-  }, []);
-
+  // ── cwi-inboxfix-20260905（MD §5.3）：標記已作廢 ──
+  // ★ cwi-notify-fix-20260907（§7 撤回作廢）：8 秒撤回整節剷（server undo route 已刪；
+  //   MsgStatus.CANCELLED enum 保留 — legacy 顯示用，唔會再產生）
   const voidMessage = useCallback(async (messageId: string): Promise<{ ok: boolean; error?: string }> => {
     try {
       const res = await fetch(`/api/messages/${messageId}/void`, { method: "POST" });
@@ -1647,8 +1671,7 @@ export function InboxClient({
         window={selectedConv?.window ?? null}
         onSend={sendMessage}
         onSendTemplate={sendTemplate}
-        // cwi-inboxfix-20260905（MD §5.2/§5.3）：8 秒撤回 + 標記已作廢
-        onUndoMessage={undoMessage}
+        // cwi-inboxfix-20260905（MD §5.3）：標記已作廢（§7：8s 撤回已作廢）
         onVoidMessage={voidMessage}
         userRole={user.role}
         staffName={user.name}
@@ -1705,6 +1728,8 @@ export function InboxClient({
               const cid = urgentToast.conversationId;
               setUrgentToast(null);
               setSelectedConvId(cid);
+              selectedIdRef.current = cid; // F-8：ref 同步（fetch guard 要即時准）
+              setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge）
               void fetchMessagesLatest(cid);
               void fetchPendingDrafts(cid);
               void markRead(cid);

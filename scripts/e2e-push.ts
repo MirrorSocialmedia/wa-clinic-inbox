@@ -306,7 +306,13 @@ async function assertNoCapture(endpoint: string, sinceT: number, windowMs = 10_0
 
 /** subscribe（API）+ 斷言 DB row（expectStaff 空 = 唔斷言 owner — admin 用） */
 async function subscribe(cookieFile: string, expectStaff: string, sub: MockSub): Promise<void> {
-  const r = await api(cookieFile, "/api/push/subscribe", { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth }, userAgent: "e2e-push" });
+  const doFetch = () => api(cookieFile, "/api/push/subscribe", { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth }, userAgent: "e2e-push" });
+  let r = await doFetch();
+  if (r.status >= 500) {
+    // dev 環境 flake（Redis lazy-reconnect / 首編譯）→ 等 2s 重試一次
+    await waitMs(2000);
+    r = await doFetch();
+  }
   if (r.status !== 200) fail(`subscribe 失敗 status=${r.status} json=${JSON.stringify(r.json)}`);
   const row = await prisma.pushSubscription.findUnique({ where: { endpoint: sub.endpoint }, select: { staffId: true } });
   if (!row) fail("subscribe DB row 缺");
@@ -450,13 +456,16 @@ async function t191(): Promise<void> {
     await waitForCapture(subB.endpoint, t0); // 交付證明（B 照收 = 事件到咗）
     await assertNoCapture(subA.endpoint, t0, 10_000, "t191 P4（admin opt-out 後唔應收）");
 
-    // Phase 5：mutedClinics（DB）— B mute TKW → B 唔收（已指派 conv → targets 只剩 B → 全部被 mute filter 掉）
-    // 交付證明 = sendInbound 內已等咗 Message 落 DB（worker 處理咗）— 唔使其他 capture
-    r = await api(cookieB, "/api/push/prefs", { mutedClinics: [clinic], adminMsgClinics: [] });
-    if (r.status !== 200) fail(`t191 P5: B prefs 寫失敗（${r.status}）`);
+    // Phase 5：mutedClinics（DB）— ★ cwi-notify-fix F-5 新語義：assignee forced 必收（P2 嘅
+    //   assignee B 即使 mute 都照收 — 舊斷言已廢）；mute 只濾非 assignee →
+    //   解指派 + C mute TKW 測：C 唔收；B（未 mute）照收（交付證明 + 事件到咗證明）
+    await prisma.conversation.update({ where: { id: PC_CONV }, data: { assigneeId: null } });
+    r = await api(cookieC, "/api/push/prefs", { mutedClinics: [clinic], adminMsgClinics: [] });
+    if (r.status !== 200) fail(`t191 P5: C prefs 寫失敗（${r.status}）`);
     t0 = Date.now();
     await sendInbound(PII_WAID, PII_NAME, "e2e-push-t191-p5");
-    await assertNoCapture(subB.endpoint, t0, 10_000, "t191 P5（B muted TKW 唔應收）");
+    await assertNoCapture(subC.endpoint, t0, 10_000, "t191 P5（C muted TKW 唔應收）");
+    await waitForCapture(subB.endpoint, t0); // B 未 mute → 照收
   } finally {
     // 還原：prefs 原值 + 解指派 + 清 sub
     if (adminPrefsBefore) await prisma.staffUser.update({ where: { id: adminId }, data: { pushPrefs: adminPrefsBefore.pushPrefs ?? Prisma.JsonNull } }).catch(() => {});
@@ -539,6 +548,166 @@ async function t193(): Promise<void> {
   }
 }
 
+function countCaptures(endpoint: string, sinceT: number): number {
+  return captures.filter((c) => c.endpoint === endpoint && c.t >= sinceT).length;
+}
+
+// ── cwi-notify-fix-20260907 scenarios（T260–T264） ────────────────────────
+async function t260(): Promise<void> {
+  if (!staffB || !cookieB || !cookieAdmin) throw new Error("t260 要 staff-b/cookie-b/cookie-admin");
+  const probe = makeSub("t260-probe");
+  await subscribe(cookieAdmin, "", probe);
+  const adminRow = await prisma.pushSubscription.findUnique({ where: { endpoint: probe.endpoint }, select: { staffId: true } });
+  const adminId = adminRow?.staffId ?? "";
+  if (!adminId) fail("t260: admin session 認定失敗");
+  const bBefore = await readPrefsRaw(staffB);
+  const adminBefore = await readPrefsRaw(adminId);
+  try {
+    // STAFF：payload 帶兩欄 → 只寫 mutedClinics（黑名單語義）；另一欄永不被寫
+    let r = await api(cookieB, "/api/push/prefs", { mutedClinics: [clinic], adminMsgClinics: [clinic] });
+    if (r.status !== 200) fail(`t260: STAFF prefs 寫失敗（${r.status}）`);
+    const rowB = await readPrefsRaw(staffB);
+    const afterB = (rowB?.pushPrefs ?? null) as Record<string, unknown> | null;
+    const bMuted = Array.isArray(afterB?.mutedClinics) ? (afterB!.mutedClinics as string[]) : null;
+    if (JSON.stringify(bMuted) !== JSON.stringify([clinic])) fail(`t260: STAFF mutedClinics 應=[clinic]（actual=${JSON.stringify(bMuted)}）`);
+    if (afterB && "adminMsgClinics" in afterB) fail(`t260: STAFF pushPrefs 唔應該含 adminMsgClinics（actual=${JSON.stringify(afterB)}）`);
+    // ADMIN：只寫 adminMsgClinics（白名單語義）
+    r = await api(cookieAdmin, "/api/push/prefs", { mutedClinics: [clinic], adminMsgClinics: [clinic] });
+    if (r.status !== 200) fail(`t260: ADMIN prefs 寫失敗（${r.status}）`);
+    const rowA = await readPrefsRaw(adminId);
+    const afterA = (rowA?.pushPrefs ?? null) as Record<string, unknown> | null;
+    const aAdminMsg = Array.isArray(afterA?.adminMsgClinics) ? (afterA!.adminMsgClinics as string[]) : null;
+    if (JSON.stringify(aAdminMsg) !== JSON.stringify([clinic])) fail(`t260: ADMIN adminMsgClinics 應=[clinic]（actual=${JSON.stringify(aAdminMsg)}）`);
+    if (afterA && "mutedClinics" in afterA) fail(`t260: ADMIN pushPrefs 唔應該含 mutedClinics（actual=${JSON.stringify(afterA)}）`);
+  } finally {
+    if (bBefore) await prisma.staffUser.update({ where: { id: staffB }, data: { pushPrefs: bBefore.pushPrefs ?? Prisma.JsonNull } }).catch(() => {});
+    if (adminBefore) await prisma.staffUser.update({ where: { id: adminId }, data: { pushPrefs: adminBefore.pushPrefs ?? Prisma.JsonNull } }).catch(() => {});
+    await clearSubs(staffB, adminId);
+  }
+  console.log("PUSH-OK: t260 prefs 角色分離（STAFF→mutedClinics / ADMIN→adminMsgClinics / 另一欄不寫）");
+}
+
+async function t261(): Promise<void> {
+  if (!staffB || !cookieB) throw new Error("t261 要 staff-b/cookie-b");
+  const sub = makeSub("t261-b");
+  await subscribe(cookieB, staffB, sub);
+  const before = await readPrefsRaw(staffB);
+  try {
+    // 兩 array 完全相同 = 舊版盲寫整包污染（根因形狀）→ 讀取自我修復 muted 當空
+    await prisma.staffUser.update({ where: { id: staffB }, data: { pushPrefs: { mutedClinics: [clinic], adminMsgClinics: [clinic] } } });
+    await prisma.conversation.update({ where: { id: PC_CONV }, data: { assigneeId: null } });
+    const t0 = Date.now();
+    await sendInbound(PII_WAID, PII_NAME, "e2e-push-t261");
+    const cap = await waitForCapture(sub.endpoint, t0); // 自我修復 → 照收
+    const p = JSON.parse(decryptCapture(cap, sub)) as { kind?: string };
+    if (p.kind !== "message") fail(`t261: kind 應=message（actual=${p.kind}）`);
+    // worker log "push: 自我修復" warn 由 shell driver 斷言
+  } finally {
+    if (before) await prisma.staffUser.update({ where: { id: staffB }, data: { pushPrefs: before.pushPrefs ?? Prisma.JsonNull } }).catch(() => {});
+    await prisma.conversation.update({ where: { id: PC_CONV }, data: { assigneeId: null } }).catch(() => {});
+    await clearSubs(staffB);
+  }
+  console.log("PUSH-OK: t261 自我修復（相同 array → muted 當空 + 照收）");
+}
+
+async function t262(): Promise<void> {
+  if (!staffB || !staffC || !cookieB || !cookieC) throw new Error("t262 要 B/C 全套");
+  const subB = makeSub("t262-b");
+  const subC = makeSub("t262-c");
+  await subscribe(cookieB, staffB, subB);
+  await subscribe(cookieC, staffC, subC);
+  // hermetic：該店全部 active STAFF mute + 全部 ADMIN prefs 清（保還原）
+  const allStaff = await prisma.staffUser.findMany({ where: { role: "STAFF", active: true, clinics: { some: { clinicId: clinic } } }, select: { id: true, pushPrefs: true } });
+  const allAdmins = await prisma.staffUser.findMany({ where: { role: "ADMIN", active: true }, select: { id: true, pushPrefs: true } });
+  const saved = new Map<string, Prisma.JsonValue | null>();
+  for (const s of allStaff) saved.set(s.id, s.pushPrefs);
+  for (const a of allAdmins) saved.set(a.id, a.pushPrefs);
+  try {
+    await prisma.staffUser.updateMany({ where: { id: { in: allStaff.map((s) => s.id) } }, data: { pushPrefs: { mutedClinics: [clinic] } } });
+    await prisma.staffUser.updateMany({ where: { id: { in: allAdmins.map((a) => a.id) } }, data: { pushPrefs: Prisma.JsonNull } });
+    await prisma.conversation.update({ where: { id: PC_CONV }, data: { assigneeId: null } });
+    const t0 = Date.now();
+    await sendInbound(PII_WAID, PII_NAME, "e2e-push-t262");
+    await assertNoCapture(subB.endpoint, t0, 10_000, "t262 B（muted）");
+    await assertNoCapture(subC.endpoint, t0, 10_000, "t262 C（muted）");
+    // worker log "push: 全部收件人被 prefs 濾走" warn 由 shell driver 斷言
+  } finally {
+    for (const [id, p] of saved) await prisma.staffUser.update({ where: { id }, data: { pushPrefs: p ?? Prisma.JsonNull } }).catch(() => {});
+    await clearSubs(staffB, staffC);
+  }
+  console.log("PUSH-OK: t262 全濾走（全部 mute → 零推送）");
+}
+
+async function t263(): Promise<void> {
+  if (!staffB || !cookieB || !cookieAdmin) throw new Error("t263 要 staff-b/cookie-b/cookie-admin");
+  const subB = makeSub("t263-b");
+  const subA = makeSub("t263-admin");
+  await subscribe(cookieB, staffB, subB);
+  await subscribe(cookieAdmin, "", subA);
+  const adminRow = await prisma.pushSubscription.findUnique({ where: { endpoint: subA.endpoint }, select: { staffId: true } });
+  const adminId = adminRow?.staffId ?? "";
+  if (!adminId) fail("t263: admin session 認定失敗");
+  const bBefore = await readPrefsRaw(staffB);
+  const adminBefore = await readPrefsRaw(adminId);
+  try {
+    // Part A：assignee = B + B mute 該店 → forced 必收（F-5）
+    await prisma.conversation.update({ where: { id: PC_CONV }, data: { assigneeId: staffB } });
+    await prisma.staffUser.update({ where: { id: staffB }, data: { pushPrefs: { mutedClinics: [clinic] } } });
+    let t0 = Date.now();
+    await sendInbound(PII_WAID, PII_NAME, "e2e-push-t263-a");
+    await waitForCapture(subB.endpoint, t0); // forced 照收
+    // Part B：assignee = ADMIN + adminMsgClinics 含該店 → Map 去重只收 1 次（舊碼 = 2 次）
+    await prisma.staffUser.update({ where: { id: adminId }, data: { pushPrefs: { adminMsgClinics: [clinic] } } });
+    await prisma.conversation.update({ where: { id: PC_CONV }, data: { assigneeId: adminId } });
+    t0 = Date.now();
+    await sendInbound(PII_WAID, PII_NAME, "e2e-push-t263-b");
+    await waitForCapture(subA.endpoint, t0);
+    await waitMs(10_000); // 等夠窗 → 若舊碼雙推，第二條必喺此窗內
+    const n = countCaptures(subA.endpoint, t0);
+    if (n !== 1) fail(`t263: ADMIN 做 assignee 應去重收 1 次（actual=${n}）`);
+  } finally {
+    if (bBefore) await prisma.staffUser.update({ where: { id: staffB }, data: { pushPrefs: bBefore.pushPrefs ?? Prisma.JsonNull } }).catch(() => {});
+    if (adminBefore) await prisma.staffUser.update({ where: { id: adminId }, data: { pushPrefs: adminBefore.pushPrefs ?? Prisma.JsonNull } }).catch(() => {});
+    await prisma.conversation.update({ where: { id: PC_CONV }, data: { assigneeId: null } }).catch(() => {});
+    await clearSubs(staffB, adminId);
+  }
+  console.log("PUSH-OK: t263 assignee 靜音照收（forced）+ ADMIN assignee 去重（=1）");
+}
+
+async function t264(): Promise<void> {
+  if (!staffB || !cookieB) throw new Error("t264 要 staff-b/cookie-b");
+  const before = await readPrefsRaw(staffB);
+  const sub = makeSub("t264-b");
+  try {
+    // (1) 冇裝置訂閱
+    await prisma.staffUser.update({ where: { id: staffB }, data: { pushPrefs: Prisma.JsonNull } });
+    let r = await api(cookieB, "/api/push/test", { clinicId: clinic });
+    let d = r.json as { result?: string; count?: number; reason?: string };
+    if (r.status !== 200 || d?.result !== "no-subscription") fail(`t264 no-sub: 期望 no-subscription（actual=${r.status} ${JSON.stringify(d)}）`);
+    // (2) 已推送 1 部裝置（mock 200）
+    await subscribe(cookieB, staffB, sub);
+    r = await api(cookieB, "/api/push/test", { clinicId: clinic });
+    d = r.json as { result?: string; count?: number };
+    if (r.status !== 200 || d?.result !== "pushed" || d?.count !== 1) fail(`t264 pushed: 期望 pushed/1（actual=${r.status} ${JSON.stringify(d)}）`);
+    // (3) 推送失敗（mock 500 → reason）
+    endpointStatus[sub.path] = 500;
+    r = await api(cookieB, "/api/push/test", { clinicId: clinic });
+    d = r.json as { result?: string; reason?: string };
+    if (r.status !== 200 || d?.result !== "failed" || !d?.reason) fail(`t264 failed: 期望 failed+reason（actual=${r.status} ${JSON.stringify(d)}）`);
+    delete endpointStatus[sub.path];
+    // (4) 呢間店被你靜音咗
+    await prisma.staffUser.update({ where: { id: staffB }, data: { pushPrefs: { mutedClinics: [clinic] } } });
+    r = await api(cookieB, "/api/push/test", { clinicId: clinic });
+    d = r.json as { result?: string };
+    if (r.status !== 200 || d?.result !== "muted") fail(`t264 muted: 期望 muted（actual=${r.status} ${JSON.stringify(d)}）`);
+  } finally {
+    delete endpointStatus[sub.path];
+    if (before) await prisma.staffUser.update({ where: { id: staffB }, data: { pushPrefs: before.pushPrefs ?? Prisma.JsonNull } }).catch(() => {});
+    await clearSubs(staffB);
+  }
+  console.log("PUSH-OK: t264 /api/push/test 四種結果（no-subscription/pushed/failed/muted）");
+}
+
 // Prisma Json null（pushPrefs 還原）
 async function main(): Promise<void> {
   await startMockServer();
@@ -548,6 +717,11 @@ async function main(): Promise<void> {
     else if (scenario === "t191") await t191();
     else if (scenario === "t192") await t192();
     else if (scenario === "t193") await t193();
+    else if (scenario === "t260") await t260();
+    else if (scenario === "t261") await t261();
+    else if (scenario === "t262") await t262();
+    else if (scenario === "t263") await t263();
+    else if (scenario === "t264") await t264();
     else throw new Error(`unknown scenario: ${scenario}`);
   } catch (e) {
     const r = e instanceof Error ? e.message : String(e);

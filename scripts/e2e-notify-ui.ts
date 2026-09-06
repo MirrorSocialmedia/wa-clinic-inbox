@@ -66,11 +66,13 @@ const staffB = arg("--staff-b");
 const denied = arg("--denied") === "1";
 const noSw = arg("--no-sw") === "1"; // v2：abort /sw.js → 驗 fallback 路徑
 const prefPreset = arg("--prefs"); // JSON（t167 預設 mutedClinics）
+const waitName = arg("--wait-name"); // 列表等待名（t265–t267；缺省 = PII_NAME）
 const cookieAFile = arg("--cookie");
 const cookieBFile = arg("--cookie2");
 const cookieCFile = arg("--cookie3");
 
 const PII_NAME = "PII 張三 E2E";
+const listWaitName = waitName || PII_NAME; // 必喺 PII_NAME 之後（TDZ）
 const PII_PHONE = "85291234567";
 const PII_BODY = "e2e-notify-pii-xyz 牙痛瞓唔着想約明日";
 const CLINIC_SHORT = "TKW";
@@ -365,6 +367,15 @@ async function titleUnread(P: PageLike): Promise<number> {
   const t = (await P.evaluate(() => document.title)) as string;
   const m = /^\((\d+)\) WA Inbox$/.exec(t);
   return m ? Number(m[1]) : 0;
+}
+
+/** cwi-notify-fix T4：模擬 tab 背景/前台（patch visibilityState + dispatch visibilitychange） */
+async function cycleVisibility(P: PageLike, to: "hidden" | "visible"): Promise<void> {
+  await P.evaluate((v: string) => {
+    Object.defineProperty(document, "visibilityState", { value: v, configurable: true });
+    Object.defineProperty(document, "hidden", { value: v === "hidden", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, to);
 }
 
 // ── scenarios ────────────────────────────────────────────────────────────
@@ -696,6 +707,82 @@ async function main(): Promise<void> {
         await new Promise((r) => setTimeout(r, 500));
       }
       if (!atLogin) fail("t194: 登出後未去 /login");
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t265") {
+      // cwi-notify-fix F-7：通知只准 socket/push 觸發 — refetch 路徑（visibilitychange →
+      //   register + refetchDelta + fetchMessagesLatest）唔好產生任何通知/聲/標題改。
+      if (!convU) throw new Error("t265 要 --conv-u");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", "");
+      browsers.push(a.B);
+      await waitForListReady(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000)); // socket connect
+      const titleBefore = (await a.P.evaluate(() => document.title)) as string;
+      const sBase = await spy(a.P);
+      // 背景 → 前台（全程零 socket 事件 — 純 refetch 路徑）
+      await cycleVisibility(a.P, "hidden");
+      await new Promise((r) => setTimeout(r, 1500));
+      await cycleVisibility(a.P, "visible");
+      await new Promise((r) => setTimeout(r, 6000)); // 等 register + refetch 行完
+      const s = await spy(a.P);
+      if (s.notifications.length > sBase.notifications.length) fail(`t265: refetch 路徑唔應該彈通知（Δ=${s.notifications.length - sBase.notifications.length}）spy=${JSON.stringify(s)}`);
+      if (s.mediaPlays.length > sBase.mediaPlays.length || s.ctxCreations > sBase.ctxCreations) fail(`t265: refetch 路徑唔應該響（media=${s.mediaPlays.length} ctx=${s.ctxCreations}）`);
+      const titleAfter = (await a.P.evaluate(() => document.title)) as string;
+      if (titleAfter !== titleBefore) fail(`t265: refetch 路徑唔應該改標題（${titleBefore} → ${titleAfter}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t266") {
+      // cwi-notify-fix F-8：refetch 回舊 list（server 快照無 socket 剛 append 嗰條 — 佢只喺 client
+      //   state）→ merge by messageId 唔好 drop 嗰條、唔好重複。
+      if (!convU) throw new Error("t266 要 --conv-u");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      // 等對話開咗（profileName 出現 ≥2 次 = 列表 + chat header）
+      const t0 = Date.now();
+      for (;;) {
+        const n = await a.P.getByText(listWaitName).count();
+        if (n >= 2) break;
+        if (Date.now() - t0 > 120_000) fail("t266 對話未開（?conv= 深連結）");
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      await new Promise((r) => setTimeout(r, 3000)); // socket connect
+      // socket append 一條（佢唔會入 server 快照 → 下一次 refetch 天然係「舊 list」）
+      // 假訊息 id = e2enotifymsg1（msgSeq 進程內首個）— 只數 chat pane 行（#msg-<id>），
+      //   唔會同列表 preview 重複計
+      await publishUntilSeen(a.P, "t266", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-t266-new" })), "e2e-t266-new");
+      const seenBefore = await a.P.locator("#msg-e2enotifymsg1").count();
+      if (seenBefore !== 1) fail(`t266: socket append 後期望 chat pane 1 條（actual=${seenBefore}）`);
+      // 觸發 refetch（visibility 循環）
+      await cycleVisibility(a.P, "hidden");
+      await new Promise((r) => setTimeout(r, 1500));
+      await cycleVisibility(a.P, "visible");
+      await new Promise((r) => setTimeout(r, 6000)); // 等 fetchMessagesLatest 行完（merge）
+      const seenAfter = await a.P.locator("#msg-e2enotifymsg1").count();
+      if (seenAfter !== 1) fail(`t266: refetch 後 merge 應保留且無重複（期望 1，actual=${seenAfter}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t267") {
+      // cwi-notify-fix T4：背景 → 前台 → socket 重註冊（冪等）+ refetch；
+      //   循環後 socket 路徑仍可用（新消息照常到）。
+      //   限制：headless 無法強制 TCP 斷線，「重連」行為以 re-register → 交付驗證
+      //   （visibility handler 已掛 = 循環後事件照常到 + refetch 唔損訊息）。
+      if (!convU) throw new Error("t267 要 --conv-u");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      const t0 = Date.now();
+      for (;;) {
+        const n = await a.P.getByText(listWaitName).count();
+        if (n >= 2) break;
+        if (Date.now() - t0 > 120_000) fail("t267 對話未開（?conv= 深連結）");
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      await new Promise((r) => setTimeout(r, 3000));
+      // 背景 → 前台
+      await cycleVisibility(a.P, "hidden");
+      await new Promise((r) => setTimeout(r, 1500));
+      await cycleVisibility(a.P, "visible");
+      await new Promise((r) => setTimeout(r, 4000)); // register + refetch
+      const vis = (await a.P.evaluate(() => document.visibilityState)) as string;
+      if (vis !== "visible") fail(`t267: visibilityState 應=visible（actual=${vis}）`);
+      // 交付證明：循環後新消息照常到（socket + register 有效）
+      await publishUntilSeen(a.P, "t267", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-t267-after" })), "e2e-t267-after");
       console.log("NOTIFY-UI-OK");
     } else {
       throw new Error(`unknown scenario: ${scenario}`);
