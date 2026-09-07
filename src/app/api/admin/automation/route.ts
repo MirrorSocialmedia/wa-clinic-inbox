@@ -11,7 +11,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdminOrSupervisor } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { publishControl } from "@/lib/notify";
 import {
@@ -39,7 +39,7 @@ function automationAdminIds(): string[] {
 }
 
 export const GET = handle(async (req: NextRequest) => {
-  const ctx = await requireAdmin(req);
+  const ctx = await requireAdminOrSupervisor(req); // ★ cwi-routing-20260906 §8：SUPERVISOR 讀寫 AI 級別
 
   const weeks = lastFourCompleteWeeks();
   const [clinics, policies, stats] = await Promise.all([
@@ -96,7 +96,7 @@ const patchSchema = z.object({
 });
 
 export const PATCH = handle(async (req: NextRequest) => {
-  const ctx = await requireAdmin(req);
+  const ctx = await requireAdminOrSupervisor(req); // ★ cwi-routing-20260906 §8：SUPERVISOR 讀寫 AI 級別
   const body = patchSchema.safeParse(await req.json().catch(() => null));
   if (!body.success) {
     return NextResponse.json({ error: "bad_request", message: "body: { clinicId, category, level: L1-L4 }" }, { status: 400 });

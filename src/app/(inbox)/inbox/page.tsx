@@ -46,7 +46,7 @@ export default async function InboxPage({
   // staffMap 唔限 clinic scope — cwi-inboxfix-20260905（T9 e2e 發現）：跨店負責人的
   // 三態 chip（● 某某 處理緊）需要全店 staff 名；同 /api/conversations 對齊（全量 active）。
   // 零 PII 增量：staff 名對 STAFF 本就喺 API list 回傳（跨店線 assigneeName 一直有值）。
-  const [clinics, convs, contacts, staff, pendingBookings] = await Promise.all([
+  const [clinics, convs, contacts, staff, pendingBookings, skillGroups, myGroupMembers] = await Promise.all([
     session.role === "STAFF"
       ? prisma.clinic.findMany({ where: { id: { in: myClinicIds } } })
       : prisma.clinic.findMany({ orderBy: { code: "asc" } }),
@@ -60,6 +60,12 @@ export default async function InboxPage({
       orderBy: { createdAt: "desc" },
       take: 200,
     }),
+    // ★ cwi-routing-20260906（MD §4.3）：路由 badge 組名（出廠 4 組，全量 fetch）
+    prisma.skillGroup.findMany({ select: { id: true, name: true, code: true } }),
+    // 「派俾我」膠囊 — 我係邊啲組嘅成員（STAFF；ADMIN/SUPERVISOR 唔使）
+    session.role === "STAFF"
+      ? prisma.skillGroupMember.findMany({ where: { staffId: session.staffId }, select: { groupId: true } })
+      : Promise.resolve([] as { groupId: string }[]),
   ]);
 
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
@@ -67,6 +73,7 @@ export default async function InboxPage({
   // cwi-multiclinic-20260903：clinic map（clinicName badge）+ 補齊指派俾我嘅外店線嘅店
   // （SSR 首屏 clinicName/店名 badge 完整；client 另有 /api/clinics?scope=schedule fail-soft 補漏）
   const clinicMap = new Map(clinics.map((c) => [c.id, c]));
+  const groupMap = new Map(skillGroups.map((g) => [g.id, g.name]));
   const rowClinicIds = Array.from(new Set(convs.map((c) => c.clinicId)));
   const missingClinicIds = rowClinicIds.filter((id) => !clinicMap.has(id));
   if (missingClinicIds.length > 0) {
@@ -114,6 +121,14 @@ export default async function InboxPage({
       urgency: cv.urgency,
       urgent: cv.urgent,
       aiSummary: cv.aiSummary,
+      // ★ cwi-routing-20260906（MD §4.3）：路由 badge — 🎯 組名 / 🎯 單人名 / ⚠ 已升級
+      routedGroupId: cv.routedGroupId,
+      routedStaffId: cv.routedStaffId,
+      routedRuleId: cv.routedRuleId,
+      routedAt: cv.routedAt,
+      escalatedAt: cv.escalatedAt,
+      routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId) ?? null) : null,
+      routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
       contact: contactMap.get(cv.contactId) ?? null,
       // ★ booking-ui（A）：已釘住舊客（藍掣可見性）
       pinnedPatient: cv.pinnedPatientApricotId ? { patientApricotId: cv.pinnedPatientApricotId } : null,
@@ -170,6 +185,8 @@ export default async function InboxPage({
                 ? [session.clinicId]
                 : []
             : [],
+        // ★ cwi-routing-20260906（MD §4.3）：「派俾我 N」膠囊 — 我嘅組 id（client 端 filter + 計數 backup）
+        myGroupIds: myGroupMembers.map((g) => g.groupId),
       }}
       initialClinics={clinics}
       initialConversations={conversations}

@@ -9,17 +9,17 @@ import type { NotifyPrefs } from "@/lib/notify-client";
 interface Props {
   /** 手機：入咗聊天就藏列表（桌面永遠顯示） */
   hidden?: boolean;
-  userRole: "ADMIN" | "STAFF";
+  userRole: "ADMIN" | "STAFF" | "SUPERVISOR"; // ★ cwi-routing-20260906 §8
   clinics: ClinicInfo[];
   activeClinicId: string | "all";
   onActiveClinic: (id: string | "all") => void;
   statusFilter: ConvStatus | "ALL";
   onStatusFilter: (s: ConvStatus | "ALL") => void;
   /** ★ cwi-inboxfix-20260905（MD I-1/I-2）：膠囊指派維度 — unassigned=公海 / mine=我負責（server 端 filter） */
-  assignedFilter: "all" | "unassigned" | "mine";
-  onAssignedFilter: (f: "all" | "unassigned" | "mine") => void;
+  assignedFilter: "all" | "unassigned" | "mine" | "routed";
+  onAssignedFilter: (f: "all" | "unassigned" | "mine" | "routed") => void;
   /** ★ cwi-inboxfix-20260905（MD §1.1）：計數（?counts=1；列表 refetch 順帶更新）— null = 未攞到 */
-  counts: { all: number; unassigned: number; mine: number; pending: number; resolved: number } | null;
+  counts: { all: number; unassigned: number; mine: number; routed: number; pending: number; resolved: number } | null;
   conversations: ConversationItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
@@ -27,6 +27,8 @@ interface Props {
   onSearch: (q: string) => void;
   searchResults: ConversationItem[] | null;
   onClearSearch: () => void;
+  /** ★ cwi-routing-20260906（MD §4.3）：我嘅技能組 id — 「派俾我」膠囊 client 端 filter */
+  myGroupIds?: string[];
   /** ★ H1：自己 staffId — 負責人 chip 三狀態（自己=綠「你」/ 別人=琥珀名 / unassigned=無 chip） */
   myStaffId: string;
   /** cwi-multiclinic-20260903（MD A.6.4）：自己綁定店集合（STAFF；ADMIN = []）— 跨店線店名 badge 判定 */
@@ -167,7 +169,13 @@ export function ConversationList(p: Props) {
     //   與 server ?assigned= 語義等價 — 見 fetchConversations 註解）
     if (p.assignedFilter !== "all") {
       list = list.filter((c) =>
-        p.assignedFilter === "unassigned" ? c.assigneeId == null : c.assigneeId === p.myStaffId
+        p.assignedFilter === "unassigned"
+          ? c.assigneeId == null
+          : p.assignedFilter === "routed"
+            // ★ cwi-routing-20260906（MD §4.3）：派俾我 = 未指派 且（routedStaffId=我 ∨ routedGroupId∈我組）
+            ? c.assigneeId == null &&
+              (c.routedStaffId === p.myStaffId || (c.routedGroupId != null && (p.myGroupIds ?? []).includes(c.routedGroupId)))
+            : c.assigneeId === p.myStaffId
       );
     }
     if (p.statusFilter !== "ALL") list = list.filter((c) => c.status === p.statusFilter);
@@ -179,7 +187,7 @@ export function ConversationList(p: Props) {
       if (ar !== br) return ar - br;
       return new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime();
     });
-  }, [p.conversations, p.searchResults, p.statusFilter, p.assignedFilter, p.myStaffId]);
+  }, [p.conversations, p.searchResults, p.statusFilter, p.assignedFilter, p.myStaffId, p.myGroupIds]);
 
   return (
     <aside
@@ -456,11 +464,18 @@ export function ConversationList(p: Props) {
           公海 = 唯一有色膠囊（bg-warn 系）— 佢係唯一「冇人跟＝會漏單」嘅狀態。
           狀態 chip 撳 active 嗰粒 = 返轉去（無獨立「全部狀態」chip — 指派維度「全部」= 總開關）。 */}
       <div className="flex gap-1.5 px-3 py-2 overflow-x-auto items-center">
-        {(["all", "unassigned", "mine"] as const).map((f) => {
+        {(["all", "unassigned", "mine", "routed"] as const).map((f) => {
           const active = p.assignedFilter === f;
           const isPool = f === "unassigned";
+          const isRouted = f === "routed";
           const label =
-            f === "all" ? "全部" : isPool ? `公海 ${p.counts?.unassigned ?? 0}` : `我負責 ${p.counts?.mine ?? 0}`;
+            f === "all"
+              ? "全部"
+              : isPool
+                ? `公海 ${p.counts?.unassigned ?? 0}`
+                : isRouted
+                  ? `派俾我 ${p.counts?.routed ?? 0}`
+                  : `我負責 ${p.counts?.mine ?? 0}`;
           return (
             <button
               key={f}
@@ -471,9 +486,13 @@ export function ConversationList(p: Props) {
                   ? active
                     ? "bg-warn text-white font-semibold shadow-sm"
                     : "bg-warn/25 text-warn-text"
-                  : active
-                    ? "bg-t1 text-canvas"
-                    : "bg-transparent text-t2 border border-line hover:bg-panel-2"
+                  : isRouted
+                    ? active
+                      ? "bg-brand text-panel font-semibold shadow-sm"
+                      : "bg-brand-soft text-brand-text"
+                    : active
+                      ? "bg-t1 text-canvas"
+                      : "bg-transparent text-t2 border border-line hover:bg-panel-2"
               }`}
             >
               {label}
@@ -673,6 +692,29 @@ export function ConversationList(p: Props) {
                         等回覆
                       </span>
                     )}
+                    {/* ★ cwi-routing-20260906（MD §4.3）：路由 badge — ⚠ 已升級 / 🎯 組 / 🎯 單人當值（常駐；未路由 = 無） */}
+                    {c.escalatedAt ? (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-danger-soft text-danger-text font-semibold inline-flex items-center gap-0.5 flex-none"
+                        title={`投訴已升級（${new Date(c.escalatedAt).toLocaleString()}）— 待主管組接手`}
+                      >
+                        ⚠ 已升級{c.routedGroupName ? ` · ${c.routedGroupName}` : ""}
+                      </span>
+                    ) : c.routedStaffId ? (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-brand-soft text-brand-text font-medium inline-flex items-center gap-0.5 flex-none"
+                        title={`路由指定：${c.routedStaffName ?? "當值同事"}（當值中 — 優先跟進）`}
+                      >
+                        🎯 {c.routedStaffName ?? "當值"}
+                      </span>
+                    ) : c.routedGroupId ? (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-brand-soft text-brand-text font-medium inline-flex items-center gap-0.5 flex-none"
+                        title={`路由標記：${c.routedGroupName ?? "技能組"}（未指派 — 撳入去覆一句即接手）`}
+                      >
+                        🎯 {c.routedGroupName ?? "組"}
+                      </span>
+                    ) : null}
                     {/* ★ cwi-inboxfix-20260905（MD I-3）：負責人常駐三態 — 永遠 render：
                         ⚑ 未指派（橙）/ ● 你（重點色，跨店加「由 X 派嚟」）/ ● 某某（灰） */}
                     {c.assigneeId == null ? (

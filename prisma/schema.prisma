@@ -13,6 +13,10 @@ datasource db {
 enum Role {
   ADMIN
   STAFF
+  // ★ cwi-routing-20260906（§8 修訂）：主管 — 全店唯讀 + AI 自動化級別讀寫（含 panic 降 L1）
+  // + 內部備註可寫；覆客（send/assign/flows/bookings）與設定類一律 403。
+  // 通知照 STAFF 規則（★ 老細拍板：唔預設靜音）。
+  SUPERVISOR
 }
 
 enum Direction {
@@ -73,6 +77,9 @@ enum NoticeKind {
   BOOKING_AUTO      // L4：AI 已自動落單（資訊性）
   SUGGESTION_READY  // 學習迴路有新建議（Phase E 用）
   SYSTEM
+  // ★ cwi-routing-20260906：規則式指派通知軌（§2.4 / §3）
+  ROUTING_ASSIGNED  // 路由命中 → 組/單人標記 + 通知（title「新個案 · {組} · {店}」零 PII）
+  ROUTING_ESCALATION // 投訴 N 分鐘未接手 → 升級第二級組（title「升級 · {原組} 未處理 · {店}」）
 }
 
 // Phase 2b：逐舖 AI 模式（指揮大神 2026-08-18 決定，覆蓋 MD D5「AI 永不發送」）
@@ -242,6 +249,65 @@ model Contact {
   @@unique([clinicId, waId])                  // 同一病人喺兩間店 = 兩條 Contact（隔離）
 }
 
+// ★ cwi-routing-20260906（§1）：規則式指派 + 技能組。
+// 鐵律（R-2）：路由結果只寫 Conversation.routed* 標記欄，**唔掂 assigneeId** —
+// 對話仍然「未指派」（公海照見、任何人接手得、Send Lock 唔生效）。
+enum RoutingTargetType {
+  GROUP        // 技能組（初版三個 + 主管組 SUPV）
+  STAFF        // 單人（= 組得一個人）
+  CLINIC_POOL  // 該店公海（唔做任何標記 = 現行行為）
+}
+
+model SkillGroup {
+  id          String  @id @default(cuid())
+  name        String                          // 療程顧問 / 投訴處理 / 前台 / 主管
+  code        String  @unique                 // CONSULT / COMPLAINT / FRONTDESK / SUPV
+  description String?
+  enabled     Boolean @default(true)
+  createdAt   DateTime @default(now())
+
+  // 裸 String join 欄（MD §1 原樣 — 唔開 Prisma relation：路由/組管理都係 app 層 join，
+  // 避免 FK cascade 影響既有 StaffUser/Clinic 生命週期；cleanup 由 UI 操作負責）
+}
+
+model SkillGroupMember {
+  groupId String
+  staffId String
+  createdAt DateTime @default(now()) @db.Timestamptz
+  @@id([groupId, staffId])
+  @@index([staffId])
+}
+
+model SkillGroupClinic {
+  groupId  String
+  clinicId String
+  @@id([groupId, clinicId])
+  @@index([clinicId])
+}
+
+model RoutingRule {
+  id            String   @id @default(cuid())
+  clinicId      String?                       // null = 全局；有值 = 該店覆寫（同 name/priority 覆蓋全局）
+  name          String                        // 「箍牙/植牙 → 療程顧問」
+  priority      Int                           // 細數行先；首個命中即停
+  enabled       Boolean  @default(true)
+  // ── 條件（空 = 唔限；有值要全中 — intents includes + keywords 任一 canonical 命中 + patientType 相等）
+  intents       String[] @default([])         // ["QUESTION","BOOKING_REQUEST"]
+  keywords      String[] @default([])         // lexicon canonical 後比對：["矯齒","植牙"]
+  patientType   String?                       // NEW | RETURNING | null（靠 patient-lookup；查唔到當 NEW）
+  // ── 目標
+  targetType    RoutingTargetType
+  targetGroupId String?                       // GROUP → 組 id
+  targetStaffId String?                       // STAFF → 單人 id
+  // ── 行為
+  autoReplyTemplate String?                   // R-7：命中後 L2 首覆文案（可空；L1 → 出草稿）
+  escalateAfterMin  Int?                      // R-5：N 分鐘未處理升級（null = 唔升級；出廠 15）
+  escalateToGroupId String?                   // 第二級組（升級只一次 — escalatedAt 防重複）
+  createdBy     String?
+  updatedAt     DateTime @updatedAt
+  @@index([clinicId, enabled, priority])
+}
+
 model Conversation {
   id               String     @id @default(cuid())
   clinicId         String
@@ -282,9 +348,18 @@ model Conversation {
   // cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA 提醒防重複旗（null = 未提醒/已接手；
   // cron 標 now，assign 成功清返）
   slaNotifiedAt    DateTime? @db.Timestamptz
+  // ★ cwi-routing-20260906（R-2 鐵律）：路由結果標記（唔係 assignee — 公海照見、Send Lock 唔生效）。
+  // routed* 只由路由引擎寫（classify 後掛鉤）；assign 流程零改動。
+  routedGroupId  String?                      // 路由命中組（CLINIC_POOL 目標 = null）
+  routedStaffId  String?                      // R-9：當值單人 → 標人；多於一個/冇當值 → null（只標組）
+  routedRuleId   String?                      // 命中規則（audit 追溯）
+  routedAt       DateTime? @db.Timestamptz    // 路由時間（升級 N 分鐘起點）
+  escalatedAt    DateTime? @db.Timestamptz    // 升級過先有值（防重複升級 — 只升一次）
 
   @@unique([clinicId, contactId])
   @@index([clinicId, status, lastMessageAt])
+  @@index([routedGroupId, assigneeId])        // 「派俾我」膠囊 + 升級 sweep 輔助
+  @@index([routedStaffId])
 }
 
 model Message {

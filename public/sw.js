@@ -15,7 +15,7 @@
 
 // ★ cwi-realtime-fix §8.3 (T279)：版本標記 — activate 時 console.info（console 可追溯 SW 更新）。
 //   SW 邏輯任何改動都要 bump 呢個值（byte 變 → 瀏覽器自動偵測新 version）。
-const SW_VERSION = "2026-09-07-a1";
+const SW_VERSION = "2026-09-07-a2";
 
 self.addEventListener("install", (e) => self.skipWaiting());
 self.addEventListener("activate", (e) => {
@@ -33,7 +33,14 @@ self.addEventListener("push", (event) => {
     }
   })();
   // ★ PII 鐵律：payload 只有 kind / clinicShort / conversationId，冇病人資料
-  const title = d.kind === "urgent" ? `⚠ 緊急 · ${d.clinicShort}` : `新訊息 · ${d.clinicShort}`;
+  const title =
+    d.kind === "urgent"
+      ? `⚠ 緊急 · ${d.clinicShort}`
+      : d.kind === "routing-escalation"
+        ? `⚠ 升級 · ${d.clinicShort}`
+        : d.kind === "routing"
+          ? `新個案 · ${d.clinicShort}`
+          : `新訊息 · ${d.clinicShort}`;
   // F-7（cwi-notify-fix）：通知來源留痕 — SW push 係唯一准觸發通知嘅非 socket 來源
   console.debug("notify:", "sw:push");
   event.waitUntil(
@@ -41,7 +48,7 @@ self.addEventListener("push", (event) => {
       silent: false, // cwi-realtime-fix §7.1：部分平台預設靜音 → 明確 false 先至用系統通知音
       tag: d.conversationId,
       renotify: true,
-      requireInteraction: d.kind === "urgent",
+      requireInteraction: d.kind === "urgent" || d.kind === "routing-escalation",
       vibrate: d.kind === "urgent" ? [200, 100, 200] : [120],
       data: { conversationId: d.conversationId },
       badge: "/icon-badge.png",

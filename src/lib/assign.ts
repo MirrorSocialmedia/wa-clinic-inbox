@@ -151,6 +151,7 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
             select: {
               name: true,
               active: true,
+              role: true,
               clinicId: true,
               // cwi-multiclinic-20260903（A.4）：primary 店（跨店 takeover 判定 + note「· 由 {店名}」）
               clinics: { where: { isPrimary: true }, select: { clinicId: true }, take: 1 },
@@ -168,6 +169,10 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
     if (toStaffId) {
       if (!target || !target.active) {
         throw new AssignError(400, "ASSIGNEE_INVALID", "assignee must be an active staff");
+      }
+      // ★ cwi-routing-20260906（§8）：SUPERVISOR 覆唔到客 → 唔可以做負責人（防孤兒對話）
+      if (target.role === "SUPERVISOR") {
+        throw new AssignError(403, "SUPERVISOR_ASSIGN_FORBIDDEN", "supervisor is read-only — cannot be assignee");
       }
       toName = target.name;
     }

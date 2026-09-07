@@ -104,8 +104,9 @@ export function initHub(io: SocketIOServer): void {
       // ★ cwi-h6-20260830：多店員工 join 全部綁定店 room（舊 session 冇 clinicIds → fallback [clinicId]）
       const roomClinics = session.clinicIds?.length ? session.clinicIds : session.clinicId ? [session.clinicId] : [];
       void Promise.all(roomClinics.map((cid) => socket.join(`clinic:${cid}`)));
-    } else if (session.role === "ADMIN") {
-      // ADMIN join 全部已知 clinic room
+    } else if (session.role === "ADMIN" || session.role === "SUPERVISOR") {
+      // ADMIN / SUPERVISOR（★ cwi-routing-20260906 §8：全店唯讀 — 通知照 STAFF 規則，須收晒全店 room）
+      // join 全部已知 clinic room
       void prisma
         .clinic.findMany({ select: { id: true } })
         .then((clinics) =>

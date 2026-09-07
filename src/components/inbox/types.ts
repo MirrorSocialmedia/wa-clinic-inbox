@@ -51,6 +51,14 @@ export interface ConversationItem {
   urgency: string | null;
   urgent: boolean;
   aiSummary: string | null;
+  /** ★ cwi-routing-20260906（MD §4.3）：路由標記（badge 數據；未路由 = 全 null） */
+  routedGroupId?: string | null;
+  routedStaffId?: string | null;
+  routedRuleId?: string | null;
+  routedAt?: Date | string | null;
+  escalatedAt?: Date | string | null;
+  routedGroupName?: string | null;
+  routedStaffName?: string | null;
   contact: ContactInfo | null;
   /** ★ booking-ui（A）：已釘住舊客（chat 卡藍掣「幫我喺 Apricot 落單」可見性）— null = 未釘住 */
   pinnedPatient: { patientApricotId: string } | null;
@@ -179,7 +187,7 @@ export interface MessageItem {
 export interface StaffInfo {
   id: string;
   name: string;
-  role: "ADMIN" | "STAFF";
+  role: "ADMIN" | "STAFF" | "SUPERVISOR";
   clinicId: string | null;
 }
 
@@ -187,10 +195,12 @@ export interface UserCtx {
   staffId: string;
   name: string;
   email: string;
-  role: "ADMIN" | "STAFF";
+  role: "ADMIN" | "STAFF" | "SUPERVISOR";
   clinicId: string | null;
   /** cwi-multiclinic-20260903：綁定店集合（STAFF = StaffClinic 全部；ADMIN = []）— 跨店 badge 判定用 */
   clinicIds: string[];
+  /** ★ cwi-routing-20260906（MD §4.3）：我係邊啲技能組嘅成員（「派俾我」膠囊 client 端計數/backup；ADMIN/SUPERVISOR = []） */
+  myGroupIds?: string[];
 }
 
 /** socket message:new payload（同 worker notify 對齊） */

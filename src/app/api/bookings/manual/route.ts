@@ -31,7 +31,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertConversationAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { confirmBookingCore } from "@/lib/booking/confirm-core";
 import { slotAvailable } from "@/lib/availability";
@@ -75,6 +75,7 @@ export const POST = handle(async (req: NextRequest) => {
   const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertConversationAccess(ctx, conv); // 別店 / 非授權對話 → 403
+  assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   // Send Lock（MD §7 — 同 create/rollback/cancel）
   if (conv.assigneeId && conv.assigneeId !== ctx.staff.id) {

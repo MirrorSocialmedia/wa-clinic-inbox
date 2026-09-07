@@ -13,7 +13,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertConversationAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { assignConversation } from "@/lib/assign";
@@ -49,6 +49,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertConversationAccess(ctx, conv); // STAFF 別店 → 403
+  assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   // ★ H1 Send Lock（MD §3.2）：同 free-form 同規則 — 負責人唔係自己 → 423（INTERNAL note route 冇呢個檢查）。
   // cwi-h6-20260830：ADMIN 豁免（§8：ADMIN 可接手可覆可放手 — E2E T97）

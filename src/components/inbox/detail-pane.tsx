@@ -14,7 +14,7 @@ interface Props {
   myStaffId: string;
   /** D.4（cwi-schedv2-20260903）：本對話嘅 clinic code（MiniSchedule 拉 /api/flows/slots 用；null → 隱藏表） */
   clinicCode?: string | null;
-  userRole: "ADMIN" | "STAFF";
+  userRole: "ADMIN" | "STAFF" | "SUPERVISOR"; // ★ cwi-routing-20260906 §8
   /** ★ H1：轉交/派單/放返隊列 — POST /api/conversations/[id]/assign（INTERNAL note + AuditLog + socket） */
   onAssign: (toStaffId: string | null) => Promise<{ ok: boolean; error?: string }>;
   assignBusy: boolean;
@@ -769,6 +769,7 @@ export function DetailPane({
                       >
                         <span className="truncate">{s.name}</span>
                         {s.role === "ADMIN" && <span className="ml-auto text-[10px] text-t3 shrink-0">管理員</span>}
+                        {s.role === "SUPERVISOR" && <span className="ml-auto text-[10px] text-t3 shrink-0">主管</span>}
                         {c.assigneeId === s.id && <span className="ml-auto text-[10px] text-brand-text shrink-0">現任</span>}
                       </button>
                     ))}
@@ -829,6 +830,7 @@ export function DetailPane({
                       >
                         <span className="truncate">{s.name}</span>
                         {s.role === "ADMIN" && <span className="ml-auto text-[10px] text-t3 shrink-0">管理員</span>}
+                        {s.role === "SUPERVISOR" && <span className="ml-auto text-[10px] text-t3 shrink-0">主管</span>}
                       </button>
                     ))}
                     {staffOfClinic(assignSubClinicId).length === 0 && (

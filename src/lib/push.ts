@@ -22,7 +22,7 @@ import log from "@/lib/log";
 import type { Prisma } from "@prisma/client";
 
 export interface PushPayload {
-  kind: "message" | "notice" | "urgent";
+  kind: "message" | "notice" | "urgent" | "routing" | "routing-escalation";
   clinicShort: string;
   conversationId: string;
 }
@@ -204,7 +204,8 @@ export function pushEvent(e: { kind: "message" | "urgent"; clinicId: string; con
         if (s?.active) addTarget(s.id, parsePushPrefs(s.pushPrefs, s.id), true);
       } else {
         const rows = await prisma.staffUser.findMany({
-          where: { role: "STAFF", active: true, clinics: { some: { clinicId: e.clinicId } } },
+          // ★ cwi-routing-20260906 §8：SUPERVISOR 通知照 STAFF 規則（per-store 靜音偏好生效；不預設靜音）
+          where: { role: { in: ["STAFF", "SUPERVISOR"] }, active: true, clinics: { some: { clinicId: e.clinicId } } },
           select: { id: true, pushPrefs: true },
         });
         for (const r of rows) addTarget(r.id, parsePushPrefs(r.pushPrefs, r.id), false);
@@ -239,6 +240,35 @@ export function pushEvent(e: { kind: "message" | "urgent"; clinicId: string; con
       await Promise.all(finalTargets.map(([id]) => pushToStaff(id, payload)));
     } catch (err) {
       log.warn({ err: err instanceof Error ? err.message : String(err) }, "push: 事件處理失敗（靜默）");
+    }
+  })();
+}
+
+/**
+ * ★ cwi-routing-20260906（§2）：路由定向 push → 技能組成員（R-2：路由唔指派 — 收件人 = 組成員，
+ * 唔係 assignee 邏輯）。老細拍板：通知照 STAFF 靜音規則（per-store mutedClinics 生效；
+ * **任何角色都唔預設靜音** — 新 staff 預設 mutedClinics=[] → 會收到）；唔係 forced。
+ * escalated=true（T3 升級）→ kind=routing-escalation（sw.js 獨立標題）。
+ * Fire-and-forget，內部吞晒所有錯。
+ */
+export function pushRoutingEvent(e: { clinicId: string; conversationId: string; staffIds: string[]; escalated: boolean }): void {
+  if (!ensureVapid()) return;
+  if (e.staffIds.length === 0) return;
+  void (async () => {
+    try {
+      const clinic = await prisma.clinic.findUnique({ where: { id: e.clinicId }, select: { code: true } });
+      if (!clinic?.code) return;
+      const payload: PushPayload = { kind: e.escalated ? "routing-escalation" : "routing", clinicShort: clinic.code, conversationId: e.conversationId };
+      const rows = await prisma.staffUser.findMany({
+        where: { id: { in: e.staffIds }, active: true },
+        select: { id: true },
+      });
+      for (const r of rows) {
+        if (await isClinicMutedForStaff(r.id, e.clinicId)) continue; // 靜音偏好生效（不預設靜音）
+        await pushToStaff(r.id, payload);
+      }
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : String(err) }, "push: pushRoutingEvent 失敗（靜默）");
     }
   })();
 }

@@ -15,7 +15,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertConversationAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { hkDateOffset } from "@/lib/availability";
@@ -37,6 +37,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   const contact = conv ? await prisma.contact.findUnique({ where: { id: conv.contactId } }) : null;
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertConversationAccess(ctx, conv); // STAFF 別店 → 403
+  assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   if (!conv.pinnedPatientApricotId) {
     return NextResponse.json({ error: "no_pinned_patient", message: "要喺側欄先釘住舊客" }, { status: 400 });

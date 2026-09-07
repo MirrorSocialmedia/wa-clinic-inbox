@@ -15,7 +15,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdminOrSupervisor } from "@/lib/rbac"; // ★ cwi-routing-20260906 §8：SUPERVISOR 讀寫
 import { handle } from "@/lib/api-error";
 import { saveDraft, WorkflowError } from "@/lib/workflow/store";
 
@@ -30,7 +30,7 @@ const bodySchema = z.object({
 
 export const POST = handle(
   async (req: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
-    const ctx = await requireAdmin(req);
+    const ctx = await requireAdminOrSupervisor(req);
     const { id } = await params;
 
     const card = await prisma.suggestionCard.findUnique({ where: { id } });

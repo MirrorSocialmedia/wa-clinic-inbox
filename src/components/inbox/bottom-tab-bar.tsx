@@ -14,7 +14,7 @@ export function BottomTabBar({
   role,
   unreadCount,
 }: {
-  role: "ADMIN" | "STAFF";
+  role: "ADMIN" | "STAFF" | "SUPERVISOR";
   unreadCount: number;
 }) {
   const pathname = usePathname();
@@ -23,8 +23,8 @@ export function BottomTabBar({
     { href: "/inbox", label: "收件箱", icon: MessageCircle, badge: unreadCount },
     { href: "/bookings", label: "預約", icon: CalendarDays },
     { href: "/schedule", label: "時間表", icon: Stethoscope },
-    // ADMIN → 管理（頁頂有帳戶卡 + 登出）；STAFF → 我的（/account 帳戶卡 + 登出 — MD §5）
-    role === "ADMIN"
+    // ADMIN / SUPERVISOR（★ cwi-routing-20260906 §8：主管入管理殼睇 AI 級別/建議）→ 管理；STAFF → 我的
+    role === "ADMIN" || role === "SUPERVISOR"
       ? { href: "/admin", label: "管理", icon: Settings }
       : { href: "/account", label: "我的", icon: User },
   ] as const;

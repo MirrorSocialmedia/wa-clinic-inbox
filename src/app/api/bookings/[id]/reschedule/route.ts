@@ -8,7 +8,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { sendBookingFlow, WindowClosedError } from "@/lib/flows/send";
@@ -22,6 +22,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   const booking = await prisma.bookingRequest.findUnique({ where: { id } });
   if (!booking) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertClinicAccess(ctx, booking.clinicId); // STAFF 別店 → 403
+  assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   if (booking.status !== "PENDING") {
     return NextResponse.json({ error: `booking already ${booking.status}` }, { status: 409 });

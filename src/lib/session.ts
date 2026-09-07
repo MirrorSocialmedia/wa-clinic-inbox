@@ -13,7 +13,7 @@ import log from "@/lib/log";
  */
 
 /** 同 Prisma `Role` enum 一致（結構性兼容，避免 session lib 硬綁 generate 順序） */
-export type SessionRole = "ADMIN" | "STAFF";
+export type SessionRole = "ADMIN" | "STAFF" | "SUPERVISOR";
 
 export interface SessionData {
   /** StaffUser.id */
@@ -45,8 +45,9 @@ export const SESSION_COOKIE_NAME = "wa_inbox_session";
 export const SESSION_TTL_SECONDS: Record<SessionRole, number> = {
   STAFF: 24 * 3600, // 24h（M-4：原 7d）
   ADMIN: 12 * 3600, // 12h
+  SUPERVISOR: 12 * 3600, // ★ cwi-routing-20260906：高權限（AI 級別可寫）→ 同 ADMIN 12h
 };
-const UNSEAL_TTL_SECONDS = Math.max(SESSION_TTL_SECONDS.STAFF, SESSION_TTL_SECONDS.ADMIN);
+const UNSEAL_TTL_SECONDS = Math.max(SESSION_TTL_SECONDS.STAFF, SESSION_TTL_SECONDS.ADMIN, SESSION_TTL_SECONDS.SUPERVISOR);
 
 /** session 有冇喺該 role 嘅有效期内（loginAt 起算；fail-closed：無 loginAt = 失效）。 */
 export function isSessionFresh(data: Pick<SessionData, "role" | "loginAt">): boolean {

@@ -9,7 +9,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 
 export async function auditScheduleView(
-  ctx: { staff: { id: string; role: "ADMIN" | "STAFF" }; clinicId: string | null },
+  ctx: { staff: { id: string; role: "ADMIN" | "STAFF" | "SUPERVISOR" }; clinicId: string | null },
   targetClinicId: string,
   clinicCode: string
 ): Promise<void> {

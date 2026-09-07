@@ -165,7 +165,7 @@ export interface ShouldNotifyArgs {
   /** 對畫而家嘅 assigneeId（client state — message:new payload 唔帶） */
   assigneeId: string | null;
   myStaffId: string;
-  myRole: "ADMIN" | "STAFF";
+  myRole: "ADMIN" | "STAFF" | "SUPERVISOR"; // ★ cwi-routing-20260906 §8：通知照 STAFF 規則
   /** 正開住嘅對話 id（N-5） */
   activeConversationId: string | null;
   mutedClinics: string[];

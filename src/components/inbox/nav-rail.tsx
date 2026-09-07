@@ -18,7 +18,7 @@ export function NavRail({
 }: {
   name: string;
   email: string;
-  role: "ADMIN" | "STAFF";
+  role: "ADMIN" | "STAFF" | "SUPERVISOR";
 }) {
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -74,7 +74,7 @@ export function NavRail({
         <div className="relative">
           <button
             onClick={() => setMenuOpen((v) => !v)}
-            title={`${name}\n${email}\n${role === "ADMIN" ? "管理員" : "店員"}`}
+            title={`${name}\n${email}\n${role === "ADMIN" ? "管理員" : role === "SUPERVISOR" ? "主管" : "店員"}`}
             aria-label="帳戶選單"
             aria-expanded={menuOpen}
             className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-semibold select-none hover:opacity-85 ${
@@ -90,7 +90,7 @@ export function NavRail({
               <div className="absolute bottom-0 left-full ml-2.5 z-50 w-56 rounded-xl border border-line bg-panel shadow-xl p-3">
                 <div className="text-sm font-semibold text-t1 truncate">{name}</div>
                 <div className="text-xs text-t3 truncate">{email}</div>
-                <div className="text-xs text-t3">{role === "ADMIN" ? "管理員" : "店員"}</div>
+                <div className="text-xs text-t3">{role === "ADMIN" ? "管理員" : role === "SUPERVISOR" ? "主管" : "店員"}</div>
                 <button
                   onClick={logout}
                   disabled={busy}

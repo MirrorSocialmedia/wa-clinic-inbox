@@ -45,6 +45,8 @@ const SECTION_NAMES: Record<string, string> = {
   "/admin/onboarding": "WhatsApp 接入",
   "/admin/templates": "訊息範本",
   "/admin/workflows": "Workflow",
+  "/admin/skill-groups": "技能組",
+  "/admin/routing-rules": "路由規則",
   "/admin/automation": "AI 自動化",
   "/admin/suggestions": "AI 建議",
   "/admin/knowledge": "知識庫",
@@ -55,11 +57,14 @@ export function AdminShell({
   userName,
   clinicCount,
   pendingSuggestions,
+  role,
   children,
 }: {
   userName: string;
   clinicCount: number;
   pendingSuggestions: number;
+  /** ★ cwi-routing-20260906 §8：SUPERVISOR → 側欄只留 AI 讀寫頁（自動化級別/建議） */
+  role?: string;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
@@ -85,6 +90,13 @@ export function AdminShell({
       items: [{ href: "/admin/staff", label: "員工帳號", icon: Users }],
     },
     {
+      title: "路由",
+      items: [
+        { href: "/admin/skill-groups", label: "技能組", icon: Users },
+        { href: "/admin/routing-rules", label: "路由規則", icon: Workflow },
+      ],
+    },
+    {
       title: "AI",
       items: [
         { href: "/admin/automation", label: "AI 自動化", icon: Bot },
@@ -107,6 +119,17 @@ export function AdminShell({
       ],
     },
   ];
+
+  // ★ cwi-routing-20260906 §8：SUPERVISOR — 設定類全 403 → 側欄只露 AI 級別 + AI 建議（兩頁已開權限）
+  const visibleGroups =
+    role === "SUPERVISOR"
+      ? groups
+          .map((g) => ({
+            ...g,
+            items: g.items.filter((it) => it.href === "/admin/automation" || it.href === "/admin/suggestions"),
+          }))
+          .filter((g) => g.items.length > 0)
+      : groups;
 
   async function logout() {
     try {
@@ -135,7 +158,7 @@ export function AdminShell({
 
           {/* 分組導覽 */}
           <nav className="flex flex-col gap-4 overflow-auto min-h-0 flex-1" aria-label="管理導覽">
-            {groups.map((g) => (
+            {visibleGroups.map((g) => (
               <div key={g.title} className="flex flex-col gap-0.5">
                 <div className="font-semibold text-[9.5px] tracking-[0.14em] uppercase text-t3 px-3 pb-1.5">
                   {g.title}

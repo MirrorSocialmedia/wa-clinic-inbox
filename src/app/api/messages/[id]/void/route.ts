@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertConversationAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { publishNotify } from "@/lib/notify";
 
@@ -38,6 +38,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertConversationAccess(auth, conv); // STAFF 別店 → 403
+  assertCanWriteConversation(auth); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   if (msg.sentByStaffId && msg.sentByStaffId !== auth.staff.id && auth.staff.role !== "ADMIN") {
     return NextResponse.json({ error: "only the sender or an admin can void" }, { status: 403 });

@@ -21,7 +21,7 @@ function msg(err: unknown): string {
 
 export async function recordLoginAudit(
   staffId: string,
-  role: "ADMIN" | "STAFF",
+  role: "ADMIN" | "STAFF" | "SUPERVISOR",
   ip: string
 ): Promise<void> {
   // 1) ADMIN：先查近期 IP（寫入前 — 見上方註釋）

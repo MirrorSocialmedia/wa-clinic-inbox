@@ -23,6 +23,9 @@
  * - unassigned-sla     每 5 分鐘 → cwi-inboxfix-20260905（MD §1.4 I-5）：公海未指派超過 N 分鐘
  *                                       → 該店全部 active STAFF push「{店簡稱} 有病人未有人跟」+ StaffNotice
  *                                       （N = triage.unassignedSlaMinutes default 10；slaNotifiedAt 防重複洗版；接手清返）
+ * - routing-escalate   每 5 分鐘 → cwi-routing-20260906（§3）：投訴兩級升級第二級 —
+ *                                       規則命中後 N 分鐘（規則參數 escalateAfterMin）仍未接手
+ *                                       → 通知升級組（出廠 = 主管組）+ 標 escalatedAt（只升一次；原子 claim 冪等）
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
  */
@@ -41,6 +44,7 @@ import { runMining } from "@/lib/ops/mining";
 import { sweepFlowHolds } from "@/lib/flows/hold-sweep";
 import { runAutoReleaseSweep } from "@/lib/auto-release";
 import { runUnassignedSlaSweep } from "@/lib/unassigned-sla";
+import { runRoutingEscalateSweep } from "@/lib/routing/escalate";
 
 export async function startCronWorker(): Promise<Worker | null> {
   const worker = new Worker(
@@ -74,6 +78,15 @@ export async function startCronWorker(): Promise<Worker | null> {
           log.info(
             { checked: r.checked, clinics: r.clinicsNotified, staff: r.staffNotified, failed: r.failed },
             "cron: unassigned-sla done"
+          );
+          return { ok: true, ...r };
+        }
+        case "routing-escalate": {
+          // cwi-routing-20260906（§3）：投訴兩級升級第二級（N 分鐘未接手 → 升級組；只升一次；冪等可空跑）
+          const r = await runRoutingEscalateSweep();
+          log.info(
+            { checked: r.checked, escalated: r.escalated, skippedNoMembers: r.skippedNoMembers, failed: r.failed },
+            "cron: routing-escalate done"
           );
           return { ok: true, ...r };
         }

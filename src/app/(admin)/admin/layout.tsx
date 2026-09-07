@@ -22,7 +22,8 @@ export default async function AdminLayout({
 }) {
   const session = await getServerSession();
   if (!session) redirect("/login");
-  if (session.role !== "ADMIN") forbidden();
+  // ★ cwi-routing-20260906 §8：SUPERVISOR 入管理殼（AI 級別/建議頁）；其餘設定頁各自 403/redirect。
+  if (session.role !== "ADMIN" && session.role !== "SUPERVISOR") forbidden();
 
   // 側欄 badge（AI 建議待審數）+ 品牌副題（真店數）— 純讀，零副作用
   const [pendingSuggestions, clinicCount] = await Promise.all([
@@ -36,6 +37,7 @@ export default async function AdminLayout({
         userName={session.name}
         clinicCount={clinicCount}
         pendingSuggestions={pendingSuggestions}
+        role={session.role}
       >
         {children}
       </AdminShell>

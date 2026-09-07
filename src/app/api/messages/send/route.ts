@@ -3,7 +3,7 @@ import { z } from "zod";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import log from "@/lib/log";
-import { requireAuth, assertConversationAccess, clinicScope } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, clinicScope, assertCanWriteConversation } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { enqueueOutboundSend } from "@/lib/queue";
 import { getWindowState } from "@/lib/wa/window";
@@ -85,6 +85,7 @@ export const POST = handle(async (req: NextRequest) => {
   });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertConversationAccess(ctx, conv); // STAFF 砌別店 URL → 403
+  assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   // ★ H1 Send Lock（MD §3.2）：對話有負責人時，只有負責人可以發 WhatsApp。
   // 其他店內員工 → 423 SEND_LOCKED（UI composer 轉內部備註模式；INTERNAL note route 冇呢個檢查）。

@@ -33,8 +33,8 @@ export const GET = handle(async (req: NextRequest) => {
   const statusParam = url.searchParams.get("status");
   const assignedParam = url.searchParams.get("assigned");
   const countsParam = url.searchParams.get("counts") === "1";
-  if (assignedParam && !["unassigned", "mine"].includes(assignedParam)) {
-    return NextResponse.json({ error: "invalid assigned (unassigned|mine)" }, { status: 400 });
+  if (assignedParam && !["unassigned", "mine", "routed"].includes(assignedParam)) {
+    return NextResponse.json({ error: "invalid assigned (unassigned|mine|routed)" }, { status: 400 });
   }
 
   const where: Record<string, unknown> = {};
@@ -49,6 +49,22 @@ export const GET = handle(async (req: NextRequest) => {
     }
     if (assignedParam === "unassigned") {
       where.assigneeId = null;
+      if (ctx.staff.role === "STAFF") {
+        where.clinicId = clinicParam ?? { in: ctx.clinicIds };
+      } else if (clinicParam) {
+        where.clinicId = clinicParam;
+      }
+    } else if (assignedParam === "routed") {
+      // ★ cwi-routing-20260906（MD §4.3）：「派俾我」= routedStaffId=我 ∨ routedGroupId∈我嘅組，且未指派。
+      // R-4：組成員只見自己服務店個案 → 嚴格店 scope（同公海 — 外店路由線唔漏入嚟）。
+      const myGroups = await prisma.skillGroupMember.findMany({
+        where: { staffId: ctx.staff.id },
+        select: { groupId: true },
+      });
+      where.assigneeId = null;
+      const orBranches: Record<string, unknown>[] = [{ routedStaffId: ctx.staff.id }];
+      if (myGroups.length > 0) orBranches.push({ routedGroupId: { in: myGroups.map((g) => g.groupId) } });
+      where.OR = orBranches;
       if (ctx.staff.role === "STAFF") {
         where.clinicId = clinicParam ?? { in: ctx.clinicIds };
       } else if (clinicParam) {
@@ -101,12 +117,14 @@ export const GET = handle(async (req: NextRequest) => {
     orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }],
     take: 200,
   });
-  const [contacts, staff, clinics, pendingBookings] = await Promise.all([
+  const [contacts, staff, clinics, skillGroups, pendingBookings] = await Promise.all([
     prisma.contact.findMany({ select: { id: true, waId: true, profileName: true, labels: true } }),
     prisma.staffUser.findMany({ select: { id: true, name: true } }),
     // cwi-multiclinic-20260903（MD A.3）：clinicName — 跨店線 UI 標店名 badge 用
     // （全 row 都有值：本店/ADMIN 線一樣有，前端自己決定顯唔顯示）
     prisma.clinic.findMany({ select: { id: true, name: true, code: true } }),
+    // ★ cwi-routing-20260906（MD §4.3）：路由 badge 組名 — 組數極少（出廠 4），全量 fetch
+    prisma.skillGroup.findMany({ select: { id: true, name: true, code: true } }),
     // Phase 3：綠色卡 — 每對話最新 PENDING 預約（staff 一眼見到「有預約等處理」）
     // ★ booking-ui（D）：CONFIRMED 亦要顯示（Apricot 單號 + 撤銷倒數）— PENDING 優先
     prisma.bookingRequest.findMany({
@@ -117,6 +135,7 @@ export const GET = handle(async (req: NextRequest) => {
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
   const clinicMap = new Map(clinics.map((c) => [c.id, c]));
+  const groupMap = new Map(skillGroups.map((g) => [g.id, g]));
   // providerslot-20260830 T3：hold 卡 — 每個 WA 號最新非終態 hold（join key = Contact.waId）。
   // scope 跟對話一樣（STAFF 自己店 / ADMIN ?clinicId=）；fail-soft → 空 Map。
   const holdClinicFilter: string | string[] | undefined = clinicParam
@@ -140,7 +159,7 @@ export const GET = handle(async (req: NextRequest) => {
   // STAFF = clinic ∪ assignee-me OR（clinicParam 時 clinic 支路收窄）；ADMIN = clinicParam（冇 = 全店）。
   // OR scope 內 assignee=null 嘅行只會經 clinic 支路命中 → unassigned 計數天然 = I-2 公海語義
   // （絕唔會經 assignee 支路漏入外店線）。
-  let counts: { all: number; unassigned: number; mine: number; pending: number; resolved: number } | null = null;
+  let counts: { all: number; unassigned: number; mine: number; routed: number; pending: number; resolved: number } | null = null;
   if (countsParam) {
     const cWhere: Record<string, unknown> = {};
     if (ctx.staff.role === "STAFF") {
@@ -148,24 +167,38 @@ export const GET = handle(async (req: NextRequest) => {
     } else if (clinicParam) {
       cWhere.clinicId = clinicParam;
     }
+    // ★ cwi-routing-20260906：routed 計數 — 我嘅組 id set（組成員「派俾我」膠囊）
+    const myGroupsForCount = await prisma.skillGroupMember.findMany({
+      where: { staffId: ctx.staff.id },
+      select: { groupId: true },
+    });
+    const myGroupSet = new Set(myGroupsForCount.map((g) => g.groupId));
     const groups = await prisma.conversation.groupBy({
-      by: ["assigneeId", "status"],
+      by: ["assigneeId", "status", "routedStaffId", "routedGroupId"],
       where: cWhere,
       _count: { _all: true },
     });
     let all = 0;
     let unassigned = 0;
     let mine = 0;
+    let routed = 0;
     let pending = 0;
     let resolved = 0;
     for (const g of groups) {
       all += g._count._all;
       if (g.assigneeId === null) unassigned += g._count._all;
       if (g.assigneeId === ctx.staff.id) mine += g._count._all;
+      // ★ cwi-routing-20260906（MD §4.3）：派俾我 = 未指派 且（routedStaffId=我 ∨ routedGroupId∈我組）
+      if (
+        g.assigneeId === null &&
+        (g.routedStaffId === ctx.staff.id || (g.routedGroupId !== null && myGroupSet.has(g.routedGroupId)))
+      ) {
+        routed += g._count._all;
+      }
       if (g.status === "PENDING") pending += g._count._all;
       if (g.status === "RESOLVED") resolved += g._count._all;
     }
-    counts = { all, unassigned, mine, pending, resolved };
+    counts = { all, unassigned, mine, routed, pending, resolved };
   }
 
   const items = convs.map((cv) => {
@@ -192,6 +225,14 @@ export const GET = handle(async (req: NextRequest) => {
         urgency: cv.urgency,
         urgent: cv.urgent,
         aiSummary: cv.aiSummary,
+        // ★ cwi-routing-20260906（MD §4.3）：路由 badge — 🎯 組名 / 🎯 單人名 / ⚠ 已升級
+        routedGroupId: cv.routedGroupId,
+        routedStaffId: cv.routedStaffId,
+        routedRuleId: cv.routedRuleId,
+        routedAt: cv.routedAt,
+        escalatedAt: cv.escalatedAt,
+        routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId)?.name ?? null) : null,
+        routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
         contact: contactMap.get(cv.contactId) ?? null,
         // ★ booking-ui（A）：已釘住舊客（藍掣「幫我喺 Apricot 落單」可見性）— 只回 id（姓名喺 patient-context API）
         pinnedPatientApricotId: cv.pinnedPatientApricotId,

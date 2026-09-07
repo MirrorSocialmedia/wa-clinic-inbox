@@ -22,6 +22,7 @@ import { scrubAiSummary } from "@/lib/ai/scrub";
 import { getAutomationLevel } from "@/lib/ai/automation";
 import type { SessionSlots } from "@/lib/ai/session-types";
 import { fetchDutyRoster, hkToday } from "@/lib/duty/client";
+import { applyRouting, applyRoutingFirstReply } from "@/lib/routing/route";
 // ★ Phase C（cwi-sess-20260824-c1）：slot-filling session runner（C6）
 import { getSlots } from "@/lib/availability";
 import {
@@ -378,6 +379,27 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   // 過窗發唔出 → 避免一堆 FAILED outbound）；AUTO 自動覆本就有 window-closed 閘（下方 blocks）。
   const win = getWindowState(updatedConv.lastInboundAt);
 
+  // ── ★ cwi-routing-20260906（§2）：規則式路由 — 標記 + 通知（R-2：唔掂 assigneeId，對話仍公海）──
+  //   掛鉤點 = classify 落 DB 之後、任何通知之前。R-8：URGENT_PAIN/HIGH 嘅全店 urgent:escalation
+  //   廣播（下方 step 5 路徑）照行 — 路由只額外加組標記 + 組通知，唔取代、唔收窄。
+  //   fail-soft：引擎內部吞錯 — 路由失敗唔阻 AI pipeline（對話照落公海）。
+  const routing = await applyRouting({
+    conv: {
+      id: conv.id,
+      clinicId: conv.clinicId,
+      contactId: conv.contactId,
+      assigneeId: updatedConv.assigneeId,
+      pinnedPatientApricotId: conv.pinnedPatientApricotId,
+      status: conv.status,
+    },
+    clinic,
+    contact,
+    msg: { id: msg.id, type: msg.type, body: msg.body ?? "", waMessageId: msg.waMessageId },
+    intent: result.intent,
+    urgency: result.urgency,
+    lexicon: ptLex,
+  });
+
   // ── C6：L3+ 開 session（BOOKING_REQUEST + 無人接手 + 文字訊息 + ★ P2：窗口內）──
   // 無 AutomationPolicy row 嘅店 = legacy L1/L2 → 一行都唔改（跌落現有 draft/AUTO）
   if (
@@ -424,6 +446,21 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       },
     });
     return await handlePainTriageTurn(session, msg, conv, clinic);
+  }
+
+  // ── ★ cwi-routing-20260906（§5 R-7）：療程首覆 — 規則有 template → template 做呢條 inbound 唯一草稿 ──
+  //   發送決策全部交返下方現有 4.5 閘（L1 → 草稿俾 staff；L2+ → 自動發；window/assigned/RESOLVED 鐵律零改動）。
+  //   只喺正常 draft 路徑到呢度 — booking/PAIN session 喺上面已 return（各冇自己回覆路徑，唔會重複覆）。
+  if (routing.rule?.autoReplyTemplate) {
+    await applyRoutingFirstReply({
+      convId: conv.id,
+      msgId: msg.id,
+      msgType: msg.type,
+      rule: routing.rule,
+      intent: result.intent,
+      urgency: result.urgency,
+      winOpen: win.open,
+    });
   }
 
   // ── 4. AI 草稿（鐵律：URGENT_PAIN / HIGH 永不生成 — code 層第一重擋） ─────

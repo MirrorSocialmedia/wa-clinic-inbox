@@ -33,7 +33,8 @@ export interface StaffInfo {
   id: string;
   email: string;
   name: string;
-  role: "ADMIN" | "STAFF";
+  /** ★ cwi-routing-20260906（§8）：SUPERVISOR = 全店唯讀 + AI 級別讀寫；覆客/指派/設定一律 403。 */
+  role: "ADMIN" | "STAFF" | "SUPERVISOR";
 }
 
 export interface AuthContext {
@@ -177,13 +178,25 @@ export async function requireAdmin(req: NextRequest): Promise<AuthContext> {
 }
 
 /**
+ * ★ cwi-routing-20260906（§8）：要求 ADMIN 或 SUPERVISOR（STAFF → 403）。
+ * 用途：AI 自動化級別（含 panic 降 L1）+ AI 建議頁 — 主管讀寫，其餘設定類仍然 admin-only。
+ */
+export async function requireAdminOrSupervisor(req: NextRequest): Promise<AuthContext> {
+  const ctx = await requireAuth(req);
+  if (ctx.staff.role !== "ADMIN" && ctx.staff.role !== "SUPERVISOR") {
+    throw new RbacError(403, "admin or supervisor required");
+  }
+  return ctx;
+}
+
+/**
  * STAFF 硬性綁定 clinicIds 嘅 query scope helper（cwi-h6-20260830 多店化）：
  *   where: { ...clinicScope(ctx) }
  * ADMIN → {}（跨店）；STAFF → { clinicId: { in: [店1, 店2, ...] } }（只綁定店）。
  * 所有按店過濾嘅 Prisma query 都必過呢個，唔好手寫 clinicId 條件。
  */
 export function clinicScope(ctx: {
-  staff: { role: "ADMIN" | "STAFF" };
+  staff: { role: "ADMIN" | "STAFF" | "SUPERVISOR" };
   clinicIds: string[];
 }): { clinicId?: { in: string[] } } {
   if (ctx.staff.role === "STAFF") {
@@ -200,12 +213,13 @@ export function clinicScope(ctx: {
  * ★ cwi-h6-20260830：conversation 級 access（取代大部分 assertClinicAccess call site）。
  * 模型（MD §0）：可以睇/覆一個 conversation =
  *   ADMIN ∨ conv.clinicId ∈ 我嘅店集合 ∨ conv.assigneeId == 我（單線授權 — 派俾完全外店嘅人嗰條線）
+ *   ★ cwi-routing-20260906（§8）：SUPERVISOR = 全店放行（唯讀語義 — 寫嘅鐵律喺 assertCanWriteConversation）
  */
 export function assertConversationAccess(
   ctx: Pick<AuthContext, "staff" | "clinicIds">,
   conv: { clinicId: string; assigneeId: string | null }
 ): void {
-  if (ctx.staff.role === "ADMIN") return;
+  if (ctx.staff.role === "ADMIN" || ctx.staff.role === "SUPERVISOR") return;
   if (ctx.clinicIds.includes(conv.clinicId)) return;
   if (conv.assigneeId === ctx.staff.id) return; // 單線授權
   throw new RbacError(403, "no access to this conversation");
@@ -217,7 +231,7 @@ export function assertConversationAccess(
  * 注意：呢個係列表層級；單對話 access 仍以 assertConversationAccess 為準。
  */
 export function conversationScope(ctx: {
-  staff: { role: "ADMIN" | "STAFF"; id: string };
+  staff: { role: "ADMIN" | "STAFF" | "SUPERVISOR"; id: string };
   clinicIds: string[];
 }): Record<string, unknown> {
   if (ctx.staff.role === "STAFF") {
@@ -252,16 +266,27 @@ export function assertScheduleReadAccess(_ctx: Pick<AuthContext, "staff">): void
   void _ctx; // active 已驗（requireAuth）；呢度刻意唔查 clinic — 全店唯讀
 }
 
+/**
+ * ★ cwi-routing-20260906（§8）：覆客寫入鐵律 — 發訊息 / 採用 AI 草稿 / 接手（assign）/ 落單 /
+ * 發 Flow 嘅 route 一律先調呢個：SUPERVISOR → 403（主管覆唔到客）；ADMIN/STAFF 放行。
+ * （讀路徑繼續用 assertConversationAccess — 唯讀唔受影響。）
+ */
+export function assertCanWriteConversation(ctx: Pick<AuthContext, "staff">): void {
+  if (ctx.staff.role === "SUPERVISOR") {
+    throw new RbacError(403, "supervisor is read-only — 覆客操作唔准");
+  }
+}
+
 function toContext(data: SessionData, res: AuthContext["res"]): AuthContext {
   // Fail-closed：role 必須係已知值（防壞 session / role 字串注入）
-  if (data.role !== "ADMIN" && data.role !== "STAFF") {
+  if (data.role !== "ADMIN" && data.role !== "STAFF" && data.role !== "SUPERVISOR") {
     throw new RbacError(401, "invalid session role");
   }
   // ★ cwi-h6-20260830：clinicIds — 新 session 由 login 寫入（StaffClinic 查詢）；
   // 舊 session（冇 clinicIds 欄）fallback [clinicId]（行為同舊版完全一致 — T98 驗收）。
   const clinicIds =
-    data.role === "ADMIN"
-      ? []
+    data.role === "ADMIN" || data.role === "SUPERVISOR"
+      ? [] // ★ §8：SUPERVISOR 全店（同 ADMIN 一樣 scope 不限）
       : data.clinicIds?.length
         ? data.clinicIds
         : data.clinicId

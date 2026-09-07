@@ -12,7 +12,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { commitHold, WorkforceApiError } from "@/lib/workforce/client";
 
@@ -26,6 +26,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   if (!hold) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (hold.clinicId) assertClinicAccess(ctx, hold.clinicId);
   else if (ctx.staff.role !== "ADMIN") return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
+  assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   if (hold.status !== "HELD") {
     return NextResponse.json({ error: `hold already ${hold.status}`, status: hold.status }, { status: 409 });

@@ -133,15 +133,16 @@ export function InboxClient({
   // ★ cwi-inboxfix-20260905（MD I-10）：連線狀態（斷線時列表頂 banner — 避免「靜靜哋唔更新」）
   const [connOffline, setConnOffline] = useState(false);
   // ★ cwi-inboxfix-20260905（MD I-1/I-2）：公海膠囊指派維度 filter（server 端）+ 計數（?counts=1 順帶）
-  const [assignedFilter, setAssignedFilter] = useState<"all" | "unassigned" | "mine">("all");
+  const [assignedFilter, setAssignedFilter] = useState<"all" | "unassigned" | "mine" | "routed">("all"); // ★ cwi-routing-20260906：+派俾我
   const [convCounts, setConvCounts] = useState<{
     all: number;
     unassigned: number;
     mine: number;
+    routed: number;
     pending: number;
     resolved: number;
   } | null>(null);
-  const assignedFilterRef = useRef<"all" | "unassigned" | "mine">("all");
+  const assignedFilterRef = useRef<"all" | "unassigned" | "mine" | "routed">("all");
   assignedFilterRef.current = assignedFilter;
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<ConversationItem[] | null>(null);
@@ -922,6 +923,7 @@ export function InboxClient({
             all: number;
             unassigned: number;
             mine: number;
+            routed: number;
             pending: number;
             resolved: number;
           } };
@@ -1743,6 +1745,7 @@ export function InboxClient({
           setSearchResults(null);
         }}
         myStaffId={user.staffId}
+        myGroupIds={user.myGroupIds ?? []}
         myClinicIds={user.clinicIds}
         clinicById={clinicById}
         mentionUnread={mentionUnread}

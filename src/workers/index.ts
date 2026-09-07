@@ -44,6 +44,11 @@ async function registerSchedulers() {
     name: "auto-release",
     data: {},
   });
+  // cwi-routing-20260906（§3）：投訴兩級升級第二級 — N 分鐘未接手 → 升級組（只升一次；冪等，可空跑）
+  await cronQueue.upsertJobScheduler("sched-routing-escalate", { pattern: "*/5 * * * *" }, {
+    name: "routing-escalate",
+    data: {},
+  });
   // cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA — 未指派超過 N 分鐘 → push 全店 active STAFF（冪等：slaNotifiedAt）
   await cronQueue.upsertJobScheduler("sched-unassigned-sla", { pattern: "*/5 * * * *" }, {
     name: "unassigned-sla",
@@ -77,7 +82,7 @@ async function registerSchedulers() {
   });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m)"
   );
 }
 

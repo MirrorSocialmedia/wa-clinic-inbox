@@ -17,7 +17,7 @@ export function AccountCard({
 }: {
   name: string;
   email: string;
-  role: "ADMIN" | "STAFF";
+  role: "ADMIN" | "STAFF" | "SUPERVISOR";
   clinics: { code: string; name: string }[];
 }) {
   const [busy, setBusy] = useState(false);
@@ -51,7 +51,7 @@ export function AccountCard({
                 role === "ADMIN" ? "bg-warn-soft text-warn-text" : "bg-brand-soft text-brand-text"
               }`}
             >
-              {role === "ADMIN" ? "管理員" : "店員"}
+              {role === "ADMIN" ? "管理員" : role === "SUPERVISOR" ? "主管" : "店員"}
             </span>
           </div>
           <div className="text-xs text-t3 truncate">{email}</div>

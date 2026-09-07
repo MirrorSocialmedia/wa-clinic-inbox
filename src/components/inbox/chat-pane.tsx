@@ -65,7 +65,7 @@ interface Props {
   /** ★ H1：接手進行中（disable 掣） */
   takeoverBusy: boolean;
   /** cwi-multiclinic-20260903（MD A.6.1）：角色（放手掣顯隱 — 現任負責人 ∨ ADMIN） */
-  userRole: "ADMIN" | "STAFF";
+  userRole: "ADMIN" | "STAFF" | "SUPERVISOR"; // ★ cwi-routing-20260906 §8
   /** cwi-multiclinic-20260903（MD A.6.1）：〔放手〕— release = assign toStaffId:null（server assertCanAssign 守權限） */
   onRelease?: () => Promise<{ ok: boolean; error?: string }>;
   /** cwi-multiclinic-20260903：放手進行中（disable 掣） */
@@ -477,6 +477,8 @@ export function ChatPane(p: Props) {
   const c = p.conversation;
   // ★ H1 Send Lock 三狀態：locked = 有負責人且唔係自己（composer 轉內部備註模式）
   const locked = !!c.assigneeId && c.assigneeId !== p.myStaffId;
+  // ★ cwi-routing-20260906 §8：SUPERVISOR 覆唔到客 — composer 轉唯讀提示（內部備註照發）
+  const readOnly = p.userRole === "SUPERVISOR";
   // cwi-window-20260901（P2）：COPY_ONLY 過窗草稿（發唔出 — 只准複製去手機 App）
   const isCopyOnly = p.pendingDraft?.mode === "COPY_ONLY";
   const assigneeName = c.assigneeName ?? null;
@@ -993,14 +995,16 @@ export function ChatPane(p: Props) {
                 <Lock size={12} strokeWidth={2.75} />
                 此對話由 {assigneeName ?? "其他同事"} 負責 — 你只可發內部備註
               </span>
-              <button
-                onClick={() => void p.onTakeover()}
-                disabled={p.takeoverBusy}
-                className="ml-auto shrink-0 text-xs px-3 py-1 rounded-full bg-warn text-warn-text font-semibold hover:opacity-90 disabled:opacity-40 inline-flex items-center gap-1"
-              >
-                <StickyNote size={12} strokeWidth={2.75} />
-                {p.takeoverBusy ? "接手咗…" : "接手"}
-              </button>
+              {!readOnly && (
+                <button
+                  onClick={() => void p.onTakeover()}
+                  disabled={p.takeoverBusy}
+                  className="ml-auto shrink-0 text-xs px-3 py-1 rounded-full bg-warn text-warn-text font-semibold hover:opacity-90 disabled:opacity-40 inline-flex items-center gap-1"
+                >
+                  <StickyNote size={12} strokeWidth={2.75} />
+                  {p.takeoverBusy ? "接手咗…" : "接手"}
+                </button>
+              )}
             </div>
             <div className="relative">
               {/* ★ H2：@ 自動補全 dropdown（同店 active staff；↑↓ 揀 / Enter 選 / Esc 收） */}
@@ -1026,6 +1030,7 @@ export function ChatPane(p: Props) {
                       </span>
                       <span className="truncate">{s.name}</span>
                       {s.role === "ADMIN" && <span className="ml-auto text-[10px] text-t3">ADMIN</span>}
+                      {s.role === "SUPERVISOR" && <span className="ml-auto text-[10px] text-t3">主管</span>}
                     </button>
                   ))}
                 </div>
@@ -1083,6 +1088,12 @@ export function ChatPane(p: Props) {
             </div>
           </div>
         ) : c.window.open ? (
+          readOnly ? (
+            /* ★ cwi-routing-20260906 §8：SUPERVISOR 全店唯讀 — 無覆客 composer（API 層 403 雙保險） */
+            <div className="rounded-2xl border border-line bg-panel-2 px-4 py-2.5 text-xs text-t3">
+              主管（唯讀）— 可以睇對話、發內部備註，但唔可以覆病人（由當值同事 / 負責人處理）
+            </div>
+          ) : (
           <div className="flex flex-col gap-1.5">
             <div className="flex items-end gap-2">
               <textarea
@@ -1108,6 +1119,7 @@ export function ChatPane(p: Props) {
               </button>
             </div>
           </div>
+          )
         ) : (
           /* cwi-window-20260901（P3 / W-1）：過窗三出路 — 共享組件（D.3 排班板/迷你表同源複用；markup 同原版本一致） */
           <WindowExits

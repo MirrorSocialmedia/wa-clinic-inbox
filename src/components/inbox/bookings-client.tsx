@@ -44,7 +44,7 @@ interface Booking {
 interface UserCtx {
   staffId: string;
   name: string;
-  role: "ADMIN" | "STAFF";
+  role: "ADMIN" | "STAFF" | "SUPERVISOR"; // ★ cwi-routing-20260906 §8
   clinicId: string | null;
 }
 

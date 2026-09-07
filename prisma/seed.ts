@@ -96,6 +96,8 @@ const USERS = [
   { email: "staff-tkw@wa-clinic.local", name: "TKW 前台", role: "STAFF" as const, clinicCode: "TKW" },
   { email: "staff-mf@wa-clinic.local", name: "MF 前台", role: "STAFF" as const, clinicCode: "MF" },
   { email: "staff-wtc@wa-clinic.local", name: "WTC 前台", role: "STAFF" as const, clinicCode: "WTC" },
+  // ★ cwi-routing-20260906（§8）：SUPERVISOR 主管 — 全店唯讀 + AI 級別讀寫；StaffClinic 綁全店（通知照 STAFF 規則 — 見下方 union 補缺）。
+  { email: "supervisor@wa-clinic.local", name: "主管 陳文強", role: "SUPERVISOR" as const, clinicCode: null },
 ];
 
 function randomPassword(prefix: string): string {
@@ -196,6 +198,116 @@ async function main(): Promise<void> {
       await prisma.staffClinic.create({ data: { staffId: s.id, clinicId: s.clinicId, isPrimary: false } });
     }
   }
+
+  // ★ cwi-routing-20260906（§1/§4.2）：出廠技能組 + 預設路由規則（冪等：組按 code upsert；
+  //   成員/診所 = union 補缺（唔刪 — UI 改過嘅成員唔會俾 re-seed 洗走）；規則按 (clinicId=null, name) 冪等）。
+  const allClinicIds = [...clinicIds.values()];
+  const allActiveStaff = await prisma.staffUser.findMany({ where: { active: true }, select: { id: true, role: true } });
+  const staffIds = allActiveStaff.filter((s) => s.role === "STAFF").map((s) => s.id);
+  const supvIds = allActiveStaff.filter((s) => s.role === "SUPERVISOR").map((s) => s.id);
+
+  // ★ cwi-routing-20260906（§8 老細拍板）：SUPERVISOR 綁定全店（StaffClinic union 補缺）—
+  //   通知照 STAFF 規則（push loop 按 StaffClinic 篩店 + per-store 靜音偏好）；
+  //   session scope 仍然全店（login route 對 SUPERVISOR 寫 clinicIds=[]）。
+  for (const supvId of supvIds) {
+    for (const cid of allClinicIds) {
+      await prisma.staffClinic.upsert({
+        where: { staffId_clinicId: { staffId: supvId, clinicId: cid } },
+        update: {},
+        create: { staffId: supvId, clinicId: cid, isPrimary: false },
+      });
+    }
+  }
+
+  const GROUPS = [
+    { code: "CONSULT", name: "療程顧問", members: staffIds },
+    { code: "COMPLAINT", name: "投訴處理", members: staffIds },
+    { code: "FRONTDESK", name: "前台", members: staffIds },
+    // ★ 老細拍板：第 4 組「主管」SUPV — 成員 = 持 SUPERVISOR 角色嘅 active staff（seed 時入，UI 可改）
+    { code: "SUPV", name: "主管", members: supvIds },
+  ];
+  for (const g of GROUPS) {
+    const group = await prisma.skillGroup.upsert({
+      where: { code: g.code },
+      update: { name: g.name, enabled: true },
+      create: { code: g.code, name: g.name, description: `出廠預設（cwi-routing-20260906）` },
+    });
+    // 成員 union 補缺
+    const haveMembers = await prisma.skillGroupMember.findMany({ where: { groupId: group.id }, select: { staffId: true } });
+    const haveSet = new Set(haveMembers.map((m) => m.staffId));
+    for (const sid of g.members) {
+      if (!haveSet.has(sid)) {
+        await prisma.skillGroupMember.create({ data: { groupId: group.id, staffId: sid } });
+      }
+    }
+    // 服務診所 union 補缺（出廠 = 全部店）
+    const haveClinics = await prisma.skillGroupClinic.findMany({ where: { groupId: group.id }, select: { clinicId: true } });
+    const haveCSet = new Set(haveClinics.map((m) => m.clinicId));
+    for (const cid of allClinicIds) {
+      if (!haveCSet.has(cid)) {
+        await prisma.skillGroupClinic.create({ data: { groupId: group.id, clinicId: cid } });
+      }
+    }
+  }
+  const consultGroup = await prisma.skillGroup.findUnique({ where: { code: "CONSULT" } });
+  const complaintGroup = await prisma.skillGroup.findUnique({ where: { code: "COMPLAINT" } });
+  const supvGroup = await prisma.skillGroup.findUnique({ where: { code: "SUPV" } });
+
+  // R-7 療程組首覆文案（出廠；可自訂可關 — null 即關）
+  const R7_TEMPLATE =
+    "多謝你嘅查詢！我哋會安排療程顧問跟進。如果你手頭上有之前照過嘅 X-ray，或者方便影一張正面同側面露齒笑嘅相片發過嚟，我哋可以先幫你做初步評估。";
+
+  const RULES = [
+    {
+      name: "高價值療程",
+      priority: 10,
+      intents: [] as string[],
+      keywords: ["矯齒", "植牙", "貼片", "美白"],
+      patientType: "NEW" as string | null,
+      targetType: "GROUP" as const,
+      targetGroupId: consultGroup?.id ?? null,
+      targetStaffId: null as string | null,
+      autoReplyTemplate: R7_TEMPLATE,
+      escalateAfterMin: null as number | null,
+      escalateToGroupId: null as string | null,
+    },
+    {
+      name: "投訴處理",
+      priority: 20,
+      intents: ["COMPLAINT"],
+      keywords: [] as string[],
+      patientType: null,
+      targetType: "GROUP" as const,
+      targetGroupId: complaintGroup?.id ?? null,
+      targetStaffId: null,
+      autoReplyTemplate: null,
+      // R-5：N=15 分鐘（參數化 per-rule）→ 第二級 = 主管組
+      escalateAfterMin: 15,
+      escalateToGroupId: supvGroup?.id ?? null,
+    },
+    {
+      name: "預設",
+      priority: 90,
+      intents: [] as string[],
+      keywords: [] as string[],
+      patientType: null,
+      targetType: "CLINIC_POOL" as const,
+      targetGroupId: null,
+      targetStaffId: null,
+      autoReplyTemplate: null,
+      escalateAfterMin: null,
+      escalateToGroupId: null,
+    },
+  ];
+  for (const r of RULES) {
+    const existing = await prisma.routingRule.findFirst({ where: { clinicId: null, name: r.name } });
+    if (existing) {
+      await prisma.routingRule.update({ where: { id: existing.id }, data: r });
+    } else {
+      await prisma.routingRule.create({ data: { ...r, enabled: true } });
+    }
+  }
+  console.log(`[seed] routing: ${GROUPS.length} groups + ${RULES.length} rules ensured (CONSULT=${consultGroup?.id ?? "MISSING"} COMPLAINT=${complaintGroup?.id ?? "MISSING"} SUPV=${supvGroup?.id ?? "MISSING"})`);
 
   // credentials 檔：舊行（existing 用戶）+ 今次新建行 — 一次寫定（冪等）
   const ordered: string[] = [];

@@ -6,7 +6,7 @@
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdminOrSupervisor } from "@/lib/rbac"; // ★ cwi-routing-20260906 §8：SUPERVISOR 讀寫
 import { handle } from "@/lib/api-error";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +15,7 @@ const VALID = new Set(["PROPOSED", "APPROVED", "REJECTED"]);
 const RANK: Record<string, number> = { PROPOSED: 0, APPROVED: 1, REJECTED: 2 };
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  await requireAdminOrSupervisor(req);
   const status = req.nextUrl.searchParams.get("status") ?? undefined;
   const where = status && VALID.has(status) ? { status } : {};
   const rows = await prisma.suggestionCard.findMany({
