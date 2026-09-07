@@ -112,11 +112,13 @@ run_notify_gate() {
     --scenario t166 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" --conv-u "$CVU"
 
   # T167：多店逐店靜音（C：TKW muted → 靜；MF → 響）
+  # cwi-realtime-fix §2：prefs DB 單一真相 — mutedClinics 要喺 DB；--prefs-db 預先 POST 入 DB
+  # （desktop/sound 係 per-device 照走 localStorage preset；mutedClinics 係 STAFF 角色欄走 DB）
   local PREFS_T167="{\"desktop\":true,\"sound\":true,\"mutedClinics\":[\"$TKW_CLINIC_ID\"],\"adminMsgClinics\":[]}"
   nn "T167 多店逐店靜音（C：TKW 靜 / MF 響）" \
     --scenario t167 --cookie3 /tmp/e2e-cookie-notify-c.txt \
     --clinic "$TKW_CLINIC_ID" --clinic-m "$MF_CLINIC_ID" --conv-u "$CVU" --conv-m "$CVM" \
-    --prefs "$PREFS_T167"
+    --prefs "$PREFS_T167" --prefs-db
 
   # T168：mention 迴歸（bell badge + chime + 同事名保留 + staff 定向 room）
   nn "T168 mention 迴歸（bell + chime + 同事名）" \

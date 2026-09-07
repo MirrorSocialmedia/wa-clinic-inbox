@@ -66,19 +66,30 @@ function cloneDefaults(): NotifyPrefs {
   return { ...DEFAULT_NOTIFY_PREFS, mutedClinics: [], adminMsgClinics: [] };
 }
 
-/** N-8：讀 localStorage 開關（per-device）。SSR/損壞 → 預設值。 */
+/** N-8：讀 localStorage 開關（per-device）。SSR/損壞 → 預設值。
+ *  ★ cwi-realtime-fix §2.2 (client 自我修復，同 server F-3 同一套邏輯)：
+ *    muted === adminMsg（非空且完全相同）= 舊 bug 遺留 → muted 當空 + 順手寫返正。 */
 export function notifyPrefs(): NotifyPrefs {
   if (typeof window === "undefined") return cloneDefaults();
   try {
     const raw = window.localStorage.getItem(PREFS_KEY);
     if (!raw) return cloneDefaults();
     const p = JSON.parse(raw) as Partial<NotifyPrefs>;
-    return {
-      desktop: p.desktop !== false,
-      sound: p.sound !== false,
-      mutedClinics: Array.isArray(p.mutedClinics) ? p.mutedClinics.filter((x) => typeof x === "string") : [],
-      adminMsgClinics: Array.isArray(p.adminMsgClinics) ? p.adminMsgClinics.filter((x) => typeof x === "string") : [],
-    };
+    const desktop = p.desktop !== false;
+    const sound = p.sound !== false;
+    let mutedClinics = Array.isArray(p.mutedClinics) ? p.mutedClinics.filter((x) => typeof x === "string") : [];
+    const adminMsgClinics = Array.isArray(p.adminMsgClinics) ? p.adminMsgClinics.filter((x) => typeof x === "string") : [];
+    const same =
+      mutedClinics.length > 0 &&
+      mutedClinics.length === adminMsgClinics.length &&
+      mutedClinics.every((c) => adminMsgClinics.includes(c));
+    if (same) {
+      // eslint-disable-next-line no-console -- §2.4 自我修復留痕（壞資料 → muted 當空）
+      console.warn("[notify] prefs 壞資料（muted === adminMsg）→ mutedClinics 當空");
+      mutedClinics = [];
+      setNotifyPrefs({ desktop, sound, mutedClinics, adminMsgClinics }); // 順手寫返正（冪等）
+    }
+    return { desktop, sound, mutedClinics, adminMsgClinics };
   } catch {
     return cloneDefaults();
   }
@@ -100,6 +111,9 @@ export function setNotifyPrefs(p: NotifyPrefs): void {
  * F-2（cwi-notify-fix-20260907）：一動作一欄 — 只發自己角色嘅欄
  * （STAFF → mutedClinics；ADMIN → adminMsgClinics）— 唔再整包盲寫（server 側有兜底忽略 + warn）。
  * 失敗靜默（server 會用 DB 現值）。
+ *
+ * ★ cwi-realtime-fix §2.1 註：client 不再 mount 時盲用呢個寫 DB（DB 係單一真相 —
+ *   mount 改由 GET 拉 server 覆蓋 localStorage）；只保留做 API（未來 caller 用）。
  */
 export function syncPushPrefs(p: NotifyPrefs, role: "ADMIN" | "STAFF"): void {
   if (typeof window === "undefined") return;
@@ -267,7 +281,14 @@ function playIfAllowed(kind: NotifyKind, prefs: NotifyPrefs): void {
  * §4 Android 音效解鎖：Android 唔准未經用戶互動播音 — 首次 pointerdown（一次性）
  * 播一次 0 音量 chime 解鎖 audio element（失敗靜默跳過）。
  * 震動（vibrate）唔受限制，係手機最可靠嘅提示。
+ * ★ cwi-realtime-fix §7.2：play() resolve 先計「解鎖」— 未解鎖前 fireNotify 唔試頁面音
+ *   （autoplay 政策必擋），改行 SW 系統通知音。
  */
+let audioUnlocked = false;
+export function isAudioUnlocked(): boolean {
+  return audioUnlocked;
+}
+
 export function unlockAudio(): void {
   try {
     const el = chimeEl();
@@ -279,9 +300,13 @@ export function unlockAudio(): void {
     } catch {
       /* ignore */
     }
-    void el.play().catch(() => {
-      /* autoplay policy — 靜默 skip */
-    });
+    void el.play()
+      .then(() => {
+        audioUnlocked = true; // 解鎖成功 → 之後頁面 chime 可信
+      })
+      .catch(() => {
+        /* autoplay policy — 靜默 skip */
+      });
     window.setTimeout(() => {
       try {
         el.volume = prev;
@@ -373,8 +398,10 @@ export type FireNotifyResult = "fired" | "no-desktop";
  * 驅動 — 唔會漏。返回碼供 caller log（唔會 throw）。
  */
 export function fireNotify(a: FireNotifyArgs): FireNotifyResult {
-  // V-2：音效 — 全域 3 秒最小間隔（靜靜跳過，通知照出）
-  playIfAllowed(a.kind, a.prefs);
+  // cwi-realtime-fix §7.2：已解鎖 → 頁面 chime（V-2 全域 3 秒最小間隔）；
+  // 未解鎖（頁面零互動）→ 唔好淨係試 playChime()（autoplay 政策必擋）— 靠下面
+  // SW 通知路徑嘅系統通知音（唔受 autoplay 限制）；已解鎖 → 兩者都出（雙保險）。
+  if (audioUnlocked) playIfAllowed(a.kind, a.prefs);
 
   const canDesktop =
     a.prefs.desktop && typeof Notification !== "undefined" && Notification.permission === "granted";

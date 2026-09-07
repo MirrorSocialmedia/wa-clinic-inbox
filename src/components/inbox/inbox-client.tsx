@@ -36,7 +36,6 @@ import {
   notifyPrefs,
   setNotifyPrefs,
   shouldNotify,
-  syncPushPrefs,
   unlockAudio,
   type NotifyPrefs,
 } from "@/lib/notify-client";
@@ -46,6 +45,8 @@ import { DetailPane } from "./detail-pane";
 
 const PAGE_SIZE = 50;
 const WINDOW_MS = 24 * 3600 * 1000;
+// cwi-realtime-fix §1.3 (RT-2)：補漏重疊窗 — WhatsApp waTimestamp 係秒級（同秒多條 / 倒序）
+const RT_OVERLAP_MS = 60_000;
 
 interface ContactSearchHit {
   id: string;
@@ -188,7 +189,51 @@ export function InboxClient({
     }
     link.href = unreadTotal > 0 ? unreadFaviconDataUrl(unreadTotal) : "/favicon.ico";
   }, [unreadTotal]);
-  const lastMsgTsRef = useRef<number>(0); // 斷線前最後訊息時間（backlog cursor）
+  // ★ cwi-realtime-fix §1.1 (RT-1)：per-conversation 補漏游標 — convId → 最後見過嘅 waTimestamp (ms)。
+  //   舊版全域共用游標會被「其他對話較新訊息」推進 → 選中對話嘅補漏 delta 窗口推過自己最後一條
+  //   → 食訊息（根因 A）。
+  const lastMsgTsRef = useRef<Map<string, number>>(new Map());
+  // §1.1：推進 per-conversation 游標（只進唔退；null/非法 ts 無動作）
+  const bumpCursor = useCallback((convId: string, ts: string | number | null | undefined) => {
+    if (!convId || ts == null || ts === "") return;
+    const ms = typeof ts === "number" ? ts : new Date(ts).getTime();
+    if (!Number.isFinite(ms)) return;
+    const cur = lastMsgTsRef.current.get(convId) ?? 0;
+    if (ms > cur) lastMsgTsRef.current.set(convId, ms);
+  }, []);
+
+  // ── cwi-realtime-fix §3 (RT-6)：realtime 可觀測性 — socket 事件計數 + 補漏時間 ──
+  const rtStatsRef = useRef<Record<string, number>>({});
+  const lastCatchUpAtRef = useRef<number | null>(null);
+  const [rtDebug, setRtDebug] = useState<{
+    connected: boolean;
+    events: Record<string, number>;
+    cursors: Record<string, number>;
+    lastCatchUpAt: number | null;
+  }>({ connected: false, events: {}, cursors: {}, lastCatchUpAt: null });
+  const takeRtSnapshot = useCallback(() => {
+    const cursors = [...lastMsgTsRef.current.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+    setRtDebug({
+      connected: !!(socketRef.current && !socketRef.current.disconnected),
+      events: { ...rtStatsRef.current },
+      cursors: Object.fromEntries(cursors),
+      lastCatchUpAt: lastCatchUpAtRef.current,
+    });
+  }, []);
+  const rtRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRtSnapshot = useCallback(() => {
+    if (rtRefreshTimerRef.current) return; // 1s debounce — 事件 burst 唔會每條都 re-render
+    rtRefreshTimerRef.current = setTimeout(() => {
+      rtRefreshTimerRef.current = null;
+      takeRtSnapshot();
+    }, 1000);
+  }, [takeRtSnapshot]);
+  useEffect(
+    () => () => {
+      if (rtRefreshTimerRef.current) clearTimeout(rtRefreshTimerRef.current);
+    },
+    []
+  );
   // ★ Realtime P0 (R3, cwi-rt-20260823-a1)：focus/visibility/3 分鐘 idle refetch 游標
   const lastConvSeenRef = useRef<number>(Date.now()); // 對話列表 lastMessageAt 游標（ms epoch）
   const deltaInFlightRef = useRef<boolean>(false); // focus+visibility 同時觸發 → 唔重複 fetch
@@ -215,27 +260,77 @@ export function InboxClient({
   prefsRef.current = prefs;
   const [notifyBanner, setNotifyBanner] = useState(false);
   useEffect(() => {
-    const p = notifyPrefs();
-    setPrefs(p);
+    // 首屏：localStorage cache（可能係壞值/舊值 — notifyPrefs 已自我修復 muted===adminMsg 特徵；§2.2）
+    const local = notifyPrefs();
+    setPrefs(local);
     if (!notifyBannerDismissed()) setNotifyBanner(true);
-    // v2（cwi-notify-v2）：push 偏好同步 DB（server 推送以 DB 為準；localStorage 只做即時 UI）
-    // F-2（cwi-notify-fix）：只發自己角色嘅欄（user.role 係 session 恆定值 — [] deps 安全）
-    syncPushPrefs(p, user.role);
+    // ★ cwi-realtime-fix §2.1 (RT-4)：DB 係 prefs 唯一真相 — mount 時先 fetch server
+    //   → 覆蓋 localStorage → 再用（localStorage 只係離線/首屏 cache）。
+    //   舊版 mount 時 syncPushPrefs（localStorage → DB）會用舊本地值污染 DB — 已廢。
+    void (async () => {
+      try {
+        const res = await fetch("/api/push/prefs", { cache: "no-store" });
+        if (!res.ok) return; // 網絡/server 錯 → 用 local cache 兜底（下次 mount 再試）
+        const d = (await res.json()) as { mutedClinics?: string[]; adminMsgClinics?: string[] };
+        const strArr = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+        // §2.3 角色語義：每個角色只持有自己嗰個欄（另一欄強制空 — 防跨角色污染）
+        const merged =
+          user.role === "STAFF"
+            ? { ...local, mutedClinics: strArr(d.mutedClinics), adminMsgClinics: [] as string[] }
+            : { ...local, mutedClinics: [] as string[], adminMsgClinics: strArr(d.adminMsgClinics) };
+        setNotifyPrefs(merged); // 覆蓋 localStorage（server 為準）
+        setPrefs(merged);
+        // eslint-disable-next-line no-console -- §2.4 prefs mount sync 留痕
+        console.debug("[prefs] mount sync from DB（單一真相）", user.role);
+      } catch {
+        /* offline / 首屏 — 用 local cache */
+      }
+    })();
     // v2 Web Push：每次登入（mount）冪等確保 subscription（endpoint unique — 已授權先）
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       void ensurePushSubscription();
     }
+    // cwi-realtime-fix §8：SW 先於 mount 完成註冊/更新接管 → 補確保 subscription
+    // （mount 時 reg 未 ready → ensurePushSubscription 直接 false 且唔會自動重試 — 修首次登入 race）
+    const onSwActivated = () => {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") void ensurePushSubscription();
+    };
+    window.addEventListener("sw:activated", onSwActivated);
     // §4 Android 音效解鎖：首次 pointerdown → 0 音量 chime（一次性；失敗靜默跳過）
     const onFirstPointerDown = () => unlockAudio();
     window.addEventListener("pointerdown", onFirstPointerDown, { once: true, capture: true });
-    return () => window.removeEventListener("pointerdown", onFirstPointerDown, { capture: true });
+    return () => {
+      window.removeEventListener("pointerdown", onFirstPointerDown, { capture: true });
+      window.removeEventListener("sw:activated", onSwActivated);
+    };
   }, []);
   const updatePrefs = useCallback(
-    (next: NotifyPrefs) => {
-      setPrefs(next);
-      setNotifyPrefs(next);
-      // v2：逐店靜音 / ADMIN opt-in 改動同步 DB（server push 準）— F-2：只發自己角色嘅欄
-      syncPushPrefs(next, user.role);
+    async (next: NotifyPrefs) => {
+      setPrefs(next); // UI 即時回應
+      // per-device 欄（desktop/sound）唔過 DB → localStorage 直接寫
+      setNotifyPrefs({ ...prefsRef.current, desktop: next.desktop, sound: next.sound });
+      // ★ cwi-realtime-fix §2.1 (RT-4)：角色欄（mutedClinics/adminMsgClinics）先 POST（只發自己角色欄 —
+      //   F-2），成功之後先寫 localStorage（唔好樂觀寫）；失敗保舊本地值，下次 mount 由 server 覆蓋自愈
+      const body =
+        user.role === "ADMIN" ? { adminMsgClinics: next.adminMsgClinics } : { mutedClinics: next.mutedClinics };
+      try {
+        const res = await fetch("/api/push/prefs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          // eslint-disable-next-line no-console -- §2.4 prefs POST 失敗留痕（本地保舊值）
+          console.warn("[prefs] POST /api/push/prefs 失敗 (HTTP", res.status, ") — 本地保舊值（下次 mount 重同步）");
+          return;
+        }
+        setNotifyPrefs(next); // server 確認寫入 → localStorage 覆蓋
+        // eslint-disable-next-line no-console -- §2.4 prefs POST ok 留痕
+        console.debug("[prefs] POST ok → localStorage", user.role);
+      } catch {
+        // eslint-disable-next-line no-console -- §2.4 prefs POST 網絡錯留痕
+        console.warn("[prefs] POST 網絡錯 — 本地保舊值（下次 mount 重同步）");
+      }
     },
     [user.role]
   );
@@ -284,10 +379,14 @@ export function InboxClient({
     const socket = io({ withCredentials: true, transports: ["websocket", "polling"] });
     socketRef.current = socket;
 
+    // ★ cwi-realtime-fix §3 (RT-6)：所有 socket 事件計數（debug 面板第一站）
+    socket.onAny((ev: string) => {
+      rtStatsRef.current[ev] = (rtStatsRef.current[ev] ?? 0) + 1;
+      scheduleRtSnapshot();
+    });
+
     socket.on("message:new", (e: NewMessageEvent) => {
-      if (e.message.waTimestamp) {
-        lastMsgTsRef.current = Math.max(lastMsgTsRef.current, new Date(e.message.waTimestamp).getTime());
-      }
+      if (e.message.waTimestamp) bumpCursor(e.conversationId, e.message.waTimestamp); // §1.2：per-conversation 推進
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.id === e.conversationId);
         const msg = e.message;
@@ -710,11 +809,13 @@ export function InboxClient({
     socket.on("disconnect", () => {
       wasDisconnected = true;
       setConnOffline(true);
+      takeRtSnapshot();
     });
     socket.on("connect", () => {
       // ★ cwi-inboxfix-20260905（MD I-10）：每次 connect（首次/重連）都顯式重註冊 + 恢復 online。
       socket.emit("register");
       setConnOffline(false);
+      takeRtSnapshot();
       if (firstConnect) {
         // 首次 connect：數據由 SSR/initial fetch 提供 — 唔重複 refetch（避免 load 雙拉）
         firstConnect = false;
@@ -852,7 +953,7 @@ export function InboxClient({
       });
       setHasMore(data.hasMore);
       if (data.messages.length > 0) {
-        lastMsgTsRef.current = Math.max(lastMsgTsRef.current, new Date(data.messages[data.messages.length - 1].waTimestamp).getTime());
+        bumpCursor(convId, data.messages[data.messages.length - 1].waTimestamp); // §1.2：per-conversation 推進（只喺結果實際應用時）
       }
     } catch {
       /* ignore */
@@ -866,6 +967,11 @@ export function InboxClient({
       );
       if (!res.ok) return;
       const data = (await res.json()) as { messages: MessageItem[] };
+      // ★ cwi-realtime-fix §3 (RT-6)：補漏結果一定要 log（上次靠 code review 先搵到，今次靠 log）
+      const prevIds = new Set(messagesRef.current.map((m) => m.id));
+      const addedCount = data.messages.filter((m) => !prevIds.has(m.id)).length;
+      // eslint-disable-next-line no-console -- §3 catchUp 留痕（realtime 排障第一停）
+      console.debug("[rt] catchUp result", { convId, fetched: data.messages.length, added: addedCount });
       setMessages((prev) => {
         const ids = new Set(prev.map((m) => m.id));
         const added = data.messages.filter((m) => !ids.has(m.id));
@@ -875,6 +981,28 @@ export function InboxClient({
       /* ignore */
     }
   }, []);
+
+  // ── cwi-realtime-fix §1.3 (RT-2 / RT-3)：per-conversation 補漏 ────────────
+  // cur===0 / state 空（從未載入，或啱啱清空）→ 一定要攞完整最新一頁（清空後只做 delta
+  //   係「彈完消失」第二條路 — RT-3）；否則 delta + 60 秒重疊窗（RT-2 秒級 ts 容錯，
+  //   fetchMessagesAfter 已 by-id 去重 — 重疊窗唔會出重複行）。
+  const catchUp = useCallback(
+    (convId: string) => {
+      const cur = lastMsgTsRef.current.get(convId) ?? 0;
+      if (cur === 0 || messagesRef.current.length === 0) {
+        // eslint-disable-next-line no-console -- §3 catchUp 留痕（realtime 排障第一停）
+        console.debug("[rt] catchUp", { convId, cursor: cur, mode: "latest" });
+        void fetchMessagesLatest(convId);
+        return;
+      }
+      // eslint-disable-next-line no-console -- §3 catchUp 留痕（realtime 排障第一停）
+      console.debug("[rt] catchUp", { convId, cursor: cur, mode: "after", from: cur - RT_OVERLAP_MS });
+      void fetchMessagesAfter(convId, cur - RT_OVERLAP_MS);
+      lastCatchUpAtRef.current = Date.now();
+      void takeRtSnapshot();
+    },
+    [fetchMessagesAfter, fetchMessagesLatest, takeRtSnapshot]
+  );
 
   // ── ★ Realtime P0 (R3, cwi-rt-20260823-a1)：focus-refetch ────────────────
   // visibilitychange(visible) / window focus / 3 分鐘 idle timer → 同一個 refetchDelta()。
@@ -908,18 +1036,17 @@ export function InboxClient({
         );
         return next;
       });
-      // 開住嘅 thread 補漏（選中對話有更新先 fetch — 唔空攪）
+      // cwi-realtime-fix §1.3：開住嘅 thread 補漏 — per-conversation 游標 + 60s 重疊窗；
+      // state 空/游標 0 一律行最新一頁（RT-3）。唔再「選中喺 rows 先補」— 對話列表 delta
+      // 漏咗某對話都要補（游標自帶判斷，唔空攪）。
       const sel = selectedIdRef.current;
-      if (sel && rows.some((r) => r.id === sel)) {
-        if (lastMsgTsRef.current > 0) void fetchMessagesAfter(sel, lastMsgTsRef.current);
-        else void fetchMessagesLatest(sel);
-      }
+      if (sel) catchUp(sel);
     } catch {
       /* ignore — 下次 trigger 再試 */
     } finally {
       deltaInFlightRef.current = false;
     }
-  }, [fetchMessagesAfter, fetchMessagesLatest]);
+  }, [catchUp]);
 
   // R3 triggers：tab focus 返 / window focus / 每 3 分鐘 idle 掃一次
   useEffect(() => {
@@ -1627,6 +1754,7 @@ export function InboxClient({
         prefs={prefs}
         onPrefsChange={updatePrefs}
         connOffline={connOffline}
+        rtDebug={rtDebug}
       />
 
       {/* ★ Part B：首次登入 banner 一次（localStorage flag；啟 = 請求 permission + 開桌面通知） */}

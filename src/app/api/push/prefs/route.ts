@@ -1,6 +1,7 @@
 import { type NextRequest } from "next/server";
 import { handle } from "@/lib/api-error";
 import { requireAuth } from "@/lib/rbac";
+import { parsePushPrefs } from "@/lib/push";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 
@@ -19,6 +20,23 @@ import log from "@/lib/log";
  * 驗證：只收 string 陣列；clinic id 必係存在嘅 clinic id（防垃圾 data）。
  */
 export const dynamic = "force-dynamic";
+
+/**
+ * GET /api/push/prefs — cwi-realtime-fix §2.1 (RT-4)：client mount 時拉 DB prefs。
+ *
+ * DB 係 prefs 唯一真相 — client 用呢個回應覆蓋 localStorage 先至用（localStorage
+ * 只係離線/首屏 cache）。回傳 parsePushPrefs 同源口徑（server 自我修復 — RT-5：
+ * muted===adminMsg 舊污染特徵喺讀取層已自愈）。永遠兩個 array（role 欄位歸空喺 client 側做）。
+ */
+export const GET = handle(async (req: NextRequest) => {
+  const { staff } = await requireAuth(req);
+  const row = await prisma.staffUser.findUnique({
+    where: { id: staff.id },
+    select: { pushPrefs: true },
+  });
+  const parsed = parsePushPrefs(row?.pushPrefs, staff.id);
+  return Response.json({ mutedClinics: parsed.mutedClinics, adminMsgClinics: parsed.adminMsgClinics });
+});
 
 function cleanClinicIds(v: unknown): string[] | null {
   if (v == null) return null;

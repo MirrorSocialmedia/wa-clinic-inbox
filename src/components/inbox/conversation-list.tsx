@@ -51,6 +51,13 @@ interface Props {
   onPrefsChange: (p: NotifyPrefs) => void;
   /** ★ cwi-inboxfix-20260905（MD I-10）：socket 斷線中 — 列表頂 banner「⚠ 連線中斷 — 重連中…」 */
   connOffline?: boolean;
+  /** ★ cwi-realtime-fix §3 (RT-6)：realtime 連線 debug 快照（唯讀 — 將來所有 realtime 問題第一站） */
+  rtDebug?: {
+    connected: boolean;
+    events: Record<string, number>;
+    cursors: Record<string, number>;
+    lastCatchUpAt: number | null;
+  };
 }
 
 const STATUS_LABEL: Record<ConvStatus | "ALL", string> = {
@@ -281,7 +288,13 @@ export function ConversationList(p: Props) {
               />
               提示音
             </label>
-            {p.clinics.length > 1 && (
+            {/* cwi-realtime-fix §7.3：autoplay 政策講清楚（未互動前頁面音被擋 — 主路係系統通知音） */}
+            <div className="text-[10px] text-t3 leading-snug -mt-1">
+              瀏覽器規定：網頁音效要先同頁面互動一次先播得。想一開機就有聲，建議「安裝為 App」（主畫面／桌面捷徑）。
+            </div>
+            {/* cwi-realtime-fix §2.3：角色語義 — STAFF 見逐店靜音（黑名單）；ADMIN 只見下方 opt-in（白名單），
+                兩個 list 唔好同時出（ADMIN 唔准再寫 mutedClinics） */}
+            {p.userRole === "STAFF" && p.clinics.length > 1 && (
               <div className="space-y-1 pt-1.5 border-t border-line">
                 <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">逐店靜音</div>
                 {p.clinics.map((c) => {
@@ -359,6 +372,31 @@ export function ConversationList(p: Props) {
                 </div>
               )}
             </div>
+            {/* cwi-realtime-fix §3 (RT-6)：連線狀態 debug 區（唯讀 — 事件計數/游標/最後補漏） */}
+            {p.rtDebug && (
+              <div className="pt-1.5 border-t border-line space-y-0.5">
+                <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">連線狀態（唯讀 debug）</div>
+                <div className="text-[10px] text-t2 font-mono">
+                  socket: {p.rtDebug.connected ? "✅ 已連接" : "❌ 斷線"}
+                </div>
+                {Object.entries(p.rtDebug.events)
+                  .filter(([, n]) => n > 0)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([ev, n]) => (
+                    <div key={ev} className="text-[10px] text-t3 font-mono truncate">
+                      {ev} ×{n}
+                    </div>
+                  ))}
+                {Object.entries(p.rtDebug.cursors).map(([cid, ts]) => (
+                  <div key={cid} className="text-[10px] text-t3 font-mono truncate">
+                    cursor {cid.slice(0, 8)}: {new Date(ts).toLocaleTimeString()}
+                  </div>
+                ))}
+                <div className="text-[10px] text-t3 font-mono">
+                  最後補漏: {p.rtDebug.lastCatchUpAt ? new Date(p.rtDebug.lastCatchUpAt).toLocaleTimeString() : "—"}
+                </div>
+              </div>
+            )}
             <div className="text-[10px] text-t3 pt-1.5 border-t border-line">
               閂咗分頁都收到通知（Web Push）；逐店靜音 / 訊息通知選項已同步 server（push 都生效）
             </div>

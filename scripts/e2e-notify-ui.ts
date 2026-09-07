@@ -29,7 +29,7 @@
  *
  * ★ PII 鐵律：斷言本身就用 fixture 病人資料做 canary（t164 零 PII regex）。
  */
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import Redis from "ioredis";
@@ -70,6 +70,18 @@ const waitName = arg("--wait-name"); // 列表等待名（t265–t267；缺省 =
 const cookieAFile = arg("--cookie");
 const cookieBFile = arg("--cookie2");
 const cookieCFile = arg("--cookie3");
+// cwi-realtime-fix T270–T282
+const convB = arg("--conv-b"); // 第二對話（t270 合成 B / t272 換對話）
+const nameA = arg("--name-a"); // t272 對話 A 接觸人名（列表行 click）
+const nameB = arg("--name-b"); // t272 對話 B 接觸人名
+const idA2 = arg("--id-a2"); // t270 直插 DB 訊息 id
+const bodyA2 = arg("--body-a2"); // t270 直插 DB 訊息 body
+const idA3 = arg("--id-a3"); // t271 同秒對 A3
+const idA4 = arg("--id-a4"); // t271 同秒對 A4
+const bodyA4s = arg("--body-a4s"); // t271 合成 socket 訊息 body
+const bodyT2813 = arg("--b3"); // t281 背景訊息 3
+const bodyT2814 = arg("--b4"); // t281 背景訊息 4
+const bodyA5 = arg("--body-a5"); // t282 重開後應在嘅訊息 body
 
 const PII_NAME = "PII 張三 E2E";
 const listWaitName = waitName || PII_NAME; // 必喺 PII_NAME 之後（TDZ）
@@ -109,6 +121,11 @@ interface SpyState {
   mediaPlays: { src: string; t: number }[];
   ctxCreations: number;
   errors: unknown[];
+  // cwi-realtime-fix：可觀測性 spy（T273/T274/T275/T276/T272）
+  debugLogs: string[]; // console.debug 含 notify: / [rt] 嘅行
+  warnLogs: string[]; // console.warn 含 prefs/notify 嘅行（自我修復留痕）
+  prefsPosts: string[]; // POST /api/push/prefs 嘅 body（角色欄斷言）
+  fetchUrls: string[]; // /messages? 請求 URL（latest vs delta 斷言）
 }
 declare global {
   interface Window {
@@ -155,6 +172,39 @@ function spyInitScript(mode: "granted" | "denied", prefPresetJson: string): stri
     if (prefJson) {
       try { localStorage.setItem("wa_inbox_notify_prefs_v1", prefJson); } catch (e) {}
     }
+    // cwi-realtime-fix：debug/warn log + prefs POST + /messages? URL 追蹤（T272/T273/T274/T275/T276）
+    window.__spy.debugLogs = [];
+    window.__spy.warnLogs = [];
+    window.__spy.prefsPosts = [];
+    window.__spy.fetchUrls = [];
+    const origDebug = console.debug;
+    console.debug = function (...a) {
+      try {
+        const s = a.map((x) => (typeof x === "string" ? x : ((function () { try { return JSON.stringify(x); } catch (e) { return String(x); } })()))).join(" ");
+        if (s.indexOf("notify:") >= 0 || s.indexOf("[rt]") >= 0) window.__spy.debugLogs.push(s);
+      } catch (e) {}
+      return origDebug.apply(console, a);
+    };
+    const origWarn = console.warn;
+    console.warn = function (...a) {
+      try {
+        const s = a.map((x) => (typeof x === "string" ? x : String(x))).join(" ");
+        if (s.indexOf("prefs") >= 0 || s.indexOf("notify") >= 0) window.__spy.warnLogs.push(s);
+      } catch (e) {}
+      return origWarn.apply(console, a);
+    };
+    const origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      try {
+        const url = typeof input === "string" ? input : (input && input.url) || "";
+        if (url.indexOf("/messages?") >= 0) window.__spy.fetchUrls.push(url);
+        if (url.indexOf("/api/push/vapid-key") >= 0) window.__spy.fetchUrls.push(url);
+        if (url.indexOf("/api/push/prefs") >= 0 && init && (init.method || "GET").toUpperCase() === "POST") {
+          window.__spy.prefsPosts.push(typeof init.body === "string" ? init.body : "");
+        }
+      } catch (e) {}
+      return origFetch.apply(this, arguments);
+    };
   })(${JSON.stringify(mode)}, ${JSON.stringify(prefPresetJson)});
   `;
 }
@@ -179,8 +229,8 @@ const nowIso = () => new Date().toISOString();
 let msgSeq = 0;
 const nextMsgId = () => `e2enotifymsg${++msgSeq}`;
 
-function messagePayload(conv: string, clinicId: string, opts: { unread?: number; body?: string; contact?: boolean; direction?: string }): unknown {
-  const t = nowIso();
+function messagePayload(conv: string, clinicId: string, opts: { unread?: number; body?: string; contact?: boolean; direction?: string; ts?: string; id?: string }): unknown {
+  const t = opts.ts ?? nowIso(); // cwi-realtime-fix：可傳固定 ts（同秒對 / 游標序測試）
   return {
     conversationId: conv,
     clinicId,
@@ -188,7 +238,7 @@ function messagePayload(conv: string, clinicId: string, opts: { unread?: number;
       ? { id: "e2enotifyct1", waId: PII_PHONE, profileName: PII_NAME, labels: [] }
       : null,
     message: {
-      id: nextMsgId(),
+      id: opts.id ?? nextMsgId(), // cwi-realtime-fix：可傳固定 id（同 DB 行 by-id 去重測試）
       waMessageId: `wamid.E2E_NOTIFY_${msgSeq}`,
       direction: opts.direction ?? "IN",
       channel: "API",
@@ -217,6 +267,7 @@ interface CtxLike {
   addCookies: (c: unknown[]) => Promise<void>;
   newPage: () => Promise<PageLike>;
   close: () => Promise<void>;
+  route: (p: string, h: (r: { abort: () => Promise<void>; fulfill: (o: Record<string, unknown>) => Promise<void> }) => Promise<void>) => Promise<void>;
 }
 interface PageLike {
   addInitScript: (s: string) => Promise<void>;
@@ -258,19 +309,46 @@ async function waitForListReady(P: PageLike, waitText: string, timeoutMs = 120_0
   }
 }
 
-async function openBrowser(exe: string, cookieFile: string, url: string, mode: "granted" | "denied", prefPreset: string, opts?: { noSw?: boolean; viewport?: { width: number; height: number } }): Promise<{ B: unknown; C: CtxLike; P: PageLike }> {
+async function openBrowser(exe: string, cookieFile: string, url: string, mode: "granted" | "denied", prefPreset: string, opts?: { noSw?: boolean; swBody?: string; viewport?: { width: number; height: number } }): Promise<{ B: unknown; C: CtxLike; P: PageLike }> {
   const sessionValue = readSession(cookieFile);
   if (!sessionValue) throw new Error(`cookie 檔搵唔到 wa_inbox_session: ${cookieFile}`);
   const B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<{ newContext: (o: Record<string, unknown>) => Promise<CtxLike>; close: () => Promise<void> }> }).launch({
     headless: true,
     executablePath: exe,
+    // cwi-realtime-fix §7.2：headless 環境音頻播放确定性（app 層 audioUnlocked gate 照斷 — 呢度只係卸咗瀏覽器 autoplay 政策）
+    args: ["--autoplay-policy=no-user-gesture-required"],
   })) as unknown as { newContext: (o: Record<string, unknown>) => Promise<CtxLike>; close: () => Promise<void> };
   const C = await B.newContext({ viewport: opts?.viewport ?? { width: 1440, height: 900 } });
   if (opts?.noSw) {
     // v2 --no-sw：abort /sw.js → SW 註冊失敗 → app 行 new Notification fallback
-    await (C as unknown as { route: (p: string, h: (r: { abort: () => Promise<void> }) => Promise<void>) => Promise<void> }).route("**/sw.js", (r) => r.abort());
+    await C.route("**/sw.js", (r) => r.abort());
+  } else if (opts?.swBody) {
+    // cwi-realtime-fix T279/T280：攔截 /sw.js 送指定 byte（SW 版本切換測試）
+    await C.route("**/sw.js", (r) => r.fulfill({ status: 200, contentType: "text/javascript", body: opts.swBody }));
   }
   await C.addCookies([{ name: "wa_inbox_session", value: sessionValue, domain: "127.0.0.1", path: "/" }]);
+  // cwi-realtime-fix §2 (RT-4)：DB 係 prefs 單一真相。`--prefs` preset 預設係「舊本地值」（local-only，
+  // app mount 會用 DB 覆蓋 — 正是 T273/T274 要測嘅行為）。舊 gate suite 語義（preset = 生效 prefs，
+  // 舊 world 靠 syncPushPrefs mount 回寫）用 `--prefs-db` 旗號：預先把角色欄 POST 入 DB。
+  // server 按 role 驗證：非本角色欄自動強制 [] — 兩欄一併 POST 安全。
+  if (prefPreset && process.argv.includes("--prefs-db")) {
+    try {
+      const p = JSON.parse(prefPreset) as { mutedClinics?: string[]; adminMsgClinics?: string[] };
+      const body: Record<string, unknown> = {};
+      if (Array.isArray(p.mutedClinics)) body.mutedClinics = p.mutedClinics;
+      if (Array.isArray(p.adminMsgClinics)) body.adminMsgClinics = p.adminMsgClinics;
+      if (Object.keys(body).length > 0) {
+        const res = await fetch(`${base}/api/push/prefs`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: `wa_inbox_session=${sessionValue}` },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) console.error(`[prefs-bridge] POST /api/push/prefs → ${res.status}`);
+      }
+    } catch (e) {
+      console.error("[prefs-bridge] 失敗（繼續）:", String(e));
+    }
+  }
   const P = await C.newPage();
   await P.addInitScript(spyInitScript(mode, prefPreset));
   await P.goto(url, { waitUntil: "domcontentloaded", timeout: 90_000 });
@@ -379,6 +457,133 @@ async function cycleVisibility(P: PageLike, to: "hidden" | "visible"): Promise<v
 }
 
 // ── scenarios ────────────────────────────────────────────────────────────
+// ── cwi-realtime-fix T270–T282 helpers ───────────────────────────────────────────────
+
+/** 讀 spy 可觀測性欄（debug/warn log、prefs POST、fetch URL） */
+async function spyMeta(P: PageLike): Promise<{ debugLogs: string[]; warnLogs: string[]; prefsPosts: string[]; fetchUrls: string[] }> {
+  const s = await P.evaluate(() => window.__spy);
+  return s as unknown as { debugLogs: string[]; warnLogs: string[]; prefsPosts: string[]; fetchUrls: string[] };
+}
+
+/** §7.2：headless 無真實 user gesture → autoplay 鎖定。真實 click（isTrusted）→ app pointerdown
+ *  listener → unlockAudio（0 音量 chime）。回 unlock 後 baseline — chime 斷言一律用 delta。
+ *  （evaluate dispatch 嘅事件係 untrusted — 解唔到鎖） */
+/** 開 SW 前音頻解鎖：真實 trusted gesture（pointerdown）— app `onFirstPointerDown` 一次性
+ *  pointerdown listener 先調 unlockAudio（0 音量 chime）。headless 無人手互動 → 用 Playwright
+ *  真 click（isTrusted）模擬。
+ * ★ 關面板要用**背景遮罩**（fixed inset-0）— 面板開咗時 gear 被遮罩蓋住，
+ *   再 click gear 會 pointer-events intercept 30s 超時（T160 等實測）。
+ */
+async function unlockAudio(P: PageLike): Promise<Awaited<ReturnType<typeof spy>>> {
+  const gear = P.locator('[aria-label="通知設定"]').first();
+  await gear.click(); // 開（trusted pointerdown — 音頻解鎖就係呢一下）
+  await new Promise((r) => setTimeout(r, 500));
+  await P.locator('div.fixed.inset-0[aria-hidden="true"]')
+    .click({ timeout: 5000 })
+    .catch(() => {
+      /* 遮罩未出 / 已關 — 唔影響（解鎖已落） */
+    });
+  await new Promise((r) => setTimeout(r, 800)); // unlock chime（0 音量）落定
+  return await spy(P);
+}
+
+/** focus 事件 → app onFocus = refetchDelta（純補漏路徑 — 無 fetchMessagesLatest 兜底） */
+async function dispatchFocus(P: PageLike): Promise<void> {
+  await P.evaluate(() => window.dispatchEvent(new Event("focus")));
+}
+
+/** SW 版本查詢（postMessage round-trip — sw.js 嘅 sw-version handler） */
+async function swVersionQuery(P: PageLike, timeoutMs = 8000): Promise<string> {
+  for (let i = 0; i < 3; i++) {
+    const v = (await P.evaluate((t: number) =>
+      new Promise<string>((res) => {
+        const to = setTimeout(() => res("TIMEOUT"), t);
+        navigator.serviceWorker.addEventListener(
+          "message",
+          (e) => {
+            if (e.data && e.data.type === "sw-version-ack") {
+              clearTimeout(to);
+              res(String(e.data.version));
+            }
+          },
+          { once: true }
+        );
+        try {
+          navigator.serviceWorker.controller?.postMessage({ type: "sw-version" });
+        } catch {
+          res("NOCTL");
+        }
+      }),
+      timeoutMs
+    )) as string;
+    if (v !== "TIMEOUT" && v !== "NOCTL") return v;
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return "";
+}
+
+/** 攞 dev server 現行 /sw.js byte */
+async function fetchSwBody(baseUrl: string): Promise<string> {
+  const r = await fetch(`${baseUrl}/sw.js`);
+  if (!r.ok) throw new Error(`sw.js fetch ${r.status}`);
+  return await r.text();
+}
+
+/** scenario 側 DB 操作（e2e-query — 固定 id 冪等 fixture 插/洗；失敗回 ERR…） */
+function dbq(sql: string): string {
+  try {
+    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+    return execFileSync("./node_modules/.bin/tsx", ["scripts/e2e-query.ts", sql], {
+      cwd: path.join(__dirname, ".."),
+      encoding: "utf-8",
+      timeout: 90_000,
+    });
+  } catch (e) {
+    return `ERR ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/** 等 SW subscription（app mount 自動 ensurePushSubscription；headless datacenter 環境 push service
+ *  唔可能可用 → null 亦係合理結果，caller 自行判斷） */
+async function waitForSubscription(P: PageLike, timeoutMs = 20_000): Promise<string | null> {
+  const t0 = Date.now();
+  for (;;) {
+    const ep = (await P.evaluate(() =>
+      navigator.serviceWorker
+        .getRegistration()
+        .then((r) =>
+          r
+            ? r.pushManager.getSubscription().then((s) => (s ? s.endpoint : null))
+            : null
+        )
+        .catch(() => null)
+    )) as string | null;
+    if (ep) return ep;
+    if (Date.now() - t0 > timeoutMs) return null;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+/** 讀 public/sw.js（T279/T280 file-swap — dev server 每次 request 都讀盤） */
+function readSwFile(): string {
+  return readFileSync(path.join(__dirname, "..", "public", "sw.js"), "utf-8");
+}
+function writeSwFile(body: string): void {
+  writeFileSync(path.join(__dirname, "..", "public", "sw.js"), body);
+}
+
+/** 等對話開咗（contact 名出現 ≥2 次 = 列表 + chat header） */
+async function waitForConvOpen(P: PageLike, name: string, timeoutMs = 120_000): Promise<void> {
+  const t0 = Date.now();
+  for (;;) {
+    const n = await P.getByText(name).count();
+    if (n >= 2) return;
+    if (Date.now() - t0 > timeoutMs) fail(`對話未開（?conv= 深連結；waitText="${name}"）`);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+// ── scenarios ────────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
   const exe = findChromium();
   const browsers: unknown[] = [];
@@ -389,6 +594,14 @@ async function main(): Promise<void> {
   };
 
   try {
+    // cwi-realtime-fix §2 (RT-4)：DB 係 prefs 單一真相 → 每個 scenario 開始前清晒 pushPrefs，
+    // 還原舊 world 嘅「fresh browser = fresh prefs」語義（DB 跨 scenario 持久 — 唔清會跨 scenario 污染，
+    // 例：T275 寫咗 ADMIN adminMsgClinics → 下個 suite 嘅 T169「ADMIN 預設靜」假紅 — 實測）。
+    // `--no-prefs-reset`：scenario 自己預設 DB state（T273/T274）— 跳過 reset。
+    if (!process.argv.includes("--no-prefs-reset")) {
+      const prefReset = dbq('UPDATE "StaffUser" SET "pushPrefs" = NULL');
+      if (prefReset.startsWith("ERR")) console.error(`[prefs-reset] 失敗（繼續）: ${prefReset.slice(0, 120)}`);
+    }
     if (scenario === "t160") {
       // 未指派 → 全店 STAFF 響（A + B 兩瀏覽器都收）
       const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", "");
@@ -397,10 +610,14 @@ async function main(): Promise<void> {
       await waitForListReady(a.P, PII_NAME);
       await waitForListReady(b.P, PII_NAME);
       await new Promise((r) => setTimeout(r, 3000)); // socket connect
+      // cwi-realtime-fix §7.2：headless 無真實 gesture → 頁面音鎖 — 模擬真實互動解鎖；
+      // chime 斷言用 unlock 後 baseline 嘅 delta
+      const baseA = await unlockAudio(a.P);
+      const baseB = await unlockAudio(b.P);
       const sA = await publishAndRing(a.P, "A（assignee 無 → 全店）", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1 })), (s) => titleMatches(s, `新訊息 · ${CLINIC_SHORT}`));
       const sB = await publishAndRing(b.P, "B（assignee 無 → 全店）", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1 })), (s) => titleMatches(s, `新訊息 · ${CLINIC_SHORT}`));
-      if (chimePlays(sA) < 1) fail("t160 A: 冇 chime（chimePlays=0）");
-      if (chimePlays(sB) < 1) fail("t160 B: 冇 chime（chimePlays=0）");
+      if (chimePlays(sA) - chimePlays(baseA) < 1) fail("t160 A: 冇 chime（unlock 後 Δ=0）");
+      if (chimePlays(sB) - chimePlays(baseB) < 1) fail("t160 B: 冇 chime（unlock 後 Δ=0）");
       if (sA.ctxCreations !== 0 || sB.ctxCreations !== 0) fail("t160: v1 WebAudio beep 應該已退役（ctxCreations>0）");
       console.log("NOTIFY-UI-OK");
     } else if (scenario === "t161") {
@@ -412,8 +629,9 @@ async function main(): Promise<void> {
       await waitForListReady(a.P, "E2E 李四");
       await waitForListReady(b.P, "E2E 李四");
       await new Promise((r) => setTimeout(r, 3000));
+      const baseA = await unlockAudio(a.P); // cwi-realtime-fix §7.2：解鎖後先斷 chime
       const sA = await publishAndRing(a.P, "A（assignee）", () => publish(clinic, "message:new", messagePayload(convA, clinic, { unread: 1, contact: false, body: "e2e-notify-t161-a" })), (s) => titleMatches(s, `新訊息 · ${CLINIC_SHORT}`));
-      if (chimePlays(sA) < 1) fail("t161 A: 冇 chime");
+      if (chimePlays(sA) - chimePlays(baseA) < 1) fail("t161 A: 冇 chime（unlock 後 Δ=0）");
       await assertNoNew(b.P, "t161 B（非 assignee）");
       console.log("NOTIFY-UI-OK");
     } else if (scenario === "t162") {
@@ -445,6 +663,7 @@ async function main(): Promise<void> {
       browsers.push(a.B);
       await waitForListReady(a.P, PII_NAME);
       await new Promise((r) => setTimeout(r, 3000));
+      const baseT = await unlockAudio(a.P); // cwi-realtime-fix §7.2：解鎖後 baseline（chime 斷言用 delta）
       // 5 條連發（同 conv，間隔 120ms — 全部落喺 3s 窗內）
       for (let i = 1; i <= 5; i++) {
         await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: i, contact: false, body: `e2e-t188-${i}` }));
@@ -453,14 +672,14 @@ async function main(): Promise<void> {
       const s5 = await waitForSpy(a.P, (s) => s.notifications.length >= 5, "t188 五條通知", 15_000);
       if (s5.notifications.length !== 5) fail(`t188: 期望 5 通知（每條都出 — 通知唔受限流），actual=${s5.notifications.length}`);
       if (!s5.notifications.every((n) => n.tag === convU)) fail(`t188: 全部 tag 應 = convU（tags=${JSON.stringify([...new Set(s5.notifications.map((n) => n.tag))])}）`);
-      if (chimePlays(s5) !== 1) fail(`t188: 3s 窗內期望只響 1 次，actual=${chimePlays(s5)}（mediaPlays=${JSON.stringify(s5.mediaPlays)}）`);
+      if (chimePlays(s5) - chimePlays(baseT) !== 1) fail(`t188: 3s 窗內期望只響 1 次，Δ=${chimePlays(s5) - chimePlays(baseT)}（mediaPlays=${JSON.stringify(s5.mediaPlays)}）`);
       if (s5.ctxCreations !== 0) fail(`t188: v1 WebAudio beep 應該已退役（ctxCreations=${s5.ctxCreations}）`);
       // 間隔滿 3s → 第六條 → 再響
       console.log("  (t188 等 3.5s 全域音間隔過咗...)");
       await new Promise((r) => setTimeout(r, 3500));
       const s6 = await publishAndRing(a.P, "t188 3.5s 後第六條", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 6, contact: false, body: "e2e-t188-6" })), (s) => s.notifications.length >= 6);
       if (s6.notifications.length !== 6) fail(`t188: 期望 6 通知，actual=${s6.notifications.length}`);
-      if (chimePlays(s6) !== 2) fail(`t188: 3.5s 後應再響（期望 2 次），actual=${chimePlays(s6)}`);
+      if (chimePlays(s6) - chimePlays(baseT) !== 2) fail(`t188: 3.5s 後應再響（期望 Δ=2），actual Δ=${chimePlays(s6) - chimePlays(baseT)}`);
       console.log("NOTIFY-UI-OK");
     } else if (scenario === "t164") {
       // OS 零 PII regex — message + urgent 都要（urgent payload 有 contactName = 陷阱）
@@ -554,11 +773,26 @@ async function main(): Promise<void> {
       browsers.push(a.B);
       await waitForListReady(a.P, PII_NAME);
       await new Promise((r) => setTimeout(r, 3000));
-      const s = await publishAndRing(a.P, "t166 urgent", () => publish(clinic, "urgent:escalation", urgentPayload(convU, { contactName: PII_NAME })), (sp) => sp.mediaPlays.some((m) => m.src.includes("notify-urgent.mp3")) || titleMatches(sp, `⚠ 緊急 · ${CLINIC_SHORT}`));
+      const baseU = await unlockAudio(a.P); // cwi-realtime-fix §7.2：解鎖後先斷 second 音
+      const s0 = await publishAndRing(a.P, "t166 urgent", () => publish(clinic, "urgent:escalation", urgentPayload(convU, { contactName: PII_NAME })), (sp) => sp.mediaPlays.some((m) => m.src.includes("notify-urgent.mp3")) || titleMatches(sp, `⚠ 緊急 · ${CLINIC_SHORT}`));
+      // ★ cwi-realtime-fix（a2）race 修：cond 有快路「聲」（本地 Audio.play，同步入 spy）；通知行慢路
+      //   （SW getRegistration → showNotification round-trip，dev load 下可 >500ms poll 間隔）。
+      //   cond 被聲先 hit → snapshot 搶喺通知之前 → 假紅「OS 通知 title 錯（[]）」（實測重現；
+      //   probe 驗證 app 本身聲+通知同出）。settle 800ms 後重讀 notifications 先斷言 —
+      //   真缺通知（app bug）settle 後照係 [] 照紅，唔會假綠。
+      await new Promise((r) => setTimeout(r, 800));
+      const s = { ...s0, notifications: (await spy(a.P)).notifications };
       if (!s.mediaPlays.some((m) => m.src.includes("notify-urgent.mp3"))) fail(`t166: 冇 play notify-urgent.mp3（mediaPlays=${JSON.stringify(s.mediaPlays)}）`);
-      if (chimePlays(s) > 0) fail(`t166: urgent 唔應該行 chime.wav（chimePlays=${chimePlays(s)}）`);
+      if (chimePlays(s) - chimePlays(baseU) > 0) fail(`t166: urgent 唔應該行 chime.wav（unlock 後 Δ=${chimePlays(s) - chimePlays(baseU)}）`);
       if (s.ctxCreations > 0) fail(`t166: v1 beep 應該已退役（ctxCreations=${s.ctxCreations}）`);
-      if (!titleMatches(s, `⚠ 緊急 · ${CLINIC_SHORT}`)) fail(`t166: OS 通知 title 錯（${JSON.stringify(s.notifications)}）`);
+      if (!titleMatches(s, `⚠ 緊急 · ${CLINIC_SHORT}`)) {
+        const dbg = (await a.P.evaluate(() => ({
+          ls: localStorage.getItem("wa_inbox_notify_prefs_v1"),
+          perm: typeof Notification !== "undefined" ? Notification.permission : "undef",
+          reg: !!navigator.serviceWorker.getRegistration,
+        }))) as Record<string, unknown>;
+        fail(`t166: OS 通知 title 錯（${JSON.stringify(s.notifications)}）dbg=${JSON.stringify(dbg)}`);
+      }
       console.log("NOTIFY-UI-OK");
     } else if (scenario === "t167") {
       // 多店逐店靜音（C = TKW+MF；預設 mute TKW）
@@ -566,16 +800,18 @@ async function main(): Promise<void> {
       browsers.push(a.B);
       await waitForListReady(a.P, PII_NAME);
       await new Promise((r) => setTimeout(r, 3000));
+      const baseC = await unlockAudio(a.P); // cwi-realtime-fix §7.2：解鎖後 baseline
       // TKW（muted）→ 靜（交付證明：列表 preview 更新 — 防事件丟失假綠）
       await publishUntilSeen(a.P, "t167 TKW 交付", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-notify-t167-tkw" })), "e2e-notify-t167-tkw");
       {
         const s = await spy(a.P);
-        if (s.notifications.length > 0 || s.ctxCreations > 0 || s.mediaPlays.length > 0) fail(`t167 TKW（muted）應該靜（spy=${JSON.stringify(s)}）`);
+        if (s.notifications.length > 0 || s.ctxCreations > 0) fail(`t167 TKW（muted）應該靜（spy=${JSON.stringify(s)}）`);
+        if (s.mediaPlays.length > baseC.mediaPlays.length) fail(`t167 TKW（muted）應該靜（unlock 後 Δmedia=${s.mediaPlays.length - baseC.mediaPlays.length}）`);
       }
       // MF（未 mute）→ 響（v2：chime.wav）
       if (!clinicM) throw new Error("t167 要 --clinic-m");
       const s = await publishAndRing(a.P, "t167 MF（未 mute）", () => publish(clinicM, "message:new", messagePayload(convM, clinicM, { unread: 1, contact: false, body: "e2e-notify-t167-mf" })), (sp) => titleMatches(sp, `新訊息 · ${MF_SHORT}`));
-      if (chimePlays(s) < 1) fail("t167 MF: 冇 chime");
+      if (chimePlays(s) - chimePlays(baseC) < 1) fail("t167 MF: 冇 chime（unlock 後 Δ=0）");
       // 設定面板：逐店靜音 section 存在（多店）— C 嘅 SSR 首屏 clinics=[TKW]（legacy 限制）→ 只斷言基本面板
       await a.P.locator('[aria-label="通知設定"]').first().click();
       if ((await a.P.getByText("閂咗分頁都收到通知").count()) < 1) fail("t167: 設定面板灰字缺（v2 文案）");
@@ -588,8 +824,9 @@ async function main(): Promise<void> {
       browsers.push(a.B);
       await waitForListReady(a.P, "E2E 李四");
       await new Promise((r) => setTimeout(r, 3000));
+      const baseM = await unlockAudio(a.P); // cwi-realtime-fix §7.2：解鎖後 baseline
       const s = await publishAndRing(a.P, "t168 mention", () => publish(clinic, "notify:mention", { conversationId: convA, clinicId: clinic, messageId: "e2enotifymsg-mention-1", fromStaffId: staffB }, staffA), (sp) => titleMatches(sp, "WA Inbox @mention"));
-      if (chimePlays(s) < 1) fail(`t168: 冇 chime（chimePlays=${chimePlays(s)}）`);
+      if (chimePlays(s) - chimePlays(baseM) < 1) fail(`t168: 冇 chime（unlock 後 Δ=${chimePlays(s) - chimePlays(baseM)}）`);
       const n = s.notifications.find((x) => x.title === "WA Inbox @mention");
       if (!n) fail("t168: mention 通知缺");
       if (!n.body.includes("E2E Notify B")) fail(`t168: mention body 應該有同事名（actual="${n.body}"）`);
@@ -611,12 +848,21 @@ async function main(): Promise<void> {
       // Phase 2：設定面板 ADMIN section 存在
       await adm.P.locator('[aria-label="通知設定"]').first().click();
       if ((await adm.P.getByText("接收訊息通知（預設唔收 — 逐店開）").count()) < 1) fail("t169: ADMIN opt-in section 缺");
-      if ((await adm.P.getByText("逐店靜音").count()) < 1) fail("t169: 逐店靜音 section 缺（ADMIN 3 店應見）");
+      // cwi-realtime-fix §2.3：角色分離 — ADMIN 只見 opt-in（白名單）；逐店靜音（黑名單）係 STAFF 嘅，唔好同時出
+      // ★ exact:true — 面板 help 文字（「…逐店靜音 / 訊息通知選項已同步 server…」）含 substring，
+      //   只有 section heading（<div>逐店靜音</div>）先 exact match（實測假紅）
+      if ((await adm.P.getByText("逐店靜音", { exact: true }).count()) > 0) {
+        // a2 診斷 aid：fail 時 dump 實際命中小節（chain 假紅一次，standalone 綠 — 留痕先至追得到）
+        const hits = await adm.P.evaluate(
+          () => Array.from(document.querySelectorAll("*")).filter((el) => el.children.length === 0 && (el.textContent ?? "").trim() === "逐店靜音").map((el) => el.outerHTML.slice(0, 200))
+        ) as string[];
+        fail(`t169: ADMIN 唔應該見逐店靜音 section（角色分離）hits=${JSON.stringify(hits)}`);
+      }
       // Phase 3：opt-in TKW → 收
       const tkwChecks = adm.P.locator('label:has-text("TKW") input[type="checkbox"]');
       const nChecks = await tkwChecks.count();
       if (nChecks < 1) fail("t169: 搵唔到 TKW checkbox");
-      // 最后一个 TKW checkbox = ADMIN opt-in section（逐店靜音 section 冇 ADMIN 先見到 — ADMIN 兩者都有；opt-in 喺後面）
+      // cwi-realtime-fix §2.3 後：ADMIN 只有一個 TKW checkbox（opt-in）— last() = first()
       await tkwChecks.last().click();
       // v2 全域 3s 音間隔：click 會觸發 pointerdown → unlockAudio 播一次 0 音量 chime（計入 lastSoundAt）
       // → 等 3.5s 先 publish，確保 opt-in 事件嘅 chime 唔會被 unlock 音誤壓（測試語義清晰）
@@ -783,6 +1029,367 @@ async function main(): Promise<void> {
       if (vis !== "visible") fail(`t267: visibilityState 應=visible（actual=${vis}）`);
       // 交付證明：循環後新消息照常到（socket + register 有效）
       await publishUntilSeen(a.P, "t267", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-t267-after" })), "e2e-t267-after");
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t270") {
+      // cwi-realtime-fix T1（根因 A）：per-conversation 游標隔離 — B 嘅較新訊息唔好推進 A 嘅補漏窗。
+      // A2 只喺 DB（冇 socket 事件）→ 唯一收返路徑係 catchUp(A) 嘅 delta fetch；
+      // 舊代碼全域游標被 B（tsB > A2.ts）推進 → fetchMessagesAfter(A, tsB) 永遠收唔到 A2。
+      // 觸發用 focus 事件（onFocus = refetchDelta — 無 fetchMessagesLatest 兜底，純補漏路徑）。
+      if (!convB || !idA2 || !bodyA2 || !listWaitName) throw new Error("t270 要 --conv-b --id-a2 --body-a2");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      await waitForConvOpen(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000)); // socket connect + 首屏 fetch 落定
+      // 對話已開（A 游標 = fixture ts）→ 而家先插 A2 入 DB（確保首屏 latest page 冇佢）
+      const tsA2 = new Date(Date.now() + 10_000).toISOString();
+      dbq(`DELETE FROM "Message" WHERE id='${idA2}'`);
+      const ins = dbq(
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp") VALUES ('${idA2}','${convU}','rtwa2','IN','API','text','${bodyA2}','RECEIVED','${tsA2}')`
+      );
+      if (ins.startsWith("ERR")) fail(`t270: A2 INSERT 失敗（${ins.slice(0, 200)}）`);
+      dbq(`UPDATE "Conversation" SET "lastMessageAt"='${tsA2}' WHERE id='${convU}'`);
+      const before = await a.P.locator(`#msg-${idA2}`).count();
+      if (before !== 0) fail(`t270: A2 未 catch-up 前應該未喺 state（actual=${before}）`);
+      // 合成 B 訊息（ts 比 A2 新）→ 交付證明 +（舊代碼）全域游標被推進
+      const tsB = new Date(Date.now() + 20_000).toISOString();
+      await publish(clinic, "message:new", messagePayload(convB, clinic, { unread: 1, contact: false, body: "e2e-t270-b-syn", ts: tsB }));
+      const tB0 = Date.now();
+      for (;;) {
+        if ((await a.P.getByText("e2e-t270-b-syn").count()) > 0) break;
+        if (Date.now() - tB0 > 10_000) fail("t270: B 合成訊息未交付（socket 未連？）");
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      // 觸發純補漏路徑（focus → refetchDelta → catchUp(A)）
+      await dispatchFocus(a.P);
+      const tA2 = Date.now();
+      for (;;) {
+        const n = await a.P.locator(`#msg-${idA2}`).count();
+        if (n === 1) break;
+        if (Date.now() - tA2 > 15_000) fail(`t270: A2 應該被 catchUp(A) 補返（15s 後 actual=${n}）— 游標被 B 推進？`);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      const dbg = (await spyMeta(a.P)).debugLogs;
+      if (!dbg.some((l) => l.includes("[rt] catchUp"))) fail(`t270: 應該有 [rt] catchUp log（debugLogs=${JSON.stringify(dbg.slice(-4))}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t271") {
+      // cwi-realtime-fix T1（RT-2）：同秒 waTimestamp 對（server after = strict gt）— 60s 重疊窗
+      // 令兩條都喺窗口內；fetchMessagesAfter by-id 去重 → 無重複。
+      if (!idA3 || !idA4 || !bodyA4s) throw new Error("t271 要 --id-a3 --id-a4 --body-a4s");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      await waitForConvOpen(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000));
+      // 插入同秒對 A3/A4（同一 instant — 對話已開先插，確保首屏冇佢哋）
+      const tsPair = new Date(Date.now() + 40_000).toISOString();
+      dbq(`DELETE FROM "Message" WHERE id IN ('${idA3}','${idA4}')`);
+      const ins3 = dbq(
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp") VALUES ('${idA3}','${convU}','rtwa3','IN','API','text','e2e-t271-a3-db','RECEIVED','${tsPair}')`
+      );
+      const ins4 = dbq(
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp") VALUES ('${idA4}','${convU}','rtwa4','IN','API','text','e2e-t271-a4-db','RECEIVED','${tsPair}')`
+      );
+      if (ins3.startsWith("ERR") || ins4.startsWith("ERR")) fail(`t271: INSERT 失敗（${(ins3 + ins4).slice(0, 200)}）`);
+      dbq(`UPDATE "Conversation" SET "lastMessageAt"='${tsPair}' WHERE id='${convU}'`);
+      // 合成 socket 訊息（同秒 ts）→ 游標推進到 tsPair + state 有一條（socket append）
+      await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: bodyA4s, ts: tsPair }));
+      const tS = Date.now();
+      for (;;) {
+        if ((await a.P.getByText(bodyA4s, { exact: true }).count()) > 0) break;
+        if (Date.now() - tS > 10_000) fail("t271: 合成訊息未交付（socket 未連？）");
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      // 純補漏路徑（focus）→ catchUp(A)：from = cursor - 60s → A3/A4（同秒）都喺窗口
+      await dispatchFocus(a.P);
+      const tD = Date.now();
+      for (;;) {
+        const n3 = await a.P.locator(`#msg-${idA3}`).count();
+        const n4 = await a.P.locator(`#msg-${idA4}`).count();
+        if (n3 === 1 && n4 === 1) break;
+        if (Date.now() - tD > 15_000) fail(`t271: 同秒對應該兩條都補返（A3=${n3} A4=${n4}）— 重疊窗失效？`);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      // 去重：DB 兩條 + socket 一條各只一次
+      const n3 = await a.P.locator(`#msg-${idA3}`).count();
+      const n4 = await a.P.locator(`#msg-${idA4}`).count();
+      const nS = await a.P.locator("#msg-e2enotifymsg1").count();
+      if (n3 !== 1 || n4 !== 1) fail(`t271: 重複行（A3=${n3} A4=${n4}）`);
+      if (nS !== 1) fail(`t271: socket 行應該只一次（actual=${nS}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t272") {
+      // cwi-realtime-fix §1.5（RT-3）：換對話 = setMessages([]) + fetchMessagesLatest —
+      // spy /messages? URL：每次換入 A 嘅最後一個請求必係 ?limit=（絕無 after=）。
+      if (!convB || !nameA || !nameB) throw new Error("t272 要 --conv-b --name-a --name-b");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", "");
+      browsers.push(a.B);
+      await waitForListReady(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000));
+      const lastUrlFor = async (convId: string) => {
+        const urls = (await spyMeta(a.P)).fetchUrls;
+        const hit = urls.filter((u) => u.includes(`/conversations/${convId}/messages?`));
+        return hit.length ? hit[hit.length - 1] : "";
+      };
+      // 換 1：→ A
+      await a.P.getByText(nameA, { exact: true }).first().click();
+      await new Promise((r) => setTimeout(r, 3000));
+      let url = await lastUrlFor(convU);
+      if (!url) fail("t272: 換入 A 後冇 /messages 請求");
+      if (url.includes("after=")) fail(`t272: 換對話要行 latest（唔准 delta），actual=${url}`);
+      if (!url.includes("limit=")) fail(`t272: latest 請求應帶 limit，actual=${url}`);
+      // 換 2：→ B → A（重複換 — state 已清過一次）
+      await a.P.getByText(nameB, { exact: true }).first().click();
+      await new Promise((r) => setTimeout(r, 3000));
+      await a.P.getByText(nameA, { exact: true }).first().click();
+      await new Promise((r) => setTimeout(r, 3000));
+      url = await lastUrlFor(convU);
+      if (url.includes("after=")) fail(`t272: 第二次換入 A 都要行 latest，actual=${url}`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t273") {
+      // cwi-realtime-fix T2（RT-4）：DB 單一真相 — mount 時 fetch server 覆蓋 localStorage。
+      // prefPreset（--prefs）= 舊本地值（mutedClinics=[TKW]）；driver 已設 DB = {mutedClinics: []}
+      // → mount 後 localStorage.mutedClinics 必 = []（server 為準）。
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", prefPreset);
+      browsers.push(a.B);
+      await waitForListReady(a.P, listWaitName);
+      const t0 = Date.now();
+      for (;;) {
+        const local = (await a.P.evaluate(() => {
+          try {
+            return JSON.parse(localStorage.getItem("wa_inbox_notify_prefs_v1") || "{}");
+          } catch {
+            return {};
+          }
+        })) as Record<string, unknown>;
+        const muted = Array.isArray(local.mutedClinics) ? (local.mutedClinics as unknown[]) : null;
+        if (muted !== null && muted.length === 0) break; // 被 server（DB 空）覆蓋
+        if (Date.now() - t0 > 20_000) fail(`t273: 20s localStorage 未喺 server 覆蓋（local=${JSON.stringify(local)}）— mount GET 冇行？`);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t274") {
+      // cwi-realtime-fix T2（RT-5 client 自我修復）：壞值 muted === adminMsg（非空）→
+      // 讀時 muted 當空 + console.warn + 寫返正；最終值由 mount GET（DB）覆蓋。
+      // prefPreset = 壞值（兩 array 都 = [TKW]）；driver 已設 DB = {mutedClinics: [MF]}。
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", prefPreset);
+      browsers.push(a.B);
+      await waitForListReady(a.P, listWaitName);
+      const t0 = Date.now();
+      for (;;) {
+        const meta = await spyMeta(a.P);
+        const warned = meta.warnLogs.some((w) => w.includes("prefs 壞資料"));
+        const local = (await a.P.evaluate(() => {
+          try {
+            return JSON.parse(localStorage.getItem("wa_inbox_notify_prefs_v1") || "{}");
+          } catch {
+            return {};
+          }
+        })) as Record<string, unknown>;
+        const muted = Array.isArray(local.mutedClinics) ? (local.mutedClinics as string[]) : null;
+        if (warned && muted !== null && muted.length === 1) break;
+        if (Date.now() - t0 > 20_000) fail(`t274: 自我修復 warn 缺或 localStorage 未落定（warned=${warned} local=${JSON.stringify(local)}）`);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      const local = (await a.P.evaluate(() => {
+        try {
+          return JSON.parse(localStorage.getItem("wa_inbox_notify_prefs_v1") || "{}");
+        } catch {
+          return {};
+        }
+      })) as Record<string, unknown>;
+      const muted = local.mutedClinics as string[];
+      if (muted[0] !== clinicM) fail(`t274: localStorage 應 = DB 值 [${clinicM}]（實際=${JSON.stringify(muted)}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t275") {
+      // cwi-realtime-fix T2（§2.3）：ADMIN 客戶端唔寫 mutedClinics — 斷 POST payload + 面板單一 checkbox。
+      const adm = await openBrowser(exe, cookieCFile, `${base}/inbox`, "granted", "");
+      browsers.push(adm.B);
+      await waitForListReady(adm.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000));
+      await adm.P.locator('[aria-label="通知設定"]').first().click();
+      const tkwChecks = adm.P.locator('label:has-text("TKW") input[type="checkbox"]');
+      const nChecks = await tkwChecks.count();
+      if (nChecks !== 1) fail(`t275: ADMIN 應該只見一個 TKW checkbox（opt-in；無逐店靜音），actual=${nChecks}`);
+      const postsBefore = (await spyMeta(adm.P)).prefsPosts.length;
+      await tkwChecks.first().click(); // opt-in TKW → POST
+      await new Promise((r) => setTimeout(r, 2500));
+      const posts = (await spyMeta(adm.P)).prefsPosts.slice(postsBefore);
+      if (posts.length < 1) fail(`t275: click 應該觸發 POST /api/push/prefs（Δ=${posts.length}）`);
+      const lastBody = JSON.parse(posts[posts.length - 1]) as Record<string, unknown>;
+      if (!("adminMsgClinics" in lastBody)) fail(`t275: POST payload 應有 adminMsgClinics，actual=${JSON.stringify(lastBody)}`);
+      if ("mutedClinics" in lastBody) fail(`t275: ADMIN POST 唔准帶 mutedClinics，actual=${JSON.stringify(lastBody)}`);
+      // cleanup：反轉返（預設唔收）
+      await tkwChecks.first().click();
+      await new Promise((r) => setTimeout(r, 1500));
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t276") {
+      // cwi-realtime-fix T3：通知來源留痕 — socket 事件 → fireNotify（debug log "notify: socket:message:new"）；
+      // refetch 路徑（focus → refetchDelta）零 fireNotify（t265 嘅 log 版強化）。
+      if (!convU) throw new Error("t276 要 --conv-u");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", "");
+      browsers.push(a.B);
+      await waitForListReady(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000));
+      // (a) socket 事件 → fireNotify + 來源 log
+      await publishAndRing(a.P, "t276 socket", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-t276-s" })), (s) => titleMatches(s, `新訊息 · ${CLINIC_SHORT}`));
+      let dbg = (await spyMeta(a.P)).debugLogs;
+      if (!dbg.some((l) => l.includes("notify:") && l.includes("socket:message:new"))) fail(`t276: socket 路徑應有 "notify: socket:message:new" log（debugLogs=${JSON.stringify(dbg.slice(-4))}）`);
+      // (b) refetch 路徑（focus）→ 零 notify: + 零新通知
+      const baseN = (await spy(a.P)).notifications.length;
+      const dbgCount = dbg.length;
+      await dispatchFocus(a.P);
+      await new Promise((r) => setTimeout(r, 5000));
+      const s2 = await spy(a.P);
+      if (s2.notifications.length > baseN) fail(`t276: refetch 路徑唔應該彈通知（Δ=${s2.notifications.length - baseN}）`);
+      dbg = (await spyMeta(a.P)).debugLogs;
+      const newNotify = dbg.slice(dbgCount).filter((l) => l.includes("notify:"));
+      if (newNotify.length > 0) fail(`t276: refetch 路徑零 fireNotify（new=${JSON.stringify(newNotify)}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t279") {
+      // cwi-realtime-fix T5（SW 更新策略）：★ file-swap（dev server 每次 request 讀盤 — 實測）。
+      // Playwright route 攔唔到 SW script fetch（browser process 層）— 改直接換 public/sw.js 內容。
+      // byte 變 → reg.update()（updateViaCache:none + no-cache header）→ 新版 install（skipWaiting）
+      // → activate（clients.claim）→ controllerchange → 「已更新新版本」提示 + 版本查詢 a1 → a2。
+      const v1file = readSwFile();
+      if (!v1file.includes("2026-09-07-a1")) fail("t279: public/sw.js 現行版本唔係 2026-09-07-a1（檔案被改過？）");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", "");
+      browsers.push(a.B);
+      await waitForListReady(a.P, listWaitName);
+      await waitForSwReady(a.P);
+      const v1 = await swVersionQuery(a.P);
+      if (v1 !== "2026-09-07-a1") fail(`t279: 初始版本應 a1，actual=${v1}`);
+      try {
+        writeSwFile(v1file.replace("2026-09-07-a1", "2026-09-07-a2"));
+        await new Promise((r) => setTimeout(r, 300)); // 落盤 settle
+        await a.P.evaluate(() => navigator.serviceWorker.getRegistration().then((r) => (r ? r.update() : null)).catch(() => null));
+        const t0 = Date.now();
+        for (;;) {
+          const toast = await a.P.getByText("已更新新版本").count();
+          if (toast > 0) break;
+          if (Date.now() - t0 > 45_000) fail(`t279: 45s 冇「已更新新版本」提示（SW file update 失敗？v1=${v1}）`);
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        if ((await a.P.getByText("重載").count()) < 1) fail("t279: 提示應有 [重載] 掣");
+        await new Promise((r) => setTimeout(r, 2000)); // 新 SW activate 完
+        const v2 = await swVersionQuery(a.P);
+        if (v2 !== "2026-09-07-a2") fail(`t279: 更新後版本應 = 2026-09-07-a2，actual=${v2}`);
+      } finally {
+        writeSwFile(v1file); // 還原（失敗都還 — 唔污染 repo）
+      }
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t280") {
+      // cwi-realtime-fix T5：SW 更新唔會令 push subscription 失效。
+      // ★ 環境限制（實測）：headless datacenter Chromium 嘅 push service 唔可用
+      //   （pushManager.subscribe → AbortError: permission denied，grantPermissions 都係）—
+      //   故斷言採 adaptive：subscription 得返就做真 endpoint 不變斷言；唔得就斷
+      //   （a）app 訂閱 flow 有行（vapid key fetch）（b）SW 更新後 pushManager 照可用
+      //   （c）SW 照 active（d）endpoint 唔會由有變無。
+      const v1file = readSwFile();
+      if (!v1file.includes("2026-09-07-a1")) fail("t280: public/sw.js 現行版本唔係 2026-09-07-a1");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", "");
+      browsers.push(a.B);
+      await waitForListReady(a.P, listWaitName);
+      await waitForSwReady(a.P);
+      const getSubEp = (P: PageLike) =>
+        P.evaluate(async () => {
+          const reg = await navigator.serviceWorker.getRegistration().catch(() => null);
+          if (!reg) return null;
+          const s = await reg.pushManager.getSubscription().catch(() => null);
+          return s ? s.endpoint : null;
+        }) as Promise<string | null>;
+      const ep1 = await getSubEp(a.P);
+      // 等 app 訂閱 flow（sw:activated hook → ensurePushSubscription → vapid fetch）
+      await new Promise((r) => setTimeout(r, 6000));
+      const vapidFetches = (await spyMeta(a.P)).fetchUrls.filter((u) => u.includes("/api/push/vapid-key")).length;
+      if (vapidFetches < 1) fail(`t280: app 應該行過訂閱 flow（vapid key fetch=0）`);
+      try {
+        writeSwFile(v1file.replace("2026-09-07-a1", "2026-09-07-a2"));
+        await new Promise((r) => setTimeout(r, 300));
+        await a.P.evaluate(() => navigator.serviceWorker.getRegistration().then((r) => (r ? r.update() : null)).catch(() => null));
+        const t0 = Date.now();
+        for (;;) {
+          const toast = await a.P.getByText("已更新新版本").count();
+          if (toast > 0) break;
+          if (Date.now() - t0 > 45_000) fail("t280: SW update 提示未出（45s）");
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+        const post = (await a.P.evaluate(async () => {
+          const reg = await navigator.serviceWorker.getRegistration().catch(() => null);
+          if (!reg) return { ep: null, state: "none", pushMgr: false };
+          const s = await reg.pushManager.getSubscription().catch(() => null);
+          return { ep: s ? s.endpoint : null, state: reg.active ? "active" : "none", pushMgr: typeof reg.pushManager.getSubscription === "function" };
+        })) as { ep: string | null; state: string; pushMgr: boolean };
+        if (!post.pushMgr) fail("t280: SW 更新後 pushManager 應該照可用");
+        if (post.state !== "active") fail(`t280: SW 更新後應照 active，actual=${post.state}`);
+        if (ep1 && post.ep !== ep1) fail(`t280: subscription endpoint 唔應該變（ep1=${ep1.slice(0, 60)}… ep2=${post.ep ? post.ep.slice(0, 60) : "null"}…）`);
+        if (ep1 && !post.ep) fail("t280: SW 更新後 subscription 唔應該失效（endpoint 由有變無）");
+      } finally {
+        writeSwFile(v1file);
+      }
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t281") {
+      // cwi-realtime-fix §4 第 3 步：背景（visibility 假裝）期間兩條訊息 → 前台兩條都喺、
+      // 無重複（socket append + 前台 refetchDelta/catchUp merge）+ catchUp log。
+      // ★ 訊息要 DB-backed（raw INSERT 固定 id + Conversation.lastMessageAt 推進）—
+      //   純合成 socket 事件唔入 DB → 對話列表 delta（refetchDelta 嘅前置）返空 → 唔行 catchUp。
+      //   socket 事件同 DB 行用同一 message id → by-id 去重驗證真實 merge 路徑。
+      if (!bodyT2813 || !bodyT2814) throw new Error("t281 要 --b3 --b4");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      await waitForConvOpen(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000));
+      const M3 = "e2et281m3";
+      const M4 = "e2et281m4";
+      dbq(`DELETE FROM "Message" WHERE id IN ('${M3}','${M4}')`);
+      await cycleVisibility(a.P, "hidden"); // 背景
+      await new Promise((r) => setTimeout(r, 2000));
+      // msg 3：DB 行 + 同 id 合成 socket 事件
+      const ts3 = new Date(Date.now() + 5000).toISOString();
+      const ins3 = dbq(
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp") VALUES ('${M3}','${convU}','rtt281m3','IN','API','text','${bodyT2813}','RECEIVED','${ts3}')`,
+      );
+      if (ins3.startsWith("ERR")) fail(`t281: M3 INSERT 失敗（${ins3.slice(0, 150)}）`);
+      dbq(`UPDATE "Conversation" SET "lastMessageAt"='${ts3}' WHERE id='${convU}'`);
+      await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: bodyT2813, ts: ts3, id: M3 }));
+      await new Promise((r) => setTimeout(r, 3000));
+      // msg 4：同上
+      const ts4 = new Date(Date.now() + 10_000).toISOString();
+      const ins4 = dbq(
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp") VALUES ('${M4}','${convU}','rtt281m4','IN','API','text','${bodyT2814}','RECEIVED','${ts4}')`,
+      );
+      if (ins4.startsWith("ERR")) fail(`t281: M4 INSERT 失敗（${ins4.slice(0, 150)}）`);
+      dbq(`UPDATE "Conversation" SET "lastMessageAt"='${ts4}' WHERE id='${convU}'`);
+      await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 2, contact: false, body: bodyT2814, ts: ts4, id: M4 }));
+      await new Promise((r) => setTimeout(r, 3000));
+      await cycleVisibility(a.P, "visible"); // 前台 → refetchDelta（列表 delta 有行 → catchUp）+ fetchMessagesLatest
+      const t0 = Date.now();
+      for (;;) {
+        const n3 = await a.P.locator(`#msg-${M3}`).count();
+        const n4 = await a.P.locator(`#msg-${M4}`).count();
+        if (n3 === 1 && n4 === 1) break;
+        if (Date.now() - t0 > 15_000) {
+          const n3 = await a.P.locator(`#msg-${M3}`).count();
+          const n4 = await a.P.locator(`#msg-${M4}`).count();
+          fail(`t281: 背景訊息前台應該兩條都喺（M3=${n3} M4=${n4}）`);
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      await new Promise((r) => setTimeout(r, 2000)); // catchUp log 落定
+      const dbg = (await spyMeta(a.P)).debugLogs;
+      if (!dbg.some((l) => l.includes("[rt] catchUp"))) fail(`t281: 前台 catchUp 應該有 log（debugLogs=${JSON.stringify(dbg.slice(-4))}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t282") {
+      // cwi-realtime-fix §4 第 4 步：tab 「閂咗」期間送咗訊息（driver 真 webhook 路徑 — 已入 DB）
+      // → 重開新瀏覽器 → 訊息喺度。
+      if (!bodyA5) throw new Error("t282 要 --body-a5");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      const t0 = Date.now();
+      for (;;) {
+        const n = await a.P.getByText(bodyA5, { exact: true }).count();
+        if (n >= 1) break;
+        if (Date.now() - t0 > 30_000) fail("t282: 重開後 30s 訊息仍未喺（?conv= 首屏 fetch 失敗？）");
+        await new Promise((r) => setTimeout(r, 1000));
+      }
       console.log("NOTIFY-UI-OK");
     } else {
       throw new Error(`unknown scenario: ${scenario}`);

@@ -54,8 +54,20 @@ STAFF_C=$(pnpm -s e2e:staff create --clinic TKW --email "$C_EMAIL" --name "E2E N
 [ -n "$STAFF_C" ] || { echo "FATAL: staff C 建立失敗"; exit 2; }
 COOKIE_B=/tmp/e2e-cookie-notifyfix-b.txt
 COOKIE_C=/tmp/e2e-cookie-notifyfix-c.txt
-curl -s -o /dev/null -c "$COOKIE_B" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$B_EMAIL\",\"password\":\"$H1B_PASS\"}"
-curl -s -o /dev/null -c "$COOKIE_C" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$C_EMAIL\",\"password\":\"$H1B_PASS\"}"
+# ★ cwi-realtime-fix（a2）：B/C login 原本冇 status check — dev recompile race 500 時
+#   cookie 空 → 後面 API 全 401 連串（v4 實測 T260–T264 全死，suite 浪費）。
+#   同 TKW/ADMIN 一樣 check；非 200 → 等 3s retry 一次（dev flake 兜底）；再 fail → FATAL 快死。
+login_retry() { # $1=cookie $2=email $3=pass $4=label
+  local CODE
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$1" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$2\",\"password\":\"$3\"}")
+  if [ "$CODE" != "200" ]; then
+    sleep 3
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$1" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$2\",\"password\":\"$3\"}")
+  fi
+  [ "$CODE" = "200" ] || { echo "FATAL: $4 login $CODE（server 不稳？）"; exit 2; }
+}
+login_retry "$COOKIE_B" "$B_EMAIL" "$H1B_PASS" "staff B"
+login_retry "$COOKIE_C" "$C_EMAIL" "$H1B_PASS" "staff C"
 
 # ── 瀏覽器 fixture 對話（T265–T267 用；固定 id 冪等） ──────────────────
 FIXCT=e2enotifyfixct1

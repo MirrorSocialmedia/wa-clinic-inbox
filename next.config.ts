@@ -17,6 +17,18 @@ const nextConfig: NextConfig = {
     "pino",
     "socket.io",
   ],
+  // ★ cwi-realtime-fix §8.1 #1：/sw.js 明確 no-cache — 瀏覽器每次註冊/更新都打網絡。
+  //   SW 更新策略同 sw-registrar.tsx 嘅 updateViaCache:"none" + 主動 update loop 配對。
+  async headers() {
+    return [
+      {
+        source: "/sw.js",
+        headers: [
+          { key: "Cache-Control", value: "no-cache, no-store, must-revalidate" },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

@@ -44,7 +44,8 @@ function noteSelfHeal(staffId: string, count: number): void {
   );
 }
 
-function parsePushPrefs(p: Prisma.JsonValue | null | undefined, staffId?: string): ParsedPrefs {
+// ★ cwi-realtime-fix §2.1：export 畀 GET /api/push/prefs（DB 單一真相 — 同 client 同一套自我修復邏輯）
+export function parsePushPrefs(p: Prisma.JsonValue | null | undefined, staffId?: string): ParsedPrefs {
   const d = (p ?? {}) as { mutedClinics?: unknown; adminMsgClinics?: unknown };
   const mutedClinics = Array.isArray(d.mutedClinics) ? d.mutedClinics.filter((x): x is string => typeof x === "string") : [];
   const adminMsgClinics = Array.isArray(d.adminMsgClinics) ? d.adminMsgClinics.filter((x): x is string => typeof x === "string") : [];
