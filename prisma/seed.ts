@@ -302,7 +302,9 @@ async function main(): Promise<void> {
   for (const r of RULES) {
     const existing = await prisma.routingRule.findFirst({ where: { clinicId: null, name: r.name } });
     if (existing) {
-      await prisma.routingRule.update({ where: { id: existing.id }, data: r });
+      // ★ cwi-routing-guard-20260908：create-if-missing — existing 只 log skip，唔 update
+      //   （同組/成員/店嘅 union 補缺一致：re-seed 唔洗走 UI 改動）。
+      console.log(`[seed] routing rule "${r.name}" exists (id=${existing.id}) — kept existing, skipped update`);
     } else {
       await prisma.routingRule.create({ data: { ...r, enabled: true } });
     }

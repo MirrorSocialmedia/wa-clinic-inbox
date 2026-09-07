@@ -6025,12 +6025,12 @@ check "F sweep fixture 零殘留" "$(q "SELECT count(*)::text c FROM \"Contact\"
 
 [ "$F_FAIL" = 0 ] && pass "F 段完成：Knowledge RAG + GoldenCase（T120–T131 12 格）" || fail "F 段有項失敗（見上 ❌）"
 
-# ══════════════ G. cwi-routing-20260906（規則式路由 + 技能組 + 投訴兩級升級 + SUPERVISOR）T250–T258 ══════════════
+# ══════════════ G. cwi-routing-20260906（規則式路由 + 技能組 + 投訴兩級升級 + SUPERVISOR）T250–T259 ══════════════
 # MD §7：路由 = 只標記（routed*；R-2 鐵律 assigneeId/assignedAt 零改動）+ 組通知；首個命中即停；
 #   R-4 組要服務該店（唔服務 → 落公海）；R-9 當值恰一個 → 標人（兩種情況都通知全組）；
 #   R-8 急症照行全店 urgent:escalation（路由唔准取代/收窄）；R-7 首覆 L2 自動發 / L1 草稿；「派俾我」膠囊。
 # fixture：waId 852700x${EPOCH}（7 個）+ wamid.E2E_G2xx_${EPOCH}；段尾 hermetic 全清；零 PII。
-echo "[G/13] cwi-routing-20260906: rule routing + skill groups + 2-stage escalation (T250-T258)"
+echo "[G/13] cwi-routing-20260906: rule routing + skill groups + 2-stage escalation (T250-T259)"
 G_FAIL=0
 
 # ── G0. 準備：fresh cookie + 出廠對象 id + 當值 fixture 還原 ─────────────────────────────
@@ -6243,6 +6243,27 @@ else
   pass "T257 WTC 組員（唔服務 TKW）唔見 T250 個案"
 fi
 
+# ── T259. cwi-routing-guard-20260908：已路由對話再收 inbound → 唔重標記（升級計時器唔後移 + 通知/audit 去重）──
+G259_OLD_AT=$(q "SELECT \"routedAt\"::text v FROM \"Conversation\" WHERE id='$G250_CONV'" | jf v)
+G259_OLD_NOTICES=$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$G250_CONV' AND kind='ROUTING_ASSIGNED'" | jf c)
+G259_OLD_AUDIT=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='ROUTING_APPLIED' AND \"entityId\"='$G250_CONV'" | jf c)
+[ -n "$G259_OLD_AT" ] && [ "$G259_OLD_NOTICES" = "1" ] && [ "$G259_OLD_AUDIT" = "1" ] \
+  && pass "T259 前置：T250 對話已路由（routedAt=$G259_OLD_AT, notices=1, audit=1）" \
+  || { fail "T259 前置破（routedAt='$G259_OLD_AT' notices=$G259_OLD_NOTICES audit=$G259_OLD_AUDIT）"; G_FAIL=1; }
+G259_WID="wamid.E2E_G259_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$G250_PAT" --text "e2eg259 跟進：療程要幾耐" --wamid "$G259_WID" --name "E2E G259" >/dev/null || { fail "T259 mock-inbound POST"; G_FAIL=1; }
+# 等 worker 處理完呢條 inbound（per-message 完成 log 喺 classify+routing hook 之後 — 確保 guard 已經行過先斷言）
+T259_OK=""
+for i in $(seq 1 30); do
+  grep -F "\"wamid\":\"$G259_WID\"" /tmp/e2e-worker*.log 2>/dev/null | grep -qF "ai: classified" && { T259_OK=1; break; }
+  sleep 1
+done
+[ -n "$T259_OK" ] && pass "T259 worker 已處理 follow-up inbound（ai: classified）" || { fail "T259 worker 30s 未處理 follow-up（超时）"; G_FAIL=1; }
+check "T259 落同一對話（未另開）" "$(q "SELECT \"conversationId\" v FROM \"Message\" WHERE \"waMessageId\"='$G259_WID'" | jf v)" "$G250_CONV"
+check "T259 guard：routedAt 唔變（升級計時器唔後移）" "$(q "SELECT \"routedAt\"::text v FROM \"Conversation\" WHERE id='$G250_CONV'" | jf v)" "$G259_OLD_AT"
+check "T259 去重：StaffNotice ROUTING_ASSIGNED 照住 1" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$G250_CONV' AND kind='ROUTING_ASSIGNED'" | jf c)" "1"
+check "T259 去重：AuditLog ROUTING_APPLIED 照住 1" "$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='ROUTING_APPLIED' AND \"entityId\"='$G250_CONV'" | jf c)" "1"
+
 # ── G sweep：e2e 殘留全清（hermetic）──────────────────────────────────────────────────
 rm -f .dev/duty-mock-override.json
 q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852700%' OR x.\"waId\" LIKE '852701%')" >/dev/null 2>&1
@@ -6256,7 +6277,7 @@ patch_aimode "$TKW_CLINIC_ID" DRAFT
 check "G sweep TKW aiMode 還原 DRAFT" "$PAM_CODE" "200"
 check "G sweep e2e 規則/組 零殘留" "$(q "SELECT (SELECT count(*) FROM \"RoutingRule\" WHERE name IN ('E2E G251','E2E R4'))::text ||'/'|| (SELECT count(*) FROM \"SkillGroup\" WHERE name='E2E R4 組')::text AS v" | jf v)" "0/0"
 
-[ "$G_FAIL" = 0 ] && pass "G 段完成：規則式路由 + 技能組 + 兩級升級（T250–T257）" || fail "G 段有項失敗（見上 ❌）"
+[ "$G_FAIL" = 0 ] && pass "G 段完成：規則式路由 + 技能組 + 兩級升級 + 重標記 guard（T250–T259）" || fail "G 段有項失敗（見上 ❌）"
 # T258 迴歸：cwi-followup T220–T230 + cwi-status-role T240–T247（同本 script 前段）—
 # 全綠判定喺最終 summary（FAIL=0）；呢度留痕。
 pass "T258 迴歸 = 既有全 suite 同跑（見最終 summary FAIL 計數）"

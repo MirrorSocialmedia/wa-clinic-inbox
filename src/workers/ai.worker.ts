@@ -391,6 +391,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       assigneeId: updatedConv.assigneeId,
       pinnedPatientApricotId: conv.pinnedPatientApricotId,
       status: conv.status,
+      routedRuleId: conv.routedRuleId,
     },
     clinic,
     contact,

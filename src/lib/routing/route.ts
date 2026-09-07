@@ -158,7 +158,7 @@ export function onDutyMembers(
 }
 
 export interface RoutingInput {
-  conv: { id: string; clinicId: string; contactId: string; assigneeId: string | null; pinnedPatientApricotId: string | null; status: string };
+  conv: { id: string; clinicId: string; contactId: string; assigneeId: string | null; pinnedPatientApricotId: string | null; status: string; routedRuleId: string | null };
   clinic: { id: string; code: string };
   contact: { waId: string | null } | null;
   msg: { id: string; type: string; body: string; waMessageId: string | null };
@@ -186,6 +186,13 @@ export interface RoutingResult {
 export async function applyRouting(input: RoutingInput): Promise<RoutingResult> {
   const none: RoutingResult = { rule: null, marked: false, groupId: null, groupName: null, staffId: null };
   try {
+    // ★ cwi-routing-guard-20260908：已路由且未 RESOLVED → 唔重標記。
+    //   保留首次 routedAt（15min 升級計時器唔後移）+ StaffNotice/push/audit 去重。
+    //   RESOLVED = re-open 新週期 → 放行（下方 update 會 reset escalatedAt=null）。
+    if (input.conv.routedRuleId != null && input.conv.status !== "RESOLVED") {
+      log.debug({ conversationId: input.conv.id, ruleId: input.conv.routedRuleId }, "routing: already routed — skip re-mark");
+      return none;
+    }
     const [rules, patientType] = await Promise.all([
       resolveEffectiveRules(input.conv.clinicId),
       resolvePatientType({ pinnedPatientApricotId: input.conv.pinnedPatientApricotId, waId: input.contact?.waId ?? null }),
@@ -267,6 +274,9 @@ export async function applyRouting(input: RoutingInput): Promise<RoutingResult> 
           routedStaffId,
           routedRuleId: rule.id,
           routedAt: new Date(),
+          // ★ cwi-routing-guard-20260908：re-open（RESOLVED → 新 inbound）= 新升級週期 → 清 escalatedAt。
+          //   首次路由時 escalatedAt 本來就係 null → 無副作用。
+          escalatedAt: null,
         },
       });
     }
