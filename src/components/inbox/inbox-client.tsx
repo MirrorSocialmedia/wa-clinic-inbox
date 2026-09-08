@@ -470,7 +470,11 @@ export function InboxClient({
           assigneeName: existing?.assigneeName ?? null,
           assignVersion: existing?.assignVersion ?? 0,
           pinnedPatient: existing?.pinnedPatient ?? null,
-          unreadCount: isOut ? (existing?.unreadCount ?? 0) : e.conversation.unreadCount,
+          unreadCount: isOut
+            ? (existing?.unreadCount ?? 0)
+            : selectedIdRef.current === e.conversationId && document.visibilityState === "visible"
+              ? 0 // ★ cwi-hotfix-20260908 §2 (T303)：開住對話 + tab 可見 → badge 即時清（server markRead 另走 debounce）
+              : e.conversation.unreadCount, // tab hidden → 保留事件值（用戶真未睇；visibilitychange 返嚟先清 — T304）
           lastInboundAt: isOut
             ? existing?.lastInboundAt ?? null
             : (e.conversation.lastInboundAt ?? null),
@@ -514,6 +518,11 @@ export function InboxClient({
             return prev;
           return [...prev, msg].sort(msgSortCmp);
         });
+        // ★ cwi-hotfix-20260908 §2 (T303)：開住對話收 IN + tab 可見 → 即清（server markRead
+        //   包 300ms debounce — 連發十條只打一次 API）。hidden 唔 markRead（T304）。
+        if (msg.direction === "IN" && document.visibilityState === "visible") {
+          void markReadDebounced(e.conversationId);
+        }
       }
 
       // ★ Part B（N-1）：客人來訊 → 通知（只 IN；outbound/echo 唔算「客人來訊」）。
@@ -1196,7 +1205,17 @@ export function InboxClient({
         else s.emit("register"); // 連緊 → 冪等重註冊（server room 重 join 兜底）
       }
       void refetchDelta();
-      if (selectedIdRef.current) void fetchMessagesLatest(selectedIdRef.current);
+      // ★ cwi-hotfix-20260908 §2 (T304)：tab hidden 期間選中對話收咗 IN（handler 保留 badge —
+      //   用戶真未睇）→ 返前台先清：列表 badge 寫 0 + server markRead（同 IN handler 共用 debounce）。
+      const sel = selectedIdRef.current;
+      if (sel) {
+        const c = conversationsRef.current.find((x) => x.id === sel);
+        if (c && c.unreadCount > 0) {
+          setConversations((prev) => prev.map((x) => (x.id === sel ? { ...x, unreadCount: 0 } : x)));
+          void markReadDebounced(sel);
+        }
+        void fetchMessagesLatest(sel);
+      }
     };
     const onFocus = () => { void refetchDelta(); };
     document.addEventListener("visibilitychange", onVisibility);
@@ -1393,6 +1412,27 @@ export function InboxClient({
       /* ignore */
     }
   }
+
+  // ★ cwi-hotfix-20260908 §2：markRead 300ms debounce — socket 連發 IN（burst）收斂成一次
+  //   flush；flush 內每個對話只打一次 PATCH（Set 去重）。300ms 窗內換到嘅其他對話都會
+  //   喺同一 flush 各自 markRead 一次（唔會漏）。
+  const markReadPendingRef = useRef<Set<string>>(new Set());
+  const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markReadDebounced = useCallback((id: string) => {
+    markReadPendingRef.current.add(id);
+    if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
+    markReadTimerRef.current = setTimeout(() => {
+      markReadTimerRef.current = null;
+      const ids = [...markReadPendingRef.current];
+      markReadPendingRef.current = new Set();
+      for (const i of ids) void markRead(i); // 首 render 實例只依賴 fetch + setConversations（穩定）
+    }, 300);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
+    };
+  }, []);
 
   // ── composer ──────────────────────────────────────────────────────────
   const sendMessage = useCallback(

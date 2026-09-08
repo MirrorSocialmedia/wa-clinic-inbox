@@ -8,6 +8,8 @@
 # T276 fireNotify 來源 log（socket vs refetch）   T278 /sw.js no-cache header
 # T279 SW_VERSION + 更新提示（controllerchange）  T280 SW 更新後 subscription 唔失效
 # t281 §4 背景兩條→前台兩條                        t282 §4 「閂咗」期間訊息→重開喺度
+# T303 開住對話收 IN → badge 即清 + markRead×1（burst 3→1，cwi-hotfix-20260908 §2）
+# T304 tab hidden 收 IN → 唔 markRead；visible 後先清 + markRead×1
 #
 # 前置：server（3100）+ worker 已起；DB 15432；REDIS_URL 喺 .env。
 # fixture 全部 hermetic（固定 id 冪等、段尾全清）；零 PII（E2E 病人資料）。
@@ -201,6 +203,18 @@ nn "T285 ADMIN 無「跨店」badge；STAFF 真跨店照顯示" \
   --scenario t285 --cookie "$COOKIE_TKW" --cookie3 "$COOKIE_ADMIN" --clinic "$TKW_CLINIC_ID" \
   --wait-name "$NAME_A" --staff-tkw "$TKW_STAFF_ID" \
   --wa-m "$RT_CT_M" --name-m "$NAME_M"
+
+# ── cwi-hotfix-20260908（T303–T304：開住對話 unread 即時清 + hidden 唔清）──────────────
+
+# T303：開住對話收 IN（tab 可見）→ 列表 badge 即時 0 + server markRead 恰 1 次；debounce 300ms 內連發 3 條收斂成 1 次
+nn "T303 開住對話收 IN → badge 即清 + markRead×1（burst 3→1）" \
+  --scenario t303 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
+  --conv-u "$CONV_A" --wait-name "$NAME_A"
+
+# T304：tab hidden 時收 IN → 唔 markRead（DB unread 保留 + badge 保留）；visible 後先清 + markRead 恰 1 次
+nn "T304 tab hidden 唔 markRead（visible 後先清 + markRead×1）" \
+  --scenario t304 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
+  --conv-u "$CONV_A" --wait-name "$NAME_A"
 
 # ── cleanup（hermetic） ────────────────────────────────────────────────
 q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$CONV_A','$CONV_B') OR \"waMessageId\" LIKE 'rtfw%' OR \"waMessageId\" LIKE 'rtwv2%'" >/dev/null 2>&1

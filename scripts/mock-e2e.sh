@@ -56,6 +56,8 @@
 #       別店 scope 403；欄位白名單；DUTY_MOCK=0 + 無/壞 URL → 200 {duty:null} 唔 crash
 #   T39 (Phase 4) backup/restore：backup-wa.sh 出 dump 檔（sandbox 無 age → NODE_ENV=development 明文軌
 #       + 響亮 warning）；restore-wa-test.sh restore 落 scratch DB + 5 表 row count 全對
+#   T300–T302 (cwi-hotfix-20260908 I 段) 「最新一頁」= 真最新 50（三分支游標 contract：API 回應對 DB 真相）
+#       + ?after= createdAt 升序（慢鐘行）+ ?before= 向上捲不變（T303/T304 喺 e2e-realtime-fix.sh）
 #
 # 深度審查修補（runway 步驟 1）：
 #   T40 (P0-1) claim 孤兒恢復：WebhookEvent 存在但無 Message（舊 code crash 狀態）→
@@ -6467,6 +6469,80 @@ check "H sweep TKW aiMode 還原 DRAFT" "$PAM_CODE" "200"
 check "H sweep e2e 規則 零殘留" "$(q "SELECT count(*)::text c FROM \"RoutingRule\" WHERE name IN ('E2E T292 首覆','E2E T292 公海','E2E T293 lex')" | jf c)" "0"
 
 [ "$H_FAIL" = 0 ] && pass "H 段完成：審計修復 B-1/B-2/B-3/H-1/H-3（T290–T295）" || fail "H 段有項失敗（見上 ❌）"
+
+
+# ══════════════ I. cwi-hotfix-20260908（「最新一頁」真最新 50 + 三分支游標）T300–T302 ══════════════
+echo ""
+echo "[I/3] cwi-hotfix-20260908: latest-page 3-branch cursor (T300-T302)"
+I_FAIL=0
+# id 必 cuid 形（≥20 lowercase alnum）— 短 id 唔入 RBAC matrix → 403「route not registered」（2026-08-26 實測）
+I_CONV1="e2et300conversationsa1"
+I_CONV2="e2et301conversationsa2"
+I_CT1="e2et300contacta1aaaaaaaa"
+I_CT2="e2et301contacta2aaaaaaaa"
+I_WA1="852801${EPOCH}"
+I_WA2="852802${EPOCH}"
+# 定點 base（node 算 cursor ISO 同 SQL to_timestamp 用同一毫秒值 — 避免 now() 重評漂移）
+I_BASE1_MS=$(node -e "console.log(Date.now() - 86400000)")
+I_BASE2_MS=$(node -e "console.log(Date.now() - 2*86400000)")
+# ── fixture 冪等清理 + 重建 ──
+q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$I_CONV1','$I_CONV2')" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id IN ('$I_CONV1','$I_CONV2')" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id IN ('$I_CT1','$I_CT2')" >/dev/null 2>&1
+q "INSERT INTO \"Contact\" (id,\"clinicId\",\"waId\",\"profileName\",labels) VALUES ('$I_CT1','$TKW_CLINIC_ID','$I_WA1','E2E T300 病人',ARRAY[]::text[]), ('$I_CT2','$TKW_CLINIC_ID','$I_WA2','E2E T301 病人',ARRAY[]::text[])" >/dev/null
+q "INSERT INTO \"Conversation\" (id,\"clinicId\",\"contactId\",status,\"lastMessageAt\") VALUES ('$I_CONV1','$TKW_CLINIC_ID','$I_CT1','OPEN',to_timestamp($I_BASE1_MS/1000.0) + interval '51 seconds'), ('$I_CONV2','$TKW_CLINIC_ID','$I_CT2','OPEN',to_timestamp($I_BASE2_MS/1000.0) + interval '100 seconds')" >/dev/null
+# conv1：51 條（waTimestamp 單調升 = createdAt — 最新一頁 contract fixture）
+q "INSERT INTO \"Message\" (id,\"conversationId\",\"waMessageId\",direction,channel,type,body,status,\"waTimestamp\",\"createdAt\")
+   SELECT 'e2et300m' || lpad(i::text,2,'0'), '$I_CONV1', 'e2et300w' || lpad(i::text,2,'0'), 'IN','API','text','e2e t300 msg ' || i, 'RECEIVED',
+          to_timestamp($I_BASE1_MS/1000.0) + (i || ' seconds')::interval,
+          to_timestamp($I_BASE1_MS/1000.0) + (i || ' seconds')::interval
+   FROM generate_series(1,51) i" >/dev/null
+# conv2：3 條 — m3 = 慢鐘行（createdAt 新但 waTimestamp 舊）— 捉 after= 分支用 waTimestamp 排序嘅舊行為
+q "INSERT INTO \"Message\" (id,\"conversationId\",\"waMessageId\",direction,channel,type,body,status,\"waTimestamp\",\"createdAt\") VALUES
+   ('e2et301m01','$I_CONV2','e2et301w01','IN','API','text','e2e t301 m1','RECEIVED', to_timestamp($I_BASE2_MS/1000.0) + interval '1 second',  to_timestamp($I_BASE2_MS/1000.0) + interval '1 second'),
+   ('e2et301m02','$I_CONV2','e2et301w02','IN','API','text','e2e t301 m2','RECEIVED', to_timestamp($I_BASE2_MS/1000.0) + interval '100 seconds', to_timestamp($I_BASE2_MS/1000.0) + interval '2 seconds'),
+   ('e2et301m03','$I_CONV2','e2et301w03','IN','API','text','e2e t301 m3 slow-clock','RECEIVED', to_timestamp($I_BASE2_MS/1000.0) + interval '50 seconds',  to_timestamp($I_BASE2_MS/1000.0) + interval '3 seconds')" >/dev/null
+I_N=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$I_CONV1'" | jf c)
+check "I setup：conv1 51 條訊息落庫" "$I_N" "51"
+
+# API JSON 提欄 helper（api_field <file> <dotted.path>；api_ids <file> = messages[].id 逗號串）
+api_field() { node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));const v=process.argv[2].split('.').reduce((o,k)=>(o==null?o:o[k]),j);console.log(v==null?'':(typeof v==='object'?JSON.stringify(v):String(v)))" "$1" "$2" 2>/dev/null; }
+api_ids() { node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));console.log((j.messages||[]).map(m=>m.id).join(','))" "$1" 2>/dev/null; }
+
+# ── T300. 「最新一頁」（無 before/after）→ 真最新 50（contract：API 回應對 DB 真相）────────
+CODE=$(curl -s -o /tmp/e2e-t300.json -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/conversations/$I_CONV1/messages?limit=50")
+check "T300 GET 最新頁 → 200" "$CODE" "200"
+T300_DB_NEWEST=$(q "SELECT id v FROM \"Message\" WHERE \"conversationId\"='$I_CONV1' ORDER BY \"waTimestamp\" DESC, id DESC LIMIT 1" | jf v)
+T300_DB_2ND_OLDEST=$(q "SELECT id v FROM \"Message\" WHERE \"conversationId\"='$I_CONV1' ORDER BY \"waTimestamp\" ASC, id ASC LIMIT 1 OFFSET 1" | jf v)
+check "T300 newest.id = DB 最新（ORDER BY waTimestamp DESC LIMIT 1）" "$(api_field /tmp/e2e-t300.json newest.id)" "$T300_DB_NEWEST"
+check "T300 oldest.id = DB 第 2 舊（最新 50 剔咗最舊 1 條）" "$(api_field /tmp/e2e-t300.json oldest.id)" "$T300_DB_2ND_OLDEST"
+check "T300 hasMore=true（51>50）" "$(api_field /tmp/e2e-t300.json hasMore)" "true"
+check "T300 回 50 條" "$(api_field /tmp/e2e-t300.json messages.length)" "50"
+check "T300 全 50 升序 = DB 最新 50（順序一致）" "$(api_ids /tmp/e2e-t300.json)" "$(q "SELECT string_agg(id, ',' ORDER BY \"waTimestamp\", id) v FROM (SELECT id, \"waTimestamp\" FROM \"Message\" WHERE \"conversationId\"='$I_CONV1' ORDER BY \"waTimestamp\" DESC, id DESC LIMIT 50) x" | jf v)"
+
+# ── T301. ?after=（補漏游標）→ createdAt 升序 + 同 filter 一致（慢鐘行 m3 必喺 m2 前）────
+I_CURSOR_ISO=$(node -e "console.log(new Date($I_BASE2_MS + 1000).toISOString())")   # = m1.createdAt
+CODE=$(curl -s -o /tmp/e2e-t301.json -w '%{http_code}' -b "$COOKIE_TKW" -G "$BASE/api/conversations/$I_CONV2/messages" --data-urlencode "after=$I_CURSOR_ISO" --data-urlencode "limit=10")
+check "T301 GET ?after= → 200" "$CODE" "200"
+T301_DB_ORDER=$(q "SELECT string_agg(id, ',' ORDER BY \"createdAt\", id) v FROM \"Message\" WHERE \"conversationId\"='$I_CONV2' AND \"createdAt\" > to_timestamp(($I_BASE2_MS + 1000)/1000.0)" | jf v)
+check "T301 順序 = DB createdAt 升序（m3 慢鐘喺 m2 前 — 舊 waTimestamp 排序會反）" "$(api_ids /tmp/e2e-t301.json)" "$T301_DB_ORDER"
+check "T301 hasMore=false（filter 後只 2 條）" "$(api_field /tmp/e2e-t301.json hasMore)" "false"
+check "T301 oldest/newest = m2/m3" "$(api_field /tmp/e2e-t301.json oldest.id),$(api_field /tmp/e2e-t301.json newest.id)" "e2et301m02,e2et301m03"
+
+# ── T302. ?before=（向上捲）→ 行為不變（waTimestamp < before，由新到舊攞 10，回傳升序）────
+I_BEFORE_ISO=$(node -e "console.log(new Date($I_BASE1_MS + 50000).toISOString())")   # = m50.waTimestamp
+CODE=$(curl -s -o /tmp/e2e-t302.json -w '%{http_code}' -b "$COOKIE_TKW" -G "$BASE/api/conversations/$I_CONV1/messages" --data-urlencode "before=$I_BEFORE_ISO" --data-urlencode "limit=10")
+check "T302 GET ?before= → 200" "$CODE" "200"
+check "T302 ?before= 10 條升序 = DB（m40..m49 — 最接近游標嘅舊訊息）" "$(api_ids /tmp/e2e-t302.json)" "$(q "SELECT string_agg(id, ',' ORDER BY \"waTimestamp\", id) v FROM (SELECT id, \"waTimestamp\" FROM \"Message\" WHERE \"conversationId\"='$I_CONV1' AND \"waTimestamp\" < to_timestamp(($I_BASE1_MS + 50000)/1000.0) ORDER BY \"waTimestamp\" DESC, id DESC LIMIT 10) x" | jf v)"
+check "T302 hasMore=true（舊嘅仲有 39 條）" "$(api_field /tmp/e2e-t302.json hasMore)" "true"
+check "T302 newest.id = m49（仍舊於 before 游標）" "$(api_field /tmp/e2e-t302.json newest.id)" "e2et300m49"
+
+# ── I sweep：e2e 殘留全清（hermetic）──────────────────────────────────
+q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$I_CONV1','$I_CONV2')" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id IN ('$I_CONV1','$I_CONV2')" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id IN ('$I_CT1','$I_CT2')" >/dev/null 2>&1
+check "I sweep fixture 零殘留" "$(q "SELECT ((SELECT count(*) FROM \"Message\" WHERE \"conversationId\" IN ('$I_CONV1','$I_CONV2')) + (SELECT count(*) FROM \"Contact\" WHERE id IN ('$I_CT1','$I_CT2')))::text c" | jf c)" "0"
+[ "$I_FAIL" = 0 ] && pass "I 段完成：「最新一頁」真最新 50 + 三分支游標（T300–T302）" || fail "I 段有項失敗（見上 ❌）"
 
 
 

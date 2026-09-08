@@ -185,6 +185,7 @@ function spyInitScript(mode: "granted" | "denied", prefPresetJson: string): stri
     window.__spy.warnLogs = [];
     window.__spy.prefsPosts = [];
     window.__spy.fetchUrls = [];
+    window.__spy.markReadPatches = [];
     const origDebug = console.debug;
     console.debug = function (...a) {
       try {
@@ -210,6 +211,12 @@ function spyInitScript(mode: "granted" | "denied", prefPresetJson: string): stri
         if (url.indexOf("/api/push/prefs") >= 0 && init && (init.method || "GET").toUpperCase() === "POST") {
           window.__spy.prefsPosts.push(typeof init.body === "string" ? init.body : "");
         }
+        // ★ cwi-hotfix-20260908 (T303/T304)：markRead PATCH 計數（server-side markRead 被 call 嘅實錘）
+        if (
+          url.indexOf("/api/conversations/") >= 0 &&
+          init && (init.method || "GET").toUpperCase() === "PATCH" &&
+          typeof init.body === "string" && init.body.indexOf("markRead") >= 0
+        ) window.__spy.markReadPatches.push({ url: url, t: Date.now() });
       } catch (e) {}
       return origFetch.apply(this, arguments);
     };
@@ -468,9 +475,45 @@ async function cycleVisibility(P: PageLike, to: "hidden" | "visible"): Promise<v
 // ── cwi-realtime-fix T270–T282 helpers ───────────────────────────────────────────────
 
 /** 讀 spy 可觀測性欄（debug/warn log、prefs POST、fetch URL） */
-async function spyMeta(P: PageLike): Promise<{ debugLogs: string[]; warnLogs: string[]; prefsPosts: string[]; fetchUrls: string[] }> {
+async function spyMeta(P: PageLike): Promise<{ debugLogs: string[]; warnLogs: string[]; prefsPosts: string[]; fetchUrls: string[]; markReadPatches: { url: string; t: number }[] }> {
   const s = await P.evaluate(() => window.__spy);
-  return s as unknown as { debugLogs: string[]; warnLogs: string[]; prefsPosts: string[]; fetchUrls: string[] };
+  return s as unknown as { debugLogs: string[]; warnLogs: string[]; prefsPosts: string[]; fetchUrls: string[]; markReadPatches: { url: string; t: number }[] };
+}
+
+/** ★ cwi-hotfix-20260908 (T303)：共用一個 Redis 連線連發 N 條 message:new（毫秒級 — 確保喺 300ms
+ *  debounce 窗內；逐條 publish() 每次重開連線太慢會超出窗）。 */
+async function publishBurst(clinicId: string, event: string, payloads: unknown[], staffId?: string): Promise<void> {
+  const r = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379", {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  try {
+    await r.connect();
+    for (const p of payloads) {
+      const msg: Record<string, unknown> = { clinicId, event, payload: p };
+      if (staffId) msg.staffId = staffId;
+      await r.publish("wa-inbox:notify", JSON.stringify(msg));
+    }
+  } finally {
+    await r.quit().catch(() => r.disconnect());
+  }
+}
+
+/** ★ cwi-hotfix-20260908 (T303/T304)：列表中指定聯絡人行嘅 unread badge 數字（0 = 無 badge；-1 = 行搵唔到） */
+async function rowUnreadBadge(P: PageLike, name: string): Promise<number> {
+  return P.evaluate((nm: string) => {
+    const nameEl = [...document.querySelectorAll("span")].find(
+      (s) => (s.textContent || "").trim() === nm && (s.className || "").includes("font-bold")
+    ) as HTMLElement | undefined;
+    if (!nameEl) return -1;
+    let cur: HTMLElement | null = nameEl;
+    for (let i = 0; i < 8 && cur; i++) {
+      const b = cur.querySelector("span.bg-wa");
+      if (b) return parseInt(b.textContent || "0", 10);
+      cur = cur.parentElement;
+    }
+    return 0; // 行內無 badge
+  }, name);
 }
 
 /** §7.2：headless 無真實 user gesture → autoplay 鎖定。真實 click（isTrusted）→ app pointerdown
@@ -1636,6 +1679,135 @@ async function main(): Promise<void> {
       if (nCross !== 0) fail(`t285: ADMIN 列表唔應該有「跨店」（actual=${nCross}）`);
       const nTkwBadge = await d.P.getByText("TKW", { exact: true }).count();
       if (nTkwBadge < 1) fail(`t285: ADMIN 全店視圖應該有店名 badge TKW（actual=${nTkwBadge}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t303" || scenario === "t304") {
+      // ★ cwi-hotfix-20260908 §2：開住對話收 IN 嘅 unread 清除。
+      // T303：tab 可見 → badge 即時 0 + server markRead 被 call；debounce 300ms 內連發 3 條只 call 一次。
+      // T304：tab hidden → 唔 markRead（DB unread 保留）；visible 後先清 + markRead 恰一次。
+      // 真斷言：markRead PATCH 次數用 client fetch spy 計（client→server 實call）+ DB unreadCount 對數。
+      if (!convU || !listWaitName) throw new Error("t303/t304 要 --conv-u --wait-name");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      await waitForConvOpen(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 4000)); // socket connect + 首屏 + 選中 markRead 落定（DB unread=0）
+      const dbUnread = () => dbqGet(`SELECT "unreadCount"::text v FROM "Conversation" WHERE id='${convU}'`, "v");
+      const patchCount = async () => (await spyMeta(a.P)).markReadPatches.length;
+      // ?conv= 深連結行 initialSelectedConvId effect（fetchMessagesLatest 等），唔經 selectConversation
+      // → 唔 markRead（existing 行為 — 只 row click 先清 unread）。setup 用真 API 明確清一次
+      // 建立 baseline（用戶已讀語義）；後續斷言先測 IN 自動清邏輯（新 code）。
+      if (dbUnread() !== "0") {
+        const sess = readSession(cookieAFile);
+        const cr = await fetch(`${base}/api/conversations/${convU}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Cookie: `wa_inbox_session=${sess}` },
+          body: JSON.stringify({ markRead: true }),
+        });
+        if (!cr.ok) fail(`t303/4 setup: baseline markRead PATCH ${cr.status}`);
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      if (dbUnread() !== "0") fail(`t303/4 setup: baseline markRead 後 DB unread 應=0（actual=${dbUnread()}）`);
+      const basePatches = (await patchCount());
+      if (scenario === "t303") {
+        // (1) 單條 IN（tab 可見）：模擬真 webhook（DB unread 先 +1）→ publish socket 事件
+        dbq(`UPDATE "Conversation" SET "unreadCount"=1, "lastInboundAt"=now() WHERE id='${convU}'`);
+        const b1 = "e2e-t303-single";
+        await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: b1 }));
+        const t1 = Date.now();
+        for (;;) {
+          if ((await a.P.getByText(b1, { exact: true }).count()) > 0) break;
+          if (Date.now() - t1 > 10_000) fail("t303: IN 訊息未交付（socket 未連？）");
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        // server-side 真相：DB unread 1 → 0（client markRead 真被 call）
+        const t2 = Date.now();
+        for (;;) {
+          if (dbUnread() === "0") break;
+          if (Date.now() - t2 > 8_000) fail(`t303: DB unread 應被 markRead 清 0（actual=${dbUnread()}）`);
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        await new Promise((r) => setTimeout(r, 500));
+        const n1 = (await patchCount()) - basePatches;
+        if (n1 !== 1) fail(`t303: 單條 IN 應打恰 1 次 markRead PATCH（actual=${n1}）`);
+        // 列表 badge（client state）即時 0
+        let badge = -2;
+        const t3 = Date.now();
+        for (;;) {
+          badge = await rowUnreadBadge(a.P, listWaitName);
+          if (badge === 0) break;
+          if (Date.now() - t3 > 5_000) fail(`t303: 列表 badge 應清 0（actual=${badge}）`);
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        // (2) debounce：300ms 窗內連發 3 條 → 收斂成 1 次 PATCH
+        dbq(`UPDATE "Conversation" SET "unreadCount"=1 WHERE id='${convU}'`);
+        const base2 = await patchCount();
+        const bodies = ["e2e-t303-b1", "e2e-t303-b2", "e2e-t303-b3"];
+        await publishBurst(
+          clinic,
+          "message:new",
+          bodies.map((b) => messagePayload(convU, clinic, { unread: 1, contact: false, body: b }))
+        );
+        const t4 = Date.now();
+        for (;;) {
+          let all = true;
+          for (const b of bodies) if ((await a.P.getByText(b, { exact: true }).count()) === 0) all = false;
+          if (all) break;
+          if (Date.now() - t4 > 10_000) fail("t303: burst 3 條未全部交付（socket 未連？）");
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        const t5 = Date.now();
+        for (;;) {
+          if (dbUnread() === "0") break;
+          if (Date.now() - t5 > 8_000) fail(`t303: burst 後 DB unread 應被 markRead 清 0（actual=${dbUnread()}）`);
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        await new Promise((r) => setTimeout(r, 600)); // debounce flush 落定 + spy 計數入帳
+        const n2 = (await patchCount()) - base2;
+        if (n2 !== 1) fail(`t303: 300ms 窗內 3 條連發應收斂成 1 次 markRead PATCH（actual=${n2}）`);
+      } else {
+        // T304：tab hidden → 唔 markRead；visible 後先清
+        dbq(`UPDATE "Conversation" SET "unreadCount"=1, "lastInboundAt"=now() WHERE id='${convU}'`);
+        await cycleVisibility(a.P, "hidden");
+        const b1 = "e2e-t304-bg";
+        await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: b1 }));
+        const t1 = Date.now();
+        for (;;) {
+          if ((await a.P.getByText(b1, { exact: true }).count()) > 0) break;
+          if (Date.now() - t1 > 10_000) fail("t304: IN 訊息未交付（socket 未連？）");
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        await new Promise((r) => setTimeout(r, 1500)); // > 300ms debounce 窗 + 網絡 margin
+        const nHidden = (await patchCount()) - basePatches;
+        if (nHidden !== 0) fail(`t304: tab hidden 收 IN 唔好 markRead（PATCH delta=${nHidden}）`);
+        if (dbUnread() !== "1") fail(`t304: tab hidden 時 DB unread 應保留 1（actual=${dbUnread()}）`);
+        // 列表 badge 保留事件值 1（未清 — 用戶真未睇）
+        let badge = -2;
+        const t2 = Date.now();
+        for (;;) {
+          badge = await rowUnreadBadge(a.P, listWaitName);
+          if (badge === 1) break;
+          if (badge === 0) fail("t304: hidden 時列表 badge 應保留 1（被提前清咗）");
+          if (Date.now() - t2 > 6_000) fail(`t304: 列表 badge 未顯示 1（actual=${badge}）`);
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        // 返前台 → badge 清 + server markRead 恰一次
+        await cycleVisibility(a.P, "visible");
+        const t3 = Date.now();
+        for (;;) {
+          if (dbUnread() === "0") break;
+          if (Date.now() - t3 > 8_000) fail(`t304: 返前台後 DB unread 應被 markRead 清 0（actual=${dbUnread()}）`);
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        await new Promise((r) => setTimeout(r, 500));
+        const nVis = (await patchCount()) - basePatches;
+        if (nVis !== 1) fail(`t304: 返前台後 markRead 應恰 1 次（actual=${nVis}）`);
+        const t4 = Date.now();
+        for (;;) {
+          badge = await rowUnreadBadge(a.P, listWaitName);
+          if (badge === 0) break;
+          if (Date.now() - t4 > 5_000) fail(`t304: 返前台後列表 badge 應清 0（actual=${badge}）`);
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
       console.log("NOTIFY-UI-OK");
     } else {
       throw new Error(`unknown scenario: ${scenario}`);

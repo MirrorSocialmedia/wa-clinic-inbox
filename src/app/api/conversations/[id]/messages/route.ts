@@ -11,7 +11,7 @@ import { handle } from "@/lib/api-error";
  * - after=<ISO/epochMs>   reconnect 補漏：**createdAt > after**（cwi-realtime-v2 §2 —
  *                         server 單調寫入時間；waTimestamp 係病人手機時鐘，IN 訊息可偏慢
  *                         幾分鐘 → 做同步游標會永久漏）
- * - （都唔給）            初始載入：最新 N 條，升序回傳
+ * - （都唔給）            初始載入「最新一頁」：最新 N 條（waTimestamp desc 攞 + reverse），升序回傳
  * - limit  預設 50（MD：分頁 50 條/頁），上限 100
  *
  * 回傳 { messages, hasMore, oldest, newest } — messages 係完整 row（含 createdAt，
@@ -45,22 +45,28 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   if (before) where.waTimestamp = { lt: before }; // 向上捲照舊 waTimestamp（MD v2 §2）
   if (after) where.createdAt = { gt: after }; // ★ v2 §2：補漏游標比對 server createdAt
 
-  // 多取 1 條判定 hasMore；同 timestamp 用 id 做次級排序（batch history 冪等穩定）
-  const rows = before
+  // 多取 1 條判定 hasMore；同 timestamp 用 id 做次級排序（batch history 冪等穩定）。
+  // ★ cwi-hotfix-20260908 §1：三分支游標（舊兩分支嘅 `asc + take` 分支會攞「最舊 50」— 「訊息消失」根因）：
+  //  1) after  → createdAt asc：補漏游標（filter 係 createdAt，排序同 filter 一致；waTimestamp 係
+  //              病人手機時鐘，做補漏排序會亂序）。
+  //  2) before → waTimestamp desc：向上捲，由新到舊攞最接近游標嘅 N 條（行為不變）。
+  //  3) 皆無   → waTimestamp desc：「最新一頁」由新到舊攞 N 條。
+  //  2/3 回傳前 reverse → 一律升序；after 分支天然升序。
+  const rows = after
     ? await prisma.message.findMany({
         where,
-        orderBy: [{ waTimestamp: "desc" }, { id: "desc" }],
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         take: limit + 1,
       })
     : await prisma.message.findMany({
         where,
-        orderBy: [{ waTimestamp: "asc" }, { id: "asc" }],
+        orderBy: [{ waTimestamp: "desc" }, { id: "desc" }],
         take: limit + 1,
       });
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
-  const messages = before ? [...page].reverse() : page;
+  const messages = after ? page : [...page].reverse();
 
   return NextResponse.json({
     messages,
