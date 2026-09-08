@@ -355,6 +355,9 @@ model Conversation {
   routedRuleId   String?                      // 命中規則（audit 追溯）
   routedAt       DateTime? @db.Timestamptz    // 路由時間（升級 N 分鐘起點）
   escalatedAt    DateTime? @db.Timestamptz    // 升級過先有值（防重複升級 — 只升一次）
+  // ★ cwi-auditfix-20260908（B-3）：R-7 首覆原子閘 — 每對話只生效一次（updateMany where=null 搶佔）。
+  //   防「規則未標記 → 每條訊息重發 autoReplyTemplate」。null = 未發過首覆。
+  routedFirstReplyAt DateTime? @db.Timestamptz
 
   @@unique([clinicId, contactId])
   @@index([clinicId, status, lastMessageAt])

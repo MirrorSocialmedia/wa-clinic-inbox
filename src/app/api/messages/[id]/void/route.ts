@@ -37,7 +37,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   }
   const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv); // STAFF 別店 → 403
+  await assertConversationAccess(auth, conv); // STAFF 別店 → 403
   assertCanWriteConversation(auth); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   if (msg.sentByStaffId && msg.sentByStaffId !== auth.staff.id && auth.staff.role !== "ADMIN") {

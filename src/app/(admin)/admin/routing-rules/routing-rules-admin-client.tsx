@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { applyLexicon } from "@/lib/sessions/lexicon-core"; // pure — client-safe（★ cwi-auditfix-20260908 H-1）
 
 /**
  * 路由規則管理 client — ★ cwi-routing-20260906（MD §4.2）。
@@ -58,6 +59,8 @@ interface LoadData {
   groups: GroupOpt[];
   staff: StaffOpt[];
   clinics: ClinicOpt[];
+  /** ★ cwi-auditfix-20260908（H-1）：關鍵詞 canonical 提示 — key: "__global" | clinicId */
+  lexicon?: Record<string, { term: string; canonical: string; note?: string }[]>;
 }
 
 const INTENTS: { value: string; label: string }[] = [
@@ -362,6 +365,25 @@ function RuleEditor({
   const [escalateGroup, setEscalateGroup] = useState(initial?.escalateToGroupId ?? "");
   const [saving, setSaving] = useState(false);
 
+  // ★ cwi-auditfix-20260908（H-1）：關鍵詞 canonical 提示 — 用本規則 clinic 嘅口語表（同引擎同一套）。
+  //   管理員寫「箍牙」，chip 旁會顯示「→ 矯齒」，唔會以為口語關鍵詞唔match。
+  const lexEntries = useMemo(
+    () => data.lexicon?.[clinicId ?? "__global"] ?? [],
+    [data.lexicon, clinicId]
+  );
+  const kwCanonical = useMemo(
+    () => new Map(keywords.map((k) => [k, applyLexicon(k, lexEntries)] as const)),
+    [keywords, lexEntries]
+  );
+  // ★ cwi-auditfix-20260908（M-3）：同店域 priority 重複 → 軟提示（唔擋 — 兩條並存按次序行，但多數係手滑）
+  const priorityClash = useMemo(() => {
+    if (priority <= 0) return null;
+    const clash = data.rules.find(
+      (r) => r.clinicId === clinicId && r.priority === priority && r.id !== initial?.id
+    );
+    return clash ? clash.name : null;
+  }, [priority, data.rules, clinicId, initial?.id]);
+
   function addKeyword() {
     const parts = kwInput
       .split(/[,，、\s]+/)
@@ -446,6 +468,11 @@ function RuleEditor({
               onChange={(e) => setPriority(Number(e.target.value) || 0)}
               className="mt-1 w-full rounded-full border border-line bg-panel-2 px-4 py-2 text-sm text-t1 focus:outline-none focus:border-brand"
             />
+            {priorityClash && (
+              <span className="mt-1 block text-[11px] text-amber-500">
+                ⚠ 呢個優先級同「{priorityClash}」重複 — 兩條都會行（先建嘅 name 排序決定），多數係手滑
+              </span>
+            )}
           </label>
           <label className="block">
             <span className="text-xs font-medium text-t2">病人類型</span>
@@ -479,16 +506,25 @@ function RuleEditor({
         </div>
 
         <div>
-          <div className="text-xs font-medium text-t2 mb-1.5">關鍵詞（chip；會經口語表 normalize 先比對）</div>
+          <div className="text-xs font-medium text-t2 mb-1.5">關鍵詞（chip；關鍵詞同訊息都會經口語表 normalize — 雙比對）</div>
           <div className="flex flex-wrap items-center gap-1.5 rounded-full border border-line bg-panel-2 px-3 py-1.5">
-            {keywords.map((k) => (
-              <span key={k} className="inline-flex items-center gap-1 text-xs px-2.5 py-0.5 rounded-full bg-brand-soft text-brand-text">
-                {k}
-                <button onClick={() => setKeywords((prev) => prev.filter((x) => x !== k))} aria-label={`移除 ${k}`}>
-                  ×
-                </button>
-              </span>
-            ))}
+            {keywords.map((k) => {
+              const canonical = kwCanonical.get(k);
+              return (
+                <span key={k} className="inline-flex items-center gap-1 text-xs px-2.5 py-0.5 rounded-full bg-brand-soft text-brand-text">
+                  {k}
+                  {/* ★ cwi-auditfix-20260908（H-1）：口語表會改動關鍵詞時，顯示 canonical 形式 */}
+                  {canonical !== undefined && canonical !== k && (
+                    <span className="text-t3 font-normal" title="口語表 canonical 形式">
+                      → {canonical}
+                    </span>
+                  )}
+                  <button onClick={() => setKeywords((prev) => prev.filter((x) => x !== k))} aria-label={`移除 ${k}`}>
+                    ×
+                  </button>
+                </span>
+              );
+            })}
             <input
               value={kwInput}
               onChange={(e) => setKwInput(e.target.value)}

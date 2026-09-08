@@ -6049,6 +6049,8 @@ COMPLAINT_GID=$(q "SELECT id FROM \"SkillGroup\" WHERE code='COMPLAINT'" | jf id
 SUPV_GID=$(q "SELECT id FROM \"SkillGroup\" WHERE code='SUPV'" | jf id)
 R_P10=$(q "SELECT id FROM \"RoutingRule\" WHERE \"clinicId\" IS NULL AND name='高價值療程'" | jf id)
 STAFF_TKW_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='staff-tkw@wa-clinic.local'" | jf id)
+STAFF_MF_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='staff-mf@wa-clinic.local'" | jf id)
+STAFF_WTC_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='staff-wtc@wa-clinic.local'" | jf id)
 [ -n "$CONSULT_GID" ] && [ -n "$COMPLAINT_GID" ] && [ -n "$SUPV_GID" ] && [ -n "$R_P10" ] && [ -n "$STAFF_TKW_ID" ] \
   && pass "G0 出廠對象齊（CONSULT/COMPLAINT/SUPV + P10 規則 + TKW staff）" \
   || { fail "G0 出廠對象缺（seed 未跑？）"; G_FAIL=1; }
@@ -6087,7 +6089,7 @@ curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X DELETE "$BASE/api/a
 
 # ── T252. R-4：組冇服務該店 → 唔標記，落公海 ──────────────────────────────────────────
 E2E_R4_GID=$(curl -s -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/skill-groups" -H 'Content-Type: application/json' \
-  -d '{"name":"E2E R4 組","description":"e2e T252","memberIds":["'$STAFF_TKW_ID'"],"clinicIds":["'$MF_CLINIC_ID'"]}' | jf id)
+  -d '{"name":"E2E R4 組","description":"e2e T252","memberIds":["'$STAFF_MF_ID'"],"clinicIds":["'$MF_CLINIC_ID'"]}' | jf id)
 [ -n "$E2E_R4_GID" ] && pass "T252 建 e2e 組（只服務 MF）" || { fail "T252 建組失敗"; G_FAIL=1; }
 R_E2E252=$(curl -s -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/routing-rules" -H 'Content-Type: application/json' \
   -d '{"name":"E2E R4","clinicId":null,"priority":5,"intents":[],"keywords":["e2eg252"],"patientType":null,"targetType":"GROUP","targetGroupId":"'$E2E_R4_GID'","targetStaffId":null,"autoReplyTemplate":null,"escalateAfterMin":null,"escalateToGroupId":null}' | jf id)
@@ -6238,9 +6240,11 @@ curl -s -b "$COOKIE_TKW" "$BASE/api/conversations?assigned=routed" -o /tmp/e2e-g
 grep -q "$G250_CONV" /tmp/e2e-g257-tkw.json && pass "T257 TKW 組員（服務 TKW）見 T250 個案（assigned=routed）" || { fail "T257 TKW 膠囊列表冇 T250"; G_FAIL=1; }
 curl -s -b "$COOKIE_WTC" "$BASE/api/conversations?assigned=routed" -o /tmp/e2e-g257-wtc.json
 if grep -q "$G250_CONV" /tmp/e2e-g257-wtc.json; then
-  fail "T257 WTC 組員見到唔係自己服務店嘅個案（R-4 破）"; G_FAIL=1
+  # ★ cwi-auditfix-20260908（B-1）：舊斷言「WTC 唔見」已反轉 — 路由 = 單線授權，
+  #   WTC 係 CONSULT 組員（被 route 嗰個組）→ 必須見到（唔受 StaffClinic 綁定限制）
+  pass "T257 WTC 組員（唔服務 TKW 但喺路由組）見 T250 個案（B-1 單線授權）"
 else
-  pass "T257 WTC 組員（唔服務 TKW）唔見 T250 個案"
+  fail "T257 WTC 組員見唔到被 route 俾自己組嘅個案（B-1 鎖死）"; G_FAIL=1
 fi
 
 # ── T259. cwi-routing-guard-20260908：已路由對話再收 inbound → 唔重標記（升級計時器唔後移 + 通知/audit 去重）──
@@ -6281,6 +6285,189 @@ check "G sweep e2e 規則/組 零殘留" "$(q "SELECT (SELECT count(*) FROM \"Ro
 # T258 迴歸：cwi-followup T220–T230 + cwi-status-role T240–T247（同本 script 前段）—
 # 全綠判定喺最終 summary（FAIL=0）；呢度留痕。
 pass "T258 迴歸 = 既有全 suite 同跑（見最終 summary FAIL 計數）"
+
+# ══════════════ H. cwi-auditfix-20260908（審計修復：B-1/B-2/B-3/H-1/H-3）T290–T295 ══════════════
+# 範圍：B-1 路由鎖死（寫入驗證 + 單線授權兜底）；B-2 升級 claim 寫路由指向；
+#   B-3 首覆原子閘（每對話只一次 + 未標記唔重發）；H-1 關鍵詞 lexicon 雙比對；
+#   H-3 標記原子 claim（並發雙 job 恰一個贏）。
+# fixture：waId 852800x${EPOCH} + wamid.E2E_G29x_${EPOCH}；段尾 hermetic 全清；零 PII。
+echo "[H/13] cwi-auditfix-20260908: audit fixes B-1/B-2/B-3/H-1/H-3 (T290-T295)"
+H_FAIL=0
+rm -f .dev/duty-mock-override.json   # 還原 fixture（零當值 — R-9 唔標人，斷言穩定）
+# ★ cwi-auditfix-20260908（run3 實遇）：webhook 瞬時 500（Next dev loadManifest race）→
+#   同 wamid 重試 3 次（冪等 — T4 已實測重發唔重複）
+ib_retry() { # ib_retry <fail-desc> <mock-inbound args...>
+  local d="$1" i; shift
+  for i in 1 2 3; do
+    pnpm -s mock-inbound message "$@" >/dev/null 2>&1 && return 0
+    sleep 3
+  done
+  fail "$d（webhook 3 試仍失敗 — loadManifest flake?）"; H_FAIL=1; return 1
+}
+
+# ── T290a. B-1 寫入驗證：組成員必須綁定全部服務店（否則 400「X 未綁定 {店}」）────────
+CODE=$(curl -s -o /tmp/e2e-t290a1.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/skill-groups" -H 'Content-Type: application/json' \
+  -d '{"name":"E2E T290 綁定驗證","description":"e2e T290a","memberIds":["'$STAFF_WTC_ID'"],"clinicIds":["'$TKW_CLINIC_ID'"]}')
+check "T290a 未綁定成員建組 → 400" "$CODE" "400"
+grep -q "未綁定" /tmp/e2e-t290a1.json && pass "T290a 400 訊息帶「未綁定」（zero PII staff/clinic 名）" || { fail "T290a 400 訊息唔對：$(head -c 120 /tmp/e2e-t290a1.json)"; H_FAIL=1; }
+T290_GID=$(curl -s -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/skill-groups" -H 'Content-Type: application/json' \
+  -d '{"name":"E2E T290 綁定OK","description":"e2e T290a","memberIds":["'$STAFF_TKW_ID'"],"clinicIds":["'$TKW_CLINIC_ID'"]}' | jf id)
+[ -n "$T290_GID" ] && pass "T290a 綁定 OK 嘅組建到（staff-tkw ∈ TKW）" || { fail "T290a 合法組建唔到"; H_FAIL=1; }
+CODE=$(curl -s -o /tmp/e2e-t290a2.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/skill-groups/$T290_GID" -H 'Content-Type: application/json' \
+  -d '{"clinicIds":["'$TKW_CLINIC_ID'","'$MF_CLINIC_ID'"]}')
+check "T290a 組加新服務店（成員唔綁）→ 400" "$CODE" "400"
+grep -q "未綁定" /tmp/e2e-t290a2.json && pass "T290a 加店驗證訊息帶「未綁定」（MF）" || { fail "T290a 加店 400 訊息唔對：$(head -c 120 /tmp/e2e-t290a2.json)"; H_FAIL=1; }
+# 混合成員（staff-tkw 唔綁 MF）→ 仍 400（per-member 語義，唔係 aggregate）
+T290_STAFF_EMAIL="staff-e2e-t290@wa-clinic.local"
+T290_STAFF_ID=$(pnpm -s e2e:staff create --clinic TKW --email "$T290_STAFF_EMAIL" --name "E2E T290 Staff" 2>/dev/null | grep -oE 'STAFF_ID=[a-z0-9]+' | head -1 | cut -d= -f2)
+pnpm -s e2e:staff create --clinic MF --email "$T290_STAFF_EMAIL" --name "E2E T290 Staff" >/dev/null 2>&1   # 第二綁定（冪等）
+CODE=$(curl -s -o /tmp/e2e-t290a3.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/skill-groups/$T290_GID" -H 'Content-Type: application/json' \
+  -d '{"memberIds":["'$STAFF_TKW_ID'","'$T290_STAFF_ID'"],"clinicIds":["'$TKW_CLINIC_ID'","'$MF_CLINIC_ID'"]}')
+check "T290a 混合成員（staff-tkw 唔綁 MF）→ 400（per-member 驗證）" "$CODE" "400"
+CODE=$(curl -s -o /tmp/e2e-t290a4.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/skill-groups/$T290_GID" -H 'Content-Type: application/json' \
+  -d '{"memberIds":["'$T290_STAFF_ID'"],"clinicIds":["'$TKW_CLINIC_ID'","'$MF_CLINIC_ID'"]}')
+check "T290a 全部成員綁定齊（雙綁 staff）→ 200" "$CODE" "200"
+[ "$CODE" != "200" ] && echo "  T290a diag: $(head -c 200 /tmp/e2e-t290a4.json)"
+curl -s -o /dev/null -b "$COOKIE_ADMIN" -X DELETE "$BASE/api/admin/skill-groups/$T290_GID" >/dev/null 2>&1
+
+# ── T290b. B-1 兜底：路由組員（唔綁該店）見到 + 開得到被 route 嘅對話 ────────────────
+G290_PAT="8528001${EPOCH}"; G290_WID="wamid.E2E_G290_${EPOCH}"
+ib_retry "T290b mock-inbound POST" --clinic TKW --from "$G290_PAT" --text "想 cool牙 問下要幾耐" --wamid "$G290_WID" --name "E2E G290" || true
+G290_CONV=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='$G290_WID'" | jf conversationId)
+if wait_for "SELECT \"routedGroupId\"::text s FROM \"Conversation\" WHERE id='$G290_CONV'" '[{"s":"'$CONSULT_GID'"}]' 30; then
+  pass "T290b 新個案已 route 去 CONSULT（P10）"
+else
+  fail "T290b routedGroupId 未落"; H_FAIL=1
+fi
+curl -s -b "$COOKIE_WTC" "$BASE/api/conversations?assigned=routed" -o /tmp/e2e-t290b-wtc.json
+if grep -q "$G290_CONV" /tmp/e2e-t290b-wtc.json; then
+  pass "T290b WTC（唔綁 TKW，CONSULT 組員）喺「派俾我」見到（B-1 唔限 clinicIds）"
+else
+  fail "T290b WTC 列表見唔到（B-1 鎖死 — 列表層）"; H_FAIL=1
+fi
+CODE=$(curl -s -o /tmp/e2e-t290b-detail.json -w '%{http_code}' -b "$COOKIE_WTC" "$BASE/api/conversations/$G290_CONV")
+check "T290b WTC 開對話詳情 → 200（assertConversationAccess 第四條放行）" "$CODE" "200"
+[ "$CODE" = "403" ] && echo "  T290b diag: $(head -c 200 /tmp/e2e-t290b-detail.json)"
+
+# ── T291. B-2：升級 claim 同時寫 routedGroupId=升級組 + routedStaffId=null + fromGroupId audit ──
+G291_PAT="8528002${EPOCH}"; G291_WID="wamid.E2E_G291_${EPOCH}"
+ib_retry "T291 mock-inbound POST" --clinic TKW --from "$G291_PAT" --text "e2eg291 投訴：服務態度好差" --wamid "$G291_WID" --name "E2E G291" || true
+G291_CONV=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='$G291_WID'" | jf conversationId)
+wait_for "SELECT \"routedGroupId\"::text s FROM \"Conversation\" WHERE id='$G291_CONV'" '[{"s":"'$COMPLAINT_GID'"}]' 30 || { fail "T291 未標 COMPLAINT"; H_FAIL=1; }
+q "UPDATE \"Conversation\" SET \"routedAt\" = now() - interval '16 minutes' WHERE id='$G291_CONV'" >/dev/null
+pnpm -s e2e:cron routing-escalate >/dev/null 2>&1 || fail "T291 e2e:cron routing-escalate enqueue"
+if wait_for "SELECT CASE WHEN \"escalatedAt\" IS NULL THEN 'no' ELSE 'yes' END s FROM \"Conversation\" WHERE id='$G291_CONV'" '[{"s":"yes"}]' 30; then
+  pass "T291 升級 claim 成功（escalatedAt 落）"
+else
+  fail "T291 escalatedAt 未落"; H_FAIL=1
+fi
+check "T291 B-2：routedGroupId 轉升級組（SUPV）" "$(q "SELECT \"routedGroupId\"::text v FROM \"Conversation\" WHERE id='$G291_CONV'" | jf v)" "$SUPV_GID"
+check "T291 B-2：routedStaffId 清 null（第一級當值標記唔再適用）" "$(q "SELECT CASE WHEN \"routedStaffId\" IS NULL THEN 'yes' ELSE 'no' END v FROM \"Conversation\" WHERE id='$G291_CONV'" | jf v)" "yes"
+check "T291 audit meta.fromGroupId = COMPLAINT（追溯源頭組）" "$(q "SELECT (\"meta\"->>'fromGroupId')::text v FROM \"AuditLog\" WHERE action='ROUTING_ESCALATED' AND \"entityId\"='$G291_CONV'" | jf v)" "$COMPLAINT_GID"
+check "T291 StaffNotice meta.fromGroupId = COMPLAINT" "$(q "SELECT (\"meta\"->>'fromGroupId')::text v FROM \"StaffNotice\" WHERE \"conversationId\"='$G291_CONV' AND kind='ROUTING_ESCALATION'" | jf v)" "$COMPLAINT_GID"
+check "T291 升級通知照舊 → SUPV 恰 1" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$G291_CONV' AND kind='ROUTING_ESCALATION' AND (\"meta\"->>'toGroupId')='$SUPV_GID'" | jf c)" "1"
+
+# ── T292. B-3：首覆每對話只一次（原子閘）+ 未標記唔回 rule（唔重發 template）────────
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-t292-tkw-q-${EPOCH}', '$TKW_CLINIC_ID','QUESTION','L2',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"='L2',\"updatedAt\"=now()" >/dev/null 2>&1
+patch_aimode "$TKW_CLINIC_ID" AUTO
+check "T292 setup：TKW QUESTION=L2 + aiMode=AUTO" "$PAM_CODE" "200"
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
+R_T292=$(curl -s -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/routing-rules" -H 'Content-Type: application/json' \
+  -d '{"name":"E2E T292 首覆","clinicId":null,"priority":5,"intents":[],"keywords":["e2eg292"],"patientType":null,"targetType":"GROUP","targetGroupId":"'$CONSULT_GID'","targetStaffId":null,"autoReplyTemplate":"E2E T292 首覆模板","escalateAfterMin":null,"escalateToGroupId":null}' | jf id)
+[ -n "$R_T292" ] && pass "T292 建 e2e 首覆規則（P5 → CONSULT + template）" || { fail "T292 建規則失敗"; H_FAIL=1; }
+R_T292P=$(curl -s -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/routing-rules" -H 'Content-Type: application/json' \
+  -d '{"name":"E2E T292 公海","clinicId":null,"priority":6,"intents":[],"keywords":["e2eg92p"],"patientType":null,"targetType":"CLINIC_POOL","targetGroupId":null,"targetStaffId":null,"autoReplyTemplate":"E2E T292 公海模板","escalateAfterMin":null,"escalateToGroupId":null}' | jf id)
+[ -n "$R_T292P" ] && pass "T292 建 e2e 公海規則（P6 → CLINIC_POOL + template — 未標記 case）" || { fail "T292 建公海規則失敗"; H_FAIL=1; }
+G292_PAT="8528003${EPOCH}"; G292_WID1="wamid.E2E_G292a_${EPOCH}"; G292_WID2="wamid.E2E_G292b_${EPOCH}"
+ib_retry "T292 msg1 POST" --clinic TKW --from "$G292_PAT" --text "e2eg292 想 cool牙 問下要幾耐" --wamid "$G292_WID1" --name "E2E G292" || true
+G292_CONV=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='$G292_WID1'" | jf conversationId)
+G292_MSG1=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$G292_WID1' AND direction='IN'" | jf v)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$G292_MSG1'" '[{"s":"SENT_AUTO"}]' 40; then
+  pass "T292a msg1 首覆自動發（L2 AUTO + routing-r7 template）"
+else
+  fail "T292a SENT_AUTO 未落"; H_FAIL=1
+fi
+check "T292a draft 來源 = routing-r7" "$(q "SELECT \"model\"::text v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$G292_MSG1'" | jf v)" "routing-r7"
+# msg2（同對話跟進）→ 原子閘：routedFirstReplyAt 已落 → 唔再建首覆
+sleep 5
+ib_retry "T292 msg2 POST" --clinic TKW --from "$G292_PAT" --text "e2eg292 跟進：唔該快啲覆我" --wamid "$G292_WID2" --name "E2E G292" || true
+G292_MSG2=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$G292_WID2' AND direction='IN'" | jf v)
+T292_OK=""
+for i in $(seq 1 40); do
+  grep -F "\"wamid\":\"$G292_WID2\"" /tmp/e2e-worker*.log 2>/dev/null | grep -qF "ai: classified" && { T292_OK=1; break; }
+  sleep 1
+done
+[ -n "$T292_OK" ] && pass "T292b worker 已處理 msg2" || { fail "T292b msg2 40s 未處理"; H_FAIL=1; }
+check "T292b 首覆恰一次：routing-r7 draft = 1（msg2 冇重建 — 原子閘）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$G292_CONV' AND \"model\"='routing-r7'" | jf c)" "1"
+check "T292b msg2 無 routing-r7 draft" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$G292_MSG2' AND \"model\"='routing-r7'" | jf c)" "0"
+check "T292 routedFirstReplyAt 原子閘欄有落" "$(q "SELECT CASE WHEN \"routedFirstReplyAt\" IS NULL THEN 'no' ELSE 'yes' END v FROM \"Conversation\" WHERE id='$G292_CONV'" | jf v)" "yes"
+# 未標記 case：CLINIC_POOL 規則命中（有 template）→ 唔回 rule → 唔建首覆
+G292C_PAT="8528004${EPOCH}"; G292C_WID="wamid.E2E_G292c_${EPOCH}"
+ib_retry "T292c POST" --clinic TKW --from "$G292C_PAT" --text "e2eg92p 問下要幾耐" --wamid "$G292C_WID" --name "E2E G292c" || true
+G292C_CONV=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='$G292C_WID'" | jf conversationId)
+G292C_MSG=$(q "SELECT id v FROM \"Message\" WHERE \"waMessageId\"='$G292C_WID' AND direction='IN'" | jf v)
+T292C_OK=""
+for i in $(seq 1 40); do
+  grep -F "\"wamid\":\"$G292C_WID\"" /tmp/e2e-worker*.log 2>/dev/null | grep -qF "ai: classified" && { T292C_OK=1; break; }
+  sleep 1
+done
+[ -n "$T292C_OK" ] && pass "T292c worker 已處理公海個案" || { fail "T292c 40s 未處理"; H_FAIL=1; }
+check "T292c 未標記（CLINIC_POOL）→ 無 routing-r7 draft（B-3：rule:null）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$G292C_MSG' AND \"model\"='routing-r7'" | jf c)" "0"
+check "T292c M-2：ROUTING_MATCHED_UNMARKED audit 落（恰 1 — 去重）" "$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='ROUTING_MATCHED_UNMARKED' AND \"entityId\"='$G292C_CONV'" | jf c)" "1"
+
+# ── T293. H-1：關鍵詞 lexicon 雙比對（管理員寫口語「箍牙」，病人寫「cool牙」→ 照命中）──
+# ★ run1 實遇：同 route T292 POST 剛 200、T293 瞬時 500（dev lazy-compile race）— 加重試 + diag
+R_T293=""
+for i in 1 2 3; do
+  T293_BODY=$(curl -s -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/routing-rules" -H 'Content-Type: application/json' \
+    -d '{"name":"E2E T293 lex","clinicId":null,"priority":7,"intents":[],"keywords":["箍牙"],"patientType":null,"targetType":"GROUP","targetGroupId":"'$CONSULT_GID'","targetStaffId":null,"autoReplyTemplate":null,"escalateAfterMin":null,"escalateToGroupId":null}')
+  R_T293=$(printf '%s' "$T293_BODY" | jf id)
+  [ -n "$R_T293" ] && break
+  echo "  T293 diag (try $i): $(printf '%s' "$T293_BODY" | head -c 200)"
+  sleep 3
+done
+[ -n "$R_T293" ] && pass "T293 建 e2e 規則（P7 關鍵詞=口語「箍牙」→ CONSULT）" || { fail "T293 建規則失敗（3 試）"; H_FAIL=1; }
+G293_PAT="8528005${EPOCH}"; G293_WID="wamid.E2E_G293_${EPOCH}"
+ib_retry "T293 mock-inbound POST" --clinic TKW --from "$G293_PAT" --text "cool牙 問下要幾耐" --wamid "$G293_WID" --name "E2E G293" || true
+G293_CONV=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='$G293_WID'" | jf conversationId)
+if wait_for "SELECT \"routedRuleId\"::text s FROM \"Conversation\" WHERE id='$G293_CONV'" '[{"s":"'$R_T293'"}]' 30; then
+  pass "T293 raw 唔含「箍牙」但 canonical 雙比對命中（H-1 修復；舊邏輯會落 P10）"
+else
+  G293_ACTUAL=$(q "SELECT \"routedRuleId\"::text v FROM \"Conversation\" WHERE id='$G293_CONV'" | jf v)
+  fail "T293 未命中 e2e 規則（routedRuleId=$G293_ACTUAL，預期 $R_T293）"; H_FAIL=1
+fi
+check "T293 命中目標 = CONSULT" "$(q "SELECT \"routedGroupId\"::text v FROM \"Conversation\" WHERE id='$G293_CONV'" | jf v)" "$CONSULT_GID"
+
+# ── T295. H-3：並發雙 job 原子 claim（in-process — worker concurrency=1 唔可以經 API 造 race）──
+T295_OUT=$(pnpm -s tsx scripts/e2e-t295.ts 2>&1)
+T295_CODE=$?
+if [ "$T295_CODE" = "0" ]; then
+  pass "T295 並發雙 job：恰一個 marked + StaffNotice 恰 1 + audit 恰 1（H-3 原子 claim）"
+else
+  echo "$T295_OUT" | sed 's/^/    /'
+  fail "T295 原子 claim e2e 失敗（exit=$T295_CODE）"; H_FAIL=1
+fi
+
+# ── H sweep：e2e 殘留全清（hermetic）────────────────────────────────────────────
+rm -f .dev/duty-mock-override.json
+curl -s -o /dev/null -b "$COOKIE_ADMIN" -X DELETE "$BASE/api/admin/routing-rules/$R_T292" >/dev/null 2>&1
+curl -s -o /dev/null -b "$COOKIE_ADMIN" -X DELETE "$BASE/api/admin/routing-rules/$R_T292P" >/dev/null 2>&1
+curl -s -o /dev/null -b "$COOKIE_ADMIN" -X DELETE "$BASE/api/admin/routing-rules/$R_T293" >/dev/null 2>&1
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852800%')" >/dev/null 2>&1
+q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852800%')" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852800%')" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\" LIKE '852800%')" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\" LIKE '852800%'" >/dev/null 2>&1
+check "H sweep fixture 零殘留" "$(q "SELECT count(*)::text c FROM \"Contact\" WHERE \"waId\" LIKE '852800%'" | jf c)" "0"
+pnpm -s e2e:staff delete --email "$T290_STAFF_EMAIL" >/dev/null 2>&1
+check "H sweep fixture staff 零殘留" "$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE email='$T290_STAFF_EMAIL'" | jf c)" "0"
+patch_aimode "$TKW_CLINIC_ID" DRAFT
+check "H sweep TKW aiMode 還原 DRAFT" "$PAM_CODE" "200"
+check "H sweep e2e 規則 零殘留" "$(q "SELECT count(*)::text c FROM \"RoutingRule\" WHERE name IN ('E2E T292 首覆','E2E T292 公海','E2E T293 lex')" | jf c)" "0"
+
+[ "$H_FAIL" = 0 ] && pass "H 段完成：審計修復 B-1/B-2/B-3/H-1/H-3（T290–T295）" || fail "H 段有項失敗（見上 ❌）"
+
 
 
 # ── summary ────────────────────────────────────────────────────────────

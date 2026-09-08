@@ -1,8 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, invalidateGroupCache } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
+import { assertGroupMembersBound } from "@/lib/skill-groups";
 
 /**
  * /api/admin/skill-groups — ★ cwi-routing-20260906（MD §4.1）：技能組管理（ADMIN-only）。
@@ -99,10 +100,19 @@ export const POST = handle(async (req: NextRequest) => {
   });
   const memberIds = (body.memberIds as string[]) ?? [];
   const clinicIds = (body.clinicIds as string[]) ?? [];
+  // ★ cwi-auditfix-20260908（B-1）：成員必綁定全部服務店 — 否則被 route 嘅對話對佢鎖死
+  const boundErr = await assertGroupMembersBound(prisma, memberIds, clinicIds);
+  if (boundErr) {
+    // 回滾剛建嘅空組（保持 hermetic — 唔留殘屍）
+    await prisma.skillGroup.delete({ where: { id: group.id } }).catch(() => undefined);
+    return NextResponse.json({ error: "member_not_bound", message: boundErr }, { status: 400 });
+  }
   if (memberIds.length > 0) {
     await prisma.skillGroupMember.createMany({
       data: memberIds.map((staffId) => ({ groupId: group.id, staffId })),
     });
+    // ★ cwi-auditfix-20260908（B-1）：新成員入組 → 路由放行 cache 即時失效
+    invalidateGroupCache();
   }
   if (clinicIds.length > 0) {
     await prisma.skillGroupClinic.createMany({

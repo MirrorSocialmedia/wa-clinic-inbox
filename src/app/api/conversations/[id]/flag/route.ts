@@ -26,7 +26,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(ctx, conv); // STAFF 別店 → 403
+  await assertConversationAccess(ctx, conv); // STAFF 別店 → 403
 
   const parsed = bodySchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {

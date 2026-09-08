@@ -31,7 +31,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id } = await ctx.params;
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv); // cwi-h6：店集合 ∨ 單線授權（assignee == 自己）；外店他人對話 → 403
+  await assertConversationAccess(auth, conv); // cwi-h6：店集合 ∨ 單線授權（assignee == 自己）；外店他人對話 → 403
   const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
   return NextResponse.json({ conversation: conv, contact });
 });
@@ -44,7 +44,7 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv); // cwi-h6：店集合 ∨ 單線授權
+  await assertConversationAccess(auth, conv); // cwi-h6：店集合 ∨ 單線授權
 
   // ★ H1：assignee 改動受權限模型約束（現任 assignee / ADMIN / unassigned claim / 接手 self；否則 403）
   if (parsed.data.assigneeId !== undefined) {

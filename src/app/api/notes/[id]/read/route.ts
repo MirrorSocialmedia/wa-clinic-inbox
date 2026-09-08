@@ -33,10 +33,10 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   // schema 設計：Message 無 @relation（conversationId 純欄）→ 分開查
   const conv = await prisma.conversation.findUnique({
     where: { id: msg.conversationId },
-    select: { id: true, clinicId: true, assigneeId: true },
+    select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true }, // ★ cwi-auditfix-20260908（B-1）：路由單線授權支路
   });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv); // STAFF 別店 → 403
+  await assertConversationAccess(auth, conv); // STAFF 別店 → 403
   if (msg.channel !== "INTERNAL" || msg.type !== "note") {
     return NextResponse.json({ error: "not a note" }, { status: 400 });
   }

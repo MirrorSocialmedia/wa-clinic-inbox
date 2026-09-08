@@ -61,12 +61,12 @@ export const GET = handle(
     }
     const conv = await prisma.conversation.findUnique({
       where: { id: msg.conversationId },
-      select: { clinicId: true, assigneeId: true },
+      select: { clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true }, // ★ cwi-auditfix-20260908（B-1）：路由單線授權支路
     });
     if (!conv) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
-    assertConversationAccess(auth, conv); // STAFF 跨店 → RbacError(403)
+    await assertConversationAccess(auth, conv); // STAFF 跨店 → RbacError(403)
 
     const ext = (file.split(".").pop() ?? "").toLowerCase();
     const mime = MIME[ext] ?? "application/octet-stream";

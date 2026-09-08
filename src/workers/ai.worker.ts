@@ -452,7 +452,9 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   // ── ★ cwi-routing-20260906（§5 R-7）：療程首覆 — 規則有 template → template 做呢條 inbound 唯一草稿 ──
   //   發送決策全部交返下方現有 4.5 閘（L1 → 草稿俾 staff；L2+ → 自動發；window/assigned/RESOLVED 鐵律零改動）。
   //   只喺正常 draft 路徑到呢度 — booking/PAIN session 喺上面已 return（各冇自己回覆路徑，唔會重複覆）。
-  if (routing.rule?.autoReplyTemplate) {
+  //   ★ cwi-auditfix-20260908（B-3）：`routing.marked &&` — 未標記（CLINIC_POOL/組唔服務/唔當值）
+  //   applyRouting 已回 rule:null，呢度雙重保險；配合 applyRoutingFirstReply 原子閘（每對話只一次）。
+  if (routing.marked && routing.rule?.autoReplyTemplate) {
     await applyRoutingFirstReply({
       convId: conv.id,
       msgId: msg.id,

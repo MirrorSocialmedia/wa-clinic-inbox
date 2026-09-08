@@ -25,7 +25,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id } = await ctx.params;
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv); // STAFF 別店 → 403
+  await assertConversationAccess(auth, conv); // STAFF 別店 → 403
 
   // 1) audit：APP_HANDOFF_CLICK（metadata only — 零電話/零內文）
   await prisma.auditLog.create({

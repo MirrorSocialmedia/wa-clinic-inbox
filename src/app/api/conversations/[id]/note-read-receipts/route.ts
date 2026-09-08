@@ -27,7 +27,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
     select: { id: true, clinicId: true, assigneeId: true },
   });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv); // STAFF 別店 → 403
+  await assertConversationAccess(auth, conv); // STAFF 別店 → 403
 
   // 只撈 INTERNAL note 嘅回執（先攞 note id 陣列，再 join 回執 row）
   const noteRows = await prisma.message.findMany({

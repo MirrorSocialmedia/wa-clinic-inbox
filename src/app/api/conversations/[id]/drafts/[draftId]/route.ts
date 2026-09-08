@@ -27,7 +27,7 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id, draftId } = await ctx.params;
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv);
+  await assertConversationAccess(auth, conv);
   const draft = await prisma.aiDraft.findFirst({ where: { id: draftId, conversationId: id } });
   if (!draft) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (draft.status === "DISCARDED") {
@@ -66,7 +66,7 @@ export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id, draftId } = await ctx.params;
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv);
+  await assertConversationAccess(auth, conv);
   const draft = await prisma.aiDraft.findFirst({ where: { id: draftId, conversationId: id } });
   if (!draft) return NextResponse.json({ error: "not found" }, { status: 404 });
 

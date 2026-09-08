@@ -24,7 +24,7 @@ export const GET = handle(async (req: NextRequest) => {
   if (!msg) return NextResponse.json({ error: "not found" }, { status: 404 });
   const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(ctx, { clinicId: conv.clinicId, assigneeId: conv.assigneeId });
+  await assertConversationAccess(ctx, { clinicId: conv.clinicId, assigneeId: conv.assigneeId });
   if (msg.direction !== "IN" || !msg.body) {
     return NextResponse.json({ error: "only IN text messages can be added" }, { status: 400 });
   }

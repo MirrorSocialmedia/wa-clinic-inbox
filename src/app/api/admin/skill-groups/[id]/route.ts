@@ -1,8 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, invalidateGroupCache, RbacError } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
+import { assertGroupMembersBound } from "@/lib/skill-groups";
 
 /**
  * /api/admin/skill-groups/[id] — ★ cwi-routing-20260906（MD §4.1）：技能組編輯（ADMIN-only）。
@@ -61,6 +62,14 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
           enabled: group.enabled,
         },
       });
+      // ★ cwi-auditfix-20260908（B-1）：replace 語義下先算最終狀態（memberIds/clinicIds 未送 = 維持現狀），
+      //   再驗證「每個成員 × 每間服務店」全部有 StaffClinic — 擋「加成員」同「加新服務店」兩種壞路徑。
+      const curMembers = await tx.skillGroupMember.findMany({ where: { groupId: id }, select: { staffId: true } });
+      const curClinics = await tx.skillGroupClinic.findMany({ where: { groupId: id }, select: { clinicId: true } });
+      const finalMembers = memberIds ? memberIds : curMembers.map((m) => m.staffId);
+      const finalClinics = clinicIds ? clinicIds : curClinics.map((c) => c.clinicId);
+      const boundErr = await assertGroupMembersBound(tx, finalMembers, finalClinics);
+      if (boundErr) throw new RbacError(400, boundErr);
       if (memberIds) {
         // replace 語義：撳咗先留（createMany skipDuplicates 冪等）
         const current = await tx.skillGroupMember.findMany({ where: { groupId: id }, select: { staffId: true } });
@@ -88,6 +97,9 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
       }
       return g;
     });
+
+    // ★ cwi-auditfix-20260908（B-1）：成員變動 → 路由放行 cache 即時失效
+    if (memberIds || clinicIds) invalidateGroupCache();
 
     await prisma.auditLog
       .create({
@@ -129,6 +141,8 @@ export const DELETE = handle(async (req: NextRequest, { params }: { params: Prom
       prisma.skillGroupClinic.deleteMany({ where: { groupId: id } }),
       prisma.skillGroup.delete({ where: { id } }),
     ]);
+    // ★ cwi-auditfix-20260908（B-1）：組删 → 成員路由放行集合變動，cache 即時失效
+    invalidateGroupCache();
 
     await prisma.auditLog
       .create({

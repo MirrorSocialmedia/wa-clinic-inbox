@@ -209,19 +209,58 @@ export function clinicScope(ctx: {
   return {};
 }
 
+// ── ★ cwi-auditfix-20260908（B-1 兜底）：我嘅技能組集合（in-process 60s cache）─────────
+// 路由 = 單線授權：對話 routedGroupId ∈ 我組（或 routedStaffId == 我）→ 放行，
+// 唔受 StaffClinic 綁定限制（組成員唔綁該店都必須開得到 — 否則 route 通知 = 鎖死）。
+const groupCache = new Map<string, { at: number; groupIds: Set<string> }>();
+const GROUP_TTL_MS = 60_000;
+
+export async function myGroupIds(staffId: string): Promise<Set<string>> {
+  const now = Date.now();
+  const hit = groupCache.get(staffId);
+  if (hit && now - hit.at < GROUP_TTL_MS) return hit.groupIds;
+  let groupIds = new Set<string>();
+  try {
+    const rows = await prisma.skillGroupMember.findMany({ where: { staffId }, select: { groupId: true } });
+    groupIds = new Set(rows.map((r) => r.groupId));
+  } catch (err) {
+    // fail-closed：DB 故障 → 空集合（唔放寬路由支路；clinic/assignee 支路照舊）
+    log.warn({ staffId, err: err instanceof Error ? err.message : String(err) }, "rbac: myGroupIds DB error — fail-closed（空集合）");
+  }
+  groupCache.set(staffId, { at: now, groupIds });
+  if (groupCache.size > 1000) {
+    for (const [k, v] of groupCache) if (now - v.at >= GROUP_TTL_MS * 2) groupCache.delete(k);
+  }
+  return groupIds;
+}
+
+/** admin 改咗組成員時叫 — 放行語義即時生效（唔使等 60s cache）。 */
+export function invalidateGroupCache(staffId?: string): void {
+  if (staffId) groupCache.delete(staffId);
+  else groupCache.clear();
+}
+
 /**
  * ★ cwi-h6-20260830：conversation 級 access（取代大部分 assertClinicAccess call site）。
  * 模型（MD §0）：可以睇/覆一個 conversation =
  *   ADMIN ∨ conv.clinicId ∈ 我嘅店集合 ∨ conv.assigneeId == 我（單線授權 — 派俾完全外店嘅人嗰條線）
  *   ★ cwi-routing-20260906（§8）：SUPERVISOR = 全店放行（唯讀語義 — 寫嘅鐵律喺 assertCanWriteConversation）
+ *   ★ cwi-auditfix-20260908（B-1 兜底）：∨ conv.routedStaffId == 我 ∨ conv.routedGroupId ∈ 我組
+ *   （路由 = 單線授權，同 assignee 語義一致 — 組成員唔綁該店都開得到被 route 嘅對話）。
+ *
+ * ★ async（B-1）：routedGroupId 支路要打 DB 查我組（60s cache）→ 所有 call site 要 await。
+ * conv 參數嘅 routed* 欄係 optional — 冇帶 = 嗰兩條支路自然唔成立（唔改 call site select 都唔會假放行）。
  */
-export function assertConversationAccess(
+export async function assertConversationAccess(
   ctx: Pick<AuthContext, "staff" | "clinicIds">,
-  conv: { clinicId: string; assigneeId: string | null }
-): void {
+  conv: { clinicId: string; assigneeId: string | null; routedStaffId?: string | null; routedGroupId?: string | null }
+): Promise<void> {
   if (ctx.staff.role === "ADMIN" || ctx.staff.role === "SUPERVISOR") return;
   if (ctx.clinicIds.includes(conv.clinicId)) return;
-  if (conv.assigneeId === ctx.staff.id) return; // 單線授權
+  if (conv.assigneeId === ctx.staff.id) return; // 單線授權（指派）
+  // ★ cwi-auditfix-20260908（B-1）：路由單線授權
+  if (conv.routedStaffId && conv.routedStaffId === ctx.staff.id) return;
+  if (conv.routedGroupId && (await myGroupIds(ctx.staff.id)).has(conv.routedGroupId)) return;
   throw new RbacError(403, "no access to this conversation");
 }
 

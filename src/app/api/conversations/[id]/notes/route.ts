@@ -41,7 +41,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv); // STAFF 別店 → 403
+  await assertConversationAccess(auth, conv); // STAFF 別店 → 403
 
   // mentions：只保留同店 active staff（非法值靜默 drop — 防注入別店/停用 staff）
   let mentions: string[] = [];

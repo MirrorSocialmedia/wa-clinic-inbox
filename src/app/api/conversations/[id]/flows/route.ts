@@ -48,7 +48,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(ctx, conv); // STAFF 別店 → 403
+  await assertConversationAccess(ctx, conv); // STAFF 別店 → 403
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   // ★ H1 Send Lock（MD §3.2）：同 free-form 同規則 — 負責人唔係自己 → 423（INTERNAL note route 冇呢個檢查）。

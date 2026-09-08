@@ -74,7 +74,7 @@ export const POST = handle(async (req: NextRequest) => {
 
   const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(ctx, conv); // 別店 / 非授權對話 → 403
+  await assertConversationAccess(ctx, conv); // 別店 / 非授權對話 → 403
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   // Send Lock（MD §7 — 同 create/rollback/cancel）

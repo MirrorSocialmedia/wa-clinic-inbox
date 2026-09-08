@@ -34,7 +34,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id } = await ctx.params;
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv);
+  await assertConversationAccess(auth, conv);
 
   const url = new URL(req.url);
   const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? 50) || 50));

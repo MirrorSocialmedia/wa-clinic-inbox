@@ -84,7 +84,7 @@ export const POST = handle(async (req: NextRequest) => {
     where: { id: parsed.data.conversationId },
   });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(ctx, conv); // STAFF 砌別店 URL → 403
+  await assertConversationAccess(ctx, conv); // STAFF 砌別店 URL → 403
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   // ★ H1 Send Lock（MD §3.2）：對話有負責人時，只有負責人可以發 WhatsApp。

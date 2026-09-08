@@ -332,6 +332,30 @@ export interface ConversationAssignedEvent {
   assignVersion: number;
 }
 
+/**
+ * ★ cwi-auditfix-20260908（M-1）：socket routing:assigned — 路由引擎寫咗 routed* 標記。
+ * client patch 該行（routedGroupId/routedStaffId/routedGroupName）+ 重算 counts.routed。
+ * （舊狀況：只有 push/notice，inbox 列表要手動 reload 先見到「派俾我」新行）
+ */
+export interface RoutingAssignedEvent {
+  conversationId: string;
+  ruleId: string;
+  groupId: string | null;
+  groupName: string | null;
+  /** R-9 當值單人（恰一個當值成員先有值；null = 只標組） */
+  staffId: string | null;
+}
+
+/** ★ cwi-auditfix-20260908（M-1）：socket routing:escalation — 升級計時器 claim 咗對話。 */
+export interface RoutingEscalationEvent {
+  conversationId: string;
+  ruleId: string;
+  fromGroupId: string | null;
+  toGroupId: string;
+  groupName: string;
+  escalatedAt: string;
+}
+
 /** ★ H1：socket note:new — 有新內部備註（零內文 — 內容由 client 拉） */
 export interface NoteNewEvent {
   conversationId: string;

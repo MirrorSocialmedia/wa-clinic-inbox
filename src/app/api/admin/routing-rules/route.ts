@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { requireAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { validateRuleBody, assertTargetsExist } from "@/lib/routing/rule-validate";
+import { getLexicon } from "@/lib/sessions/lexicon";
 
 /**
  * /api/admin/routing-rules — ★ cwi-routing-20260906（MD §4.2）：路由規則管理（ADMIN-only）。
@@ -54,12 +55,24 @@ export const GET = handle(async (req: NextRequest) => {
     escalateToGroupName: r.escalateToGroupId ? (groupName.get(r.escalateToGroupId)?.name ?? null) : null,
     updatedAt: r.updatedAt,
   }));
+  // ★ cwi-auditfix-20260908（H-1）：關鍵詞 canonical 提示用 — 編輯面板 chip 旁顯示口語表會點改關鍵詞。
+  //   key: "__global"（全局規則）+ 本次返回規則涉及嘅每個 clinicId（getLexicon 有 cache + fail-soft）。
+  const lexKeys = new Set<string>(["__global"]);
+  for (const r of rules) if (r.clinicId) lexKeys.add(r.clinicId);
+  const lexicon: Record<string, { term: string; canonical: string; note?: string }[]> = {};
+  await Promise.all(
+    [...lexKeys].map(async (k) => {
+      lexicon[k] = await getLexicon(k === "__global" ? null : k);
+    })
+  );
+
   // 管理頁編輯用：組 / staff / 店 全量（一次過返 — 下拉源）
   return NextResponse.json({
     rules: items,
     groups: groups.map((g) => ({ id: g.id, name: g.name, code: g.code, enabled: g.enabled })),
     staff: staff.filter((s) => s.active).map((s) => ({ id: s.id, name: s.name })),
     clinics: clinics.map((c) => ({ id: c.id, name: c.name, code: c.code })),
+    lexicon,
   });
 });
 

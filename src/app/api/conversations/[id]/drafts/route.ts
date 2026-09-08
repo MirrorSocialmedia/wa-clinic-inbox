@@ -18,7 +18,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id } = await ctx.params;
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(auth, conv);
+  await assertConversationAccess(auth, conv);
 
   const drafts = await prisma.aiDraft.findMany({
     where: { conversationId: id, status: "PROPOSED" },

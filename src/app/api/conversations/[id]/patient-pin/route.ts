@@ -50,7 +50,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   if (!loaded) return NextResponse.json({ error: "not found" }, { status: 404 });
   const { conv, contact } = loaded;
   if (!contact) return NextResponse.json({ error: "contact not found" }, { status: 404 });
-  assertConversationAccess(auth, conv);
+  await assertConversationAccess(auth, conv);
 
   const hash = phoneHash(contact.waId);
   let matches;
@@ -99,7 +99,7 @@ export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
   const loaded = await loadConvAndContact(id);
   if (!loaded) return NextResponse.json({ error: "not found" }, { status: 404 });
   const { conv } = loaded;
-  assertConversationAccess(auth, conv);
+  await assertConversationAccess(auth, conv);
 
   if (conv.pinnedPatientApricotId) {
     await prisma.conversation.update({

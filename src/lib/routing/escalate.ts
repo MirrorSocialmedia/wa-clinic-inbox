@@ -9,8 +9,10 @@
  * - **只升一次**：escalatedAt != null → 永遠唔再升（第二級之後冇第三級 — MD §3）。
  * - 15 分鐘內有人接手（assigneeId != null）→ 唔升（接手勝過升級）。
  * - N 分鐘係**規則參數**（RoutingRule.escalateAfterMin，出廠 15）— 唔係全局硬編碼。
- * - 原子 claim：`updateMany({ id, escalatedAt: null, assigneeId: null } → escalatedAt=now)` count===1
- *   先至發通知 — 兩個 cron 實例/重跑唔會重複通知（冪等）。
+ * - 原子 claim：`updateMany({ id, escalatedAt: null, assigneeId: null } → escalatedAt=now,
+ *   routedGroupId=升級組, routedStaffId=null)` count===1 先至發通知（冪等防重複）。
+ *   ★ cwi-auditfix-20260908（B-2）：claim 同時把路由指向升級組 — 否則第二級組成員
+ *   「派俾我」（routedGroupId ∈ 我組）搵唔到該對話。原組留 audit meta（fromGroupId）。
  * - 升級組無 active 成員（或唔服務該店）→ skip 唔 claim（下轮重試）。
  * - 零 PII：StaffNotice title / socket payload / push payload / audit meta 全部 metadata only。
  */
@@ -51,7 +53,7 @@ export async function runRoutingEscalateSweep(): Promise<EscalateSweepResult> {
       assigneeId: null,
       status: { not: "RESOLVED" },
     },
-    select: { id: true, clinicId: true, routedRuleId: true, routedAt: true },
+    select: { id: true, clinicId: true, routedRuleId: true, routedAt: true, routedGroupId: true },
   });
   out.checked = convs.length;
 
@@ -90,9 +92,12 @@ export async function runRoutingEscalateSweep(): Promise<EscalateSweepResult> {
       }
 
       // 4. 原子 claim（先 claim 後通知 — 冪等防重複）
+      // ★ cwi-auditfix-20260908（B-2）：同時把路由指向升級組（第二級「派俾我」搵得到）；
+      //   routedStaffId 清 null（第一級當值標記唔再適用 — 升級 = 組級接手）。
+      const fromGroupId = c.routedGroupId;
       const claimed = await prisma.conversation.updateMany({
         where: { id: c.id, escalatedAt: null, assigneeId: null },
-        data: { escalatedAt: now },
+        data: { escalatedAt: now, routedGroupId: group.id, routedStaffId: null },
       });
       if (claimed.count === 0) continue; // 輸咗 race（已升級 / 有人接手咗）
 
@@ -105,15 +110,18 @@ export async function runRoutingEscalateSweep(): Promise<EscalateSweepResult> {
           conversationId: c.id,
           kind: "ROUTING_ESCALATION",
           title,
-          meta: { ruleId, toGroupId: group.id, waitedMin: Math.round(waitedMin) } as Prisma.InputJsonValue,
+          meta: { ruleId, fromGroupId, toGroupId: group.id, waitedMin: Math.round(waitedMin) } as Prisma.InputJsonValue,
         },
       });
       // commit-then-emit（鐵律 — 通知 commit 咗先 publish）
+      // ★ cwi-auditfix-20260908（M-1）：payload 補 escalatedAt — client patch 行用（零 PII metadata）
       publishNotify(c.clinicId, "routing:escalation", {
         conversationId: c.id,
         ruleId,
+        fromGroupId,
         toGroupId: group.id,
         groupName: group.name,
+        escalatedAt: now.toISOString(),
       });
       pushRoutingEvent({ clinicId: c.clinicId, conversationId: c.id, staffIds: members.map((m) => m.id), escalated: true });
 
@@ -141,7 +149,7 @@ export async function runRoutingEscalateSweep(): Promise<EscalateSweepResult> {
           action: "ROUTING_ESCALATED",
           entity: "Conversation",
           entityId: c.id,
-          meta: { ruleId, toGroupId: group.id, waitedMin: Math.round(waitedMin) } as Prisma.InputJsonValue,
+          meta: { ruleId, fromGroupId, toGroupId: group.id, waitedMin: Math.round(waitedMin) } as Prisma.InputJsonValue,
         },
       });
 

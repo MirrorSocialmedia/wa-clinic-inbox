@@ -31,7 +31,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   const conv = await prisma.conversation.findUnique({ where: { id } });
   const contact = conv ? await prisma.contact.findUnique({ where: { id: conv.contactId } }) : null;
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertConversationAccess(ctx, conv); // STAFF 別店 → 403
+  await assertConversationAccess(ctx, conv); // STAFF 別店 → 403
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   if (!conv.pinnedPatientApricotId) {

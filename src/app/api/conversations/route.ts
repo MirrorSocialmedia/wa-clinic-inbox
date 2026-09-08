@@ -56,7 +56,8 @@ export const GET = handle(async (req: NextRequest) => {
       }
     } else if (assignedParam === "routed") {
       // ★ cwi-routing-20260906（MD §4.3）：「派俾我」= routedStaffId=我 ∨ routedGroupId∈我嘅組，且未指派。
-      // R-4：組成員只見自己服務店個案 → 嚴格店 scope（同公海 — 外店路由線唔漏入嚟）。
+      // ★ cwi-auditfix-20260908（B-1）：STAFF 唔再限 clinicIds — 路由本身已限組服務店（R-4），
+      //   被 route 嘅組成員即使唔綁該店都要見到 + 開得到（同 assigned=mine 一樣嘅單線授權語義）。
       const myGroups = await prisma.skillGroupMember.findMany({
         where: { staffId: ctx.staff.id },
         select: { groupId: true },
@@ -65,9 +66,8 @@ export const GET = handle(async (req: NextRequest) => {
       const orBranches: Record<string, unknown>[] = [{ routedStaffId: ctx.staff.id }];
       if (myGroups.length > 0) orBranches.push({ routedGroupId: { in: myGroups.map((g) => g.groupId) } });
       where.OR = orBranches;
-      if (ctx.staff.role === "STAFF") {
-        where.clinicId = clinicParam ?? { in: ctx.clinicIds };
-      } else if (clinicParam) {
+      // STAFF：無 clinic 限制（B-1）；ADMIN/SUPERVISOR：clinicParam 收窄（tab 語義照舊）
+      if (ctx.staff.role !== "STAFF" && clinicParam) {
         where.clinicId = clinicParam;
       }
     } else {
@@ -184,12 +184,21 @@ export const GET = handle(async (req: NextRequest) => {
     let routed = 0;
     let pending = 0;
     let resolved = 0;
+    // ★ cwi-auditfix-20260908（B-1）：STAFF 嘅「派俾我」計數唔限自己店 —
+    //   base scope（clinic ∪ assignee-me）唔含外店被 route 線 → 用專屬 count query，同 assigned=routed 列表完全同源。
+    if (ctx.staff.role === "STAFF") {
+      const orR: Record<string, unknown>[] = [{ routedStaffId: ctx.staff.id }];
+      if (myGroupSet.size > 0) orR.push({ routedGroupId: { in: [...myGroupSet] } });
+      routed = await prisma.conversation.count({ where: { assigneeId: null, OR: orR } });
+    }
     for (const g of groups) {
       all += g._count._all;
       if (g.assigneeId === null) unassigned += g._count._all;
       if (g.assigneeId === ctx.staff.id) mine += g._count._all;
       // ★ cwi-routing-20260906（MD §4.3）：派俾我 = 未指派 且（routedStaffId=我 ∨ routedGroupId∈我組）
+      //   （STAFF 專用 — 見上方專屬 count query；ADMIN/SUPERVISOR 沿用 groupBy 支路）
       if (
+        ctx.staff.role !== "STAFF" &&
         g.assigneeId === null &&
         (g.routedStaffId === ctx.staff.id || (g.routedGroupId !== null && myGroupSet.has(g.routedGroupId)))
       ) {

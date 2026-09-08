@@ -21,6 +21,8 @@ import type {
   NoteReadEvent,
   NoteReceipt,
   NoticeNewEvent,
+  RoutingAssignedEvent,
+  RoutingEscalationEvent,
   StaffInfo,
   StaffNoticeItem,
   UrgentEscalationEvent,
@@ -731,6 +733,61 @@ export function InboxClient({
               }
             : c
         )
+      );
+    });
+
+    // ── ★ cwi-auditfix-20260908（M-1）：routing 事件 → patch 該 row + 重算 counts.routed ──
+    // 「派俾我」predicate（同 server conversations/route.ts 同源）：
+    //   未指派 且（routedStaffId=我 ∨ routedGroupId∈我組）。舊狀況：只有 push/notice，
+    //   inbox 列表要手動 reload 先見到新 route 行（「派俾我」膠囊計數唔變）。
+    const routedForMe = (c: ConversationItem): boolean =>
+      c.assigneeId == null &&
+      (c.routedStaffId === user.staffId ||
+        (c.routedGroupId != null && (user.myGroupIds ?? []).includes(c.routedGroupId)));
+    const patchRoutingRow = (
+      convId: string,
+      patch: Partial<ConversationItem>,
+      before: ConversationItem | undefined
+    ) => {
+      setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, ...patch } : c)));
+      setConvCounts((prevCounts) => {
+        if (!prevCounts || !before) return prevCounts; // row 唔喺列表（filter 外）→ 唔敢估 delta
+        const wasRouted = routedForMe(before);
+        const nowRouted = routedForMe({ ...before, ...patch } as ConversationItem);
+        const delta = (nowRouted ? 1 : 0) - (wasRouted ? 1 : 0);
+        if (delta === 0) return prevCounts;
+        return { ...prevCounts, routed: Math.max(0, prevCounts.routed + delta) };
+      });
+    };
+
+    // routing:assigned — 路由引擎寫咗 routed* 標記（組 ∨ R-9 當值單人；R-2：唔掂 assignee）
+    socket.on("routing:assigned", (e: RoutingAssignedEvent) => {
+      const before = conversationsRef.current.find((c) => c.id === e.conversationId);
+      patchRoutingRow(
+        e.conversationId,
+        {
+          routedGroupId: e.groupId,
+          routedGroupName: e.groupName,
+          routedStaffId: e.staffId,
+          routedAt: new Date().toISOString(),
+          escalatedAt: null,
+        },
+        before
+      );
+    });
+
+    // routing:escalation — 升級計時器 claim 咗對話（routed → 升級組；routedStaffId 清 null）
+    socket.on("routing:escalation", (e: RoutingEscalationEvent) => {
+      const before = conversationsRef.current.find((c) => c.id === e.conversationId);
+      patchRoutingRow(
+        e.conversationId,
+        {
+          routedGroupId: e.toGroupId,
+          routedGroupName: e.groupName,
+          routedStaffId: null,
+          escalatedAt: e.escalatedAt,
+        },
+        before
       );
     });
 
