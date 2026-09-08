@@ -36,6 +36,7 @@ import {
   notifyPrefs,
   setNotifyPrefs,
   shouldNotify,
+  isAudioUnlocked,
   unlockAudio,
   type NotifyPrefs,
 } from "@/lib/notify-client";
@@ -45,8 +46,27 @@ import { DetailPane } from "./detail-pane";
 
 const PAGE_SIZE = 50;
 const WINDOW_MS = 24 * 3600 * 1000;
-// cwi-realtime-fix §1.3 (RT-2)：補漏重疊窗 — WhatsApp waTimestamp 係秒級（同秒多條 / 倒序）
-const RT_OVERLAP_MS = 60_000;
+// cwi-realtime-fix §1.3 (RT-2) 補漏重疊窗 → cwi-realtime-v2 §2 收窄到 10s：
+// 游標改用 server createdAt（單調、無偏差）— 重疊窗只係保同秒寫入嘅邊界情況。
+const RT_OVERLAP_MS = 10_000;
+
+/**
+ * ★ cwi-realtime-v2 §2：訊息排序 — createdAt 主序（server 寫入時間，病人手機時鐘偏差
+ *   唔會令新訊息插上面）+ waTimestamp 次序（同秒穩定）。
+ *   例外：channel=HISTORY（匯入舊訊息）嘅 createdAt 係匯入時間（唔係訊息時間）— 若跟
+ *   createdAt 排序會被插去最新；佢哋本來就係舊嘢 → 永遠排最舊，內裡用 waTimestamp 序。
+ *   前端顯示時間照舊用 waTimestamp（病人發送時間）。
+ */
+function msgSortCmp(a: MessageItem, b: MessageItem): number {
+  const aH = a.channel === "HISTORY";
+  const bH = b.channel === "HISTORY";
+  if (aH !== bH) return aH ? -1 : 1;
+  if (aH) return new Date(a.waTimestamp).getTime() - new Date(b.waTimestamp).getTime();
+  const ca = new Date(a.createdAt).getTime();
+  const cb = new Date(b.createdAt).getTime();
+  if (ca !== cb) return ca - cb;
+  return new Date(a.waTimestamp).getTime() - new Date(b.waTimestamp).getTime();
+}
 
 interface ContactSearchHit {
   id: string;
@@ -190,10 +210,29 @@ export function InboxClient({
     }
     link.href = unreadTotal > 0 ? unreadFaviconDataUrl(unreadTotal) : "/favicon.ico";
   }, [unreadTotal]);
-  // ★ cwi-realtime-fix §1.1 (RT-1)：per-conversation 補漏游標 — convId → 最後見過嘅 waTimestamp (ms)。
+  // ★ cwi-realtime-fix §1.1 (RT-1)：per-conversation 補漏游標 — convId → 最後見過嘅 createdAt (ms)。
+  //   cwi-realtime-v2 §2：改用 server 寫入時間（waTimestamp 係病人手機時鐘，IN 訊息可偏慢幾分鐘
+  //   → 游標被推過真實位置 → 補漏永久漏）。
   //   舊版全域共用游標會被「其他對話較新訊息」推進 → 選中對話嘅補漏 delta 窗口推過自己最後一條
   //   → 食訊息（根因 A）。
   const lastMsgTsRef = useRef<Map<string, number>>(new Map());
+  // ★ cwi-realtime-v2 §1：message:new 去重 — 同店 assignee 會收兩次（clinic room + staff room
+  //   補推）— 保留最近 500 個 message id（Set 保插入序，超額剔最舊）。
+  const seenMsgIdsRef = useRef<Set<string>>(new Set());
+  const rememberMsgId = (id: string | null | undefined): boolean => {
+    // 回傳 true = 首次見過（應該處理）；false = 重複（skip）
+    if (!id) return true;
+    if (seenMsgIdsRef.current.has(id)) return false;
+    seenMsgIdsRef.current.add(id);
+    if (seenMsgIdsRef.current.size > 500) {
+      const it = seenMsgIdsRef.current.values();
+      for (let i = seenMsgIdsRef.current.size - 500; i > 0; i--) {
+        const oldest = it.next().value;
+        if (oldest != null) seenMsgIdsRef.current.delete(oldest);
+      }
+    }
+    return true;
+  };
   // §1.1：推進 per-conversation 游標（只進唔退；null/非法 ts 無動作）
   const bumpCursor = useCallback((convId: string, ts: string | number | null | undefined) => {
     if (!convId || ts == null || ts === "") return;
@@ -254,6 +293,24 @@ export function InboxClient({
 
   const mentionTotal = Object.values(mentionUnread).reduce((a, b) => a + b, 0);
 
+  // ── ★ cwi-realtime-v2 §5：音效實時狀態（設定面板顯示 — 唔使再估） ──
+  // audioOk = 已解鎖（首次互動後）；pwaStandalone = 已安裝為 App（Chrome autoplay 政策
+  //   明文例外 — 零互動即准播音，正式解法）。見 notify-client unlockAudio 註釋。
+  const [audioOk, setAudioOk] = useState(false);
+  const [pwaStandalone, setPwaStandalone] = useState(false);
+  const unlockAudioNow = useCallback(() => {
+    unlockAudio(() => setAudioOk(true));
+  }, []);
+  useEffect(() => {
+    setAudioOk(isAudioUnlocked());
+    const mq = window.matchMedia("(display-mode: standalone)");
+    const upd = () =>
+      setPwaStandalone(mq.matches || (navigator as unknown as { standalone?: boolean }).standalone === true);
+    upd();
+    mq.addEventListener?.("change", upd);
+    return () => mq.removeEventListener?.("change", upd);
+  }, []);
+
   // ── ★ Part B 通知 v1（N-8）：開關 localStorage per-device + 首次登入 banner ──
   //   預設先渲染（SSR 安全），mount 後先讀真實 localStorage — 避 hydration mismatch。
   const [prefs, setPrefs] = useState<NotifyPrefs>(DEFAULT_NOTIFY_PREFS);
@@ -298,7 +355,10 @@ export function InboxClient({
     };
     window.addEventListener("sw:activated", onSwActivated);
     // §4 Android 音效解鎖：首次 pointerdown → 0 音量 chime（一次性；失敗靜默跳過）
-    const onFirstPointerDown = () => unlockAudio();
+    // ★ v2 §5：解鎖成功 → 設定面板實時狀態更新
+    const onFirstPointerDown = () => {
+      unlockAudio(() => setAudioOk(true));
+    };
     window.addEventListener("pointerdown", onFirstPointerDown, { once: true, capture: true });
     return () => {
       window.removeEventListener("pointerdown", onFirstPointerDown, { capture: true });
@@ -387,7 +447,10 @@ export function InboxClient({
     });
 
     socket.on("message:new", (e: NewMessageEvent) => {
-      if (e.message.waTimestamp) bumpCursor(e.conversationId, e.message.waTimestamp); // §1.2：per-conversation 推進
+      // ★ cwi-realtime-v2 §1：去重 — 同店 assignee 經 clinic room + staff room 收同一條兩次；
+      //   唔去重會雙彈 OS 通知 / 雙更新列表。
+      if (!rememberMsgId(e.message.id)) return;
+      if (e.message.createdAt) bumpCursor(e.conversationId, e.message.createdAt); // §1.2 + v2 §2：游標用 server createdAt
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.id === e.conversationId);
         const msg = e.message;
@@ -447,7 +510,7 @@ export function InboxClient({
             )
           )
             return prev;
-          return [...prev, msg].sort((a, b) => new Date(a.waTimestamp).getTime() - new Date(b.waTimestamp).getTime());
+          return [...prev, msg].sort(msgSortCmp);
         });
       }
 
@@ -939,35 +1002,45 @@ export function InboxClient({
     }
   }, []);
 
-  const fetchMessagesLatest = useCallback(async (convId: string) => {
+  const fetchMessagesLatest = useCallback(async (convId: string): Promise<number> => {
     try {
       const res = await fetch(`/api/conversations/${convId}/messages?limit=${PAGE_SIZE}`);
-      if (!res.ok) return;
+      if (!res.ok) return 0;
       const data = (await res.json()) as { messages: MessageItem[]; hasMore: boolean };
       // F-8（cwi-notify-fix）：merge by messageId — socket 已 append 入 state 嘅行（server list
       // 未反映 / refetch race 回舊 list）唔會因整包覆蓋消失；id 撞車 server row 為準。
       // 換對話要先喺 call site setMessages([]) 清空（避免 A 嘅行漏入 B）。
-      if (selectedIdRef.current !== convId) return; // fetch 期間已換咗對話 → 舊結果棄
+      if (selectedIdRef.current !== convId) return 0; // fetch 期間已換咗對話 → 舊結果棄
+      // ★ cwi-realtime-v2 §3：回傳新增行數（reconcile tick 計 [rt] reconcile added N）
+      const prevIds = new Set(messagesRef.current.map((m) => m.id));
+      const addedCount = data.messages.filter((m) => !prevIds.has(m.id)).length;
       setMessages((prev) => {
         const map = new Map(prev.map((m) => [m.id, m]));
         for (const m of data.messages) map.set(m.id, m);
-        return [...map.values()].sort((a, b) => new Date(a.waTimestamp).getTime() - new Date(b.waTimestamp).getTime());
+        return [...map.values()].sort(msgSortCmp);
       });
       setHasMore(data.hasMore);
       if (data.messages.length > 0) {
-        bumpCursor(convId, data.messages[data.messages.length - 1].waTimestamp); // §1.2：per-conversation 推進（只喺結果實際應用時）
+        // v2 §2：游標 = 該頁最大 createdAt（latest 頁 server 按 waTimestamp 排序 — 尾行唔一定係 max）
+        const maxCreated = data.messages.reduce(
+          (mx, m) => Math.max(mx, new Date(m.createdAt).getTime() || 0),
+          0
+        );
+        bumpCursor(convId, maxCreated); // 只喺結果實際應用時
       }
+      return addedCount;
     } catch {
       /* ignore */
     }
+    return 0;
   }, []);
 
-  const fetchMessagesAfter = useCallback(async (convId: string, afterMs: number) => {
+  const fetchMessagesAfter = useCallback(async (convId: string, afterMs: number): Promise<number> => {
     try {
       const res = await fetch(
         `/api/conversations/${convId}/messages?after=${new Date(afterMs).toISOString()}&limit=${PAGE_SIZE}`
       );
-      if (!res.ok) return;
+      if (!res.ok) return 0;
       const data = (await res.json()) as { messages: MessageItem[] };
       // ★ cwi-realtime-fix §3 (RT-6)：補漏結果一定要 log（上次靠 code review 先搵到，今次靠 log）
       const prevIds = new Set(messagesRef.current.map((m) => m.id));
@@ -977,11 +1050,13 @@ export function InboxClient({
       setMessages((prev) => {
         const ids = new Set(prev.map((m) => m.id));
         const added = data.messages.filter((m) => !ids.has(m.id));
-        return [...prev, ...added].sort((a, b) => new Date(a.waTimestamp).getTime() - new Date(b.waTimestamp).getTime());
+        return [...prev, ...added].sort(msgSortCmp);
       });
+      return addedCount;
     } catch {
       /* ignore */
     }
+    return 0;
   }, []);
 
   // ── cwi-realtime-fix §1.3 (RT-2 / RT-3)：per-conversation 補漏 ────────────
@@ -989,19 +1064,18 @@ export function InboxClient({
   //   係「彈完消失」第二條路 — RT-3）；否則 delta + 60 秒重疊窗（RT-2 秒級 ts 容錯，
   //   fetchMessagesAfter 已 by-id 去重 — 重疊窗唔會出重複行）。
   const catchUp = useCallback(
-    (convId: string) => {
+    async (convId: string): Promise<number> => {
       const cur = lastMsgTsRef.current.get(convId) ?? 0;
       if (cur === 0 || messagesRef.current.length === 0) {
         // eslint-disable-next-line no-console -- §3 catchUp 留痕（realtime 排障第一停）
         console.debug("[rt] catchUp", { convId, cursor: cur, mode: "latest" });
-        void fetchMessagesLatest(convId);
-        return;
+        return await fetchMessagesLatest(convId); // v2 §3：回傳 added count
       }
       // eslint-disable-next-line no-console -- §3 catchUp 留痕（realtime 排障第一停）
       console.debug("[rt] catchUp", { convId, cursor: cur, mode: "after", from: cur - RT_OVERLAP_MS });
-      void fetchMessagesAfter(convId, cur - RT_OVERLAP_MS);
       lastCatchUpAtRef.current = Date.now();
       void takeRtSnapshot();
+      return await fetchMessagesAfter(convId, cur - RT_OVERLAP_MS); // v2 §3：回傳 added count
     },
     [fetchMessagesAfter, fetchMessagesLatest, takeRtSnapshot]
   );
@@ -1012,18 +1086,18 @@ export function InboxClient({
   //  1) 對話列表：GET /api/conversations?after=<lastSeen>（server = 現有 list route 加 param）
   //     → lastMessageAt >= after 嘅對話用 id merge（重疊容許）+ 游標推進
   //  2) 開住嘅 thread：若選中對話喺 delta 內 → fetchMessagesAfter 補訊息
-  const refetchDelta = useCallback(async () => {
-    if (deltaInFlightRef.current) return;
+  const refetchDelta = useCallback(async (opts?: { noCatchUp?: boolean }): Promise<number> => {
+    if (deltaInFlightRef.current) return 0;
     const cursor = lastConvSeenRef.current;
-    if (cursor <= 0) return;
+    if (cursor <= 0) return 0;
     deltaInFlightRef.current = true;
     try {
       const qs = new URLSearchParams({ after: new Date(cursor).toISOString() });
       if (activeClinicRef.current !== "all") qs.set("clinicId", activeClinicRef.current);
       const res = await fetch(`/api/conversations?${qs.toString()}`);
-      if (!res.ok) return;
+      if (!res.ok) return 0;
       const rows = (await res.json()) as ConversationItem[];
-      if (rows.length === 0) return;
+      if (rows.length === 0) return 0;
       let maxTs = cursor;
       for (const r of rows) maxTs = Math.max(maxTs, new Date(r.lastMessageAt).getTime());
       lastConvSeenRef.current = maxTs;
@@ -1038,13 +1112,16 @@ export function InboxClient({
         );
         return next;
       });
-      // cwi-realtime-fix §1.3：開住嘅 thread 補漏 — per-conversation 游標 + 60s 重疊窗；
+      // cwi-realtime-fix §1.3：開住嘅 thread 補漏 — per-conversation 游標 + 重疊窗；
       // state 空/游標 0 一律行最新一頁（RT-3）。唔再「選中喺 rows 先補」— 對話列表 delta
       // 漏咗某對話都要補（游標自帶判斷，唔空攪）。
+      // ★ v2 §3：reconcile tick 傳 noCatchUp（佢自己已 fetchMessagesLatest — 避免雙重計 added）。
       const sel = selectedIdRef.current;
-      if (sel) catchUp(sel);
+      if (sel && !opts?.noCatchUp) return await catchUp(sel);
+      return 0;
     } catch {
       /* ignore — 下次 trigger 再試 */
+      return 0;
     } finally {
       deltaInFlightRef.current = false;
     }
@@ -1064,16 +1141,35 @@ export function InboxClient({
       void refetchDelta();
       if (selectedIdRef.current) void fetchMessagesLatest(selectedIdRef.current);
     };
-    const onFocus = () => void refetchDelta();
+    const onFocus = () => { void refetchDelta(); };
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("focus", onFocus);
-    const timer = setInterval(() => void refetchDelta(), 3 * 60 * 1000);
+    const timer = setInterval(() => { void refetchDelta(); }, 3 * 60 * 1000);
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("focus", onFocus);
       clearInterval(timer);
     };
   }, [refetchDelta, fetchMessagesLatest]);
+
+  // ── ★ cwi-realtime-v2 §3：20 秒 reconcile 安全網 ─────────────────────────
+  // tab 可見 + 有選中對話 → 每 20s merge 最新一頁（fetchMessagesLatest 已係 by-id merge
+  //   唔會覆蓋）+ 對話列表同款 delta（noCatchUp — 訊息補漏由 fetchMessagesLatest 負責，
+  //   唔雙重計 added）。任何 socket race / 事件遺失 → 漏 = 最多遲 20 秒。
+  // N > 0 就係捉到一次 race — [rt] reconcile log 累積幾日就知係邊種 race。
+  useEffect(() => {
+    const tick = async () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      const sel = selectedIdRef.current;
+      let added = 0;
+      if (sel) added += await fetchMessagesLatest(sel);
+      added += await refetchDelta({ noCatchUp: true });
+      // eslint-disable-next-line no-console -- v2 §3 reconcile 留痕（N>0 = 捉到一次 race；string log — spy 按字符串捕）
+      console.debug(`[rt] reconcile added ${added}`);
+    };
+    const t = setInterval(() => { void tick(); }, 20_000);
+    return () => clearInterval(t);
+  }, [fetchMessagesLatest, refetchDelta]);
 
   const loadOlder = useCallback(async () => {
     const convId = selectedIdRef.current;
@@ -1090,7 +1186,8 @@ export function InboxClient({
       setMessages((prev) => {
         const ids = new Set(prev.map((m) => m.id));
         const added = data.messages.filter((m) => !ids.has(m.id));
-        return [...added, ...prev];
+        // v2 §2：向上捲 merge 後亦用 createdAt 主序排序（server 回傳係 waTimestamp 序）
+        return [...added, ...prev].sort(msgSortCmp);
       });
       setHasMore(data.hasMore);
     } finally {
@@ -1758,6 +1855,8 @@ export function InboxClient({
         onPrefsChange={updatePrefs}
         connOffline={connOffline}
         rtDebug={rtDebug}
+        audioStatus={{ ok: audioOk, standalone: pwaStandalone }}
+        onUnlockAudio={unlockAudioNow}
       />
 
       {/* ★ Part B：首次登入 banner 一次（localStorage flag；啟 = 請求 permission + 開桌面通知） */}

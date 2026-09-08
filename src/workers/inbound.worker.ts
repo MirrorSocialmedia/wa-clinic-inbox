@@ -1,6 +1,6 @@
 import { Worker, type Job } from "bullmq";
 import { inboundQueue, aiQueue, mediaQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
-import { publishNotify } from "@/lib/notify";
+import { publishNotify, publishStaffNotify } from "@/lib/notify";
 import { pushEvent } from "@/lib/push";
 import prisma from "@/lib/prisma";
 import log, { redactDeep } from "@/lib/log";
@@ -240,7 +240,7 @@ async function touchConversation(
 
 async function notifyNewMessage(clinicId: string, conv: Conversation, msg: Message) {
   const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
-  publishNotify(clinicId, "message:new", {
+  const payload = {
     conversationId: conv.id,
     clinicId,
     contact: contact
@@ -253,7 +253,12 @@ async function notifyNewMessage(clinicId: string, conv: Conversation, msg: Messa
       lastMessageAt: conv.lastMessageAt,
       lastInboundAt: conv.lastInboundAt,
     },
-  });
+  };
+  publishNotify(clinicId, "message:new", payload);
+  // ★ cwi-realtime-v2 §1：跨店 assignee 唔喺呢間店嘅 clinic room（staff 只 join 自己綁定店）
+  //   → 補推 staff:{assigneeId} room（room 已存在，零新基建）。同店 assignee 會收兩次
+  //   （clinic + staff room）— client handler 頂有 seenEventIds 去重。
+  if (conv.assigneeId) publishStaffNotify(conv.assigneeId, clinicId, "message:new", payload);
   // v2 Web Push（cwi-notify-v2）：tab 閂咗/鎖屏都收到 — payload 零 PII（kind/clinicShort/conversationId）
   pushEvent({ kind: "message", clinicId, conversationId: conv.id });
 }

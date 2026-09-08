@@ -79,9 +79,17 @@ const bodyA2 = arg("--body-a2"); // t270 直插 DB 訊息 body
 const idA3 = arg("--id-a3"); // t271 同秒對 A3
 const idA4 = arg("--id-a4"); // t271 同秒對 A4
 const bodyA4s = arg("--body-a4s"); // t271 合成 socket 訊息 body
-const bodyT2813 = arg("--b3"); // t281 背景訊息 3
-const bodyT2814 = arg("--b4"); // t281 背景訊息 4
-const bodyA5 = arg("--body-a5"); // t282 重開後應在嘅訊息 body
+const bodyT2873 = arg("--b3"); // t287（舊 t281）背景訊息 3
+const bodyT2874 = arg("--b4"); // t287（舊 t282）背景訊息 4
+const bodyA5 = arg("--body-a5"); // t288（舊 t282）重開後應在嘅訊息 body
+// ★ cwi-realtime-v2 T281–T285
+const staffMfId = arg("--staff-mf"); // t281 跨店 assignee（MF staff id）
+const staffTkwId = arg("--staff-tkw"); // t281 同店 assignee（TKW staff id）
+const waA = arg("--wa"); // t281 mock-inbound --from（TKW 對話 A 嘅 waId）
+const bodyT281a = arg("--b-a"); // t281 (a) 跨店訊息 body
+const bodyT281b = arg("--b-b"); // t281 (b) 同店訊息 body
+const waM = arg("--wa-m"); // t285 MF 對話 contact waId
+const nameM = arg("--name-m"); // t285 MF 對話 contact 名
 
 const PII_NAME = "PII 張三 E2E";
 const listWaitName = waitName || PII_NAME; // 必喺 PII_NAME 之後（TDZ）
@@ -541,6 +549,47 @@ function dbq(sql: string): string {
   } catch (e) {
     return `ERR ${e instanceof Error ? e.message : String(e)}`;
   }
+}
+
+/** dbq 包裝：JSON rows 抽第一行某欄（e2e-query.ts 輸出 = JSON.stringify(rows)） */
+function dbqGet(sql: string, key: string): string {
+  const out = dbq(sql);
+  if (out.startsWith("ERR")) return "";
+  try {
+    const rows = JSON.parse(out) as Record<string, unknown>[];
+    const v = rows[0]?.[key];
+    return typeof v === "string" ? v : v == null ? "" : String(v);
+  } catch {
+    return "";
+  }
+}
+
+/** 真 webhook 路徑（mock-inbound）— 等 worker 處理（notify 先於 AI 分類，快） */
+function mockInbound(clinicCode: string, from: string, text: string, wamid: string, name?: string): void {
+  try {
+    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+    const args = ["scripts/mock-inbound.ts", "message", "--clinic", clinicCode, "--from", from, "--text", text, "--wamid", wamid];
+    if (name) args.push("--name", name);
+    execFileSync("./node_modules/.bin/tsx", args, {
+      cwd: path.join(__dirname, ".."),
+      encoding: "utf-8",
+      timeout: 30_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (e) {
+    // 唔即時 fail — caller 嘅 DOM/DB wait 會 timeout 帶上下文
+    console.error(`[mockInbound] ${String(e).slice(0, 200)}`);
+  }
+}
+
+/** thread 內 #msg-* 行嘅 DOM 序（idx = 位置，total = 總數）— 排序斷言用 */
+async function msgDomOrder(P: PageLike, id: string): Promise<{ idx: number; total: number }> {
+  return P.evaluate((mid: string) => {
+    const el = document.getElementById(`msg-${mid}`);
+    if (!el || !el.parentElement) return { idx: -1, total: 0 };
+    const rows = Array.from(el.parentElement.children).filter((n) => /^msg-/.test((n as HTMLElement).id ?? ""));
+    return { idx: rows.findIndex((n) => (n as HTMLElement).id === `msg-${mid}`), total: rows.length };
+  }, id);
 }
 
 /** 等 SW subscription（app mount 自動 ensurePushSubscription；headless datacenter 環境 push service
@@ -1247,17 +1296,18 @@ async function main(): Promise<void> {
       // cwi-realtime-fix T5（SW 更新策略）：★ file-swap（dev server 每次 request 讀盤 — 實測）。
       // Playwright route 攔唔到 SW script fetch（browser process 層）— 改直接換 public/sw.js 內容。
       // byte 變 → reg.update()（updateViaCache:none + no-cache header）→ 新版 install（skipWaiting）
-      // → activate（clients.claim）→ controllerchange → 「已更新新版本」提示 + 版本查詢 a1 → a2。
+      // → activate（clients.claim）→ controllerchange → 「已更新新版本」提示 + 版本查詢 a2 → a3。
+      // ★ cwi-realtime-v2：sw.js 版本由 cwi-routing-20260906 bump 咗 a1→a2 — 本 scenario 跟住用 a2→a3。
       const v1file = readSwFile();
-      if (!v1file.includes("2026-09-07-a1")) fail("t279: public/sw.js 現行版本唔係 2026-09-07-a1（檔案被改過？）");
+      if (!v1file.includes("2026-09-07-a2")) fail("t279: public/sw.js 現行版本唔係 2026-09-07-a2（檔案被改過？）");
       const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", "");
       browsers.push(a.B);
       await waitForListReady(a.P, listWaitName);
       await waitForSwReady(a.P);
       const v1 = await swVersionQuery(a.P);
-      if (v1 !== "2026-09-07-a1") fail(`t279: 初始版本應 a1，actual=${v1}`);
+      if (v1 !== "2026-09-07-a2") fail(`t279: 初始版本應 a2，actual=${v1}`);
       try {
-        writeSwFile(v1file.replace("2026-09-07-a1", "2026-09-07-a2"));
+        writeSwFile(v1file.replace("2026-09-07-a2", "2026-09-07-a3"));
         await new Promise((r) => setTimeout(r, 300)); // 落盤 settle
         await a.P.evaluate(() => navigator.serviceWorker.getRegistration().then((r) => (r ? r.update() : null)).catch(() => null));
         const t0 = Date.now();
@@ -1270,7 +1320,7 @@ async function main(): Promise<void> {
         if ((await a.P.getByText("重載").count()) < 1) fail("t279: 提示應有 [重載] 掣");
         await new Promise((r) => setTimeout(r, 2000)); // 新 SW activate 完
         const v2 = await swVersionQuery(a.P);
-        if (v2 !== "2026-09-07-a2") fail(`t279: 更新後版本應 = 2026-09-07-a2，actual=${v2}`);
+        if (v2 !== "2026-09-07-a3") fail(`t279: 更新後版本應 = 2026-09-07-a3，actual=${v2}`);
       } finally {
         writeSwFile(v1file); // 還原（失敗都還 — 唔污染 repo）
       }
@@ -1283,7 +1333,7 @@ async function main(): Promise<void> {
       //   （a）app 訂閱 flow 有行（vapid key fetch）（b）SW 更新後 pushManager 照可用
       //   （c）SW 照 active（d）endpoint 唔會由有變無。
       const v1file = readSwFile();
-      if (!v1file.includes("2026-09-07-a1")) fail("t280: public/sw.js 現行版本唔係 2026-09-07-a1");
+      if (!v1file.includes("2026-09-07-a2")) fail("t280: public/sw.js 現行版本唔係 2026-09-07-a2");
       const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", "");
       browsers.push(a.B);
       await waitForListReady(a.P, listWaitName);
@@ -1301,7 +1351,7 @@ async function main(): Promise<void> {
       const vapidFetches = (await spyMeta(a.P)).fetchUrls.filter((u) => u.includes("/api/push/vapid-key")).length;
       if (vapidFetches < 1) fail(`t280: app 應該行過訂閱 flow（vapid key fetch=0）`);
       try {
-        writeSwFile(v1file.replace("2026-09-07-a1", "2026-09-07-a2"));
+        writeSwFile(v1file.replace("2026-09-07-a2", "2026-09-07-a3"));
         await new Promise((r) => setTimeout(r, 300));
         await a.P.evaluate(() => navigator.serviceWorker.getRegistration().then((r) => (r ? r.update() : null)).catch(() => null));
         const t0 = Date.now();
@@ -1326,39 +1376,39 @@ async function main(): Promise<void> {
         writeSwFile(v1file);
       }
       console.log("NOTIFY-UI-OK");
-    } else if (scenario === "t281") {
-      // cwi-realtime-fix §4 第 3 步：背景（visibility 假裝）期間兩條訊息 → 前台兩條都喺、
+    } else if (scenario === "t287") {
+      // cwi-realtime-fix §4 第 3 步（原 t281 — v2 重編號：新 T281–T285 讓位）：背景（visibility 假裝）期間兩條訊息 → 前台兩條都喺、
       // 無重複（socket append + 前台 refetchDelta/catchUp merge）+ catchUp log。
       // ★ 訊息要 DB-backed（raw INSERT 固定 id + Conversation.lastMessageAt 推進）—
       //   純合成 socket 事件唔入 DB → 對話列表 delta（refetchDelta 嘅前置）返空 → 唔行 catchUp。
       //   socket 事件同 DB 行用同一 message id → by-id 去重驗證真實 merge 路徑。
-      if (!bodyT2813 || !bodyT2814) throw new Error("t281 要 --b3 --b4");
+      if (!bodyT2873 || !bodyT2874) throw new Error("t287 要 --b3 --b4");
       const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
       browsers.push(a.B);
       await waitForConvOpen(a.P, listWaitName);
       await new Promise((r) => setTimeout(r, 3000));
-      const M3 = "e2et281m3";
-      const M4 = "e2et281m4";
+      const M3 = "e2et287m3";
+      const M4 = "e2et287m4";
       dbq(`DELETE FROM "Message" WHERE id IN ('${M3}','${M4}')`);
       await cycleVisibility(a.P, "hidden"); // 背景
       await new Promise((r) => setTimeout(r, 2000));
       // msg 3：DB 行 + 同 id 合成 socket 事件
       const ts3 = new Date(Date.now() + 5000).toISOString();
       const ins3 = dbq(
-        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp") VALUES ('${M3}','${convU}','rtt281m3','IN','API','text','${bodyT2813}','RECEIVED','${ts3}')`,
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp") VALUES ('${M3}','${convU}','rtt287m3','IN','API','text','${bodyT2873}','RECEIVED','${ts3}')`,
       );
-      if (ins3.startsWith("ERR")) fail(`t281: M3 INSERT 失敗（${ins3.slice(0, 150)}）`);
+      if (ins3.startsWith("ERR")) fail(`t287: M3 INSERT 失敗（${ins3.slice(0, 150)}）`);
       dbq(`UPDATE "Conversation" SET "lastMessageAt"='${ts3}' WHERE id='${convU}'`);
-      await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: bodyT2813, ts: ts3, id: M3 }));
+      await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: bodyT2873, ts: ts3, id: M3 }));
       await new Promise((r) => setTimeout(r, 3000));
       // msg 4：同上
       const ts4 = new Date(Date.now() + 10_000).toISOString();
       const ins4 = dbq(
-        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp") VALUES ('${M4}','${convU}','rtt281m4','IN','API','text','${bodyT2814}','RECEIVED','${ts4}')`,
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp") VALUES ('${M4}','${convU}','rtt287m4','IN','API','text','${bodyT2874}','RECEIVED','${ts4}')`,
       );
-      if (ins4.startsWith("ERR")) fail(`t281: M4 INSERT 失敗（${ins4.slice(0, 150)}）`);
+      if (ins4.startsWith("ERR")) fail(`t287: M4 INSERT 失敗（${ins4.slice(0, 150)}）`);
       dbq(`UPDATE "Conversation" SET "lastMessageAt"='${ts4}' WHERE id='${convU}'`);
-      await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 2, contact: false, body: bodyT2814, ts: ts4, id: M4 }));
+      await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 2, contact: false, body: bodyT2874, ts: ts4, id: M4 }));
       await new Promise((r) => setTimeout(r, 3000));
       await cycleVisibility(a.P, "visible"); // 前台 → refetchDelta（列表 delta 有行 → catchUp）+ fetchMessagesLatest
       const t0 = Date.now();
@@ -1369,27 +1419,223 @@ async function main(): Promise<void> {
         if (Date.now() - t0 > 15_000) {
           const n3 = await a.P.locator(`#msg-${M3}`).count();
           const n4 = await a.P.locator(`#msg-${M4}`).count();
-          fail(`t281: 背景訊息前台應該兩條都喺（M3=${n3} M4=${n4}）`);
+          fail(`t287: 背景訊息前台應該兩條都喺（M3=${n3} M4=${n4}）`);
         }
         await new Promise((r) => setTimeout(r, 1000));
       }
       await new Promise((r) => setTimeout(r, 2000)); // catchUp log 落定
       const dbg = (await spyMeta(a.P)).debugLogs;
-      if (!dbg.some((l) => l.includes("[rt] catchUp"))) fail(`t281: 前台 catchUp 應該有 log（debugLogs=${JSON.stringify(dbg.slice(-4))}）`);
+      if (!dbg.some((l) => l.includes("[rt] catchUp"))) fail(`t287: 前台 catchUp 應該有 log（debugLogs=${JSON.stringify(dbg.slice(-4))}）`);
       console.log("NOTIFY-UI-OK");
-    } else if (scenario === "t282") {
-      // cwi-realtime-fix §4 第 4 步：tab 「閂咗」期間送咗訊息（driver 真 webhook 路徑 — 已入 DB）
+    } else if (scenario === "t288") {
+      // cwi-realtime-fix §4 第 4 步（原 t282 — v2 重編號）：tab 「閂咗」期間送咗訊息（driver 真 webhook 路徑 — 已入 DB）
       // → 重開新瀏覽器 → 訊息喺度。
-      if (!bodyA5) throw new Error("t282 要 --body-a5");
+      if (!bodyA5) throw new Error("t288 要 --body-a5");
       const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
       browsers.push(a.B);
       const t0 = Date.now();
       for (;;) {
         const n = await a.P.getByText(bodyA5, { exact: true }).count();
         if (n >= 1) break;
-        if (Date.now() - t0 > 30_000) fail("t282: 重開後 30s 訊息仍未喺（?conv= 首屏 fetch 失敗？）");
+        if (Date.now() - t0 > 30_000) fail("t288: 重開後 30s 訊息仍未喺（?conv= 首屏 fetch 失敗？）");
         await new Promise((r) => setTimeout(r, 1000));
       }
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t281") {
+      // cwi-realtime-v2 T281 §1：跨店 assignee（MF staff 唔綁定 TKW）經 staff: room 收 message:new；
+      //   同店 assignee（TKW staff）收兩次（clinic + staff room）→ client seenEventIds 去重 = 只彈一次。
+      // 真 worker 路徑（mock-inbound → inbound.worker notifyNewMessage → publishNotify + publishStaffNotify）。
+      if (!staffMfId || !staffTkwId || !waA || !bodyT281a || !bodyT281b) throw new Error("t281 要 --staff-mf --staff-tkw --wa --b-a --b-b");
+      const wamidA = `rtwv2a${Date.now()}`;
+      // (a) 跨店：assignee = MF staff
+      dbq(`UPDATE "Conversation" SET "assigneeId"='${staffMfId}' WHERE id='${convU}'`);
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", ""); // MF staff
+      browsers.push(a.B);
+      await waitForListReady(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000)); // socket 註冊 + room join
+      // MF staff 嘅列表應該見到呢行（跨店指派俾我）+ 跨店 badge
+      const nCross = await a.P.getByText("↔ 跨店").count();
+      if (nCross < 1) fail(`t281a: MF staff 列表應該有「↔ 跨店」badge（actual=${nCross}）`);
+      mockInbound("TKW", waA, bodyT281a, wamidA);
+      const tA = Date.now();
+      for (;;) {
+        if ((await a.P.getByText(bodyT281a, { exact: true }).count()) > 0) break;
+        if (Date.now() - tA > 25_000) fail("t281a: 跨店 assignee 25s 未收到 message:new（staff: room 補推失敗？）");
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      // 開對話 → thread 嗰行（MF staff 只喺 staff room — 收一次）
+      await a.P.getByText(listWaitName, { exact: true }).first().click();
+      await waitForConvOpen(a.P, listWaitName, 30_000); // click 失敗（banner 擋 / re-render）→ 呢度快 fail
+      const idA1 = dbqGet(`SELECT "id" m FROM "Message" WHERE "waMessageId"='${wamidA}'`, "m");
+      if (!idA1) fail("t281a: 訊息未落 DB（mock-inbound 失敗？）");
+      const tA1 = Date.now();
+      for (;;) {
+        const n = await a.P.locator(`#msg-${idA1}`).count();
+        if (n === 1) break;
+        if (Date.now() - tA1 > 15_000) {
+          const n = await a.P.locator(`#msg-${idA1}`).count();
+          const diag = await a.P.evaluate(() => ({
+            convParam: new URLSearchParams(location.search).get("conv"),
+            msgRows: document.querySelectorAll('[id^="msg-"]').length,
+            rowIds: Array.from(document.querySelectorAll('[id^="msg-"]')).slice(0, 5).map((el) => el.id),
+          }));
+          const meta = await spyMeta(a.P);
+          const msgFetches = meta.fetchUrls.filter((u) => u.includes("/messages"));
+          fail(`t281a: thread 應該恰有 1 行（actual=${n}; diag=${JSON.stringify(diag)}; msgFetches=${JSON.stringify(msgFetches.slice(-3))}）`);
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      // (b) 同店去重：assignee = TKW staff；對話唔 selectable（active conversation 會壓通知）
+      dbq(`UPDATE "Conversation" SET "assigneeId"='${staffTkwId}' WHERE id='${convU}'`);
+      const b = await openBrowser(exe, cookieBFile, `${base}/inbox`, "granted", ""); // TKW staff
+      browsers.push(b.B);
+      await waitForListReady(b.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000));
+      const wamidB = `rtwv2b${Date.now()}`;
+      mockInbound("TKW", waA, bodyT281b, wamidB);
+      const tB = Date.now();
+      for (;;) {
+        if ((await b.P.getByText(bodyT281b, { exact: true }).count()) > 0) break;
+        if (Date.now() - tB > 25_000) fail("t281b: 同店 assignee 25s 未收到 message:new");
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      await new Promise((r) => setTimeout(r, 3000)); // 兩次事件（clinic + staff room）都到齊
+      const sp = await spy(b.P);
+      const nNotify = sp.notifications.filter((n) => n.tag === convU).length;
+      if (nNotify !== 1) fail(`t281b: 同店 assignee 應該恰彈 1 次通知（去重；actual=${nNotify}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t282") {
+      // cwi-realtime-v2 T282 §2：IN 訊息 waTimestamp 比 cursor 早 5 分鐘（慢鐘）—
+      //   socket 靜音變體（raw INSERT 無 socket 事件）→ 必經 catchUp 攞到（createdAt 游標）+ 排序排最尾。
+      if (!bodyA5) throw new Error("t282 要 --body-a5");
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      await waitForConvOpen(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000));
+      const M = "e2ev2t282";
+      dbq(`DELETE FROM "Message" WHERE id='${M}'`);
+      const createdTs = new Date().toISOString();
+      const waTs = new Date(Date.now() - 5 * 60_000).toISOString(); // 慢鐘：waTimestamp 早 5 分鐘
+      const ins = dbq(
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp","createdAt") VALUES ('${M}','${convU}','rtwv2t282','IN','API','text','${bodyA5}','RECEIVED','${waTs}','${createdTs}')`,
+      );
+      if (ins.startsWith("ERR")) fail(`t282: INSERT 失敗（${ins.slice(0, 150)}）`);
+      dbq(`UPDATE "Conversation" SET "lastMessageAt"='${createdTs}' WHERE id='${convU}'`);
+      await dispatchFocus(a.P); // → refetchDelta → catchUp（createdAt 游標）
+      const t0 = Date.now();
+      for (;;) {
+        const n = await a.P.locator(`#msg-${M}`).count();
+        if (n >= 1) break;
+        if (Date.now() - t0 > 25_000) {
+          const n = await a.P.locator(`#msg-${M}`).count();
+          fail(`t282: catchUp（createdAt 游標）未攞到慢鐘訊息（count=${n}）`);
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      // 排序：createdAt 主序 → 新 createdAt 排最尾（waTimestamp 雖舊）
+      await new Promise((r) => setTimeout(r, 1500)); // sort 安定
+      const { idx, total } = await msgDomOrder(a.P, M);
+      if (total < 2) fail(`t282: thread 應該 >=2 行（total=${total}）`);
+      if (idx !== total - 1) fail(`t282: 慢鐘訊息應該排最尾（idx=${idx} total=${total}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t283") {
+      // cwi-realtime-v2 T283 §2：HISTORY（匯入舊訊息）createdAt=匯入時間（新）但 waTimestamp=歷史（舊）
+      //   → 排序例外必須生效：排最舊（唔會插去最新）。
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      await waitForConvOpen(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000));
+      const M = "e2ev2t283";
+      dbq(`DELETE FROM "Message" WHERE id='${M}'`);
+      const createdTs = new Date().toISOString(); // 匯入 = 而家
+      const waTs = new Date(Date.now() - 3 * 86_400_000).toISOString(); // 訊息 = 3 日前
+      const ins = dbq(
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp","createdAt") VALUES ('${M}','${convU}','rtwv2t283','IN','HISTORY','text','e2e-v2-t283-history','RECEIVED','${waTs}','${createdTs}')`,
+      );
+      if (ins.startsWith("ERR")) fail(`t283: INSERT 失敗（${ins.slice(0, 150)}）`);
+      dbq(`UPDATE "Conversation" SET "lastMessageAt"='${createdTs}' WHERE id='${convU}'`);
+      await dispatchFocus(a.P); // catchUp（createdAt 游標）攞到（createdAt 新）→ merge 排序要排最舊
+      const t0 = Date.now();
+      for (;;) {
+        const n = await a.P.locator(`#msg-${M}`).count();
+        if (n >= 1) break;
+        // 12s 未現 → 補一次 focus（用戶重新點入 window 嘅真實行為）
+        if (Date.now() - t0 > 12_000) {
+          await dispatchFocus(a.P).catch(() => {});
+        }
+        if (Date.now() - t0 > 25_000) {
+          const n = await a.P.locator(`#msg-${M}`).count();
+          const meta = await spyMeta(a.P);
+          const rtLogs = meta.debugLogs.filter((l) => l.includes("[rt]")).slice(-8);
+          const convFetches = meta.fetchUrls.filter((u) => u.includes("/conversations") || u.includes("/messages")).slice(-6);
+          fail(`t283: catchUp 未攞到 HISTORY 訊息（count=${n}; rtLogs=${JSON.stringify(rtLogs)}; fetches=${JSON.stringify(convFetches)}）`);
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+      const { idx, total } = await msgDomOrder(a.P, M);
+      if (total < 2) fail(`t283: thread 應該 >=2 行（total=${total}）`);
+      if (idx !== 0) fail(`t283: HISTORY 應該排最舊（idx=${idx} total=${total}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t284") {
+      // cwi-realtime-v2 T284 §3：socket 靜音（raw INSERT 唔派事件）→ 20s reconcile 安全網必須攞到
+      //   + `[rt] reconcile added 1` log（唔 trigger focus/visibility — 唯一路徑就係 reconcile tick）。
+      const a = await openBrowser(exe, cookieAFile, `${base}/inbox?conv=${convU}`, "granted", "");
+      browsers.push(a.B);
+      await waitForConvOpen(a.P, listWaitName);
+      await new Promise((r) => setTimeout(r, 3000));
+      const M = "e2ev2t284";
+      dbq(`DELETE FROM "Message" WHERE id='${M}'`);
+      const ts = new Date().toISOString();
+      const ins = dbq(
+        `INSERT INTO "Message" (id,"conversationId","waMessageId",direction,channel,type,body,status,"waTimestamp","createdAt") VALUES ('${M}','${convU}','rtwv2t284','IN','API','text','e2e-v2-t284-reconcile','RECEIVED','${ts}','${ts}')`,
+      );
+      if (ins.startsWith("ERR")) fail(`t284: INSERT 失敗（${ins.slice(0, 150)}）`);
+      dbq(`UPDATE "Conversation" SET "lastMessageAt"='${ts}' WHERE id='${convU}'`);
+      // 唔 dispatch 任何 focus/visibility — 等 20s reconcile tick
+      const t0 = Date.now();
+      for (;;) {
+        const n = await a.P.locator(`#msg-${M}`).count();
+        if (n >= 1) break;
+        if (Date.now() - t0 > 50_000) {
+          const n = await a.P.locator(`#msg-${M}`).count();
+          fail(`t284: reconcile（20s）未攞到 socket 靜音訊息（count=${n}）`);
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      await new Promise((r) => setTimeout(r, 1500)); // log 落定
+      const dbg = (await spyMeta(a.P)).debugLogs;
+      if (!dbg.some((l) => l.includes("[rt] reconcile added"))) fail(`t284: 缺 [rt] reconcile log（debugLogs=${JSON.stringify(dbg.slice(-6))}）`);
+      console.log("NOTIFY-UI-OK");
+    } else if (scenario === "t285") {
+      // cwi-realtime-v2 T285 §4：ADMIN 列表唔顯示「跨店」badge（只店名 badge）；STAFF 真跨店照顯示。
+      if (!waM || !nameM || !staffTkwId) throw new Error("t285 要 --wa-m --name-m --staff-tkw");
+      // 1) 造 MF 店對話（真 webhook 路徑）+ 指派 TKW staff（對佢係真跨店：線唔喺佢綁定店）
+      const wamidM = `rtwv2m${Date.now()}`;
+      mockInbound("MF", waM, "e2e-v2-t285", wamidM, nameM);
+      let convM = "";
+      const t0 = Date.now();
+      for (;;) {
+        convM = dbqGet(`SELECT "conversationId" c FROM "Message" WHERE "waMessageId"='${wamidM}'`, "c");
+        if (convM) break;
+        if (Date.now() - t0 > 25_000) fail("t285: MF 對話未落 DB（mock-inbound 失敗？）");
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      dbq(`UPDATE "Conversation" SET "assigneeId"='${staffTkwId}' WHERE id='${convM}'`);
+      // 2) TKW staff：MF 店嘅行應該顯示「↔ 跨店 · MF」
+      const s = await openBrowser(exe, cookieAFile, `${base}/inbox`, "granted", "");
+      browsers.push(s.B);
+      await waitForListReady(s.P, nameM);
+      const nStaff = await s.P.getByText("↔ 跨店 · MF").count();
+      if (nStaff < 1) fail(`t285: STAFF 真跨店應該顯示「↔ 跨店 · MF」badge（actual=${nStaff}）`);
+      // 3) ADMIN：冇「跨店」字樣；「全部診所」視圖照顯示店名 badge
+      const d = await openBrowser(exe, cookieCFile, `${base}/inbox`, "granted", ""); // ADMIN
+      browsers.push(d.B);
+      await waitForListReady(d.P, listWaitName);
+      const nCross = await d.P.getByText("跨店").count();
+      if (nCross !== 0) fail(`t285: ADMIN 列表唔應該有「跨店」（actual=${nCross}）`);
+      const nTkwBadge = await d.P.getByText("TKW", { exact: true }).count();
+      if (nTkwBadge < 1) fail(`t285: ADMIN 全店視圖應該有店名 badge TKW（actual=${nTkwBadge}）`);
       console.log("NOTIFY-UI-OK");
     } else {
       throw new Error(`unknown scenario: ${scenario}`);

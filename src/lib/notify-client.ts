@@ -283,13 +283,22 @@ function playIfAllowed(kind: NotifyKind, prefs: NotifyPrefs): void {
  * 震動（vibrate）唔受限制，係手機最可靠嘅提示。
  * ★ cwi-realtime-fix §7.2：play() resolve 先計「解鎖」— 未解鎖前 fireNotify 唔試頁面音
  *   （autoplay 政策必擋），改行 SW 系統通知音。
+ *
+ * ★ cwi-realtime-v2 §5：Chrome autoplay 政策文檔（正式解法排序）：
+ *   1. **已安裝 PWA（standalone display-mode）= Chrome autoplay 政策明文例外** —
+ *      零互動即准 autoplay。前台機一律「安裝為 App」→ 呢個係正式解法，唔係 workaround。
+ *   2. 診所電腦可額外設 Chrome 政策 `AutoplayAllowlist`（生產機可選）：
+ *      Windows registry `HKLM\Software\Policies\Google\Chrome\AutoplayAllowlist\1`
+ *      = "https://wa.hkclinicworkforce.com" → 普通 tab 都免互動。（生產機待辦，唔係 code）
+ *   3. 普通 tab + 未安裝 → 需頁面互動一次（呢個 unlockAudio 一次解鎖）。
+ *   4. SW showNotification `silent: false` 系統音唔受 autoplay 管（realtime-fix §7）。
  */
 let audioUnlocked = false;
 export function isAudioUnlocked(): boolean {
   return audioUnlocked;
 }
 
-export function unlockAudio(): void {
+export function unlockAudio(onUnlocked?: () => void): void {
   try {
     const el = chimeEl();
     if (!el) return;
@@ -303,6 +312,11 @@ export function unlockAudio(): void {
     void el.play()
       .then(() => {
         audioUnlocked = true; // 解鎖成功 → 之後頁面 chime 可信
+        try {
+          onUnlocked?.(); // v2 §5：settings 面板實時狀態（「音效：已解鎖 ✅」）
+        } catch {
+          /* ignore */
+        }
       })
       .catch(() => {
         /* autoplay policy — 靜默 skip */

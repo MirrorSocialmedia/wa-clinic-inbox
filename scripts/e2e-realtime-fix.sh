@@ -34,6 +34,8 @@ check() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected=[$3] actua
 # ── credentials / login ────────────────────────────────────────────────
 TKW_EMAIL=$(awk '/^TKW STAFF:/{print $3}' .dev/credentials.txt)
 TKW_PASS=$(awk '/^TKW STAFF:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
+MF_EMAIL=$(awk '/^MF STAFF:/{print $3}' .dev/credentials.txt)
+MF_PASS=$(awk '/^MF STAFF:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
 ADMIN_EMAIL=$(awk '/^ADMIN:/{print $2}' .dev/credentials.txt)
 ADMIN_PASS=$(awk '/^ADMIN:/{split($0,a," / "); print a[2]}' .dev/credentials.txt)
 TKW_CLINIC_ID=$(q "SELECT id FROM \"Clinic\" WHERE code='TKW'" | jf id)
@@ -41,18 +43,25 @@ MF_CLINIC_ID=$(q "SELECT id FROM \"Clinic\" WHERE code='MF'" | jf id)
 [ -n "$TKW_CLINIC_ID" ] && [ -n "$MF_CLINIC_ID" ] || { echo "FATAL: clinic id 搵唔到"; exit 2; }
 TKW_STAFF_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$TKW_EMAIL'" | jf id)
 [ -n "$TKW_STAFF_ID" ] || { echo "FATAL: TKW staff id 搵唔到（email=$TKW_EMAIL）"; exit 2; }
+MF_STAFF_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$MF_EMAIL'" | jf id)
+[ -n "$MF_STAFF_ID" ] || { echo "FATAL: MF staff id 搵唔到（email=$MF_EMAIL）"; exit 2; }
 COOKIE_TKW=/tmp/e2e-cookie-rt-tkw.txt
+COOKIE_MF=/tmp/e2e-cookie-rt-mf.txt
 COOKIE_ADMIN=/tmp/e2e-cookie-rt-admin.txt
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_TKW" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$TKW_EMAIL\",\"password\":\"$TKW_PASS\"}")
 [ "$CODE" = "200" ] || { echo "FATAL: TKW staff login $CODE（server 未起？）"; exit 2; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_MF" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$MF_EMAIL\",\"password\":\"$MF_PASS\"}")
+[ "$CODE" = "200" ] || { echo "FATAL: MF staff login $CODE"; exit 2; }
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_ADMIN" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\"}")
 [ "$CODE" = "200" ] || { echo "FATAL: ADMIN login $CODE"; exit 2; }
 
 # ── fixture 對話（真 webhook 路徑 — mock-inbound；固定 waId 冪等） ─────
 RT_CT_A=85291234671
 RT_CT_B=85291234672
+RT_CT_M=85291234673   # cwi-realtime-v2 T285：MF 店對話 contact
 NAME_A="E2E Realtime 張三"
 NAME_B="E2E Realtime 王五"
+NAME_M="E2E Realtime 陳四"
 wait_msg() { # wait_msg <wamid> <convVarEchoPrefix> — 等 worker 落 DB，回傳 conversationId
   local wamid="$1" i cv=""
   for i in $(seq 1 30); do
@@ -63,7 +72,7 @@ wait_msg() { # wait_msg <wamid> <convVarEchoPrefix> — 等 worker 落 DB，回�
   return 1
 }
 # 冪等清理（舊 run 殘留）
-q "DELETE FROM \"Message\" WHERE \"waMessageId\" LIKE 'rtfw%'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"waMessageId\" LIKE 'rtfw%' OR \"waMessageId\" LIKE 'rtwv2%'" >/dev/null 2>&1
 for _w in 1 2 3 4 5; do
   _code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/push/prefs" -b "$COOKIE_TKW")
   [ "$_code" = "200" ] && break
@@ -71,7 +80,7 @@ for _w in 1 2 3 4 5; do
 done
 [ "$_code" = "200" ] || { echo "FATAL: GET /api/push/prefs warmup $_code（新 GET route 編譯失敗？）"; exit 2; }
 # 洗舊對話（按 waId）再重建
-for _wa in "$RT_CT_A" "$RT_CT_B"; do
+for _wa in "$RT_CT_A" "$RT_CT_B" "$RT_CT_M"; do
   q "DELETE FROM \"Message\" WHERE \"conversationId\" IN (SELECT id FROM \"Conversation\" WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$_wa'))" >/dev/null 2>&1
   q "DELETE FROM \"Conversation\" WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$_wa')" >/dev/null 2>&1
   q "DELETE FROM \"Contact\" WHERE \"waId\"='$_wa'" >/dev/null 2>&1
@@ -95,7 +104,7 @@ nn() { # nn <desc> <e2e:notify-ui args...>
 }
 
 echo ""
-echo "── RT. cwi-realtime-fix-20260907（T270–T280 + §4）────────────────"
+echo "── RT. cwi-realtime-fix-20260907（T270–T280 + §4）+ cwi-realtime-v2-20260907（T281–T285）"
 
 # T270：per-conversation 游標隔離（B 新訊息唔推進 A 補漏窗）
 nn "T270 游標隔離（A2 只喺 DB — catchUp(A) 收返；B 唔推進 A 游標）" \
@@ -150,24 +159,56 @@ nn "T279 SW 更新（byte 變 → 提示 + 版本 a1→a2）" \
 nn "T280 SW 更新後 subscription endpoint 唔變 + SW active" \
   --scenario t280 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" --wait-name "$NAME_A"
 
-# t281（§4 第 3 步）：背景兩條 → 前台兩條
-nn "T281 §4 背景兩條訊息→前台都喺（無重複 + catchUp log）" \
-  --scenario t281 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
-  --conv-u "$CONV_A" --wait-name "$NAME_A" --b3 rt-t281-3 --b4 rt-t281-4
+# T287（§4 第 3 步，原 t281 — v2 重編號）：背景兩條 → 前台兩條
+nn "T287 §4 背景兩條訊息→前台都喺（無重複 + catchUp log）" \
+  --scenario t287 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
+  --conv-u "$CONV_A" --wait-name "$NAME_A" --b3 rt-t287-3 --b4 rt-t287-4
 
-# t282（§4 第 4 步）：「閂咗」期間真 webhook 訊息 → 重開喺度
-pnpm -s mock-inbound message --clinic TKW --from "$RT_CT_A" --text "rt-t282-a5" --wamid rtfwa5 >/dev/null 2>&1
-wait_msg rtfwa5 >/dev/null || { echo "FATAL: t282 fixture 未落 DB"; exit 2; }
-nn "T282 §4 重開後訊息喺度（真 webhook 路徑入 DB）" \
+# T288（§4 第 4 步，原 t282 — v2 重編號）：「閂咗」期間真 webhook 訊息 → 重開喺度
+pnpm -s mock-inbound message --clinic TKW --from "$RT_CT_A" --text "rt-t288-a5" --wamid rtfwa5 >/dev/null 2>&1
+wait_msg rtfwa5 >/dev/null || { echo "FATAL: t288 fixture 未落 DB"; exit 2; }
+nn "T288 §4 重開後訊息喺度（真 webhook 路徑入 DB）" \
+  --scenario t288 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
+  --conv-u "$CONV_A" --wait-name "$NAME_A" --body-a5 rt-t288-a5
+
+# ── cwi-realtime-v2-20260907（T281–T285） ─────────────────────────
+
+# T281（v2 §1）：跨店 assignee（MF staff 唔綁定 TKW）經 staff: room 收 message:new；同店 assignee 去重
+q "UPDATE \"StaffUser\" SET \"pushPrefs\"=NULL WHERE id='$MF_STAFF_ID'" >/dev/null 2>&1
+nn "T281 跨店 assignee 經 staff room 收到 + 同店 assignee 去重（1 次通知）" \
+  --scenario t281 --cookie "$COOKIE_MF" --cookie2 "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
+  --conv-u "$CONV_A" --wait-name "$NAME_A" \
+  --staff-mf "$MF_STAFF_ID" --staff-tkw "$TKW_STAFF_ID" \
+  --wa "$RT_CT_A" --b-a rt-t281v2-a --b-b rt-t281v2-b
+
+# T282（v2 §2）：IN 訊息 waTimestamp 比 cursor 早 5 分鐘（慢鐘）→ createdAt 游標照攞到 + 排最尾
+nn "T282 慢鐘 IN（waTs 早 5 分鐘）經 createdAt 游標攞到 + 排最尾" \
   --scenario t282 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
-  --conv-u "$CONV_A" --wait-name "$NAME_A" --body-a5 rt-t282-a5
+  --conv-u "$CONV_A" --wait-name "$NAME_A" --body-a5 rt-t282v2-slow
+
+# T283（v2 §2）：HISTORY 訊息仍排最舊（waTimestamp 例外）
+nn "T283 HISTORY 訊息排最舊（createdAt 新但 waTs 舊）" \
+  --scenario t283 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
+  --conv-u "$CONV_A" --wait-name "$NAME_A"
+
+# T284（v2 §3）：socket 靜音 → 20s reconcile 安全網攞到 + [rt] reconcile log
+nn "T284 socket 靜音 → 20s reconcile 攞到 + [rt] reconcile log" \
+  --scenario t284 --cookie "$COOKIE_TKW" --clinic "$TKW_CLINIC_ID" \
+  --conv-u "$CONV_A" --wait-name "$NAME_A"
+
+# T285（v2 §4）：ADMIN 列表唔顯示「跨店」badge；STAFF 真跨店照顯示
+nn "T285 ADMIN 無「跨店」badge；STAFF 真跨店照顯示" \
+  --scenario t285 --cookie "$COOKIE_TKW" --cookie3 "$COOKIE_ADMIN" --clinic "$TKW_CLINIC_ID" \
+  --wait-name "$NAME_A" --staff-tkw "$TKW_STAFF_ID" \
+  --wa-m "$RT_CT_M" --name-m "$NAME_M"
 
 # ── cleanup（hermetic） ────────────────────────────────────────────────
-q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$CONV_A','$CONV_B') OR \"waMessageId\" LIKE 'rtfw%'" >/dev/null 2>&1
-q "DELETE FROM \"Conversation\" WHERE id IN ('$CONV_A','$CONV_B')" >/dev/null 2>&1
-q "DELETE FROM \"Contact\" WHERE \"waId\" IN ('$RT_CT_A','$RT_CT_B')" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$CONV_A','$CONV_B') OR \"waMessageId\" LIKE 'rtfw%' OR \"waMessageId\" LIKE 'rtwv2%'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id IN ('$CONV_A','$CONV_B') OR \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$RT_CT_M')" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\" IN ('$RT_CT_A','$RT_CT_B','$RT_CT_M')" >/dev/null 2>&1
 q "UPDATE \"StaffUser\" SET \"pushPrefs\"=NULL WHERE id='$TKW_STAFF_ID'" >/dev/null 2>&1
-NRES=$(q "SELECT ((SELECT count(*) FROM \"Message\" WHERE \"waMessageId\" LIKE 'rtfw%') + (SELECT count(*) FROM \"Conversation\" WHERE id IN ('$CONV_A','$CONV_B')))::text c" | jf c)
+q "UPDATE \"StaffUser\" SET \"pushPrefs\"=NULL WHERE id='$MF_STAFF_ID'" >/dev/null 2>&1
+NRES=$(q "SELECT ((SELECT count(*) FROM \"Message\" WHERE \"waMessageId\" LIKE 'rtfw%' OR \"waMessageId\" LIKE 'rtwv2%') + (SELECT count(*) FROM \"Conversation\" WHERE id IN ('$CONV_A','$CONV_B')))::text c" | jf c)
 check "RT cleanup 零殘留" "$NRES" "0"
 
 echo ""

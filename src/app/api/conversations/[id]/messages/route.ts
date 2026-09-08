@@ -8,12 +8,16 @@ import { handle } from "@/lib/api-error";
  *
  * 參數：
  * - before=<ISO/epochMs>  向上捲：waTimestamp < before（旧嘅），升序回傳
- * - after=<ISO/epochMs>   reconnect 補漏：waTimestamp > after，升序回傳
+ * - after=<ISO/epochMs>   reconnect 補漏：**createdAt > after**（cwi-realtime-v2 §2 —
+ *                         server 單調寫入時間；waTimestamp 係病人手機時鐘，IN 訊息可偏慢
+ *                         幾分鐘 → 做同步游標會永久漏）
  * - （都唔給）            初始載入：最新 N 條，升序回傳
  * - limit  預設 50（MD：分頁 50 條/頁），上限 100
  *
- * 回傳 { messages, hasMore, oldest, newest } — UI 用 oldest 做「再向上」cursor。
- * HISTORY 段自然喺最舊（waTimestamp 係歷史時間）— 同新訊息同一條 timeline。
+ * 回傳 { messages, hasMore, oldest, newest } — messages 係完整 row（含 createdAt，
+ * client 游標/排序用）— UI 用 oldest 做「再向上」cursor。
+ * HISTORY 段自然喺最舊（waTimestamp 係歷史時間）— 同新訊息同一條 timeline
+ * （client 排序對 channel=HISTORY 有 waTimestamp 例外，見 inbox-client msgSortCmp）。
  */
 export const dynamic = "force-dynamic";
 
@@ -38,8 +42,8 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   const after = parseTs(url.searchParams.get("after"));
 
   const where: Record<string, unknown> = { conversationId: id };
-  if (before) where.waTimestamp = { lt: before };
-  if (after) where.waTimestamp = { gt: after };
+  if (before) where.waTimestamp = { lt: before }; // 向上捲照舊 waTimestamp（MD v2 §2）
+  if (after) where.createdAt = { gt: after }; // ★ v2 §2：補漏游標比對 server createdAt
 
   // 多取 1 條判定 hasMore；同 timestamp 用 id 做次級排序（batch history 冪等穩定）
   const rows = before

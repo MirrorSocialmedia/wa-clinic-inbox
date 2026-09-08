@@ -60,6 +60,10 @@ interface Props {
     cursors: Record<string, number>;
     lastCatchUpAt: number | null;
   };
+  /** ★ cwi-realtime-v2 §5：音效實時狀態（ok = 已解鎖；standalone = 已安裝為 App — autoplay 明文例外） */
+  audioStatus?: { ok: boolean; standalone: boolean };
+  /** ★ cwi-realtime-v2 §5：撳「需互動一次」行 → 直接解鎖（免等下次 pointerdown） */
+  onUnlockAudio?: () => void;
 }
 
 const STATUS_LABEL: Record<ConvStatus | "ALL", string> = {
@@ -300,6 +304,36 @@ export function ConversationList(p: Props) {
             <div className="text-[10px] text-t3 leading-snug -mt-1">
               瀏覽器規定：網頁音效要先同頁面互動一次先播得。想一開機就有聲，建議「安裝為 App」（主畫面／桌面捷徑）。
             </div>
+            {/* ★ cwi-realtime-v2 §5：音效實時狀態 — 用真實 audioUnlocked 狀態，唔使再估。
+                Chrome autoplay 政策：PWA standalone = 明文例外（零互動，正式解法）；
+                生產機可選 AutoplayAllowlist registry（見 notify-client unlockAudio 註釋）。 */}
+            {p.audioStatus && (
+              <div
+                className={`text-[11px] rounded-lg px-2 py-1.5 leading-snug ${
+                  p.audioStatus.ok || p.audioStatus.standalone ? "bg-ok-soft text-ok-text" : "bg-warn-soft text-warn-text"
+                }`}
+              >
+                {p.audioStatus.standalone ? (
+                  <span>音效：App 模式 ✅（安裝後自動解鎖）</span>
+                ) : p.audioStatus.ok ? (
+                  <span>音效：已解鎖 ✅</span>
+                ) : (
+                  <span>
+                    音效：需互動一次 ⚠️
+                    {p.onUnlockAudio && (
+                      <button
+                        type="button"
+                        onClick={p.onUnlockAudio}
+                        className="underline underline-offset-2 hover:opacity-80"
+                      >
+                        （撳呢度解鎖）
+                      </button>
+                    )}
+                    · 建議安裝為 App
+                  </span>
+                )}
+              </div>
+            )}
             {/* cwi-realtime-fix §2.3：角色語義 — STAFF 見逐店靜音（黑名單）；ADMIN 只見下方 opt-in（白名單），
                 兩個 list 唔好同時出（ADMIN 唔准再寫 mutedClinics） */}
             {p.userRole === "STAFF" && p.clinics.length > 1 && (
@@ -538,12 +572,13 @@ export function ConversationList(p: Props) {
             ? (p.clinicById?.get(c.clinicId)?.code ?? c.clinicCode ?? c.clinicName ?? null)
             : null;
           // cwi-inboxfix-20260905（MD I-4）：跨店指派俾我 — 整行左彩邊 + 「你（由 X 派嚟）」
-          // （判定跟 showClinicBadge 同軌：STAFF = 線唔喺自己綁定店；ADMIN = 只喺「全部診所」視圖）
+          // ★ cwi-realtime-v2 §4：跨店語義（「線唔喺自己綁定店」）只對 STAFF 成立 —
+          //   ADMIN/SUPERVISOR clinicIds=[]（全店視圖）→ 唔好標「跨店 / 由 X 派嚟」。
           const crossToMe =
+            p.userRole === "STAFF" &&
             c.assigneeId === p.myStaffId &&
-            (p.userRole === "STAFF"
-              ? myClinicIds.length > 0 && !myClinicIds.includes(c.clinicId)
-              : p.activeClinicId === "all");
+            myClinicIds.length > 0 &&
+            !myClinicIds.includes(c.clinicId);
           // 待跟進：未指派 + 最後一條訊息係客人來訊（lastInboundAt >= lastMessageAt）
           const needsFollow =
             !c.assigneeId &&
@@ -642,14 +677,15 @@ export function ConversationList(p: Props) {
                 {/* row 3：badges + 負責人常駐 chip（cwi-inboxfix-20260905 I-3：永遠 render 三態） */}
                 <div className="flex items-center gap-1 mt-1 flex-wrap">
                   {/* cwi-multiclinic-20260903（MD A.6.4）：跨店線店名 badge — STAFF：線唔喺自己綁定店；
-                      ADMIN：只喺「全部診所」視圖顯（逐店視圖本身就單一店）
-                      cwi-inboxfix-20260905（I-4）：文案加「↔ 跨店 ·」前綴 */}
+                      ADMIN/SUPERVISOR：只喺「全部診所」視圖顯（逐店視圖本身就單一店）
+                      cwi-inboxfix-20260905（I-4）：文案加「↔ 跨店 ·」前綴
+                      ★ cwi-realtime-v2 §4：前綴只限 STAFF — ADMIN 只顯示店名 badge（TKW） */}
                   {clinicBadgeText && (
                     <span
                       className="text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t2 font-semibold inline-flex items-center gap-0.5"
-                      title={`跨店線：${c.clinicName ?? clinicBadgeText}`}
+                      title={p.userRole === "STAFF" ? `跨店線：${c.clinicName ?? clinicBadgeText}` : `店：${c.clinicName ?? clinicBadgeText}`}
                     >
-                      ↔ 跨店 · {clinicBadgeText}
+                      {p.userRole === "STAFF" ? `↔ 跨店 · ${clinicBadgeText}` : clinicBadgeText}
                     </span>
                   )}
                     {/* cwi-multiclinic-20260903（MD A.6.4）：「待跟進」— 未指派 + 最後一條係客人來訊（前端導出，零新欄） */}

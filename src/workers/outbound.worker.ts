@@ -1,7 +1,7 @@
 import { Worker, type Job } from "bullmq";
 import { outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { OUTBOUND_CONCURRENCY } from "./concurrency";
-import { publishNotify } from "@/lib/notify";
+import { publishNotify, publishStaffNotify } from "@/lib/notify";
 import { sendTextMessage, sendFlowMessage, sendTemplateMessage, type FlowMessageConfig, type TemplateComponent } from "@/lib/wa/graph";
 import { acquireToken } from "@/lib/rate-limit";
 import prisma from "@/lib/prisma";
@@ -155,7 +155,7 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       data: { waMessageId: wamid, status: "SENT" },
     });
     await touchConv(clinic.id, conv.id, msg.waTimestamp);
-    publishNotify(clinic.id, "message:new", {
+    const payload = {
       conversationId: conv.id,
       clinicId: clinic.id,
       contact: {
@@ -171,7 +171,11 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
         lastMessageAt: conv.lastMessageAt,
         lastInboundAt: conv.lastInboundAt,
       },
-    });
+    };
+    publishNotify(clinic.id, "message:new", payload);
+    // ★ cwi-realtime-v2 §1：跨店 assignee 補推 staff:{assigneeId} room（同店 assignee
+    //   clinic + staff room 收兩次 — client seenEventIds 去重）
+    if (conv.assigneeId) publishStaffNotify(conv.assigneeId, clinic.id, "message:new", payload);
     log.info(
       { clinic: clinic.code, messageId, wamid, to: contactRow.waId },
       "outbound: sent OK"
