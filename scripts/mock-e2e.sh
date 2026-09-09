@@ -2493,6 +2493,12 @@ check "T88 內部備註 POST → 201" "$CODE" "201"
 check "T88 note row 形態（INTERNAL/note/OUT）" "$(q "SELECT (channel='INTERNAL' AND type='note' AND direction='OUT')::text ok FROM \"Message\" WHERE \"conversationId\"='$CONV_T88'" | jf ok)" "true"
 # 2. 病人跟住發普通問題（唔含任何分類觸發詞）
 pnpm -s mock-inbound message --clinic MF --from "$P_T88" --text "你哋幾點開門" --wamid "$WAMID_T88" --name "E2E T88 question" >/dev/null || fail "T88 mock-inbound POST"
+# ★ cwi-audit2-20260908 T4（T88 race 假說）：webhook 200 = enqueue only（route.ts:132 inboundQueue.add），Message row 由 inbound worker 後續寫；
+#   mock-inbound 返後立即取 M_T88，worker 未 commit 時 = 空字串 → wait_for inReplyToMessageId='' 永遠 0 row → 30s 超時（假紅，host load 高必中）。
+#   先等 Message commit（15s）再取 M_T88；超時直接 fail，唔走入空字串陷阱。
+if ! wait_for "SELECT 'found' f FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T88'" '[{"f":"found"}]' 15; then
+  fail "T88 inbound Message commit timeout（waMessageId=$WAMID_T88）"; T88=1
+fi
 M_T88=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T88'" | jf id)
 if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T88'" '[{"s":"PROPOSED"}]' 30; then
   pass "T88 QUESTION draft 照出（PROPOSED）"
