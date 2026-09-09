@@ -44,13 +44,17 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   await assertConversationAccess(auth, conv); // STAFF 別店 → 403
 
   // mentions：只保留同店 active staff（非法值靜默 drop — 防注入別店/停用 staff）
+  // ★ cwi-audit2-20260908 T4（T67 flake 根因）：舊 `staff.map(s=>s.id)` 用 findMany 回序（無 orderBy，
+  //   跟 Postgres query plan 行）→ 入庫 mentions 順序非確定（B/C swap — 隔離 1/3 跑實測紅）。
+  //   改「保客户端指定順序 filter+dedupe」：確定性 + 同 UI @mention 順序一致。
   let mentions: string[] = [];
   if (parsed.data.mentions?.length) {
     const staff = await prisma.staffUser.findMany({
       where: { id: { in: parsed.data.mentions }, active: true, clinicId: conv.clinicId },
       select: { id: true },
     });
-    mentions = staff.map((s) => s.id);
+    const valid = new Set(staff.map((s) => s.id));
+    mentions = [...new Set(parsed.data.mentions)].filter((id) => valid.has(id));
   }
 
   const now = new Date();
