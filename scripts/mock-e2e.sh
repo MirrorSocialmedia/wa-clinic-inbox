@@ -4976,6 +4976,14 @@ MC=0
 patch_aimode "$TKW_CLINIC_ID" DRAFT
 code_mc_pam=$PAM_CODE
 check "H6-MC setup TKW→DRAFT" "$code_mc_pam" "200"
+# ★ cwi-audit2-20260908 T4（H6-MC-UI badges flake 根治）：Fix B 語義下 aiMode=DRAFT 只係「無 policy row 時」嘅 fallback（automation.ts:81）；
+#   殘留 AutomationPolicy（中段中斷殘留 / 前段未清）可推 QUESTION→L2 → AI 50ms 內 auto-reply →
+#   待跟進狀態（lastInboundAt>=lastMessageAt + 未指派）蒸發 → gate/badge①/badge⑤ 非確定性紅（surface 跟 client socket 同步 race 互換）。
+#   同款 hermetic：T92（:4743 wipe）+ T256（e2e-control-bust 清 worker 5min in-memory level cache — cache key 含 aiMode 但 policy 行本身唔受 key 影響）。
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null 2>&1
+check "H6-MC setup TKW policy 零殘留（DRAFT 確定性）" "$(q "SELECT count(*)::text c FROM \"AutomationPolicy\" WHERE \"clinicId\"='$TKW_CLINIC_ID'" | jf c)" "0"
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 2
 
 # fixtures：R/M/423/F/X = TKW、W = WTC（固定 id + EPOCH 冪等；零 PII；profileName = UI 斷言搜字）
 WTC_CLINIC_NAME=$(q "SELECT name::text name FROM \"Clinic\" WHERE id='$WTC_CLINIC_ID'" | jf name)

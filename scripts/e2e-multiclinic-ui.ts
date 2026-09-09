@@ -362,14 +362,48 @@ async function main(): Promise<void> {
       await openConv(P, nameFollower, "badges-f-open");
       const sendBtn = P.getByRole("button", { name: "發送", exact: true });
       await sendBtn.waitFor({ state: "visible", timeout: 20_000 });
-      await P.fill("textarea", "e2e mc f reply 跟進測試");
-      await sendBtn.click();
-      // 等 OUT 落（訊息气泡出現 — 列表同一 state 會即時重算 badge，唔使返回列表）
+      const REPLY = "e2e mc f reply 跟進測試";
+      await P.fill("textarea", REPLY);
+      // ★ cwi-audit2-20260908 T4：send click 可能 dead（SSR/hydration race — run0/r2 實錘：server log 零 request 行，
+      //   舊 ③ `div:hasText(REPLY)` 會 match 住字 composer 祖先 div → 假陽性 → ⑤ 假紅）。
+      //   修法：response 監聽驗證 202 真到達 server（send423 同款 route 思路）；未中 → dump composer 狀態 + 重填 + 重撳一次。
+      const waitSendResp = (timeoutMs: number): Promise<number | null> =>
+        new Promise((resolve) => {
+          let done = false;
+          const finish = (s: number | null) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(s);
+          };
+          const timer = setTimeout(() => finish(null), timeoutMs);
+          const h = (r: { status: () => number; url: () => string }) => {
+            if (r.url().includes("/api/messages/send")) finish(r.status());
+          };
+          P.on("response", h);
+        });
+      let sendStatus: number | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await sendBtn.click().catch(() => {});
+        sendStatus = await waitSendResp(15_000);
+        if (sendStatus === 202) break;
+        const dbg = await P.evaluate(() => ({
+          url: location.href,
+          textareas: Array.from(document.querySelectorAll("textarea")).map((t) => t.value),
+          hasReplyText: document.body.innerText.includes("e2e mc f reply 跟進測試"),
+        })).catch(() => null) as { url: string; textareas: string[]; hasReplyText: boolean } | null;
+        diagLog.push(`[badges-send] attempt=${attempt} status=${sendStatus} state=${JSON.stringify(dbg)}`);
+        console.log(`badges send: 202 未到（status=${sendStatus}）→ 重填 + 重撳`);
+        await P.fill("textarea", REPLY);
+        await sleep(1500);
+      }
+      if (sendStatus !== 202) fail(`send 未真正到達 server（202 未中，last=${sendStatus}）— composer 狀態見 diag`);
+      // 等 OUT 氣泡出現（202 已中 — 樂觀 bubble 同 frame 應出現）
       const t0 = Date.now();
       for (;;) {
-        const msgs = await P.locator("div", { hasText: "e2e mc f reply 跟進測試" }).count();
+        const msgs = await P.locator("div", { hasText: REPLY }).count();
         if (msgs > 0) break;
-        if (Date.now() - t0 > 30_000) fail("等回覆訊息出現逾時");
+        if (Date.now() - t0 > 10_000) fail("202 已中但回覆氣泡未現");
         await sleep(500);
       }
       await sleep(1500); // list row re-render（socket message:new OUT → lastMessageAt 推進）
