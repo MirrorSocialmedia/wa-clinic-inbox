@@ -187,6 +187,11 @@ export function InboxClient({
   }, [selectedConvId]);
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [hasMore, setHasMore] = useState(false);
+  // ★ cwi-audit2-20260908 T2（A-3 超額）：>250 條 gap 有界續攞唔切齊時嘅中間斷層邊界
+  //   （createdAt ms）—「最舊已載入訊息」= 第一條 createdAt > 邊界嘅 row；ChatPane 喺佢之上
+  //   render「⋯ 中間有訊息未載入，向上捲查看 ⋯」分隔線（中間位置，唔係頭尾）。換對話 / 取消
+  //   選中時清（selectConversation 兩分支 / 防呆 effect / onBack）。
+  const [gapDividerAfterMs, setGapDividerAfterMs] = useState<number | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
@@ -1106,29 +1111,80 @@ export function InboxClient({
     return 0;
   }, []);
 
-  const fetchMessagesAfter = useCallback(async (convId: string, afterMs: number): Promise<number> => {
-    try {
-      const res = await fetch(
-        `/api/conversations/${convId}/messages?after=${new Date(afterMs).toISOString()}&limit=${PAGE_SIZE}`
-      );
-      if (!res.ok) return 0;
-      const data = (await res.json()) as { messages: MessageItem[] };
-      // ★ cwi-realtime-fix §3 (RT-6)：補漏結果一定要 log（上次靠 code review 先搵到，今次靠 log）
-      const prevIds = new Set(messagesRef.current.map((m) => m.id));
-      const addedCount = data.messages.filter((m) => !prevIds.has(m.id)).length;
-      // eslint-disable-next-line no-console -- §3 catchUp 留痕（realtime 排障第一停）
-      console.debug("[rt] catchUp result", { convId, fetched: data.messages.length, added: addedCount });
-      setMessages((prev) => {
-        const ids = new Set(prev.map((m) => m.id));
-        const added = data.messages.filter((m) => !ids.has(m.id));
-        return [...prev, ...added].sort(msgSortCmp);
-      });
-      return addedCount;
-    } catch {
-      /* ignore */
-    }
-    return 0;
-  }, []);
+  const fetchMessagesAfter = useCallback(
+    async (convId: string, afterMs: number): Promise<number> => {
+      // ★ cwi-audit2-20260908 T2（A-3 有界續攞 / A-4 bump 游標 / A-6 hasMore 唔丟棄）：
+      //   - 每頁成功即 bumpCursor（本頁 max createdAt；0 條唔 bump）— 唔再靠 20s reconcile
+      //     跳走游標（舊 bug：reconcile 攞最新 50 + 游標跳 max → 中間永久斷層）
+      //   - server hasMore 續攞最多 5 頁（250 條）— 根治 gap>50 永久中間斷層
+      //   - 5 頁後仍然 hasMore（gap>250）：fetchMessagesLatest 兜最新 50 + 中間斷層分隔線
+      //   - dedup：local seen 跨頁有效（setMessages 批次化喺 loop 尾 — loop 內 messagesRef 未更新）
+      let totalFetched = 0;
+      let totalAdded = 0;
+      let lastHasMore = false;
+      let pages = 0;
+      let lastPageMax = 0;
+      const fetchedAll: MessageItem[] = [];
+      const seen = new Set(messagesRef.current.map((m) => m.id));
+      try {
+        let after = afterMs;
+        while (pages < 5) {
+          if (selectedIdRef.current !== convId) break; // fetch 期間換咗對話 → 停（防 A 嘅行漏入 B）
+          const res = await fetch(
+            `/api/conversations/${convId}/messages?after=${new Date(after).toISOString()}&limit=${PAGE_SIZE}`
+          );
+          if (!res.ok) break; // 中途中斷（網絡）：已攞頁已 apply + 游標已推進 — 下次 catchUp 由新游標接埋
+          const data = (await res.json()) as { messages: MessageItem[]; hasMore: boolean };
+          pages += 1;
+          totalFetched += data.messages.length;
+          fetchedAll.push(...data.messages);
+          for (const m of data.messages) {
+            if (!seen.has(m.id)) {
+              totalAdded += 1;
+              seen.add(m.id);
+            }
+          }
+          lastHasMore = data.hasMore;
+          if (data.messages.length > 0) {
+            // A-4：本頁 max createdAt 推進游標（只進唔退）
+            lastPageMax = data.messages.reduce(
+              (mx, m) => Math.max(mx, new Date(m.createdAt).getTime() || 0),
+              0
+            );
+            bumpCursor(convId, lastPageMax);
+          }
+          if (!lastHasMore) break;
+          after = lastPageMax; // 續攞：下一頁 after = 本頁 max createdAt（server: createdAt > after, asc）
+        }
+        // ★ cwi-realtime-fix §3 (RT-6)：補漏結果一定要 log（上次靠 code review 先搵到，今次靠 log）
+        //   T2：加 hasMore 欄（MD §7 簽收）— true = 仲有 gap 未攞完；pages = 呢次續攞頁數
+        // eslint-disable-next-line no-console -- §3 catchUp 留痕（realtime 排障第一停）
+        console.debug("[rt] catchUp result", {
+          convId,
+          fetched: totalFetched,
+          added: totalAdded,
+          hasMore: lastHasMore,
+          pages,
+        });
+        if (fetchedAll.length > 0 && selectedIdRef.current === convId) {
+          setMessages((prev) => {
+            const ids = new Set(prev.map((m) => m.id));
+            const added = fetchedAll.filter((m) => !ids.has(m.id));
+            return [...prev, ...added].sort(msgSortCmp);
+          });
+        }
+        if (lastHasMore && pages >= 5 && selectedIdRef.current === convId) {
+          // 超額（gap > 250）：兜最新 50（游標推到最新）+ 標記中間斷層（MD §3 方案 1）
+          await fetchMessagesLatest(convId);
+          setGapDividerAfterMs(lastPageMax);
+        }
+      } catch {
+        /* ignore */
+      }
+      return totalAdded;
+    },
+    [bumpCursor, fetchMessagesLatest]
+  );
 
   // ── cwi-realtime-fix §1.3 (RT-2 / RT-3)：per-conversation 補漏 ────────────
   // cur===0 / state 空（從未載入，或啱啱清空）→ 一定要攞完整最新一頁（清空後只做 delta
@@ -1358,6 +1414,7 @@ export function InboxClient({
               setSelectedConvId(match.id);
               selectedIdRef.current = match.id; // F-8：ref 同步（fetch guard 要即時准）
               setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge）
+              setGapDividerAfterMs(null); // T2：換對話清中間斷層分隔線
               void fetchMessagesLatest(match.id);
               void fetchPendingDrafts(match.id);
               void fetchNoteReceipts(match.id);
@@ -1376,6 +1433,7 @@ export function InboxClient({
       setSelectedConvId(id);
       selectedIdRef.current = id; // F-8：ref 同步（fetch guard 要即時准）
       setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge — 唔清會混兩對話）
+      setGapDividerAfterMs(null); // T2：換對話清中間斷層分隔線
       setNotice(null);
       void fetchMessagesLatest(id);
       void fetchPendingDrafts(id);
@@ -1413,6 +1471,7 @@ export function InboxClient({
       );
       selectedIdRef.current = selectedConvId;
       setMessages([]);
+      setGapDividerAfterMs(null); // T2：補載入 = 重頭載 → 清中間斷層分隔線
       void fetchMessagesLatest(selectedConvId);
       void fetchPendingDrafts(selectedConvId);
       void fetchNoteReceipts(selectedConvId);
@@ -2025,11 +2084,13 @@ export function InboxClient({
           //   — 否則舊對話嘅 socket 訊息會 append 入「未選中」狀態
           selectedIdRef.current = null;
           setSelectedConvId(null);
+          setGapDividerAfterMs(null); // T2：取消選中清中間斷層分隔線
         }}
         onOpenDetail={() => setDetailOpen(true)}
         conversation={selectedConv}
         messages={messages}
         hasMore={hasMore}
+        gapDividerAfterMs={gapDividerAfterMs}
         loadingOlder={loadingOlder}
         onScrollTop={() => void loadOlder()}
         window={selectedConv?.window ?? null}

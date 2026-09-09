@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CalendarDays,
@@ -34,6 +34,9 @@ interface Props {
   onOpenDetail: () => void;
   messages: MessageItem[];
   hasMore: boolean;
+  /** ★ cwi-audit2-20260908 T2（A-3 超額）：中間斷層邊界（createdAt ms）— >250 條 gap 補漏後，
+   * 喺第一條 createdAt > 邊界嘅 row（最舊已載入訊息）之上 render 分隔線；null = 無 */
+  gapDividerAfterMs?: number | null;
   loadingOlder: boolean;
   onScrollTop: () => void;
   window: { open: boolean; remainingMs: number; tone: string } | null;
@@ -483,6 +486,12 @@ export function ChatPane(p: Props) {
   const isCopyOnly = p.pendingDraft?.mode === "COPY_ONLY";
   const assigneeName = c.assigneeName ?? null;
   const staffNameById = new Map(p.staff.map((s) => [s.id, s.name]));
+  // ★ cwi-audit2-20260908 T2（A-3 超額）：中間斷層分隔線位置 = 第一條 createdAt > 邊界嘅 row
+  //   （messages 已按 createdAt 主序排 → findIndex 直接得）；無匹配 = 唔 render。
+  const gapDividerIdx =
+    p.gapDividerAfterMs == null
+      ? -1
+      : p.messages.findIndex((m) => new Date(m.createdAt).getTime() > (p.gapDividerAfterMs as number));
   // ★ H2：@ autocomplete candidates（query 前綴 match；長名先；cap 8 — 輕量計算，staff 陣列細，唔使 memo）
   const mentionCandidates =
     mentionState === null
@@ -718,6 +727,8 @@ export function ChatPane(p: Props) {
           const isAuto = isOut && m.aiAutoSent === true;
           const prev = p.messages[i - 1];
           const media = mediaSrc(m.mediaPath);
+          // ★ T2：中間斷層分隔線插喺此 row 之前（見 gapDividerIdx）
+          const gapBefore = gapDividerIdx === i;
           // ★ H1：INTERNAL note — 黃底 + 🔒 + 發送者名（staff 對 staff；病人睇唔到）
           if (isNote) {
             // ★ H2：tick 語義（似 WhatsApp）— 藍 ✓✓ = 全部被 mention staff 已讀；無 mention → 現任 assignee 已讀
@@ -736,7 +747,13 @@ export function ChatPane(p: Props) {
                 ? `等待已讀：${pendingList}${readList ? `（已讀：${readList}）` : ""}`
                 : "等待已讀…";
             return (
-              <div key={m.id} id={`msg-${m.id}`} data-note-id={m.id} className="flex justify-end">
+              <Fragment key={m.id}>
+                {gapBefore && (
+                  <div key={`${m.id}::hole-divider`} role="separator" className="text-center text-[11px] text-t3 py-1">
+                    ⋯ 中間有訊息未載入，向上捲查看 ⋯
+                  </div>
+                )}
+                <div id={`msg-${m.id}`} data-note-id={m.id} className="flex justify-end">
                 <div className="max-w-[70%] px-3.5 py-2.5 rounded-[20px] border border-warn bg-danger-soft text-t1">
                   <div className="text-[10.5px] font-semibold text-warn-text mb-1 inline-flex items-center gap-1">
                     🔒 內部備註 · 唔會發去 WhatsApp
@@ -757,11 +774,18 @@ export function ChatPane(p: Props) {
                     </span>
                   </div>
                 </div>
-              </div>
+                </div>
+              </Fragment>
             );
           }
           return (
-            <div key={m.id} id={`msg-${m.id}`} className={`group flex ${isOut ? "justify-end" : "justify-start"}`}>
+            <Fragment key={m.id}>
+              {gapBefore && (
+                <div key={`${m.id}::hole-divider`} role="separator" className="text-center text-[11px] text-t3 py-1">
+                  ⋯ 中間有訊息未載入，向上捲查看 ⋯
+                </div>
+              )}
+            <div id={`msg-${m.id}`} className={`group flex ${isOut ? "justify-end" : "justify-start"}`}>
               <div
                 className={`max-w-[70%] px-3.5 py-2.5 text-[13.5px] leading-[1.6] ${
                   isOut
@@ -839,6 +863,7 @@ export function ChatPane(p: Props) {
                 </div>
               </div>
             </div>
+            </Fragment>
           );
         })}
       </div>
