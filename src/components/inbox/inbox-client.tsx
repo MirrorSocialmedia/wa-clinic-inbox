@@ -282,7 +282,9 @@ export function InboxClient({
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesRef = useRef<MessageItem[]>([]);
   const activeClinicRef = useRef<string | "all">(activeClinicId);
-  selectedIdRef.current = selectedConvId;
+  // ★ cwi-audit2-20260908 T1：selectedIdRef 唔再 render-body 隱式同步 — 所有選中路徑明確 sync
+  //   （selectConversation 內部 / onBack / 防呆 effect）。render 時「ref 跟 state」會掩飾
+  //   「state 改咗但載入/markRead 冇做」一類 bug（A-1/A-2 根因）。
   messagesRef.current = messages;
   activeClinicRef.current = activeClinicId;
 
@@ -972,11 +974,14 @@ export function InboxClient({
   staffRef.current = staff;
 
   // Phase 3：?conv= 深連結 — 首屏直接載入對話訊息
+  // ★ cwi-audit2-20260908 T1 (A-2)：改行 selectConversation 唯一入口 — 同步 selectedIdRef
+  //   （舊版 ref 頭幾 render 靠 render-body 同步、冇 markRead → 深連結入嚟 unread 唔清；
+  //   而家 render sync 已移除，呢度必經 selectConversation 先至 socket 新訊息會 append）。
+  //   selectConversation 聲明喺呢度之後，但 effect 只在 mount 後先執行 → 運行時安全（冇 TDZ）。
+  //   冪等：fetchMessagesLatest merge-by-id / markRead 冪等 — 即使雙調用都冇重複載入副作用。
   useEffect(() => {
     if (initialSelectedConvId) {
-      void fetchMessagesLatest(initialSelectedConvId);
-      void fetchPendingDrafts(initialSelectedConvId);
-      void fetchNoteReceipts(initialSelectedConvId);
+      void selectConversation(initialSelectedConvId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1296,10 +1301,9 @@ export function InboxClient({
   const jumpToMention = useCallback(
     async (convId: string, msgId: string) => {
       if (selectedIdRef.current !== convId) {
-        setSelectedConvId(convId);
-        setNotice(null);
-        void fetchMessagesLatest(convId);
-        void fetchNoteReceipts(convId);
+        // ★ cwi-audit2-20260908 T1：統一行 selectConversation（ref 同步 + 清 + 載入 + markRead）
+        //   — 舊式只補兩個 fetch 唔清 messages（merge 語義 → 上一病人嘅行會留喺畫面）
+        selectConvRef.current(convId);
       }
       window.setTimeout(() => {
         const el = document.getElementById(`msg-${msgId}`);
@@ -1309,7 +1313,7 @@ export function InboxClient({
         window.setTimeout(() => el.classList.remove("msg-flash"), 1600);
       }, 450);
     },
-    [fetchMessagesLatest, fetchNoteReceipts]
+    [] // ★ cwi-audit2-20260908 T1：只經 selectConvRef（ref 恆定）→ 唔需要 reactive deps
   );
 
   const onBellClick = useCallback(() => {
@@ -1330,7 +1334,12 @@ export function InboxClient({
         /* non-fatal — UI 先 optimistic 清 */
       }
       setNotices((prev) => prev.filter((x) => x.id !== n.id));
-      if (n.conversationId) setSelectedConvId(n.conversationId);
+      // ★ cwi-audit2-20260908 T1 (A-1)：bell 通知改行 selectConversation 唯一入口 — 清上一病人
+      //   messages + 載入 + ref 同步 + markRead（舊式只 setSelectedConvId：PII 交叉顯示 +
+      //   A 嘅 socket 訊息照 append 入 B 畫面 + B 新訊息唔 append + unread 唔清）。
+      //   selectConvRef 模式：onNoticeClick 定義喺 selectConversation 之前（useCallback([])）
+      //   → 用 ref 喺 runtime 取最新實例，避 forward-reference / stale closure。
+      if (n.conversationId) selectConvRef.current(n.conversationId);
     })();
   }, []);
 
@@ -1387,6 +1396,29 @@ export function InboxClient({
   selectConvRef.current = (id: string) => {
     void selectConversation(id);
   };
+
+  // ★ cwi-audit2-20260908 T1（防呆 effect）：最後防線 — 所有選中路徑必經 selectConversation
+  //   （ref 同步 + setMessages([]) + 載入 + markRead）。日後任何路徑若直接 setSelectedConvId
+  //   而冇同步 ref，呢個 effect 會補做完整載入 + 同步 ref + warn（可 trace）。
+  //   無死循環：selectConversation 喺 setSelectedConvId 前先同步 ref（同一次同步調用）→
+  //   本 effect 執行時 mismatch 已係 false → no-op；只有真 mismatch（直調路徑）先 fire 一次補載，
+  //   ref 同步後即收斂。聲明位置喺深連結 mount effect 之後 → 深連結 mount 時深連結 effect
+  //   先跑（selectConversation 同步 ref）→ 本 effect no-op，唔會 double load。
+  useEffect(() => {
+    if (selectedConvId && selectedIdRef.current !== selectedConvId) {
+      // eslint-disable-next-line no-console -- 防呆 backstop 留痕（MD §1 要求）
+      console.warn(
+        "[inbox] selectedConvId changed without selectConversation — defensive load",
+        selectedConvId
+      );
+      selectedIdRef.current = selectedConvId;
+      setMessages([]);
+      void fetchMessagesLatest(selectedConvId);
+      void fetchPendingDrafts(selectedConvId);
+      void fetchNoteReceipts(selectedConvId);
+      void markRead(selectedConvId);
+    }
+  }, [selectedConvId, fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts]);
 
   // v2 Web Push：SW notificationclick → postMessage open-conversation → 選中該對話
   // （撳 push 通知：focus 本 tab 後由呢度補齊對話選中）
@@ -1988,7 +2020,12 @@ export function InboxClient({
       )}
 
       <ChatPane
-        onBack={() => setSelectedConvId(null)}
+        onBack={() => {
+          // ★ cwi-audit2-20260908 T1：取消選中都要同步 ref（render-body sync 已移除）
+          //   — 否則舊對話嘅 socket 訊息會 append 入「未選中」狀態
+          selectedIdRef.current = null;
+          setSelectedConvId(null);
+        }}
         onOpenDetail={() => setDetailOpen(true)}
         conversation={selectedConv}
         messages={messages}
@@ -2054,12 +2091,8 @@ export function InboxClient({
             onClick={() => {
               const cid = urgentToast.conversationId;
               setUrgentToast(null);
-              setSelectedConvId(cid);
-              selectedIdRef.current = cid; // F-8：ref 同步（fetch guard 要即時准）
-              setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge）
-              void fetchMessagesLatest(cid);
-              void fetchPendingDrafts(cid);
-              void markRead(cid);
+              // ★ cwi-audit2-20260908 T1：統一行 selectConversation（仲補齊 fetchNoteReceipts + mention 未讀清）
+              void selectConversation(cid);
             }}
             className="text-xs underline underline-offset-2 shrink-0"
           >
