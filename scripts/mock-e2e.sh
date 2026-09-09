@@ -5122,7 +5122,10 @@ SCHED_TODAY=$(TZ=Asia/Hong_Kong date +%F)
 printf '[{"clinicCode":"TKW","extra":2}]' > .dev/workforce-mock-extra-providers.json
 CODE150=$(curl -s -o /tmp/e2e-sched-t150.html -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/schedule?clinic=TKW")
 check "T150 週視圖 → 200" "$CODE150" "200"
-grep -qF "當值：" /tmp/e2e-sched-t150.html && pass "T150 當值副標題" || { fail "T150 當值副標題缺失"; SCHED_FAIL=1; }
+# ★ cwi-audit2-20260908 T4 根因：SSR 週視圖 JSX 係半角冒號「當值:」（schedule-board.tsx:491 字節實證；
+#   cwi-schedv2 Part D fbbd0cc 由全角改半角後，舊 grep 全角「當值：」恒假紅 — 2026-09-03 起每跑必紅）。
+#   改 colon-agnostic（[:：]）+ strip SSR comment 分隔 → 兩向冒號變更都唔再假紅。
+sed 's/<!-- -->//g' /tmp/e2e-sched-t150.html | grep -qE "當值[:：]" && pass "T150 當值副標題" || { fail "T150 當值副標題缺失"; SCHED_FAIL=1; }
 grep -qF "mock 陳醫師" /tmp/e2e-sched-t150.html && pass "T150 醫生名" || { fail "T150 醫生名缺失"; SCHED_FAIL=1; }
 grep -qE "[0-9]+ 席" /tmp/e2e-sched-t150.html && pass "T150 剩餘席數" || { fail "T150 席數缺失"; SCHED_FAIL=1; }
 # ★ React SSR 喺 expression/text 之間插 <!-- --> 分隔（`+{N} 位…` = 3 個 text node）
