@@ -7,7 +7,7 @@ import { handle } from "@/lib/api-error";
  * GET /api/conversations/[id]/messages — 對話訊息分頁（MD §6.4）。
  *
  * 參數：
- * - before=<ISO/epochMs>  向上捲：waTimestamp < before（旧嘅），升序回傳
+ * - before=<ISO/epochMs>  向上捲：**createdAt < before**（cwi-audit2 A-5：同 after/顯示排序同軸），升序回傳
  * - after=<ISO/epochMs>   reconnect 補漏：**createdAt > after**（cwi-realtime-v2 §2 —
  *                         server 單調寫入時間；waTimestamp 係病人手機時鐘，IN 訊息可偏慢
  *                         幾分鐘 → 做同步游標會永久漏）
@@ -18,6 +18,9 @@ import { handle } from "@/lib/api-error";
  * client 游標/排序用）— UI 用 oldest 做「再向上」cursor。
  * HISTORY 段自然喺最舊（waTimestamp 係歷史時間）— 同新訊息同一條 timeline
  * （client 排序對 channel=HISTORY 有 waTimestamp 例外，見 inbox-client msgSortCmp）。
+ * ★ cwi-audit2 A-5：HISTORY 行嘅 createdAt = 匯入時間（同 timeline 無因果）— client cursor 用
+ * 最舊 loaded non-HISTORY 行嘅 createdAt（見 inbox-client loadOlder）；HISTORY 行可出現喺
+ * before 頁（client dedup + msgSortCmp 排底處理）。
  */
 export const dynamic = "force-dynamic";
 
@@ -42,14 +45,16 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   const after = parseTs(url.searchParams.get("after"));
 
   const where: Record<string, unknown> = { conversationId: id };
-  if (before) where.waTimestamp = { lt: before }; // 向上捲照舊 waTimestamp（MD v2 §2）
+  if (before) where.createdAt = { lt: before }; // ★ cwi-audit2 A-5：向上捲改 createdAt 軸（同 after/顯示排序對稱）
   if (after) where.createdAt = { gt: after }; // ★ v2 §2：補漏游標比對 server createdAt
 
   // 多取 1 條判定 hasMore；同 timestamp 用 id 做次級排序（batch history 冪等穩定）。
   // ★ cwi-hotfix-20260908 §1：三分支游標（舊兩分支嘅 `asc + take` 分支會攞「最舊 50」— 「訊息消失」根因）：
+  // ★ cwi-audit2 A-5：before 分支改 createdAt 軸 — waTimestamp 係病人手機時鐘，時鐘偏差會令向上捲
+  //   喺 createdAt 軸上重複拉同一批或跳過；createdAt 係 server 單調寫入時間，根治。
   //  1) after  → createdAt asc：補漏游標（filter 係 createdAt，排序同 filter 一致；waTimestamp 係
   //              病人手機時鐘，做補漏排序會亂序）。
-  //  2) before → waTimestamp desc：向上捲，由新到舊攞最接近游標嘅 N 條（行為不變）。
+  //  2) before → createdAt desc：向上捲，由新到舊攞最接近游標嘅 N 條（同 1 對稱 — A-5 改軸）。
   //  3) 皆無   → waTimestamp desc：「最新一頁」由新到舊攞 N 條。
   //  2/3 回傳前 reverse → 一律升序；after 分支天然升序。
   const rows = after
@@ -58,11 +63,17 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         take: limit + 1,
       })
-    : await prisma.message.findMany({
-        where,
-        orderBy: [{ waTimestamp: "desc" }, { id: "desc" }],
-        take: limit + 1,
-      });
+    : before
+      ? await prisma.message.findMany({
+          where,
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: limit + 1,
+        })
+      : await prisma.message.findMany({
+          where,
+          orderBy: [{ waTimestamp: "desc" }, { id: "desc" }],
+          take: limit + 1,
+        });
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;

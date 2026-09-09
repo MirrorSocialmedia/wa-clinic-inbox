@@ -1154,7 +1154,12 @@ export function InboxClient({
             bumpCursor(convId, lastPageMax);
           }
           if (!lastHasMore) break;
-          after = lastPageMax; // 續攞：下一頁 after = 本頁 max createdAt（server: createdAt > after, asc）
+          // ★ cwi-audit2 A-5（T313-B）：same-createdAt 群邊界保護 — 若本頁尾部群（lastPageMax）被
+          //   take 截斷（例：HISTORY import batch 全部同 createdAt 橫跨頁面邊界），strict
+          //   `createdAt > after` 會跳過群內剩餘行 → 游標退返群內第一行前 1ms → 下頁重攞整群
+          //   （by-id dedup，零重複）。群大過頁時 5 頁上限攔截（同 gap>250 殘留行為）。
+          const firstOfMaxGroup = data.messages.find((m) => new Date(m.createdAt).getTime() === lastPageMax);
+          after = firstOfMaxGroup ? new Date(firstOfMaxGroup.createdAt).getTime() - 1 : lastPageMax;
         }
         // ★ cwi-realtime-fix §3 (RT-6)：補漏結果一定要 log（上次靠 code review 先搵到，今次靠 log）
         //   T2：加 hasMore 欄（MD §7 簽收）— true = 仲有 gap 未攞完；pages = 呢次續攞頁數
@@ -1168,9 +1173,18 @@ export function InboxClient({
         });
         if (fetchedAll.length > 0 && selectedIdRef.current === convId) {
           setMessages((prev) => {
+            // ★ cwi-audit2 A-5（T313-B）：fetchedAll 可含重複 id（same-createdAt 群邊界退cursor
+            //   重攞整群 — 下頁重覆上頁尾群）→ 除咗對 prev dedup，仲要 in-list dedup（舊版只對
+            //   prev filter → fetchedAll 內重複 id 雙倍入 state = 重複行）。
             const ids = new Set(prev.map((m) => m.id));
-            const added = fetchedAll.filter((m) => !ids.has(m.id));
-            return [...prev, ...added].sort(msgSortCmp);
+            const added: MessageItem[] = [];
+            for (const m of fetchedAll) {
+              if (!ids.has(m.id)) {
+                ids.add(m.id);
+                added.push(m);
+              }
+            }
+            return added.length ? [...prev, ...added].sort(msgSortCmp) : prev;
           });
         }
         if (lastHasMore && pages >= 5 && selectedIdRef.current === convId) {
@@ -1308,29 +1322,58 @@ export function InboxClient({
     return () => clearInterval(t);
   }, [fetchMessagesLatest, refetchDelta]);
 
+  // ★ cwi-audit2-20260908 T3（A-5）：「createdAt 軸洞已補」per-conversation 標記（換對話時 selectConversation 清）。
+  // 最新 50 用 waTimestamp 軸（hotfix 行為唔郁）— 病人手機時鐘偏差可令已載入集喺 createdAt 軸上
+  // 留洞（已載行唔係連續後綴）→ 首次向上捲用 catchUp 同款 after= 機制補一次（有界 ≤5 頁 +
+  // 分隔線兜底），補完向上 walk（createdAt 軸）先完整 — 舊軸「重複拉同一批／靜默跳過」根治。
+  const holeFilledRef = useRef<Set<string>>(new Set());
+
   const loadOlder = useCallback(async () => {
     const convId = selectedIdRef.current;
     if (!convId || loadingOlder) return;
-    const oldest = messagesRef.current[0];
-    if (!oldest) return;
+    const list = messagesRef.current;
+    if (!list.length) return;
+    if (!holeFilledRef.current.has(convId)) {
+      holeFilledRef.current.add(convId);
+      const nonHist = list
+        .filter((m) => m.channel !== "HISTORY")
+        .map((m) => new Date(m.createdAt).getTime())
+        .filter((t) => Number.isFinite(t));
+      if (list.length >= PAGE_SIZE && nonHist.length > 0) {
+        const minLoaded = Math.min(...nonHist);
+        await fetchMessagesAfter(convId, minLoaded - RT_OVERLAP_MS);
+        if (selectedIdRef.current !== convId) return; // 補洞期間已換對話
+      }
+    }
+    // ★ cwi-audit2 A-5：cursor = 最舊 loaded non-HISTORY 行嘅 createdAt（同 server before filter /
+    // 顯示排序同軸）。HISTORY 行 createdAt = 匯入時間（同 timeline 無因果）— 直用最舊顯示行會：
+    // 匯入時間新於全部 normal 行 → 重複拉同一已載入批（stuck）；舊於全部 → 提前停。
+    // Fallback（純 HISTORY 對話）= 最舊顯示行（best-effort 行 import batch）。
+    const cursorList = messagesRef.current;
+    if (!cursorList.length) return;
+    const cursor = cursorList.find((m) => m.channel !== "HISTORY") ?? cursorList[0];
+    if (!cursor) return;
     setLoadingOlder(true);
     try {
       const res = await fetch(
-        `/api/conversations/${convId}/messages?before=${encodeURIComponent(oldest.waTimestamp)}&limit=${PAGE_SIZE}`
+        `/api/conversations/${convId}/messages?before=${encodeURIComponent(cursor.createdAt)}&limit=${PAGE_SIZE}`
       );
       if (!res.ok) return;
       const data = (await res.json()) as { messages: MessageItem[]; hasMore: boolean };
+      const prevIds = new Set(messagesRef.current.map((m) => m.id));
+      const addedCount = data.messages.filter((m) => !prevIds.has(m.id)).length;
       setMessages((prev) => {
         const ids = new Set(prev.map((m) => m.id));
         const added = data.messages.filter((m) => !ids.has(m.id));
-        // v2 §2：向上捲 merge 後亦用 createdAt 主序排序（server 回傳係 waTimestamp 序）
-        return [...added, ...prev].sort(msgSortCmp);
+        // v2 §2：向上捲 merge 後亦用 createdAt 主序排序（server 回傳係 createdAt desc + reverse）
+        return added.length ? [...added, ...prev].sort(msgSortCmp) : prev;
       });
-      setHasMore(data.hasMore);
+      // A-5 stuck guard：整頁都係已載入行（例 HISTORY 重複頁）→ 無更舊行 → 停（防 hasMore 永久 true）。
+      setHasMore(data.hasMore && addedCount > 0);
     } finally {
       setLoadingOlder(false);
     }
-  }, [loadingOlder]);
+  }, [loadingOlder, fetchMessagesAfter]);
 
   // ── ★ H2：已讀回執 fetch（開對話一次拉齊；之後 socket note:read 增量） ──────────
   const fetchNoteReceipts = useCallback(async (convId: string) => {
@@ -1415,6 +1458,7 @@ export function InboxClient({
               selectedIdRef.current = match.id; // F-8：ref 同步（fetch guard 要即時准）
               setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge）
               setGapDividerAfterMs(null); // T2：換對話清中間斷層分隔線
+              holeFilledRef.current.clear(); // T3：換對話清補洞標記
               void fetchMessagesLatest(match.id);
               void fetchPendingDrafts(match.id);
               void fetchNoteReceipts(match.id);
@@ -1434,6 +1478,7 @@ export function InboxClient({
       selectedIdRef.current = id; // F-8：ref 同步（fetch guard 要即時准）
       setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge — 唔清會混兩對話）
       setGapDividerAfterMs(null); // T2：換對話清中間斷層分隔線
+      holeFilledRef.current.clear(); // T3：換對話清補洞標記
       setNotice(null);
       void fetchMessagesLatest(id);
       void fetchPendingDrafts(id);
@@ -1472,6 +1517,7 @@ export function InboxClient({
       selectedIdRef.current = selectedConvId;
       setMessages([]);
       setGapDividerAfterMs(null); // T2：補載入 = 重頭載 → 清中間斷層分隔線
+      holeFilledRef.current.clear(); // T3：補載入 = 重頭載 → 清補洞標記（防重載後洞唔補）
       void fetchMessagesLatest(selectedConvId);
       void fetchPendingDrafts(selectedConvId);
       void fetchNoteReceipts(selectedConvId);
