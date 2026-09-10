@@ -126,7 +126,9 @@
 #       手動 enqueue → 24mo 全刪（連 NoteReadReceipt/PatientFact）/ 12mo 刪檔+清 mediaPath /
 #       AiDraft 90d（≠PROPOSED）/ StaffNotice 已讀 90d + 未到期零觸碰 + OpsReport + log metadata only
 #   T83 A1 七閘：AUTO + assignee → 只出 draft 唔自動發（log assigned — Send Lock 語義補完）
-#   T84 A1 七閘：AUTO + RESOLVED 對話病人再來訊 → 唔自動發（log resolved）
+#   T84 reopenedFirstReply 閘（cwi-reopenreply-20260910 T84 決策 (b) 收窄版）：翻開後首句三條件齊（QUESTION +
+#       距上次解決>7日 + 無不滿訊號）先照普通 auto；任一唔中 → 唔自動發（log reopenedFirstReply）。
+#       含 T2 翻開四聯動 in-test 迴歸 + 新 case A（三齊→auto）/ B（第二句→正常級別）/ C（PAIN）/ D（<7日）/ E（訊號詞「上次」）
 #   T85 A1 第八閘：員工人手覆後 cooldown（AI_HUMAN_COOLDOWN_MS 預設 30 分鐘）內 AI 唔搶咪（log human-recent）
 #   T86 A2 媒體：send 相 → 客戶端零回覆 + StaffNotice(MEDIA_RECEIVED) 落庫 + /api/notices bell +1 +
 #       AiDraft 零新增（canDraft 限 text）+ 分類照行 + PATCH 標已讀
@@ -2382,28 +2384,157 @@ q "DELETE FROM \"Conversation\" WHERE id='$CONV_T83'" >/dev/null 2>&1
 q "DELETE FROM \"Contact\" WHERE id='$C_T83'" >/dev/null 2>&1
 [ "$T83" = 0 ] && pass "T83 A1 閘：assigned" || fail "T83 assigned 閘有項失敗（見上 ❌）"
 
-# ── T84. A1 七閘：RESOLVED 對話病人翻頭一句 → 唔自動發（log resolved） ──────
-echo "[AI-T1] T84: AUTO + resolved gate..."
+# ── T84. reopenedFirstReply 閘（T84 決策 (b) 收窄版）：翻開後首句三條件齊先照普通 auto ──────
+#   舊斷言「RESOLVED + 來訊 → 唔自動發（log resolved）」升級：T2 翻開四聯動喺 AI 跑之前已將 status 翻 OPEN
+#   → 舊 `resolved` 閘唔再命中；新語義 = 翻開後**首句**（reopenedAt + lastOutboundAt 判斷）+ 任一風險條件
+#   → 唔 auto-send（log reopenedFirstReply）：① intent=QUESTION ② 距上次解決>7日（T2 清咗 resolvedAt →
+#   auto-resolve INTERNAL 備註 waTimestamp 導出）③ 無不滿訊號（上次/點解/仲未/都話咗）
+echo "[AI-T1] T84: reopenedFirstReply gate (reopened first reply)..."
 T84=0
+# hermetic：MF=AUTO（T83 已轉 — 冪等確認）+ 清 AutomationPolicy（防上一 run T89 殘留污染 autoLevel）
+patch_aimode "$MF_CLINIC_ID" AUTO; CODE=$PAM_CODE
+check "T84 MF=AUTO（冪等）" "$CODE" "200"
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$MF_CLINIC_ID'" >/dev/null 2>&1
+D10_AGO=$(date -u -d '10 days ago' +%Y-%m-%dT%H:%M:%S.%3NZ)
+D2_AGO=$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S.%3NZ)
+
+# t84_seed_resolved <convId> <contactId> <phone> <name> <resolvedTime>
+#   RESOLVED 對話 + auto-resolve INTERNAL 備註（waTimestamp = 解決時間 — 翻開後唯一可追溯「上次解決」來源）
+t84_seed_resolved() {
+  q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$2', '$MF_CLINIC_ID', '$3', '$4', ARRAY[]::text[])" >/dev/null 2>&1
+  q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\", \"resolvedAt\", \"resolvedBy\", \"escalatedAt\") VALUES ('$1', '$MF_CLINIC_ID', '$2', 'RESOLVED', '$5', '$5', 'AUTO', '$5')" >/dev/null 2>&1
+  q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, status, \"waTimestamp\", \"billingCategory\") VALUES ('$1-ar-note', '$1', 'OUT', 'INTERNAL', 'note', '系統自動標記已解決（3 日冇活動）', 'SENT', '$5', 'NONE')" >/dev/null 2>&1
+}
+t84_clean() { # t84_clean <convId> <contactId> — hermetic 全清（含 PAIN/Flow/Booking 衍生行）
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"PainTriageSession\" WHERE \"conversationId\"='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"FlowSession\" WHERE \"conversationId\"='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"BookingSession\" WHERE \"conversationId\"='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"BookingRequest\" WHERE \"conversationId\"='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\"='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE id='$2'" >/dev/null 2>&1
+}
+
+# ── T84 base（舊用例升級）：翻開 + 首句 + BOOKING intent（① 唔中）→ 唔 auto + T2 四聯動 in-test 迴歸 ──
 P_T84="8526102${EPOCH}"; WAMID_T84="wamid.E2E_T84_${EPOCH}"; C_T84="t84-c-${EPOCH}"; CONV_T84="t84-conv-${EPOCH}"
-q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_T84', '$MF_CLINIC_ID', '$P_T84', 'E2E T84', ARRAY[]::text[])" >/dev/null 2>&1
-q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CONV_T84', '$MF_CLINIC_ID', '$C_T84', 'RESOLVED', '$NOWISO')" >/dev/null 2>&1
-pnpm -s mock-inbound message --clinic MF --from "$P_T84" --text "想預約下週有冇位" --wamid "$WAMID_T84" --name "E2E T84 resolved" >/dev/null || fail "T84 mock-inbound POST"
+t84_seed_resolved "$CONV_T84" "$C_T84" "$P_T84" "E2E T84" "$D10_AGO"
+pnpm -s mock-inbound message --clinic MF --from "$P_T84" --text "想預約下週有冇位" --wamid "$WAMID_T84" --name "E2E T84 reopened-first" >/dev/null || fail "T84 mock-inbound POST"
 M_T84=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T84'" | jf id)
-if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T84'" '[{"s":"PROPOSED"}]' 30; then
-  pass "T84 resolved：draft 照出（PROPOSED）"
+# T2 翻開四聯動 in-test 迴歸：RESOLVED + inbound → OPEN + reopenedAt 寫 + resolvedBy/resolvedAt/escalatedAt 全清
+if wait_for "SELECT \"status\"::text s, (\"reopenedAt\" IS NOT NULL)::text r, (\"resolvedAt\" IS NULL)::text na, (\"resolvedBy\" IS NULL)::text nb, (\"escalatedAt\" IS NULL)::text ne FROM \"Conversation\" WHERE id='$CONV_T84'" '[{"s":"OPEN","r":"true","na":"true","nb":"true","ne":"true"}]' 15; then
+  pass "T84 T2 四聯動：翻開（OPEN + reopenedAt + resolved*/escalatedAt 清）"
 else
-  fail "T84 resolved draft"; T84=1
+  fail "T84 reopen 四聯動"; T84=1
+fi
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T84'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T84 首句 + BOOKING（① 唔中）：draft 照出（PROPOSED）"
+else
+  fail "T84 draft"; T84=1
 fi
 sleep 2
 OUT_T84=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T84' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
-check "T84 resolved：唔自動發（0 OUT 訊息）" "$OUT_T84" "0"
-grep -F "$WAMID_T84" /tmp/e2e-worker*.log 2>/dev/null | grep -q '"resolved"' && pass "T84 log reasons 見 resolved" || { fail "T84 resolved log"; T84=1; }
-q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CONV_T84'" >/dev/null 2>&1
-q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T84'" >/dev/null 2>&1
-q "DELETE FROM \"Conversation\" WHERE id='$CONV_T84'" >/dev/null 2>&1
-q "DELETE FROM \"Contact\" WHERE id='$C_T84'" >/dev/null 2>&1
-[ "$T84" = 0 ] && pass "T84 A1 閘：resolved" || fail "T84 resolved 閘有項失敗（見上 ❌）"
+check "T84 首句 + 風險條件：唔自動發（0 OUT 訊息）" "$OUT_T84" "0"
+grep -F "$WAMID_T84" /tmp/e2e-worker*.log 2>/dev/null | grep -q "reopenedFirstReply" && pass "T84 log reasons 見 reopenedFirstReply（取代舊 resolved 閘）" || { fail "T84 reopenedFirstReply log"; T84=1; }
+t84_clean "$CONV_T84" "$C_T84"
+
+# ── T84A（新 case A）：三條件齊（QUESTION + 解決咗 10 日 + 無訊號）→ 照普通新對話 auto ──
+P_T84A="8526112${EPOCH}"; WAMID_T84A="wamid.E2E_T84A_${EPOCH}"; C_T84A="t84a-c-${EPOCH}"; CONV_T84A="t84a-conv-${EPOCH}"
+t84_seed_resolved "$CONV_T84A" "$C_T84A" "$P_T84A" "E2E T84A" "$D10_AGO"
+pnpm -s mock-inbound message --clinic MF --from "$P_T84A" --text "你哋幾點閂門？" --wamid "$WAMID_T84A" --name "E2E T84A all-pass" >/dev/null || fail "T84A mock-inbound POST"
+M_T84A=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T84A'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T84A'" '[{"s":"SENT_AUTO"}]' 30; then
+  pass "T84A 三條件齊（QUESTION + >7日 + 無訊號）：照正常 auto（draft SENT_AUTO）"
+else
+  fail "T84A auto-send"; T84=1
+fi
+OUT_T84A=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T84A' AND direction='OUT' AND \"aiAutoSent\"=true AND channel<>'INTERNAL'" | jf c)
+check "T84A 自動發 OUT（aiAutoSent=true）" "$OUT_T84A" "1"
+LOBA_T84A=$(q "SELECT (\"lastOutboundAt\" IS NOT NULL AND \"lastOutboundAt\" > \"reopenedAt\")::text v FROM \"Conversation\" WHERE id='$CONV_T84A'" | jf v)
+check "T84A lastOutboundAt > reopenedAt（首句已發 — 閘失效前提）" "$LOBA_T84A" "true"
+if grep -F "$WAMID_T84A" /tmp/e2e-worker*.log 2>/dev/null | grep -q "reopenedFirstReply"; then
+  fail "T84A 閘唔該擋（log 見 reopenedFirstReply）"; T84=1
+else
+  pass "T84A 三條件齊：log 無 reopenedFirstReply"
+fi
+
+# ── T84B（新 case B）：第二句起（lastOutboundAt > reopenedAt）→ 閘唔生效 → 完全正常級別 ──
+WAMID_T84B="wamid.E2E_T84B_${EPOCH}"
+pnpm -s mock-inbound message --clinic MF --from "$P_T84A" --text "想預約下週有冇位" --wamid "$WAMID_T84B" --name "E2E T84B second" >/dev/null || fail "T84B mock-inbound POST"
+M_T84B=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T84B'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T84B'" '[{"s":"SENT_AUTO"}]' 30; then
+  pass "T84B 第二句起：閘唔生效 → 正常級別 auto（SENT_AUTO）"
+else
+  fail "T84B auto"; T84=1
+fi
+OUT_T84B=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T84A' AND direction='OUT' AND \"aiAutoSent\"=true AND channel<>'INTERNAL'" | jf c)
+check "T84B 累計 auto OUT = 2" "$OUT_T84B" "2"
+if grep -F "$WAMID_T84B" /tmp/e2e-worker*.log 2>/dev/null | grep -q "reopenedFirstReply"; then
+  fail "T84B 非首句唔該觸發閘（log 見 reopenedFirstReply）"; T84=1
+else
+  pass "T84B 第二句：log 無 reopenedFirstReply"
+fi
+t84_clean "$CONV_T84A" "$C_T84A"
+
+# ── T84C：首句 + PAIN intent（① 唔中）→ 0 auto（PAIN 行 pain-triage L1 出口 — 結構性永唔 auto）──
+P_T84C="8526113${EPOCH}"; WAMID_T84C="wamid.E2E_T84C_${EPOCH}"; C_T84C="t84c-c-${EPOCH}"; CONV_T84C="t84c-conv-${EPOCH}"
+t84_seed_resolved "$CONV_T84C" "$C_T84C" "$P_T84C" "E2E T84C" "$D10_AGO"
+pnpm -s mock-inbound message --clinic MF --from "$P_T84C" --text "牙痛" --wamid "$WAMID_T84C" --name "E2E T84C pain" >/dev/null || fail "T84C mock-inbound POST"
+M_T84C=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T84C'" | jf id)
+# ★ a2 修正：PAIN 行 pain-triage 問診流（唔經過主閘 — 結構性 block），契約同 T97 同構：
+#   問診中零 draft（鐵律）+ 第一問 auto 發出（標準 PAIN 行為 — 新對話/翻開對話一致）。
+#   舊斷言「draft PROPOSED + 0 OUT」誤讀 PAIN 路徑（PAIN 無 reply draft 可 auto）。
+if wait_for "SELECT count(*)::text c FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$CONV_T84C' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30; then
+  pass "T84C PAIN 首句：問診 session ACTIVE"
+else
+  fail "T84C triage session"; T84=1
+fi
+sleep 2
+INT_T84C=$(q "SELECT \"intent\"::text i FROM \"Conversation\" WHERE id='$CONV_T84C'" | jf i)
+check "T84C intent=PAIN" "$INT_T84C" "PAIN"
+check "T84C 問診中零 draft（鐵律）" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"conversationId\"='$CONV_T84C'" | jf c)" "0"
+OUT_T84C=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T84C' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)
+check "T84C 第一問 auto 發出（標準 PAIN 行為 — 同 T97）" "$OUT_T84C" "1"
+t84_clean "$CONV_T84C" "$C_T84C"
+
+# ── T84D：首句 + QUESTION 但解決咗 2 日（② 唔中 — <7 日）→ 唔 auto ──
+P_T84D="8526114${EPOCH}"; WAMID_T84D="wamid.E2E_T84D_${EPOCH}"; C_T84D="t84d-c-${EPOCH}"; CONV_T84D="t84d-conv-${EPOCH}"
+t84_seed_resolved "$CONV_T84D" "$C_T84D" "$P_T84D" "E2E T84D" "$D2_AGO"
+pnpm -s mock-inbound message --clinic MF --from "$P_T84D" --text "你哋幾點閂門？" --wamid "$WAMID_T84D" --name "E2E T84D recent" >/dev/null || fail "T84D mock-inbound POST"
+M_T84D=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T84D'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T84D'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T84D 2 日（<7日）：draft 照出（PROPOSED）"
+else
+  fail "T84D draft"; T84=1
+fi
+sleep 2
+OUT_T84D=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T84D' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
+check "T84D 距解決 ≤7 日：唔自動發（0 OUT）" "$OUT_T84D" "0"
+grep -F "$WAMID_T84D" /tmp/e2e-worker*.log 2>/dev/null | grep -q "reopenedFirstReply" && pass "T84D log reasons 見 reopenedFirstReply（age）" || { fail "T84D log"; T84=1; }
+t84_clean "$CONV_T84D" "$C_T84D"
+
+# ── T84E：首句 + QUESTION + >7 日 但訊息含訊號詞「上次」（③ 唔中）→ 唔 auto ──
+P_T84E="8526115${EPOCH}"; WAMID_T84E="wamid.E2E_T84E_${EPOCH}"; C_T84E="t84e-c-${EPOCH}"; CONV_T84E="t84e-conv-${EPOCH}"
+t84_seed_resolved "$CONV_T84E" "$C_T84E" "$P_T84E" "E2E T84E" "$D10_AGO"
+pnpm -s mock-inbound message --clinic MF --from "$P_T84E" --text "上次你哋話幾點閂門？" --wamid "$WAMID_T84E" --name "E2E T84E signal" >/dev/null || fail "T84E mock-inbound POST"
+M_T84E=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T84E'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T84E'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T84E 訊號詞「上次」：draft 照出（PROPOSED）"
+else
+  fail "T84E draft"; T84=1
+fi
+sleep 2
+# 加強（a2）：鎖定 intent=QUESTION — 排除 classifier 誤判 COMPLAINT/OTHER 令「intent」block 造成 ③ 訊號詞假綠
+INT_T84E=$(q "SELECT \"intent\"::text i FROM \"Conversation\" WHERE id='$CONV_T84E'" | jf i)
+check "T84E intent=QUESTION（訊號詞係唯一 block 因素）" "$INT_T84E" "QUESTION"
+OUT_T84E=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T84E' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
+check "T84E 含不滿訊號：唔自動發（0 OUT）" "$OUT_T84E" "0"
+grep -F "$WAMID_T84E" /tmp/e2e-worker*.log 2>/dev/null | grep -q "reopenedFirstReply" && pass "T84E log reasons 見 reopenedFirstReply（signal）" || { fail "T84E log"; T84=1; }
+t84_clean "$CONV_T84E" "$C_T84E"
+
+[ "$T84" = 0 ] && pass "T84 reopenedFirstReply 閘：base + A/B/C/D/E 全達標" || fail "T84 reopenedFirstReply 閘有項失敗（見上 ❌）"
+
 
 # ── T85. A1 第八閘：員工人手覆完 cooldown 內 AI 唔搶咪（log human-recent） ──
 echo "[AI-T1] T85: AUTO + human-recent gate..."
@@ -2412,7 +2543,10 @@ P_T85="8526103${EPOCH}"; WAMID_T85="wamid.E2E_T85_${EPOCH}"; C_T85="t85-c-${EPOC
 q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_T85', '$MF_CLINIC_ID', '$P_T85', 'E2E T85', ARRAY[]::text[])" >/dev/null 2>&1
 q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CONV_T85', '$MF_CLINIC_ID', '$C_T85', 'OPEN', '$NOWISO')" >/dev/null 2>&1
 # 員工人手覆（直接落 DB：OUT + sentByStaffId 非 null — 唔經 send route 避免 auto-claim 混淆 assigned 閘）
-q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, \"mediaStatus\", status, \"sentByStaffId\", \"waTimestamp\") VALUES ('t85-staff-out-${EPOCH}', '$CONV_T85', 'OUT', 'API', 'text', 'e2e staff manual reply', 'READY', 'SENT', '$MF_STAFF_ID', '$NOWISO')" >/dev/null 2>&1
+# ★ a2 修正：補 sentVia='HUMAN_TYPED' — C1（consult v2.1，trunk 5127047）將 cooldown 語義收窄為
+#   只計 HUMAN_TYPED（null/AI_ADOPTED/AI_AUTO 唔算「真人插嘴」），呢個 seed 舊版本冇該欄 →
+#   閘永遠唔命中（trunk 既有 regression，T85 喺 5127047 純 trunk 同樣紅）。
+q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, \"mediaStatus\", status, \"sentByStaffId\", \"sentVia\", \"waTimestamp\") VALUES ('t85-staff-out-${EPOCH}', '$CONV_T85', 'OUT', 'API', 'text', 'e2e staff manual reply', 'READY', 'SENT', '$MF_STAFF_ID', 'HUMAN_TYPED', '$NOWISO')" >/dev/null 2>&1
 pnpm -s mock-inbound message --clinic MF --from "$P_T85" --text "想預約下週有冇位" --wamid "$WAMID_T85" --name "E2E T85 human-recent" >/dev/null || fail "T85 mock-inbound POST"
 M_T85=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T85'" | jf id)
 if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T85'" '[{"s":"PROPOSED"}]' 30; then
@@ -3382,7 +3516,8 @@ else
 fi
 
 # 職員覆核（OUT + sentByStaffId 非空 → 第八閘 human-recent 觸發源）
-h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$W1_CONV\",\"body\":\"e2e W1 職員覆核\"}"
+# ★ a2 修正（cwi-reopenreply-20260910）：C1 語義 — free-form 必帶 source=typed 先計 HUMAN_TYPED（send route: source optional，缺席 = 舊 client = null 唔計）
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$W1_CONV\",\"body\":\"e2e W1 職員覆核\",\"source\":\"typed\"}"
 check "W1 職員 send → 2xx" "$([ "${H1_CODE:0:1}" = "2" ] && echo y || echo n)" "y"
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W1_CONV' AND direction='OUT' AND \"sentByStaffId\" IS NOT NULL AND status='SENT'" '[{"c":"1"}]' 30
 
@@ -3429,6 +3564,13 @@ check "W1 revert newVersion=3（re-publish as v(n+1)）" "$W1_NV" "3"
 wf_get /tmp/e2e-w1-get.json
 W1_AV=$(node -e 'const j=JSON.parse(require("fs").readFileSync("/tmp/e2e-w1-get.json","utf8"));const w=j.workflows.find(x=>x.key==="triage");console.log(w.active.version+"|"+w.active.params.humanCooldownMs)')
 check "W1 GET workflows：triage ACTIVE v3 + cooldown 還原 30min" "$W1_AV" "3|1800000"
+
+# ★ a2 修正（cwi-reopenreply-20260910）：C1 第八閘 = 「最後 OUT 係 HUMAN_TYPED」— msg3 auto OUT 已蓋過 lastOut，
+#   msg4 嘅 human-recent 不再成立（舊版 test 前提）。補一次 staff typed send 重建「真人啱啱插嘴」狀態，
+#   隔離驗證 revert（cooldown 30min 還原生效）。
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$W1_CONV\",\"body\":\"e2e W1 職員覆核 2\",\"source\":\"typed\"}"
+check "W1 職員 send 2（重建 lastOut=HUMAN_TYPED）→ 2xx" "$([ "${H1_CODE:0:1}" = "2" ] && echo y || echo n)" "y"
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W1_CONV' AND direction='OUT' AND \"sentByStaffId\" IS NOT NULL AND status='SENT'" '[{"c":"2"}]' 30
 
 pnpm -s mock-inbound message --clinic TKW --from "$W1_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W1_4_${EPOCH}" --name "E2E W1" >/dev/null 2>&1
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_4_${EPOCH}'" '[{"c":"1"}]' 15

@@ -23,6 +23,8 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { getParams } from "@/lib/workflow/store";
+// ★ cwi-reopenreply-20260910：INTERNAL 備註前綴單一來源（reopen-reply 閘靠呢個前綴導出「上次解決時間」）
+import { AUTO_RESOLVE_NOTE_PREFIX } from "@/lib/reopen-reply";
 
 /** shouldAutoResolve 純函數入參（E2E / unit 都可直接構造）。 */
 export interface AutoResolveCandidate {
@@ -121,7 +123,7 @@ export async function runAutoResolveSweep(
             direction: "OUT",
             channel: "INTERNAL",
             type: "note",
-            body: `系統自動標記已解決（${n} 日冇活動）`,
+            body: `${AUTO_RESOLVE_NOTE_PREFIX}（${n} 日冇活動）`,
             status: "SENT",
             waMessageId: null, // INTERNAL 永唔出 Graph API
             sentByStaffId: null, // 系統動作（無 staff 參與）

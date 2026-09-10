@@ -55,6 +55,7 @@ function findChromium(): string {
 
 interface PageLike {
   goto: (url: string, o?: Record<string, unknown>) => Promise<void>;
+  waitForTimeout: (ms: number) => Promise<void>;
   getByText: (t: string | RegExp, o?: Record<string, unknown>) => LocatorLike;
   getByRole: (role: string, o?: Record<string, unknown>) => LocatorLike;
   close: () => Promise<void>;
@@ -89,11 +90,46 @@ async function main(): Promise<void> {
   const P = await ctx.newPage();
 
   try {
+    // ★ a2 修正（cwi-reopenreply-20260910）：全量 e2e 負載下 /inbox 首次載入（dev bundle + 間歇
+    //   hydration mismatch → client 重建樹）可超斷言 budget（run2/4/5 三次紅、quiet 診斷全綠）。
+    //   先 warm-up /inbox 吸掉 bundle 成本（環境健壯性，斷言條件零改動）。
+    await P.goto(`${base}/inbox`, { waitUntil: "domcontentloaded", timeout: 120000 });
+    await P.waitForTimeout(5000);
     await P.goto(`${base}/inbox?conv=${conv}`, { waitUntil: "domcontentloaded" });
+    await P.waitForTimeout(5000); // hydration 等待（對齊 e2e-schedule-ui 慣例）
 
     // 1. 草稿卡標題（COPY_ONLY 變體）
     const title = P.getByText("AI 草稿（只可複製）", { exact: true });
-    await title.first().waitFor({ timeout: 20000 });
+    // a2（run7 定性）：T172 同頁同 cookie 斷言 SSR DOM 文字（hydration 前已喺）故全 run 綠；
+    //   呢張卡 = client-state（hydration + /drafts round-trip 先出現）— 全量負載下 /inbox dev bundle
+    //   hydration 實測 >90s（T186 同類 client-state 60s 壓線綠）。90s → 150s（斷言條件零改動）。
+    await title.first().waitFor({ timeout: 150000 }).catch(async () => {
+      // a2 診斷 dump（cwi-reopenreply-20260910）：超時時攞 page 實際狀態定性（session/error/hydration/fetch）
+      try {
+        const Pg = P as unknown as {
+          url: () => string;
+          textContent: (sel: string) => Promise<string | null>;
+          evaluate: (fn: (cid: string) => Promise<string>, arg: string) => Promise<string>;
+        };
+        const url = Pg.url();
+        const body = (await Pg.textContent("body")) ?? "";
+        const hasLogin = /登入|log ?in/i.test(body.slice(0, 2000));
+        const hasWinBanner = body.includes("24 小時窗口已過");
+        const hasConvName = body.includes("E2E W171");
+        const draftFetch = await Pg.evaluate(async (cid: string) => {
+          try {
+            const r = await fetch(`/api/conversations/${cid}/drafts`, { credentials: "include" });
+            const t = await r.text();
+            return `status=${r.status} len=${t.length} head=${t.slice(0, 120)}`;
+          } catch (fe) {
+            return `fetch-error: ${String(fe)}`;
+          }
+        }, conv);
+        throw new Error(`diag: url=${url} hasLogin=${hasLogin} winBanner=${hasWinBanner} convName=${hasConvName} /drafts[${conv}]=${draftFetch} bodyHead=${body.slice(0, 150).replace(/\s+/g, " ")}`);
+      } catch (diag) {
+        throw diag;
+      }
+    });
 
     // 2. banner
     await P.getByText(/24 小時窗口已過 — 呢段字發唔出/).first().waitFor({ timeout: 5000 });

@@ -496,7 +496,16 @@ async function t192(): Promise<void> {
   await waitForCapture(miss.endpoint, t0);
 
   // 410/404 → row 刪；200 → row 留 + lastOkAt
-  const rowOk = await prisma.pushSubscription.findUnique({ where: { endpoint: ok.endpoint }, select: { lastOkAt: true } });
+  // a2 修正（cwi-reopenreply-20260910）：capture 可見 ≠ lastOkAt 已 commit（push delivery 先 call endpoint
+  //   後 update DB — 全量負載下 race 窗口放大，run6 假紅）→ 輪詢最多 10s（斷言條件零改動：lastOkAt 必須設定）。
+  let rowOk = await prisma.pushSubscription.findUnique({ where: { endpoint: ok.endpoint }, select: { lastOkAt: true } });
+  {
+    const tRow = Date.now();
+    while ((!rowOk || !rowOk.lastOkAt) && Date.now() - tRow < 10000) {
+      await new Promise((r) => setTimeout(r, 500));
+      rowOk = await prisma.pushSubscription.findUnique({ where: { endpoint: ok.endpoint }, select: { lastOkAt: true } });
+    }
+  }
   if (!rowOk) fail("t192: 200 row 應該保留");
   if (!rowOk.lastOkAt) fail("t192: 200 → lastOkAt 未更新");
   const rowGone = await prisma.pushSubscription.findUnique({ where: { endpoint: gone.endpoint }, select: { id: true } });

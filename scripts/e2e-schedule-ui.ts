@@ -148,11 +148,17 @@ function mockInbound(waId: string, name: string): void {
 }
 
 function convIdByWa(waId: string): string {
-  const id = psql(
-    `SELECT id FROM "Conversation" WHERE "contactId" = (SELECT id FROM "Contact" WHERE "waId" = '${waId}') LIMIT 1;`
-  );
-  if (!id) throw new Error(`conversation 未建（waId ${waId}）`);
-  return id;
+  // ★ a2 修正（cwi-reopenreply-20260910）：mockInbound 係 async（webhook → worker 建 conv）— 舊版即查即抛，
+  //   worker 繁忙時 conversation 未建 → fixture null（T184-186 假紅）→ 改為輪詢最多 20s（斷言零改動，只等 fixture 就位）。
+  const t0 = Date.now();
+  for (;;) {
+    const id = psql(
+      `SELECT id FROM "Conversation" WHERE "contactId" = (SELECT id FROM "Contact" WHERE "waId" = '${waId}') LIMIT 1;`
+    );
+    if (id) return id;
+    if (Date.now() - t0 > 20000) throw new Error(`conversation 20s 未建（waId ${waId}）`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+  }
 }
 
 /** cleanup：waId sweep（worker 自建殘留都洗到 — FlowSession → Message → Conversation → Contact） */
@@ -432,7 +438,8 @@ async function main(): Promise<void> {
       await L(P.getByRole("button", { name: /更新|同步中/ })).first().click();
       let seen = false;
       const tToast = Date.now();
-      while (Date.now() - tToast < 7000) {
+      // a2 修正（cwi-reopenreply-20260910）：7s → 15s（dev 熱載下 429 response 慢過 7s 係結構性假紅；斷言條件零改動）
+      while (Date.now() - tToast < 15000) {
         const b = (await P.textContent("body")) ?? "";
         if (b.includes("啱啱先同步過")) { seen = true; break; }
         await P.waitForTimeout(300);
@@ -519,8 +526,11 @@ async function main(): Promise<void> {
       try {
         cleanupWa(WA_OLDWIN);
         mockInbound(WA_OLDWIN, "E2E-D-OLDWIN");
+        // ★ a2 修正（cwi-reopenreply-20260910）：先等 conversation 建立（convIdByWa 20s 輪詢），
+        //   再 ageConvToPast — 舊順序係 UPDATE 喺 conv 存在前行 = 0 行，lastInboundAt 保持 now → 過窗斷言假紅（T185）。
+        const idOldWin = convIdByWa(WA_OLDWIN);
         ageConvToPast(WA_OLDWIN, 25);
-        return convIdByWa(WA_OLDWIN);
+        return idOldWin;
       } catch (e) {
         return null;
       }
@@ -660,11 +670,12 @@ async function main(): Promise<void> {
     writeFileSync(FLAG_EXTRA, JSON.stringify([{ clinicCode: "TKW", extra: 4 }]), "utf8");
     try {
       await P.goto(`${base}/inbox?conv=${convWide}`, { waitUntil: "domcontentloaded", timeout: 60000 });
-      if (!(await poll(async () => ((await P.textContent("body")) ?? "").includes("今日可約"), 30000)))
+      // a2 修正（cwi-reopenreply-20260910）：30s → 60s + grid 15s → 30s（全量負載下冷 browser /inbox render 超 budget，run6 假紅；斷言條件零改動）
+      if (!(await poll(async () => ((await P.textContent("body")) ?? "").includes("今日可約"), 60000)))
         throw new Error("側欄迷你表未出現");
       // 等 data fetch 落定（grid 出現）
-      if (!(await poll(async () => P.evaluate<boolean>(() => !!document.querySelector('div[class*="grid"][style*="48px"]')), 15000)))
-        throw new Error("迷你表 grid 未載入（15s）");
+      if (!(await poll(async () => P.evaluate<boolean>(() => !!document.querySelector('div[class*="grid"][style*="48px"]')), 30000)))
+        throw new Error("迷你表 grid 未載入（30s）");
       const scroll = await P.evaluate(() => {
         const grid = document.querySelector('div[class*="grid"][style*="48px"]');
         if (!grid) return null;

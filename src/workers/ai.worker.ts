@@ -45,6 +45,8 @@ import { getLexicon, applyLexicon } from "@/lib/sessions/lexicon";
 import { matchRedFlagTerms, effectiveRedFlagTerms } from "@/lib/sessions/red-flags";
 import { painStep, parsePainState, PAIN_SESSION_TTL_MS } from "@/lib/sessions/pain-triage";
 import { triggerFloor } from "@/lib/sessions/consult-trigger";
+// ★ cwi-reopenreply-20260910（T84 決策 (b) 收窄版）：翻開後首句閘（reopenedFirstReply）
+import { AUTO_RESOLVE_NOTE_PREFIX, isReopenedFirstReply, isReopenedFirstReplySafe } from "@/lib/reopen-reply";
 import { phoneHash } from "@/lib/phone-hash";
 import { hkDateOffset } from "@/lib/availability";
 import { lookupPatient, fetchAppointments } from "@/lib/workforce/client";
@@ -599,6 +601,45 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     if (updatedConv.assigneeId !== null) blocks.push("assigned");
     // RESOLVED 對話病人翻頭一句「唔該」唔應該觸發自動覆
     if (updatedConv.status === "RESOLVED") blocks.push("resolved");
+    // ★ cwi-reopenreply-20260910（T84 決策 (b) 收窄版）：翻開後**首句** — 三條件齊（QUESTION + 距上次解決
+    //   >7 日 + 無不滿訊號）先照普通新對話 auto；任一唔中 → 强制 DRAFT（PROPOSED 照出）。
+    //   背景：T2 翻開四聯動喺 AI 跑之前已將 status 翻 OPEN → 上面 `resolved` 閘唔再命中 —
+    //   呢條閘接棒「翻開後首句」語義（reopenedAt + lastOutboundAt 判斷首句）。
+    //   第二句起（lastOutboundAt > reopenedAt，outbound SENT 路徑即時維護）閘自然失效 = 完全正常級別。
+    if (isReopenedFirstReply(updatedConv)) {
+      // 「翻開前最後一次解決時間」：resolvedAt（T2 翻開已清，防禦性）→ 否則最新 auto-resolve INTERNAL 備註
+      //   （waTimestamp <= reopenedAt）→ 仍無 = null = 條件②唔中（保守 DRAFT；手動 resolve 無痕可溯）。
+      let lastResolved: Date | null = updatedConv.resolvedAt;
+      if (lastResolved == null && updatedConv.reopenedAt != null) {
+        const note = await prisma.message.findFirst({
+          where: {
+            conversationId: conv.id,
+            direction: "OUT",
+            channel: "INTERNAL",
+            type: "note",
+            body: { startsWith: AUTO_RESOLVE_NOTE_PREFIX },
+            waTimestamp: { lte: updatedConv.reopenedAt },
+          },
+          orderBy: { waTimestamp: "desc" },
+          select: { waTimestamp: true },
+        });
+        lastResolved = note?.waTimestamp ?? null;
+      }
+      const rr = isReopenedFirstReplySafe({
+        intent: result.intent,
+        lastResolvedAt: lastResolved,
+        raw: msg.body,
+        canonical: msg.body && ptLex.length > 0 ? applyLexicon(msg.body, ptLex) : null,
+      });
+      if (!rr.safe) {
+        blocks.push("reopenedFirstReply");
+        // metadata only（intent 名 + 原因 token — 零病人原文）
+        log.info(
+          { clinic: clinic.code, wamid: msg.waMessageId, intent: result.intent, reasons: rr.reasons.join("+") },
+          "ai: reopenedFirstReply gate — 翻開首句三條件唔齊（draft only）"
+        );
+      }
+    }
     // ★ Phase A (A2)：媒體訊息 — 唔覆客、唔出草稿、只通知職員
     if (isMedia) blocks.push("media");
     // 可選第八閘：未 claim 但真人啱啱插咗嘴（冷靜期 — ★ Phase D：params 由 WorkflowDefinition
