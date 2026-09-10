@@ -57,6 +57,11 @@ const schema = z
     // → 直接回舊 row 200（idempotentReplay: true）唔再入 queue（DB 1 條、病人收 1 條）。
     // optional：舊 client / e2e 唔帶 → 行為不變（無冪等）。
     clientMessageId: z.string().uuid().optional(),
+    // ★ consult v2.1 C1（§2.1 M-1）：發送來源 — "adopted"（採用/改過 AI 草稿）| "typed"（店員自己打字）。
+    // optional：舊 client / template 發送唔帶 → sentVia=null（行為不變；template 唔計 consult loop）。
+    // adopted → Message.sentVia=AI_ADOPTED（唔算「真人插嘴」— cooldown 死鎖根治）；
+    // typed → HUMAN_TYPED + Conversation.humanTookOver=true（consult 路徑停出草稿）。
+    source: z.enum(["adopted", "typed"]).optional(),
   })
   .refine((d) => (d.body ? 1 : 0) + (d.templateName ? 1 : 0) === 1, {
     message: "body 同 templateName 必須二揀一",
@@ -264,6 +269,14 @@ export const POST = handle(async (req: NextRequest) => {
         billingCategory: isTemplateSend ? billingCategoryForTemplate(templateCategory) : BILLING_SERVICE,
         status: "QUEUED" as const,
         sentByStaffId: ctx.staff.id,
+        // ★ consult v2.1 C1（§2.1 M-1）：free-form 帶 source 先標記；template / 舊 client = null（唔計）
+        sentVia: isTemplateSend
+          ? null
+          : parsed.data.source === "adopted"
+            ? "AI_ADOPTED"
+            : parsed.data.source === "typed"
+              ? "HUMAN_TYPED"
+              : null,
         clientMessageId: parsed.data.clientMessageId ?? null,
         waTimestamp: now,
       },
@@ -297,6 +310,19 @@ export const POST = handle(async (req: NextRequest) => {
 
   await prisma.$executeRaw`
     UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
+
+  // ★ consult v2.1 C1（§2.1 M-1）：free-form 發送 → 記實際發出文字（下輪 AI context 用）；
+  //   typed → humanTookOver=true（consult 路徑停出草稿；「交返 AI 繼續」掣 = C5 UI 清返 false）。
+  //   adopted 唔置 takeover 旗（採用唔係「真人插嘴」）；template 發送唔記（唔係打字行為）。
+  if (!isTemplateSend) {
+    await prisma.conversation.update({
+      where: { id: conv.id },
+      data: {
+        lastOutboundText: parsed.data.body!,
+        ...(parsed.data.source === "typed" ? { humanTookOver: true } : {}),
+      },
+    });
+  }
 
   await prisma.auditLog
     .create({

@@ -11,6 +11,7 @@
  */
 import {
   AiCallError,
+  AI_SESSION_TRIGGERS,
   type AiIntent,
   type AiUrgency,
   type ClassifyAndDraftInput,
@@ -61,6 +62,7 @@ function parseAndValidate(content: string): {
   confidence: number;
   summary: string;
   draft: string | null;
+  sessionTrigger: string | null;
 } {
   let o: Record<string, unknown>;
   try {
@@ -85,6 +87,11 @@ function parseAndValidate(content: string): {
   const summary = typeof o["summary"] === "string" ? o["summary"].slice(0, 50) : "";
   const draft =
     typeof o["draft"] === "string" && o["draft"].trim().length > 0 ? o["draft"].trim() : null;
+  // ★ consult v2.1 C1（§2.2 M-2）：LLM 值 — 只收兩個合法 workflow；缺/非法 → null（floor 照兜底）
+  const sessionTrigger =
+    typeof o["sessionTrigger"] === "string" && (AI_SESSION_TRIGGERS as readonly string[]).includes(o["sessionTrigger"])
+      ? o["sessionTrigger"]
+      : null;
 
   return {
     intent: o["intent"] as AiIntent,
@@ -93,6 +100,7 @@ function parseAndValidate(content: string): {
     confidence,
     summary,
     draft,
+    sessionTrigger,
   };
 }
 

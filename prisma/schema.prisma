@@ -142,6 +142,9 @@ model KnowledgeDoc {
   keywords   String[]                   // 口語+書面
   body       String    @db.Text         // ≤600 字，超長拆條
   disclaimer String?                    // kind=PRICE 必填（zod refine，長度 ≥8）
+  // ★ consult v2.1 C1（§0.5-B-2）：短版 disclaimer（≤12 字）— 高價值 PRICE 條目必填（zod refine）。
+  //   高價值 = priceMax/priceMin > 1.5 或 priceMax >= 5000（price-guard §0.5-B-1 只喺高價值先 append）。
+  shortDisclaimer String?
   priceMin   Int?
   priceMax   Int?                       // priceMin <= priceMax
   enabled    Boolean   @default(true)
@@ -368,6 +371,18 @@ model Conversation {
   // ★ cwi-auditfix-20260908（B-3）：R-7 首覆原子閘 — 每對話只生效一次（updateMany where=null 搶佔）。
   //   防「規則未標記 → 每條訊息重發 autoReplyTemplate」。null = 未發過首覆。
   routedFirstReplyAt DateTime? @db.Timestamptz
+  // ★ consult v2.1 C1（§2.2 M-2）：最近一輪 inbound 嘅最終 consult trigger（FLOOR 定死 ?? LLM 值）。
+  //   "ORTHODONTIC_CONSULT" | "IMPLANT_CONSULT" | null（非 consult / 未分過類）。暫住 Conversation —
+  //   C2 建 ConsultSession 後語義移去 session（MD §3）。
+  sessionTrigger String?
+  // ★ consult v2.1 C1（§2.3 M-3 gate 級）：最近一輪嘅 consult 閘動作 — 過窗 + consult trigger →
+  //   "WINDOW_EXPIRED_HANDOFF"（唔出 free-form 草稿、出既有三出路、對話保留唔關）；其餘輪 = null。
+  consultGateAction String?
+  // ★ consult v2.1 C1（§2.1 M-1）：店員自己打字（source=typed）→ true → consult 路徑停止出草稿；
+  //   「交返 AI 繼續」掣（C5 UI）負責清返 false。採用（source=adopted）唔置呢個旗。
+  humanTookOver  Boolean  @default(false)
+  // ★ consult v2.1 C1（§2.1 M-1）：實際發出嘅最後 OUT 文字（採用/改過/typing/AUTO 都記）— 下輪 context 用。
+  lastOutboundText String?
 
   @@unique([clinicId, contactId])
   @@index([clinicId, status, lastMessageAt])
@@ -422,6 +437,10 @@ model Message {
   // ★ cwi-inboxfix-20260905（MD §5.3）：已作廢標記（純內部 — 8 秒窗過後訊息已出街，
   //   病人端照見；staff 標記「呢句當佢冇發過」+ UI 內部 tag + 更正草稿入口）。
   //   唔會通知 Meta — WhatsApp Cloud API 冇刪除已發訊息 endpoint。
+  // ★ consult v2.1 C1（§2.1 M-1）：發送來源 — "AI_ADOPTED"（店員採用/改過草稿）| "AI_AUTO"（L2 自動發）
+  //   | "HUMAN_TYPED"（店員自己打字）| null（舊 row / template 發送 — 無標記）。
+  //   cooldown 閘只計 HUMAN_TYPED（MD §2.1：採用唔係「真人插嘴」— 死鎖根治）。
+  sentVia        String?
   voidedAt       DateTime? @db.Timestamptz
   waTimestamp    DateTime @db.Timestamptz
   createdAt      DateTime @db.Timestamptz  @default(now())

@@ -3,7 +3,7 @@
  *
  * 覆蓋：
  * - deid：電話（8 位/+852 形態）→ <phone>；姓名（contactName+profileName 集）→ <name>；日期/金額保留
- * - price-guard：① 零引用幻覺價 ② 漏 disclaimer 自動 append ③ 金額出範圍；無金額 = 原樣通過
+ * - price-guard：① 零引用幻覺價 ② 漏 disclaimer 自動 append（★ consult v2.1 C1 §0.5-B-1：高價值先 append，用 shortDisclaimer）③ 金額出範圍；無金額 = 原樣通過
  * - extractAmounts：幣符綁定（日期/時間/數量唔誤判）
  * - pickKnowledge mock：keyword 選 id（PRICE 優先）／E2E-KNOWLEDGE-NONE → 空／
  *   KNOWLEDGE_MOCK_HALLUCINATE → 幻覺丟棄 + 真 id 保留／KNOWLEDGE_MOCK_TIMEOUT → fail-soft
@@ -68,21 +68,44 @@ async function main(): Promise<void> {
   console.log("\n[buildPriceDraft]");
   const fakePriceDoc = {
     id: "kd-price-x", kind: "PRICE" as const, title: "洗牙收費", keywords: ["洗牙"],
-    body: "影響因素：牙石多寡。", disclaimer: "DISC-TEST-1234", priceMin: 600, priceMax: 1200,
+    body: "影響因素：牙石多寡。", disclaimer: "DISC-TEST-1234", shortDisclaimer: null,
+    priceMin: 600, priceMax: 1200,
   };
   const built = buildPriceDraft(fakePriceDoc);
   check("範圍文字", built.text?.includes("600–1200") === true, built.text ?? "null");
   check("body 影響因素", built.text?.includes("影響因素") === true);
-  check("disclaimer code 強制", built.text?.includes("DISC-TEST-1234") === true);
+  check("disclaimer code 強制（高價值無 short → fallback 完整）", built.text?.includes("DISC-TEST-1234") === true);
   const noRange = buildPriceDraft({ ...fakePriceDoc, priceMin: null, priceMax: null });
   check("冇 min/max → null（唔准報價）", noRange.text === null);
+
+  // ── ★ consult v2.1 C1（§0.5-B-1）：高價值判定 + shortDisclaimer 選擇 ────────────────────────
+  console.log("\n[§0.5-B-1 高價值/shortDisclaimer]");
+  const { isHighValuePriceRange, selectPriceDisclaimer } = await import("../src/lib/ai/price-guard");
+  check("ratio 2.0 → 高價值", isHighValuePriceRange(600, 1200) === true);
+  check("ratio 1.55 → 高價值", isHighValuePriceRange(2000, 3100) === true);
+  check("ratio 恰 1.5 → 非高價值（> 1.5 先算）", isHighValuePriceRange(2000, 3000) === false);
+  check("ratio 1.4 + <5000 → 非高價值", isHighValuePriceRange(1000, 1400) === false);
+  check("max >= 5000 → 高價值", isHighValuePriceRange(3000, 5000) === true);
+  check("max 4000 + ratio 1.33 → 非高價值", isHighValuePriceRange(3000, 4000) === false);
+  check("null 邊界 → 非高價值", isHighValuePriceRange(null, 1200) === false && isHighValuePriceRange(600, null) === false);
+  check("selectPriceDisclaimer 高價值+short → short", selectPriceDisclaimer({ ...fakePriceDoc, shortDisclaimer: "以到診評估為準" }) === "以到診評估為準");
+  check("selectPriceDisclaimer 高價值無 short → fallback 完整", selectPriceDisclaimer(fakePriceDoc) === "DISC-TEST-1234");
+  check("selectPriceDisclaimer 低價值 → null", selectPriceDisclaimer({ ...fakePriceDoc, priceMin: 1000, priceMax: 1400 }) === null);
+  const builtShort = buildPriceDraft({ ...fakePriceDoc, shortDisclaimer: "以到診評估為準" });
+  check("buildPriceDraft 高價值+short → 用 short（唔用完整）", builtShort.text?.includes("以到診評估為準") === true && builtShort.text?.includes("DISC-TEST-1234") === false, builtShort.text ?? "null");
+  const builtLow = buildPriceDraft({ ...fakePriceDoc, priceMin: 1000, priceMax: 1400, shortDisclaimer: "以到診評估為準" });
+  check("buildPriceDraft 低價值 → 無 disclaimer", builtLow.text?.includes("DISC-TEST-1234") === false && builtLow.text?.includes("以到診評估為準") === false, builtLow.text ?? "null");
 
   // ── runPriceGuard 3 條 ────────────────────────────────────────────────
   console.log("\n[runPriceGuard]");
   const g1 = runPriceGuard({ draft: "大概 $999 左右", priceDoc: null, priceIntent: false });
   check("① 零引用幻覺價 → 擋", g1.blocked === true && g1.draft === NO_PRICE_TEXT && g1.forceNeedsHuman === true);
   const g2 = runPriceGuard({ draft: "洗牙大約 $800", priceDoc: fakePriceDoc, priceIntent: false });
-  check("② in-range 漏 disclaimer → 自動 append", g2.blocked === false && g2.disclaimerAppended === true && g2.draft.includes("DISC-TEST-1234"));
+  check("② in-range 漏 disclaimer → 自動 append（高價值 fallback 完整）", g2.blocked === false && g2.disclaimerAppended === true && g2.draft.includes("DISC-TEST-1234"));
+  const g2b = runPriceGuard({ draft: "洗牙大約 $800", priceDoc: { ...fakePriceDoc, shortDisclaimer: "以到診評估為準" }, priceIntent: false });
+  check("② 高價值+short → append short（唔用完整）", g2b.blocked === false && g2b.disclaimerAppended === true && g2b.draft.includes("以到診評估為準") && !g2b.draft.includes("DISC-TEST-1234"), g2b.draft);
+  const g2c = runPriceGuard({ draft: "洗牙大約 $1200", priceDoc: { ...fakePriceDoc, priceMin: 1000, priceMax: 1400 }, priceIntent: false });
+  check("② 低價值 → 唔 append（§0.5-B-1）", g2c.blocked === false && g2c.disclaimerAppended === false && g2c.draft === "洗牙大約 $1200", g2c.draft);
   const g3 = runPriceGuard({ draft: "洗牙大約 $5000", priceDoc: fakePriceDoc, priceIntent: false });
   check("③ out-of-range → 擋", g3.blocked === true && g3.outOfRange === true && g3.draft === NO_PRICE_TEXT);
   const g4 = runPriceGuard({ draft: "多謝查詢，請到店", priceDoc: null, priceIntent: false });

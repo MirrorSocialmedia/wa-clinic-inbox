@@ -19,6 +19,8 @@ export interface CatalogDoc {
   keywords: string[];
   body: string;
   disclaimer: string | null;
+  /** ★ consult v2.1 C1（§0.5-B-2）：短版 disclaimer（≤12 字）— 高價值 PRICE 用 */
+  shortDisclaimer: string | null;
   priceMin: number | null;
   priceMax: number | null;
 }
@@ -70,6 +72,7 @@ export async function getKnowledgeCatalog(clinicId: string | null): Promise<Know
       keywords: r.keywords,
       body: r.body,
       disclaimer: r.disclaimer,
+      shortDisclaimer: r.shortDisclaimer,
       priceMin: r.priceMin,
       priceMax: r.priceMax,
     }));

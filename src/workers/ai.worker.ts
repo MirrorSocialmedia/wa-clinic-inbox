@@ -44,6 +44,7 @@ import { isPriceIntent, buildPriceDraft, runPriceGuard, NO_PRICE_TEXT } from "@/
 import { getLexicon, applyLexicon } from "@/lib/sessions/lexicon";
 import { matchRedFlagTerms, effectiveRedFlagTerms } from "@/lib/sessions/red-flags";
 import { painStep, parsePainState, PAIN_SESSION_TTL_MS } from "@/lib/sessions/pain-triage";
+import { triggerFloor } from "@/lib/sessions/consult-trigger";
 import { phoneHash } from "@/lib/phone-hash";
 import { hkDateOffset } from "@/lib/availability";
 import { lookupPatient, fetchAppointments } from "@/lib/workforce/client";
@@ -296,6 +297,14 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     }
   }
 
+  // ── ★ consult v2.1 C1（§2.2 M-2）：consult session trigger 最終值 = FLOOR（deterministic）?? LLM 值 ──
+  // FLOOR = code 常數（CONSULT_TRIGGER_FLOOR，UI 顯示但唔可刪）—「觸發唔靠 LLM」；
+  // LLM 值（result.sessionTrigger）只喺 FLOOR 唔中時補充。floor 優先（MD §2.2）。
+  const consultTrigger =
+    msg.type === "text" && msg.body
+      ? triggerFloor(msg.body, applyLexicon(msg.body, ptLex)) ?? result.sessionTrigger ?? null
+      : null;
+
   // ── ★ Part F（cwi-raggolden-20260904，F.4）：報價鏈 + price-guard（deterministic）──────────
   //   報價鏈：intent=QUESTION 且 lexicon normalize 後命中價錢意圖 → 檢索優先 PRICE 其次 SERVICE：
   //   有 PRICE doc → 決定性報價（範圍 + 影響因素 + disclaimer code 強制）；無 → 唔准報價（人手提示 + needsHuman）。
@@ -360,6 +369,15 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   // ── 3. 分類落 Conversation ───────────────────────────────────────────
   // ★ H-3 第二層（deterministic scrub，零 AI 依賴）：AI 可能唔聽 prompt 寫咗身份資料 —
   //   落庫/推送前將 profileName（完整 + ≥2 字子串）同 waId 後 8 位替換做 病人/***
+  // ── cwi-window-20260901（P2）：窗口狀態（W-2）──
+  // 過窗：AI 草稿照生成但 mode=COPY_ONLY（UI 只准複製）；C6 session 唔開（session reply = 自動覆，
+  // 過窗發唔出 → 避免一堆 FAILED outbound）；AUTO 自動覆本就有 window-closed 閘（下方 blocks）。
+  // ★ consult v2.1 C1：喺 step 3 update 之前攞（update 唔改 lastInboundAt）— M-3 gate action 要用。
+  const win = getWindowState(conv.lastInboundAt);
+  // ★ consult v2.1 C1（§2.3 M-3 gate 級）：窗口已過 + consult trigger → WINDOW_EXPIRED_HANDOFF
+  //   （唔生成 free-form 草稿、出既有三出路、對話保留唔關；完整 transition table 屬 C3）。
+  const consultGateAction = !win.open && consultTrigger !== null ? "WINDOW_EXPIRED_HANDOFF" : null;
+
   const safeSummary = scrubAiSummary(result.summary, { profileName: contact?.profileName, waId: contact?.waId });
   const urgent = result.intent === "URGENT_PAIN" || result.urgency === "HIGH";
   const updatedConv = await prisma.conversation.update({
@@ -371,13 +389,12 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       aiSummary: safeSummary.length > 0 ? safeSummary.slice(0, 50) : null,
       // urgent 只 set true 唔 set false — 已標急症嘅對話唔會被新一條普通訊息蓋掉
       ...(urgent ? { urgent: true } : {}),
+      // ★ consult v2.1 C1（§2.2 M-2）：最近一輪最終 consult trigger（FLOOR ?? LLM）
+      sessionTrigger: consultTrigger,
+      // ★ consult v2.1 C1（§2.3 M-3 gate 級）：最近一輪 consult 閘動作（過窗 + trigger）
+      consultGateAction,
     },
   });
-
-  // ── cwi-window-20260901（P2）：窗口狀態（W-2）──
-  // 過窗：AI 草稿照生成但 mode=COPY_ONLY（UI 只准複製）；C6 session 唔開（session reply = 自動覆，
-  // 過窗發唔出 → 避免一堆 FAILED outbound）；AUTO 自動覆本就有 window-closed 閘（下方 blocks）。
-  const win = getWindowState(updatedConv.lastInboundAt);
 
   // ── ★ cwi-routing-20260906（§2）：規則式路由 — 標記 + 通知（R-2：唔掂 assigneeId，對話仍公海）──
   //   掛鉤點 = classify 落 DB 之後、任何通知之前。R-8：URGENT_PAIN/HIGH 嘅全店 urgent:escalation
@@ -475,12 +492,32 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     /** cwi-window-20260901（P2）：NORMAL（窗口內）/ COPY_ONLY（過窗 — UI 只准複製） */
     mode: string;
   } | null = null;
+  // ★ consult v2.1 C1（§2.3 M-3）：過窗 + consult trigger → 唔出 free-form 草稿（出既有三出路；對話保留）。
+  //   限 consult-trigger 範圍 — 非 consult 過窗對話行為零改動（COPY_ONLY 草稿照出）。
+  const consultWindowExpired = !win.open && consultTrigger !== null;
+  // ★ consult v2.1 C1（§2.1 M-1）：店員自己打字接手（humanTookOver）+ 本輪係 consult trigger → 停出草稿
+  //   （「交返 AI 繼續」掣 = C5 UI；C1 只 backend 狀態 + API。限 consult 範圍 — 非 consult 零改動；
+  //   C2/C3 會將 takeover 語義移去 ConsultSession）。
+  const consultTakeoverSuppressed = updatedConv.humanTookOver && consultTrigger !== null;
+  if (consultWindowExpired) {
+    log.info(
+      { clinic: clinic.code, wamid: msg.waMessageId, trigger: consultTrigger, gate: consultGateAction },
+      "ai: consult window expired — no free-form draft（既有三出路：App 覆 / template / 等病人；對話保留）"
+    );
+  } else if (consultTakeoverSuppressed) {
+    log.info(
+      { clinic: clinic.code, wamid: msg.waMessageId, trigger: consultTrigger },
+      "ai: human took over — consult draft suppressed（等「交返 AI 繼續」）"
+    );
+  }
   const canDraft =
     result.intent !== "URGENT_PAIN" &&
     result.intent !== "COMPLAINT" && // ★ Phase C：投訴唔出 AI 草稿 — 呢啲說話要人講
     result.urgency !== "HIGH" &&
     result.draft !== null &&
-    msg.type === "text"; // ★ AI Workflow T1 (A2)：媒體唔出草稿（只內部通知職員）
+    msg.type === "text" && // ★ AI Workflow T1 (A2)：媒體唔出草稿（只內部通知職員）
+    !consultWindowExpired &&
+    !consultTakeoverSuppressed;
   if (canDraft) {
     // 冪等：unique(conversationId, inReplyToMessageId) + 前置查（retry 重跑唔會重複 draft）
     let existing = await prisma.aiDraft.findUnique({
@@ -566,19 +603,23 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     if (isMedia) blocks.push("media");
     // 可選第八閘：未 claim 但真人啱啱插咗嘴（冷靜期 — ★ Phase D：params 由 WorkflowDefinition
     // 「triage」ACTIVE row 讀（三級 fallback + fail-soft；env AI_HUMAN_COOLDOWN_MS 保留做底））
+    // ★ consult v2.1 C1（§2.1 M-1，MD §2.1 代碼）：cooldown 只計最後 OUT 係 HUMAN_TYPED（店員自己打字）。
+    //   採用（AI_ADOPTED）/ AI 自動（AI_AUTO）/ 舊 row（null）都唔算「真人插嘴」→ 人手介入死鎖根治。
     const triageParams = await getParams("triage", conv.clinicId);
     const cooldownMs = triageParams.humanCooldownMs;
-    const recentHuman = await prisma.message.findFirst({
+    const lastOut = await prisma.message.findFirst({
       where: {
         conversationId: conv.id,
         direction: "OUT",
-        sentByStaffId: { not: null },
         channel: { not: "INTERNAL" }, // ★ INTERNAL 備註（assign/transfer 自動落）唔係「覆病人」— 唔觸發冷靜期
-        waTimestamp: { gte: new Date(Date.now() - cooldownMs) },
       },
-      select: { id: true },
+      orderBy: { createdAt: "desc" },
+      select: { sentVia: true, createdAt: true },
     });
-    if (recentHuman) blocks.push("human-recent");
+    const humanCooldownActive =
+      lastOut?.sentVia === "HUMAN_TYPED" &&
+      Date.now() - lastOut.createdAt.getTime() < cooldownMs;
+    if (humanCooldownActive) blocks.push("human-recent");
     // ★ Phase D 第九閘：confidence 低過 floor → low-confidence（floor 由 triage params 校）
     if (result.confidence < triageParams.confidenceFloor) blocks.push("low-confidence");
     if (blocks.length > 0) {
@@ -618,6 +659,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
         },
         impression: null,
         price: priceTrace,
+        // ★ consult v2.1 C1（§2）：consult trigger/gate 可觀測性（metadata only — 零病人原文）
+        consult: { trigger: consultTrigger, gateAction: consultGateAction, windowExpired: consultWindowExpired },
         latencyMs: result.latencyMs,
       };
       await prisma.aiDraft.update({
@@ -755,6 +798,8 @@ async function attemptAutoSend(args: {
       status: "QUEUED",
       sentByStaffId: null,
       aiAutoSent: true,
+      // ★ consult v2.1 C1（§2.1 M-1）：L2 自動發 = AI_AUTO（cooldown 閘唔計佢）
+      sentVia: "AI_AUTO",
       aiDraftId: draft.id,
       // cwi-window-20260901（P1）：AI 窗口內自動覆 = SERVICE（同人手窗口內回覆同類）
       billingCategory: "SERVICE",
@@ -800,6 +845,12 @@ async function attemptAutoSend(args: {
   }
 
   // enqueue 成功 → 留底 draft（SENT_AUTO，staff 之後可審計）+ AuditLog 必登（metadata only）
+  // ★ consult v2.1 C1（§2.1 M-1）：記實際發出文字 → 下輪 AI context（lastOutboundText）
+  await prisma.conversation
+    .update({ where: { id: conv.id }, data: { lastOutboundText: draft.draftText } })
+    .catch((err) => {
+      log.warn({ err: err instanceof Error ? err.message : String(err) }, "ai: lastOutboundText update failed（fail-soft）");
+    });
   await prisma.aiDraft.update({
     where: { id: draft.id },
     data: { status: "SENT_AUTO", finalText: draft.draftText },
@@ -1159,6 +1210,8 @@ async function sendSessionReply(
         status: "QUEUED",
         sentByStaffId: null,
         aiAutoSent: true,
+        // ★ consult v2.1 C1（§2.1 M-1）：session 自動覆 = AI_AUTO（cooldown 閘唔計佢）
+        sentVia: "AI_AUTO",
         bookingSessionId,
         // cwi-window-20260901（P1）：session 回覆（窗口內）= SERVICE
         billingCategory: "SERVICE",
@@ -1183,6 +1236,10 @@ async function sendSessionReply(
       .catch(() => undefined);
     await prisma.$executeRaw`
       UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
+    // ★ consult v2.1 C1（§2.1 M-1）：記實際發出文字 → 下輪 AI context
+    await prisma.conversation
+      .update({ where: { id: conv.id }, data: { lastOutboundText: text } })
+      .catch(() => undefined);
     return outMsg.id;
   } catch (err) {
     // enqueue fail → 唔重試，session 照 patch（病人下條訊息自然接力）

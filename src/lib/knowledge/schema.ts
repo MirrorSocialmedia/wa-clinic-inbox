@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { bustKnowledgeCache } from "@/lib/knowledge/catalog";
 import { publishControl } from "@/lib/notify";
+import { isHighValuePriceRange } from "@/lib/ai/price-guard";
 
 export const KNOWLEDGE_KINDS = ["SERVICE", "POST_OP", "POLICY", "PRICE", "PREP", "FAQ"] as const;
 
@@ -19,6 +20,8 @@ export const knowledgeDocSchema = z
     keywords: z.array(z.string().min(1).max(40)).min(1).max(20),
     body: z.string().min(1).max(1200), // MD: ≤600 字 — 1200 char hard cap 防 prompt 爆
     disclaimer: z.string().max(300).nullable(),
+    // ★ consult v2.1 C1（§0.5-B-2）：短版 disclaimer（≤12 字）— 高價值 PRICE 必填（下方 refine）
+    shortDisclaimer: z.string().min(1).max(12).nullable().optional(),
     priceMin: z.number().int().positive().nullable(),
     priceMax: z.number().int().positive().nullable(),
     enabled: z.boolean().optional(),
@@ -27,6 +30,17 @@ export const knowledgeDocSchema = z
     message: "PRICE 條目 disclaimer 必填（長度 ≥8）",
     path: ["disclaimer"],
   })
+  .refine(
+    (d) =>
+      d.kind !== "PRICE" ||
+      !isHighValuePriceRange(d.priceMin, d.priceMax) ||
+      (d.shortDisclaimer !== undefined && d.shortDisclaimer !== null && d.shortDisclaimer.trim().length > 0),
+    {
+      // ★ consult v2.1 C1（§0.5-B-2）：PRICE 且高價值（priceMax/priceMin > 1.5 或 priceMax >= 5000）→ shortDisclaimer 必填
+      message: "高價值 PRICE 條目 shortDisclaimer 必填（≤12 字）",
+      path: ["shortDisclaimer"],
+    }
+  )
   .refine((d) => d.kind !== "PRICE" || (d.priceMin !== null && d.priceMax !== null), {
     message: "PRICE 條目 priceMin/priceMax 必填",
     path: ["priceMin"],

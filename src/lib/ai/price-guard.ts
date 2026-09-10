@@ -8,7 +8,8 @@
  *
  * price-guard（草稿生成後、入庫前，deterministic，3 條）：
  * ① 草稿含價錢符號/數字模式 且 零 PRICE 引用 → 棄用草稿改人手提示版 + log `price: unsourced amount blocked`
- * ② 有 PRICE doc 但 disclaimer 句唔喺草稿 → code 自動 append
+ * ② 有 PRICE doc 且屬高價值（§0.5-B-1）但草稿缺 disclaimer 句 → code 自動 append **shortDisclaimer**（≤12 字；
+ *    低價值（窄範圍 + <5000）唔 append — MD §0.5-B）
  * ③ 草稿金額數字唔喺 [priceMin, priceMax] → 同 ① 處理
  *
  * > 呢三條係報價唯一嘅安全保證 — 模型幻覺一個價出嚟嘅風險由此結構性消除。
@@ -52,6 +53,30 @@ export function extractAmounts(text: string): number[] {
 /** 無 PRICE doc / 金額被擋時嘅人手提示版（唔准報價 — MD F.4）。 */
 export const NO_PRICE_TEXT = "呢項收費要幫你問返同事／到診評估先至準確，等我哋確認後即刻回覆你。";
 
+// ── ★ consult v2.1 C1（§0.5-B-1）：高價值判定 + disclaimer 選擇 ────────────────────────
+
+/** 高價值價格範圍：`priceMax/priceMin > 1.5` **或** `priceMax >= 5000`（MD §0.5-B 逐字）。 */
+export function isHighValuePriceRange(priceMin: number | null, priceMax: number | null): boolean {
+  if (priceMin === null || priceMax === null || priceMin <= 0 || priceMax <= 0) return false;
+  return priceMax / priceMin > 1.5 || priceMax >= 5000;
+}
+
+/**
+ * 選擇要 append 嘅 disclaimer（§0.5-B-1）：
+ * - 高價值 → `shortDisclaimer`（≤12 字）；舊 row 未填 shortDisclaimer → fallback 完整 disclaimer（安全優先：永不無 disclaimer）
+ * - 低價值 → null（唔 append — MD「只喺高價值先 append」）
+ */
+export function selectPriceDisclaimer(doc: {
+  disclaimer: string | null;
+  shortDisclaimer: string | null;
+  priceMin: number | null;
+  priceMax: number | null;
+}): string | null {
+  if (!isHighValuePriceRange(doc.priceMin, doc.priceMax)) return null;
+  const short = doc.shortDisclaimer?.trim();
+  return short && short.length > 0 ? short : doc.disclaimer ?? null;
+}
+
 export interface PriceGuardInput {
   /** 最終草稿（报价鏈決定性 draft 或 LLM draft；null = 無草稿） */
   draft: string | null;
@@ -89,7 +114,9 @@ export function buildPriceDraft(doc: CatalogDoc): { text: string | null; rangeTe
   const body = doc.body && doc.body.trim() && doc.body.trim() !== "影響因素：" ? doc.body.trim() : "";
   const parts = [`「${doc.title}」嘅費用${rangeText}。`];
   if (body) parts.push(body);
-  parts.push(doc.disclaimer ?? "");
+  // ★ consult v2.1 C1（§0.5-B-1）：高價值 → shortDisclaimer；低價值 → 唔加（同 runPriceGuard ② 同源 helper）
+  const disc = selectPriceDisclaimer(doc);
+  if (disc) parts.push(disc);
   return { text: parts.join("\n"), rangeText };
 }
 
@@ -133,10 +160,12 @@ export function runPriceGuard(input: PriceGuardInput): PriceGuardResult {
     return result;
   }
 
-  // ② 有 PRICE doc 且草稿實際含金額但缺 disclaimer → code 自動 append
-  //   （只限「草稿有金額」— 非報價草稿就算 RAG 揀咗 PRICE doc 都唔好硬塞 disclaimer）
-  if (priceDoc && priceDoc.disclaimer && amounts.length > 0 && !draft.includes(priceDoc.disclaimer)) {
-    result.draft = `${draft}\n${priceDoc.disclaimer}`;
+  // ② 有 PRICE doc 且屬高價值（§0.5-B-1）且草稿實際含金額但缺 disclaimer → code 自動 append
+  //   （只限「草稿有金額」— 非報價草稿就算 RAG 揀咗 PRICE doc 都唔好硬塞 disclaimer；
+  //     低價值（窄範圍 + <5000）唔 append — MD「只喺 priceMax/priceMin > 1.5 或 priceMax >= 5000 先」）
+  const priceDisclaimer = priceDoc ? selectPriceDisclaimer(priceDoc) : null;
+  if (priceDoc && priceDisclaimer && amounts.length > 0 && !draft.includes(priceDisclaimer)) {
+    result.draft = `${draft}\n${priceDisclaimer}`;
     result.disclaimerAppended = true;
   }
   return result;

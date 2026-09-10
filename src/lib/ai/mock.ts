@@ -141,7 +141,7 @@ export async function mockClassifyAndDraft(
   await sleep(MOCK_LATENCY_MS);
 
   const body = lastInboundBody(input);
-  let result: Omit<ClassifyAndDraftResult, "model" | "latencyMs" | "tokens">;
+  let result: Omit<ClassifyAndDraftResult, "model" | "latencyMs" | "tokens" | "sessionTrigger">;
 
   const floorHit = hitFloorTerm(body);
   if (floorHit !== null) {
@@ -219,6 +219,10 @@ export async function mockClassifyAndDraft(
 
   return {
     ...result,
+    // ★ consult v2.1 C1（§2.2 M-2）：mock LLM sessionTrigger — 預設 null（FLOOR 自己 carry —
+    //   「觸發唔靠 LLM」口徑）；bait E2E-CONSULT-TRIG-NOFLOOR → IMPLANT_CONSULT（LLM 話觸發但 FLOOR
+    //   冇 — 測最終值 = floor ?? llm 嘅 LLM fallback 路；同 bait 可以夾 FLOOR 詞測 floor 優先）。
+    sessionTrigger: body.includes("E2E-CONSULT-TRIG-NOFLOOR") ? "IMPLANT_CONSULT" : null,
     // summary 鐵律 ≤50 字（mock 模板已短，defense in depth）
     // ★ E2E bait：附固定 token — H-3 scrub 測試靶（同 E2E_BAIT_SUM_TOKEN 同名嘅 contact 會俾撳走）
     summary: `${result.summary.slice(0, 30)} ${E2E_BAIT_SUM_TOKEN}`.slice(0, 50),

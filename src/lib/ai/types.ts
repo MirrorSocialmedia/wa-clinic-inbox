@@ -24,6 +24,11 @@ export type AiIntent = (typeof AI_INTENTS)[number];
 export const AI_URGENCIES = ["LOW", "MED", "HIGH"] as const;
 export type AiUrgency = (typeof AI_URGENCIES)[number];
 
+// ★ consult v2.1 C1（§2.2 M-2）：consult session trigger（LLM 值；worker 再過 FLOOR — floor 優先）。
+// string 型（唔 import consult-trigger）— 避免 lib/ai ↔ lib/sessions 型別循環；合法值喺 parse 端校。
+export const AI_SESSION_TRIGGERS = ["ORTHODONTIC_CONSULT", "IMPLANT_CONSULT"] as const;
+export type AiSessionTrigger = (typeof AI_SESSION_TRIGGERS)[number];
+
 /** 餵入 AI 嘅上下文訊息（最近 N 條，含 in/out，HISTORY 都算 context）。 */
 export interface AiContextMessage {
   direction: "IN" | "OUT";
@@ -74,6 +79,9 @@ export interface ClassifyAndDraftResult {
   summary: string;
   /** 建議覆 reply（只係建議；staff 一鍵採用先入 composer，發送仍係人手） */
   draft: string | null;
+  /** ★ consult v2.1 C1（§2.2 M-2）：病人係唔係開 CONSULT session 嘅訊號（LLM 值）。
+   *  "ORTHODONTIC_CONSULT" | "IMPLANT_CONSULT" | null（worker 最終 = triggerFloor ?? 呢個值） */
+  sessionTrigger: string | null;
   model: string;
   latencyMs: number;
   tokens: number;
