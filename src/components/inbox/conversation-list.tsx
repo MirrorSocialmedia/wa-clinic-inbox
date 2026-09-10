@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Bell, BellRing, CalendarDays, MessageCircle, Search, Settings, X } from "lucide-react";
 import type { ClinicInfo, ConversationItem, ConvStatus, StaffNoticeItem } from "./types";
 import { relTime } from "./time";
@@ -66,13 +66,6 @@ interface Props {
   onUnlockAudio?: () => void;
 }
 
-const STATUS_LABEL: Record<ConvStatus | "ALL", string> = {
-  ALL: "全部",
-  OPEN: "處理中",
-  PENDING: "等回覆",
-  RESOLVED: "已解決",
-};
-
 // Phase 2：intent 標籤（AI 分類；未分類 = 不顯示）
 const INTENT_META: Record<string, { label: string; cls: string }> = {
   BOOKING_REQUEST: { label: "預約", cls: "bg-ok-soft text-ok-text" },
@@ -103,6 +96,12 @@ function previewOf(c: ConversationItem): string {
   return c.preview ?? c.contact?.profileName ?? c.contact?.waId ?? "（無訊息）";
 }
 
+// ★ cwi-statusrole2-20260910 T1：計數顯示 cap 99+ — 膠囊行寬度有上界（唔准橫向捲）
+function fmtCap(n: number | null | undefined): string {
+  const v = n ?? 0;
+  return v > 99 ? "99+" : String(v);
+}
+
 /**
  * 隊列欄（MD §6.4）v2 — SleekFlow 風格：
  * - clinic dropdown（ADMIN；STAFF 只自己店，唔顯示）
@@ -118,6 +117,36 @@ export function ConversationList(p: Props) {
   // ★ F-6（cwi-notify-fix-20260907）：發測試通知（/api/push/test — 同真通知同一條路）
   const [testBusy, setTestBusy] = useState(false);
   const [testResult, setTestResult] = useState<{ kind: "muted" | "other"; text: string; clinicId?: string } | null>(null);
+  // ★ cwi-statusrole2-20260910 T1（MD §1.1）：mobile <400px — 待跟進併入 ⋯ 溢出選單（唔准橫向捲）
+  const [narrow, setNarrow] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  // 溢出保護（一嚝）：五粒膠囊喺現行容器放唔低（大計數邊界）→ 待跟進併入 ⋯；
+  // 只設 true 唔回 false（防 osc）— narrow 切換時先 reset 重新量。
+  const [overflowCollapsed, setOverflowCollapsed] = useState(false);
+  const capsuleRowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 399px)");
+    const on = () => setNarrow(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  useEffect(() => {
+    // narrow 模式由 matchMedia 決定 — 重置 overflow 旗重新量
+    if (narrow) {
+      setOverflowCollapsed(false);
+      return;
+    }
+    const el = capsuleRowRef.current;
+    if (!el) return;
+    const check = () => {
+      if (el.scrollWidth > el.clientWidth + 1) setOverflowCollapsed(true);
+    };
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [narrow, p.counts]);
 
   const sendTestNotify = async () => {
     if (testBusy) return;
@@ -494,59 +523,132 @@ export function ConversationList(p: Props) {
         )}
       </div>
 
-      {/* ★ cwi-inboxfix-20260905（MD §1.1 I-1）：膠囊行 = 指派維度（全部 · 公海 N · 我負責 N）+ 狀態維度（處理中 · 等回覆 · 已解決）。
-          公海 = 唯一有色膠囊（bg-warn 系）— 佢係唯一「冇人跟＝會漏單」嘅狀態。
-          狀態 chip 撳 active 嗰粒 = 返轉去（無獨立「全部狀態」chip — 指派維度「全部」= 總開關）。 */}
-      <div className="flex gap-1.5 px-3 py-2 overflow-x-auto items-center">
-        {(["all", "unassigned", "mine", "routed"] as const).map((f) => {
-          const active = p.assignedFilter === f;
-          const isPool = f === "unassigned";
-          const isRouted = f === "routed";
-          const label =
-            f === "all"
-              ? "全部"
-              : isPool
-                ? `公海 ${p.counts?.unassigned ?? 0}`
-                : isRouted
-                  ? `派俾我 ${p.counts?.routed ?? 0}`
-                  : `我負責 ${p.counts?.mine ?? 0}`;
-          return (
-            <button
-              key={f}
-              onClick={() => p.onAssignedFilter(f)}
-              aria-pressed={active}
-              className={`px-2.5 py-0.5 rounded-full text-xs whitespace-nowrap ${
-                isPool
-                  ? active
+      {/* ★ cwi-statusrole2-20260910 T1（MD §1.1/§1.2）：膠囊區兩行。
+          第一行（要做嘅嘢）= 五粒指派膠囊：全部 · 公海 N · 派俾我 N · 我負責 N · 待跟進 N
+            - 公海 = 唯一有色（橙 bg-warn 系）；派俾我 = 重點色邊框（brand）
+            - 處理中／等回覆 膠囊已剷（假分類 — 冇人手動改 ConvStatus）
+            - 待跟進：FollowupTask 未實作 → 計數恒 0（CEO 拍板）— no-op 膠囊（MD §3 歸 T2）
+            - 唔准橫向捲：計數 99+ cap；<400px 時待跟進併入 ⋯ 溢出選單
+          第二行（已完成）= 右側狀態切換器，只兩選項：
+            處理中(OPEN) / 睇已解決 →(RESOLVED) — PENDING 隱藏（MD §1.2；API 仍接受舊 link） */}
+      <div className="px-3 py-2 flex flex-col gap-1.5">
+        <div ref={capsuleRowRef} data-e2e="capsule-row" className="flex items-center gap-1 flex-nowrap">
+          {((): {
+            defs: { key: string; label: string; active: boolean; cls: string; onClick: () => void; title?: string }[];
+          } => {
+            const neutral = (active: boolean) =>
+              active
+                ? "bg-t1 text-canvas border border-t1"
+                : "bg-transparent text-t2 border border-line hover:bg-panel-2";
+            const defs: { key: string; label: string; active: boolean; cls: string; onClick: () => void; title?: string }[] = [
+              {
+                key: "all",
+                label: "全部",
+                active: p.assignedFilter === "all",
+                cls: neutral(p.assignedFilter === "all"),
+                onClick: () => p.onAssignedFilter("all"),
+              },
+              {
+                key: "unassigned",
+                label: `公海 ${fmtCap(p.counts?.unassigned)}`,
+                active: p.assignedFilter === "unassigned",
+                // 唯一有色膠囊（橙）— 冇人跟＝會漏單
+                cls:
+                  p.assignedFilter === "unassigned"
                     ? "bg-warn text-white font-semibold shadow-sm"
-                    : "bg-warn/25 text-warn-text"
-                  : isRouted
-                    ? active
-                      ? "bg-brand text-panel font-semibold shadow-sm"
-                      : "bg-brand-soft text-brand-text"
-                    : active
-                      ? "bg-t1 text-canvas"
-                      : "bg-transparent text-t2 border border-line hover:bg-panel-2"
-              }`}
+                    : "bg-warn/25 text-warn-text",
+                onClick: () => p.onAssignedFilter("unassigned"),
+              },
+              {
+                key: "routed",
+                label: `派俾我 ${fmtCap(p.counts?.routed)}`,
+                active: p.assignedFilter === "routed",
+                // 重點色邊框（brand）— 次強調
+                cls:
+                  p.assignedFilter === "routed"
+                    ? "border border-brand bg-brand text-panel font-semibold"
+                    : "border border-brand bg-brand-soft/50 text-brand-text",
+                onClick: () => p.onAssignedFilter("routed"),
+              },
+              {
+                key: "mine",
+                label: `我負責 ${fmtCap(p.counts?.mine)}`,
+                active: p.assignedFilter === "mine",
+                cls: neutral(p.assignedFilter === "mine"),
+                onClick: () => p.onAssignedFilter("mine"),
+              },
+            ];
+            if (!narrow && !overflowCollapsed) {
+              // 待跟進：FollowupTask 未實作 → 計數恒 0（no-op）；<400px 時移入 ⋯ 選單
+              defs.push({
+                key: "followup",
+                label: "待跟進 0",
+                active: false,
+                cls: "bg-transparent text-t3 border border-line",
+                onClick: () => {},
+                title: "跟進功能未啟用",
+              });
+            }
+            return { defs };
+          })().defs.map((c) => (
+            <button
+              key={c.key}
+              onClick={c.onClick}
+              aria-pressed={c.active}
+              title={c.title}
+              className={`px-1.5 py-0.5 rounded-full text-xs whitespace-nowrap shrink-0 ${c.cls}`}
             >
-              {label}
+              {c.label}
             </button>
-          );
-        })}
-        <span className="w-px h-4 bg-line shrink-0" aria-hidden />
-        {(["OPEN", "PENDING", "RESOLVED"] as const).map((s) => (
+          ))}
+          {(narrow || overflowCollapsed) && (
+            <div className="relative shrink-0">
+              <button
+                onClick={() => setMoreOpen((v) => !v)}
+                aria-label="更多膠囊（待跟進）"
+                aria-expanded={moreOpen}
+                className="w-6 h-6 rounded-full border border-line text-t2 hover:bg-panel-2 text-sm leading-none flex items-center justify-center"
+              >
+                ⋯
+              </button>
+              {moreOpen && (
+                <>
+                  <div className="fixed inset-0 z-30" onClick={() => setMoreOpen(false)} aria-hidden />
+                  <div className="absolute right-0 top-7 z-40 rounded-lg border border-line bg-panel shadow-lg py-1 w-28">
+                    <button
+                      title="跟進功能未啟用"
+                      className="block w-full text-left px-2.5 py-1.5 text-xs text-t3 whitespace-nowrap"
+                    >
+                      待跟進 0
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        <div data-e2e="status-toggle" className="flex items-center justify-end gap-2.5">
           <button
-            key={s}
-            onClick={() => p.onStatusFilter(p.statusFilter === s ? "ALL" : s)}
-            className={`px-2.5 py-0.5 rounded-full text-xs whitespace-nowrap ${
-              p.statusFilter === s
-                ? "bg-t1 text-canvas"
-                : "bg-transparent text-t2 border border-line hover:bg-panel-2"
+            onClick={() => p.onStatusFilter(p.statusFilter === "OPEN" ? "ALL" : "OPEN")}
+            aria-pressed={p.statusFilter === "OPEN"}
+            title="只睇處理中（OPEN）對話；再撳一次返轉去"
+            className={`px-1 text-xs ${
+              p.statusFilter === "OPEN" ? "text-t1 font-semibold underline underline-offset-2" : "text-t3 hover:text-t1"
             }`}
           >
-            {STATUS_LABEL[s]}
+            處理中
           </button>
-        ))}
+          <button
+            onClick={() => p.onStatusFilter(p.statusFilter === "RESOLVED" ? "ALL" : "RESOLVED")}
+            aria-pressed={p.statusFilter === "RESOLVED"}
+            title="只睇已解決對話；再撳一次返轉去"
+            className={`px-1 text-xs ${
+              p.statusFilter === "RESOLVED" ? "text-brand font-semibold underline underline-offset-2" : "text-t3 hover:text-t1"
+            }`}
+          >
+            睇已解決 →
+          </button>
+        </div>
       </div>
 
       {/* list — 卡片式行（66px 行高 / 38px 頭像 / gap 分隔，無 border-b） */}

@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth } from "@/lib/rbac";
+import { requireAuth, type AuthContext } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
 
@@ -26,6 +26,27 @@ export const dynamic = "force-dynamic";
 
 const WINDOW_MS = 24 * 3600 * 1000;
 
+/**
+ * ★ cwi-statusrole2-20260910 T1（MD §2）：預設列表 base scope — 單一真相源。
+ * 列表 query（無 assigned filter）同 ?counts=1 計數 query 必共用呢個 function，
+ * 唔准各寫一次 scope（§2 三計數不變式嘅實作要求）。
+ * - STAFF：clinic（clinicParam 有 = 收窄該店）∪ 我係 assignee 嘅線（MD A.3 / I-2 —
+ *   跨店指派俾我嘅線永遠喺 scope 內 → 跨店 assignee 天然計入 mine 計數）。
+ * - ADMIN/SUPERVISOR：clinicParam（冇 = 全店）。
+ */
+function buildScope(
+  ctx: Pick<AuthContext, "staff" | "clinicIds">,
+  clinicParam: string | null,
+): Record<string, unknown> {
+  const w: Record<string, unknown> = {};
+  if (ctx.staff.role === "STAFF") {
+    w.OR = [{ clinicId: clinicParam ?? { in: ctx.clinicIds } }, { assigneeId: ctx.staff.id }];
+  } else if (clinicParam) {
+    w.clinicId = clinicParam;
+  }
+  return w;
+}
+
 export const GET = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
   const url = new URL(req.url);
@@ -37,16 +58,16 @@ export const GET = handle(async (req: NextRequest) => {
     return NextResponse.json({ error: "invalid assigned (unassigned|mine|routed)" }, { status: 400 });
   }
 
+  // STAFF 砌別店 clinicId → 403（RBAC 鐵律，E2E 要實測呢條；所有 branch 適用）
+  if (clinicParam && ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
+    return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
+  }
+
   const where: Record<string, unknown> = {};
   if (assignedParam) {
-    // ★ cwi-inboxfix-20260905（MD I-2 鐵律）：嚴格 scope — 唔經 conversationScope 嘅 OR 支路。
+    // ★ cwi-inboxfix-20260905（MD I-2 鐵律）：嚴格 scope — 唔經 buildScope 嘅 assignee OR 支路。
     // unassigned：clinic 限定 + assigneeId:null（外店線絕對漏唔入嚟）。
     // mine：assigneeId=自己（跨店指派俾自己嘅線保留；STAFF 唔限 clinic — 同 A.3 assignee 支路一致）。
-    if (clinicParam) {
-      if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
-        return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-      }
-    }
     if (assignedParam === "unassigned") {
       where.assigneeId = null;
       if (ctx.staff.role === "STAFF") {
@@ -75,24 +96,8 @@ export const GET = handle(async (req: NextRequest) => {
       if (ctx.staff.role === "ADMIN" && clinicParam) where.clinicId = clinicParam;
     }
   } else {
-    // 預設列表（無 assigned filter）：現有 scope 語義完全不變（STAFF = clinic ∪ assignee-me OR）。
-    if (ctx.staff.role === "STAFF") {
-      where.OR = [{ clinicId: { in: ctx.clinicIds } }, { assigneeId: ctx.staff.id }];
-    }
-    if (clinicParam) {
-      // STAFF 砌別店 clinicId → 403（RBAC 鐵律，E2E 要實測呢條）
-      if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
-        return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-      }
-      if (ctx.staff.role === "STAFF") {
-        // ★ MD A.3：店 tab filter 只限縮 clinic-scope 支路；assignee 支路保留 —
-        // 多店 staff 睇自己店 tab 時，指派俾自己嘅外店線仍要見到（A.6.4 badge + §9「見晒覆到」）。
-        // 外店未指派線依然唔見（assignee ≠ 自己）。
-        where.OR = [{ clinicId: clinicParam }, { assigneeId: ctx.staff.id }];
-      } else {
-        where.clinicId = clinicParam;
-      }
-    }
+    // 預設列表（無 assigned filter）：base scope 同計數 query 共用 buildScope（MD §2 不變式）。
+    Object.assign(where, buildScope(ctx, clinicParam));
   }
   if (statusParam) {
     if (!["OPEN", "PENDING", "RESOLVED"].includes(statusParam)) {
@@ -154,59 +159,37 @@ export const GET = handle(async (req: NextRequest) => {
   }
   const now = Date.now();
 
-  // ★ cwi-inboxfix-20260905（MD §1.1）：counts=1 — 一次 groupBy(assigneeId, status) 推五個計數
-  // （唔開五個 request）。base scope = 預設列表 scope（無 assigned filter）：
-  // STAFF = clinic ∪ assignee-me OR（clinicParam 時 clinic 支路收窄）；ADMIN = clinicParam（冇 = 全店）。
-  // OR scope 內 assignee=null 嘅行只會經 clinic 支路命中 → unassigned 計數天然 = I-2 公海語義
-  // （絕唔會經 assignee 支路漏入外店線）。
+  // ★ cwi-statusrole2-20260910 T1（MD §2）：三計數不變式 —
+  // 每個計數 = buildScope（同預設列表共用）∧ 計數 predicate ∧ status≠RESOLVED，
+  // 所以計數永遠同預設列表嘅 filter 結果一致（§2 formula）：
+  //   unassigned = assigneeId:null；mine = assigneeId:me（STAFF 跨店線經 base OR 支路計入）；
+  //   routed = unassigned ∧ (routedStaffId=me ∨ routedGroupId∈myGroups)（同 buildScope 同源 —
+  //   取代舊 B-1 專屬 no-clinic query；MD v2 C-4 修訂口徑）。
   let counts: { all: number; unassigned: number; mine: number; routed: number; pending: number; resolved: number } | null = null;
   if (countsParam) {
-    const cWhere: Record<string, unknown> = {};
-    if (ctx.staff.role === "STAFF") {
-      cWhere.OR = [{ clinicId: clinicParam ?? { in: ctx.clinicIds } }, { assigneeId: ctx.staff.id }];
-    } else if (clinicParam) {
-      cWhere.clinicId = clinicParam;
-    }
-    // ★ cwi-routing-20260906：routed 計數 — 我嘅組 id set（組成員「派俾我」膠囊）
+    const scope = buildScope(ctx, clinicParam);
+    const notResolved = { status: { not: "RESOLVED" as const } };
     const myGroupsForCount = await prisma.skillGroupMember.findMany({
       where: { staffId: ctx.staff.id },
       select: { groupId: true },
     });
-    const myGroupSet = new Set(myGroupsForCount.map((g) => g.groupId));
-    const groups = await prisma.conversation.groupBy({
-      by: ["assigneeId", "status", "routedStaffId", "routedGroupId"],
-      where: cWhere,
-      _count: { _all: true },
-    });
-    let all = 0;
-    let unassigned = 0;
-    let mine = 0;
-    let routed = 0;
-    let pending = 0;
-    let resolved = 0;
-    // ★ cwi-auditfix-20260908（B-1）：STAFF 嘅「派俾我」計數唔限自己店 —
-    //   base scope（clinic ∪ assignee-me）唔含外店被 route 線 → 用專屬 count query，同 assigned=routed 列表完全同源。
-    if (ctx.staff.role === "STAFF") {
-      const orR: Record<string, unknown>[] = [{ routedStaffId: ctx.staff.id }];
-      if (myGroupSet.size > 0) orR.push({ routedGroupId: { in: [...myGroupSet] } });
-      routed = await prisma.conversation.count({ where: { assigneeId: null, OR: orR } });
-    }
-    for (const g of groups) {
-      all += g._count._all;
-      if (g.assigneeId === null) unassigned += g._count._all;
-      if (g.assigneeId === ctx.staff.id) mine += g._count._all;
-      // ★ cwi-routing-20260906（MD §4.3）：派俾我 = 未指派 且（routedStaffId=我 ∨ routedGroupId∈我組）
-      //   （STAFF 專用 — 見上方專屬 count query；ADMIN/SUPERVISOR 沿用 groupBy 支路）
-      if (
-        ctx.staff.role !== "STAFF" &&
-        g.assigneeId === null &&
-        (g.routedStaffId === ctx.staff.id || (g.routedGroupId !== null && myGroupSet.has(g.routedGroupId)))
-      ) {
-        routed += g._count._all;
-      }
-      if (g.status === "PENDING") pending += g._count._all;
-      if (g.status === "RESOLVED") resolved += g._count._all;
-    }
+    const myGroupIds = myGroupsForCount.map((g) => g.groupId);
+    const routedOR: Record<string, unknown>[] = [{ routedStaffId: ctx.staff.id }];
+    if (myGroupIds.length > 0) routedOR.push({ routedGroupId: { in: myGroupIds } });
+    const [all, unassigned, mine, routed, pending, resolved] = await Promise.all([
+      // all = 工作隊列總數（排除 RESOLVED — 「已解決」係右側細字連結嘅獨立入口）
+      prisma.conversation.count({ where: { ...scope, ...notResolved } }),
+      // unassigned（公海）= 未指派 ∧ !RESOLVED
+      prisma.conversation.count({ where: { ...scope, ...notResolved, assigneeId: null } }),
+      // mine（我負責）= assigneeId=我 ∧ !RESOLVED（跨店 assignee 經 base OR 支路計入）
+      prisma.conversation.count({ where: { ...scope, ...notResolved, assigneeId: ctx.staff.id } }),
+      // routed（派俾我）= 未指派 ∧ 路由 predicate ∧ !RESOLVED（AND 組合 — 保留 buildScope clinic 支路）
+      prisma.conversation.count({ where: { AND: [scope, notResolved, { assigneeId: null, OR: routedOR }] } }),
+      // PENDING：§1.2 migration 後恒 0 — 欄位保留（舊 link 兼容；enum 保留）
+      prisma.conversation.count({ where: { ...scope, status: "PENDING" } }),
+      // resolved：API 兼容保留（UI 已無已解決膠囊；「睇已解決 →」連結無數字）
+      prisma.conversation.count({ where: { ...scope, status: "RESOLVED" } }),
+    ]);
     counts = { all, unassigned, mine, routed, pending, resolved };
   }
 
