@@ -20,6 +20,9 @@
  *                                       + held_timeout 警報（HELD age>12h MEDIUM / >24h HIGH；冪等 upsert + auto-resolve）
  * - auto-release       每 5 分鐘 → cwi-h6-20260830（h5 §3）：負責人超時未回覆（三條件）→ 放手回隊列
  *                                       （N = triage.autoReleaseMinutes per-clinic default 15；AI 等病人下一句先接力）
+ * - auto-resolve       每日 03:00 → cwi-statusrole2-20260910（MD §4）：OPEN 對話三守門（靜音 N 日 /
+ *                                       病人最後一句已覆 / 無待跟進+無 active 銷售 session — 後兩條喺 model 落地前恒真）
+ *                                       → RESOLVED + resolvedBy=AUTO + INTERNAL 備註 + 唔 push
  * - unassigned-sla     每 5 分鐘 → cwi-inboxfix-20260905（MD §1.4 I-5）：公海未指派超過 N 分鐘
  *                                       → 該店全部 active STAFF push「{店簡稱} 有病人未有人跟」+ StaffNotice
  *                                       （N = triage.unassignedSlaMinutes default 10；slaNotifiedAt 防重複洗版；接手清返）
@@ -43,6 +46,7 @@ import { runWeeklyStats } from "@/lib/ops/automation-stats";
 import { runMining } from "@/lib/ops/mining";
 import { sweepFlowHolds } from "@/lib/flows/hold-sweep";
 import { runAutoReleaseSweep } from "@/lib/auto-release";
+import { runAutoResolveSweep } from "@/lib/auto-resolve";
 import { runUnassignedSlaSweep } from "@/lib/unassigned-sla";
 import { runRoutingEscalateSweep } from "@/lib/routing/escalate";
 
@@ -69,6 +73,16 @@ export async function startCronWorker(): Promise<Worker | null> {
           log.info(
             { checked: r.checked, released: r.released, failed: r.failed },
             "cron: auto-release done"
+          );
+          return { ok: true, ...r };
+        }
+        case "auto-resolve": {
+          // cwi-statusrole2-20260910（MD §4）：每日 03:00 自動執枱（三守門；E2E 可傳 job.data.days 覆蓋 N）
+          const days = (job.data as { days?: number } | undefined)?.days;
+          const r = await runAutoResolveSweep(new Date(), days);
+          log.info(
+            { checked: r.checked, resolved: r.resolved, failed: r.failed },
+            "cron: auto-resolve done"
           );
           return { ok: true, ...r };
         }

@@ -218,23 +218,48 @@ async function touchConversation(
   db: Db,
   convId: string,
   ts: Date,
-  opts: { incrementUnread: boolean; touchInbound: boolean }
+  opts: { incrementUnread: boolean; touchInbound: boolean; touchOutbound?: boolean; reopen?: { dropAssignee: boolean } }
 ): Promise<Conversation | null> {
   const inc = opts.incrementUnread ? 1 : 0;
-  const rows = opts.touchInbound
-    ? await db.$queryRaw<Conversation[]>`
-        UPDATE "Conversation"
-        SET "lastMessageAt" = GREATEST("lastMessageAt", ${ts}),
-            "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${ts}), ${ts}),
-            "unreadCount" = "unreadCount" + ${inc}
-        WHERE "id" = ${convId}
-        RETURNING *`
-    : await db.$queryRaw<Conversation[]>`
-        UPDATE "Conversation"
-        SET "lastMessageAt" = GREATEST("lastMessageAt", ${ts}),
-            "unreadCount" = "unreadCount" + ${inc}
-        WHERE "id" = ${convId}
+  // ★ cwi-statusrole2-20260910（MD §3 已解決翻開四聯動）：病人訊息落 RESOLVED 對話 → 原子翻開。
+  //   CASE 以 row 現值 status 為準 → 冪等（併發重跑：第二次見 OPEN 就唔會重開）：
+  //   - status→OPEN + reopenedAt=now（badge「↻ 重新開啟」24h 窗口由 UI derive）
+  //   - Routing 保留：routedGroupId/routedStaffId/routedRuleId/routedAt 一概唔清（原本派俾邊組就仲係嗰組）
+  //   - escalatedAt 清 null（容許重新計時升級）；resolvedBy/resolvedAt 清 null（翻開 = 未再解決）
+  //   - 負責人：active → 保留（CASE 唔動 assigneeId）；停用 → dropAssignee → 跌公海（null）
+  //   - CONSULT 復活 / Followup COMPLETED：本 repo 無 ConsultSession/FollowupTask model（未實施）—
+  //     掛鉤點：consult/followup 功能落 DB 後喺 reopen 分支補（MD §3 表；followup MD §4 自帶呢條）。
+  // 動態 SQL 片段全部係內部常數（零外部輸入）；值全部走 $queryRawUnsafe 參數綁定（防注入）。
+  const params: unknown[] = [];
+  const p = (v: unknown): string => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  let sql = `UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${p(ts)})`;
+  if (opts.touchInbound) {
+    sql += `,
+            "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${p(ts)}), ${p(ts)})`;
+  }
+  sql += `,
+            "unreadCount" = "unreadCount" + ${p(inc)}`;
+  if (opts.touchOutbound) {
+    // ★ MD §4：touchOutbound = 呢條訊息係 OUT 且已 SENT（staff 手機 App 回音）— lastOutboundAt 維護點之一
+    sql += `,
+            "lastOutboundAt" = GREATEST(COALESCE("lastOutboundAt", ${p(ts)}), ${p(ts)})`;
+  }
+  if (opts.reopen) {
+    sql += `
+      , "status" = CASE WHEN "status" = 'RESOLVED' THEN 'OPEN' ELSE "status" END
+      , "reopenedAt" = CASE WHEN "status" = 'RESOLVED' THEN now() ELSE "reopenedAt" END
+      , "escalatedAt" = CASE WHEN "status" = 'RESOLVED' THEN NULL ELSE "escalatedAt" END
+      , "resolvedBy" = CASE WHEN "status" = 'RESOLVED' THEN NULL ELSE "resolvedBy" END
+      , "resolvedAt" = CASE WHEN "status" = 'RESOLVED' THEN NULL ELSE "resolvedAt" END
+      , "assigneeId" = CASE WHEN "status" = 'RESOLVED' AND ${p(opts.reopen.dropAssignee ? 1 : 0)} = 1 THEN NULL ELSE "assigneeId" END`;
+  }
+  sql += `
+        WHERE "id" = ${p(convId)}
         RETURNING *`;
+  const rows = await db.$queryRawUnsafe<Conversation[]>(sql, ...params);
   return (rows[0] as unknown as Conversation) ?? null;
 }
 
@@ -252,6 +277,8 @@ async function notifyNewMessage(clinicId: string, conv: Conversation, msg: Messa
       unreadCount: conv.unreadCount,
       lastMessageAt: conv.lastMessageAt,
       lastInboundAt: conv.lastInboundAt,
+      // ★ cwi-statusrole2-20260910（MD §3）：翻開事件帶返 reopenedAt（badge「↻ 重新開啟」24h 即時顯示）
+      reopenedAt: conv.reopenedAt,
     },
   };
   publishNotify(clinicId, "message:new", payload);
@@ -298,6 +325,17 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
 
       const contact = await upsertContact(tx, clinic.id, waId, profileName);
       const conv = await findOrCreateConversation(tx, clinic.id, contact.id, waTs);
+      // ★ cwi-statusrole2-20260910（MD §3）：RESOLVED + 病人 inbound → 翻開前置檢查 —
+      //   原負責人停用 → 跌公海（dropAssignee）；active → 保留（tx 內直查保證同 message commit 一致）。
+      const wasResolved = conv.status === "RESOLVED";
+      let dropAssignee = false;
+      if (wasResolved && conv.assigneeId) {
+        const assignee = await tx.staffUser.findUnique({
+          where: { id: conv.assigneeId },
+          select: { active: true },
+        });
+        dropAssignee = !assignee?.active;
+      }
       let msg: Message;
       try {
         msg = await tx.message.create({
@@ -323,7 +361,25 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
       const convUpdated = await touchConversation(tx, conv.id, waTs, {
         incrementUnread: true,
         touchInbound: true,
+        reopen: wasResolved ? { dropAssignee } : undefined,
       });
+      // ★ 翻開 audit（零 PII：只記 conversationId / 原 assigneeId / 聯動結果；consultRevived 恒 false —
+      //   ConsultSession model 未實施，功能落地後改真值）
+      if (wasResolved && convUpdated && convUpdated.status === "OPEN") {
+        await tx.auditLog.create({
+          data: {
+            staffId: null, // 系統動作（病人 inbound 觸發，無 staff 參與）
+            action: "CONVERSATION_REOPENED",
+            entity: "Conversation",
+            entityId: conv.id,
+            meta: {
+              prevAssigneeId: conv.assigneeId,
+              assigneeKept: !dropAssignee,
+              consultRevived: false,
+            } as object,
+          },
+        });
+      }
       return { skipped: false as const, msg, conv, convUpdated };
     });
 
@@ -471,6 +527,7 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
       const convUpdated = await touchConversation(tx, conv.id, waTs, {
         incrementUnread: false,
         touchInbound: false,
+        touchOutbound: true, // ★ MD §4：APP_ECHO = 病人已收到 → lastOutboundAt 維護
       });
       return { skipped: false as const, msg, conv, convUpdated };
     });
@@ -665,10 +722,21 @@ async function handleHistory(clinic: Clinic, value: NonNullable<WaChange["value"
     const maxInboundTs = rows
       .filter((r) => r.direction === "IN")
       .reduce<Date | null>((a, r) => (a === null || r.waTimestamp > a ? r.waTimestamp : a), null);
+    const maxOutboundTs = rows
+      .filter((r) => r.direction === "OUT")
+      .reduce<Date | null>((a, r) => (a === null || r.waTimestamp > a ? r.waTimestamp : a), null);
     if (!maxInboundTs) {
-      // 全部係 OUT（店員發嘅）— 只更新 lastMessageAt
+      // 全部係 OUT（店員發嘅）— 只更新 lastMessageAt + lastOutboundAt
       await prisma.$executeRaw`
-        UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}) WHERE "id" = ${conv.id}`;
+        UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}),
+            "lastOutboundAt" = GREATEST(COALESCE("lastOutboundAt", ${maxTs})) WHERE "id" = ${conv.id}`;
+    } else if (maxOutboundTs) {
+      await prisma.$executeRaw`
+        UPDATE "Conversation"
+        SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}),
+            "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${maxInboundTs})),
+            "lastOutboundAt" = GREATEST(COALESCE("lastOutboundAt", ${maxOutboundTs}))
+        WHERE "id" = ${conv.id}`;
     } else {
       await prisma.$executeRaw`
         UPDATE "Conversation"

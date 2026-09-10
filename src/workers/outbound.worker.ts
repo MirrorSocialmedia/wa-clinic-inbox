@@ -230,8 +230,11 @@ function truncateCode(s: string): string {
 }
 
 async function touchConv(clinicId: string, convId: string, ts: Date): Promise<void> {
+  // ★ cwi-statusrole2-20260910（MD §4）：lastOutboundAt 維護點 — 只喺 SENT 成功路徑調（touchConv 唯一 call site），
+  //   病人真正收到過 = 算覆。auto-resolve 守門 ②lastInboundAt <= lastOutboundAt 靠呢個欄。
   await prisma.$executeRaw`
-    UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${ts}) WHERE "id" = ${convId}`;
+    UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${ts}),
+        "lastOutboundAt" = GREATEST(COALESCE("lastOutboundAt", ${ts}), ${ts}) WHERE "id" = ${convId}`;
   void clinicId;
 }
 

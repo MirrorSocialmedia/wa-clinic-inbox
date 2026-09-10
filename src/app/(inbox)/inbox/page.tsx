@@ -127,6 +127,8 @@ export default async function InboxPage({
       routedRuleId: cv.routedRuleId,
       routedAt: cv.routedAt,
       escalatedAt: cv.escalatedAt,
+      // ★ cwi-statusrole2-20260910（MD §3）：badge「↻ 重新開啟」（同 API list 對齊）
+      reopenedAt: cv.reopenedAt,
       routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId) ?? null) : null,
       routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
       contact: contactMap.get(cv.contactId) ?? null,

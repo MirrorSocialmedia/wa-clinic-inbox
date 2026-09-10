@@ -135,7 +135,7 @@ export const PATCH = handle(async (req: NextRequest) => {
       action: "SET_AUTOMATION_LEVEL",
       entity: "AutomationPolicy",
       entityId: clinicId,
-      meta: { clinicId, category, from, to } as object,
+      meta: { clinicId, category, from, to, role: ctx.staff.role } as object,
     },
   });
   clearAutomationLevelCache(); // MD 個 bustLevelCache() = 現有 export

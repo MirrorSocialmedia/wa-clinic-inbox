@@ -30,6 +30,9 @@ export const TriageParams = z.object({
   // ★ cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA — 未指派超過 N 分鐘 → cron 掃
   //   → 該店全部 active STAFF push「{店簡稱} 有病人未有人跟（N 分鐘）」（default 10，min 3 max 120）
   unassignedSlaMinutes: z.number().int().min(3).max(120).default(10),
+  // ★ cwi-statusrole2-20260910（MD §4）：auto-resolve — 每日 03:00 cron 掃 OPEN 對話，
+  //   最後活動超過 N 日 且 病人最後一句已覆 且 無待跟進/無 active 銷售 session → 自動 RESOLVED（default 3）
+  autoResolveDays: z.number().int().min(1).max(30).default(3),
 });
 export const TRIAGE_DEFAULTS: z.infer<typeof TriageParams> = {
   humanCooldownMs: 30 * 60_000,
@@ -37,6 +40,7 @@ export const TRIAGE_DEFAULTS: z.infer<typeof TriageParams> = {
   autoThanksReply: "唔緊要，祝你早日康復！",
   autoReleaseMinutes: 15,
   unassignedSlaMinutes: 10,
+  autoResolveDays: 3,
 };
 
 // ── booking-session ───────────────────────────────────────────────────

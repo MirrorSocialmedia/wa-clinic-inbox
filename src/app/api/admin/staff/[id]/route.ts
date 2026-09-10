@@ -25,7 +25,7 @@ export const dynamic = "force-dynamic";
 
 const updateSchema = z.object({
   name: z.string().min(1).max(100).optional(),
-  role: z.enum(["ADMIN", "STAFF"]).optional(),
+  role: z.enum(["ADMIN", "STAFF", "SUPERVISOR"]).optional(),
   clinicId: z.string().min(1).max(64).nullable().optional(),
   active: z.boolean().optional(),
   newPassword: z.string().min(8).max(128).optional(),
@@ -54,6 +54,10 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
   }
   if (effectiveRole === "ADMIN" && effectiveClinic) {
     return NextResponse.json({ error: "ADMIN clinicId 必須為 null" }, { status: 400 });
+  }
+  // ★ cwi-statusrole2-20260910（MD §5.2）：SUPERVISOR = 全店（同 ADMIN 一樣 clinicId 必 null）
+  if (effectiveRole === "SUPERVISOR" && effectiveClinic) {
+    return NextResponse.json({ error: "SUPERVISOR clinicId 必須為 null（全店）" }, { status: 400 });
   }
   if (effectiveClinic) {
     const clinic = await prisma.clinic.findUnique({ where: { id: effectiveClinic } });

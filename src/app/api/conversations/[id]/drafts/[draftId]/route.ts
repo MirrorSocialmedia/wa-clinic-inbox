@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertConversationAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -28,6 +28,7 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   await assertConversationAccess(auth, conv);
+  assertCanWriteConversation(auth); // ★ cwi-statusrole2-20260910（MD §5.2）：drafts/adopt SUPERVISOR 403
   const draft = await prisma.aiDraft.findFirst({ where: { id: draftId, conversationId: id } });
   if (!draft) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (draft.status === "DISCARDED") {
@@ -67,6 +68,7 @@ export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   await assertConversationAccess(auth, conv);
+  assertCanWriteConversation(auth); // ★ cwi-statusrole2-20260910（MD §5.2）：discard 係寫操作 — SUPERVISOR 403
   const draft = await prisma.aiDraft.findFirst({ where: { id: draftId, conversationId: id } });
   if (!draft) return NextResponse.json({ error: "not found" }, { status: 404 });
 

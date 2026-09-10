@@ -46,8 +46,10 @@ export function NavRail({
         W
       </div>
 
+      {/* ★ cwi-statusrole2-20260910（MD §5.2）：SUPERVISOR 也要「管理」入口（總覽／AI 自動化／AI 建議）—
+          側欄入面嘅設定類項已隱藏（admin-shell）；route 層 403 做背墊 */}
       {items
-        .filter((it) => !it.adminOnly || role === "ADMIN")
+        .filter((it) => !it.adminOnly || role === "ADMIN" || role === "SUPERVISOR")
         .map((it) => {
           const active = pathname === it.href || pathname.startsWith(it.href + "/");
           return (

@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertConversationAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { publishNotify } from "@/lib/notify";
 import { assertCanAssign } from "@/lib/assign";
@@ -47,8 +47,11 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
   await assertConversationAccess(auth, conv); // cwi-h6：店集合 ∨ 單線授權
 
   // ★ H1：assignee 改動受權限模型約束（現任 assignee / ADMIN / unassigned claim / 接手 self；否則 403）
-  if (parsed.data.assigneeId !== undefined) {
-    assertCanAssign(auth, conv, parsed.data.assigneeId);
+  //   cwi-statusrole2-20260910（MD §5.2）：SUPERVISOR 一律 403（status/assigneeId/urgent 全係工單寫操作）；
+  //   markRead 係個人讀狀態 — 放行（主管要睇對話就得同時能標已讀）
+  if (parsed.data.status !== undefined || parsed.data.assigneeId !== undefined || parsed.data.urgent !== undefined) {
+    assertCanWriteConversation(auth);
+    if (parsed.data.assigneeId !== undefined) assertCanAssign(auth, conv, parsed.data.assigneeId);
   }
 
   const { status, assigneeId, markRead, urgent } = parsed.data;

@@ -345,6 +345,16 @@ model Conversation {
   lastInboundAt    DateTime? @db.Timestamptz                  // ★ 24h 窗口由呢個欄計
   lastMessageAt    DateTime @db.Timestamptz
   unreadCount      Int        @default(0)
+  // ★ cwi-statusrole2-20260910（MD §4）：最後一條 OUT（已落 SENT）訊息時間 —
+  //   auto-resolve 守門 ②`lastInboundAt <= lastOutboundAt`（病人最後一句已覆）。null = 從未有 staff/AI 回覆。
+  //   維護點：outbound.worker SENT transition / handleEchoes SENT / handleHistory isOut bulk touch（GREATEST 冪等）。
+  lastOutboundAt   DateTime? @db.Timestamptz
+  // ★ cwi-statusrole2-20260910（MD §3）：已解決對話收到病人 inbound 自動翻開 — 翻開時間（badge「↻ 重新開啟」24h 窗口）。
+  //   只由 inbound.worker reopen 分支寫；翻開即清 resolvedBy/resolvedAt（翻開 = 未再解決）。
+  reopenedAt       DateTime? @db.Timestamptz
+  // ★ cwi-statusrole2-20260910（MD §4）：解決者 — staffId（手動）/ "AUTO"（cron auto-resolve）；null = 未解決。
+  resolvedBy       String?
+  resolvedAt       DateTime? @db.Timestamptz
   // cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA 提醒防重複旗（null = 未提醒/已接手；
   // cron 標 now，assign 成功清返）
   slaNotifiedAt    DateTime? @db.Timestamptz

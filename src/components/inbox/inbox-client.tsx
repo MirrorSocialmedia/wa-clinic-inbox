@@ -491,6 +491,8 @@ export function InboxClient({
           urgency: existing?.urgency ?? null,
           urgent: existing?.urgent ?? false,
           aiSummary: existing?.aiSummary ?? null,
+          // ★ cwi-statusrole2-20260910（MD §3）：翻開事件帶返 reopenedAt（24h badge）；唔帶 = 沿用舊值
+          reopenedAt: e.conversation.reopenedAt ?? existing?.reopenedAt ?? null,
           contact: e.contact ?? existing?.contact ?? null,
           pendingBooking: existing?.pendingBooking ?? null,
           holdEvent: existing?.holdEvent ?? null,

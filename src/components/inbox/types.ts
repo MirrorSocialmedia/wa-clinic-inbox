@@ -59,6 +59,8 @@ export interface ConversationItem {
   escalatedAt?: Date | string | null;
   routedGroupName?: string | null;
   routedStaffName?: string | null;
+  /** ★ cwi-statusrole2-20260910（MD §3）：最近一次已解決翻開時間 — badge「↻ 重新開啟」24h 窗口用 */
+  reopenedAt?: Date | string | null;
   contact: ContactInfo | null;
   /** ★ booking-ui（A）：已釘住舊客（chat 卡藍掣「幫我喺 Apricot 落單」可見性）— null = 未釘住 */
   pinnedPatient: { patientApricotId: string } | null;
@@ -214,6 +216,8 @@ export interface NewMessageEvent {
     unreadCount: number;
     lastMessageAt: string;
     lastInboundAt: string | null;
+    /** ★ cwi-statusrole2-20260910（MD §3）：翻開事件帶返（badge 即時顯示） */
+    reopenedAt?: string | null;
   };
 }
 

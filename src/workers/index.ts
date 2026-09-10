@@ -44,6 +44,11 @@ async function registerSchedulers() {
     name: "auto-release",
     data: {},
   });
+  // cwi-statusrole2-20260910（MD §4）：auto-resolve — 每日 03:00（process TZ，同其他 job 一致）
+  await cronQueue.upsertJobScheduler("sched-auto-resolve", { pattern: "0 3 * * *" }, {
+    name: "auto-resolve",
+    data: {},
+  });
   // cwi-routing-20260906（§3）：投訴兩級升級第二級 — N 分鐘未接手 → 升級組（只升一次；冪等，可空跑）
   await cronQueue.upsertJobScheduler("sched-routing-escalate", { pattern: "*/5 * * * *" }, {
     name: "routing-escalate",
@@ -82,7 +87,7 @@ async function registerSchedulers() {
   });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00)"
   );
 }
 

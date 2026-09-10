@@ -70,7 +70,7 @@ export function AdminShell({
   const pathname = usePathname();
   const section = SECTION_NAMES[pathname] ?? "設定";
 
-  const groups: { title: string; items: NavItem[] }[] = [
+  const allGroups: { title: string; items: NavItem[] }[] = [
     {
       title: "監控",
       items: [
@@ -120,16 +120,17 @@ export function AdminShell({
     },
   ];
 
-  // ★ cwi-routing-20260906 §8：SUPERVISOR — 設定類全 403 → 側欄只露 AI 級別 + AI 建議（兩頁已開權限）
+  // ★ cwi-statusrole2-20260910（MD §5.2）：SUPERVISOR 側欄只留「總覽 / 醫生時間表 / AI 自動化 / AI 建議」—
+  //   其餘設定類隱藏（route 層 RBAC 403 係背墊；UI 先做第一層唔好見到 dead link）
+  const SUPERVISOR_NAV = new Set(["/admin", "/schedule", "/admin/automation", "/admin/suggestions"]);
+  // ★ cwi-statusrole2-20260910（MD §5.2）取代 cwi-routing-20260906 §8 舊 filter（只露 AI 兩頁）：
+  //   SUPERVISOR = 全店唯讀 + AI 級別讀寫 → 側欄 = 總覽 / 醫生時間表 / AI 自動化 / AI 建議
   const visibleGroups =
     role === "SUPERVISOR"
-      ? groups
-          .map((g) => ({
-            ...g,
-            items: g.items.filter((it) => it.href === "/admin/automation" || it.href === "/admin/suggestions"),
-          }))
+      ? allGroups
+          .map((g) => ({ ...g, items: g.items.filter((it) => SUPERVISOR_NAV.has(it.href)) }))
           .filter((g) => g.items.length > 0)
-      : groups;
+      : allGroups;
 
   async function logout() {
     try {
@@ -199,7 +200,9 @@ export function AdminShell({
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-[12px] font-semibold text-t1 truncate">{userName}</div>
-              <div className="text-[10px] text-t3">ADMIN · 全店</div>
+              <div className="text-[10px] text-t3">
+                {role === "SUPERVISOR" ? "SUPERVISOR · 全店（唯讀）" : "ADMIN · 全店"}
+              </div>
             </div>
             <button
               onClick={() => void logout()}

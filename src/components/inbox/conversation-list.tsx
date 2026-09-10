@@ -853,6 +853,16 @@ export function ConversationList(p: Props) {
                         🎯 {c.routedGroupName ?? "組"}
                       </span>
                     ) : null}
+                    {/* ★ cwi-statusrole2-20260910（MD §3）：badge「↻ 重新開啟」— reopenedAt 24h 內顯示（client derive；
+                        已解決對話病人再嚟訊 → 即時彈返出嚟 + 呢個 badge） */}
+                    {c.reopenedAt && Date.now() - new Date(c.reopenedAt).getTime() < 24 * 3600_000 && (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-ok-soft text-ok-text font-semibold inline-flex items-center gap-0.5 flex-none"
+                        title={`病人再嚟訊自動翻開（${new Date(c.reopenedAt).toLocaleString()}）`}
+                      >
+                        ↻ 重新開啟
+                      </span>
+                    )}
                     {/* ★ cwi-inboxfix-20260905（MD I-3）：負責人常駐三態 — 永遠 render：
                         ⚑ 未指派（橙）/ ● 你（重點色，跨店加「由 X 派嚟」）/ ● 某某（灰） */}
                     {c.assigneeId == null ? (

@@ -204,17 +204,17 @@ export function pushEvent(e: { kind: "message" | "urgent"; clinicId: string; con
         if (s?.active) addTarget(s.id, parsePushPrefs(s.pushPrefs, s.id), true);
       } else {
         const rows = await prisma.staffUser.findMany({
-          // ★ cwi-routing-20260906 §8：SUPERVISOR 通知照 STAFF 規則（per-store 靜音偏好生效；不預設靜音）
-          where: { role: { in: ["STAFF", "SUPERVISOR"] }, active: true, clinics: { some: { clinicId: e.clinicId } } },
+          where: { role: "STAFF", active: true, clinics: { some: { clinicId: e.clinicId } } },
           select: { id: true, pushPrefs: true },
         });
         for (const r of rows) addTarget(r.id, parsePushPrefs(r.pushPrefs, r.id), false);
       }
 
-      // ADMIN：urgent → 全 active ADMIN（急症安全網 — 唔受 adminMsgClinics 限制）；
-      // message → 只 opt-in 咗該店嘅
+      // ADMIN ∨ SUPERVISOR（★ cwi-statusrole2-20260910 MD §5.4：SUPERVISOR 預設全部靜音，
+      //   改用 ADMIN 分支邏輯 — 自己喺設定面板 opt-in 該店先收到）：
+      // urgent → 全 active（急症安全網 — 唔受 adminMsgClinics 限制）；message → 只 opt-in 咗該店嘅
       const admins = await prisma.staffUser.findMany({
-        where: { role: "ADMIN", active: true },
+        where: { role: { in: ["ADMIN", "SUPERVISOR"] }, active: true },
         select: { id: true, pushPrefs: true },
       });
       for (const a of admins) {

@@ -223,6 +223,8 @@ export const GET = handle(async (req: NextRequest) => {
         routedRuleId: cv.routedRuleId,
         routedAt: cv.routedAt,
         escalatedAt: cv.escalatedAt,
+        // ★ cwi-statusrole2-20260910（MD §3）：badge「↻ 重新開啟」— 24h 內由 client derive
+        reopenedAt: cv.reopenedAt,
         routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId)?.name ?? null) : null,
         routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
         contact: contactMap.get(cv.contactId) ?? null,

@@ -9,7 +9,7 @@ import { handle, toResponse } from "@/lib/api-error";
  * /api/admin/staff — ADMIN-only（員工 CRUD，Phase 1 目標 2）。
  *
  * GET  : 列表（email/name/role/clinic/active）
- * POST : 建立（STAFF 必給 clinicId 同 password；ADMIN clinicId = null）
+ * POST : 建立（STAFF 必給 clinicId 同 password；ADMIN / SUPERVISOR clinicId = null）
  */
 export const dynamic = "force-dynamic";
 
@@ -17,7 +17,7 @@ const createSchema = z
   .object({
     email: z.string().email().max(200),
     name: z.string().min(1).max(100),
-    role: z.enum(["ADMIN", "STAFF"]),
+    role: z.enum(["ADMIN", "STAFF", "SUPERVISOR"]),
     clinicId: z.string().min(1).max(64).nullable(),
     password: z.string().min(8).max(128),
     active: z.boolean().optional().default(true),
@@ -28,6 +28,11 @@ const createSchema = z
   })
   .refine((d) => d.role !== "ADMIN" || d.clinicId === null, {
     message: "ADMIN clinicId 必須為 null（跨店）",
+    path: ["clinicId"],
+  })
+  // ★ cwi-statusrole2-20260910（MD §5.2）：SUPERVISOR 可建帳號（全店 — clinicId 必 null）
+  .refine((d) => d.role !== "SUPERVISOR" || d.clinicId === null, {
+    message: "SUPERVISOR clinicId 必須為 null（全店）",
     path: ["clinicId"],
   });
 
