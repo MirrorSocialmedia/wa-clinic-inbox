@@ -6,8 +6,8 @@
  *   ② 病人最後一句已覆 — lastInboundAt != null 且 lastOutboundAt != null 且 lastInboundAt <= lastOutboundAt
  *   ③ 無 SCHEDULED/DUE FollowupTask — ★ 本 repo 無 FollowupTask model（未實施）→ 恒真；
  *      followup 功能落 DB 後喺 shouldAutoResolve 補（MD：「等緊跟進唔好關」；followup MD §4 自帶）。
- *   ④ 無 terminal IS NULL 嘅 ConsultSession — ★ 本 repo 無 ConsultSession model（未實施）→ 恒真；
- *      consult 功能落 DB 後喺 shouldAutoResolve 補（MD C-5：「銷售對話進行中唔好關」）。
+ *   ④ 無 terminal IS NULL 嘅 ConsultSession — ★ C2 已接活（T244）：sweep 逐對話查 active session，
+ *      有 → skip（銷售對話進行中唔好關）。
  *
  * 時序（MD §4 註）：CONSULT session 48h 無 inbound 會自己 EXPIRED（consult §4.2 #23）→
  *   正常流程 = 48h session 終態 → 第 3 日對話 auto-resolve，兩者唔打架；
@@ -40,12 +40,14 @@ export interface AutoResolveCandidate {
 
 /**
  * 守門判定（純函數 — deterministic 測試；now 可注入）。
- * 守門 ③④（followup/consult）本 repo 無 model → 恒真；功能落地後喺呢度加參數（MD 掛鉤點）。
+ * opts.hasOpenFollowup（③）本 repo 無 model → 默認 false（恒真）；功能落地後由 caller 傳。
+ * opts.activeConsultSession（④）C2 已接活（T244）：sweep 傳真實查詢結果。
  */
 export function shouldAutoResolve(
   conv: AutoResolveCandidate,
   autoResolveDays: number,
-  now: Date = new Date()
+  now: Date = new Date(),
+  opts: { hasOpenFollowup?: boolean; activeConsultSession?: boolean } = {}
 ): boolean {
   const cutoff = now.getTime() - autoResolveDays * 86_400_000;
   // ① 靜音夠 N 日（最後活動早過 cutoff）
@@ -53,8 +55,10 @@ export function shouldAutoResolve(
   // ② 病人最後一句已覆（兩者都要有 — null 保守唔關）
   if (conv.lastInboundAt == null || conv.lastOutboundAt == null) return false;
   if (conv.lastInboundAt.getTime() > conv.lastOutboundAt.getTime()) return false;
-  // ③ 無 SCHEDULED/DUE FollowupTask — ★ 未實施（model 唔存在）→ 恒真；功能落地後補
-  // ④ 無 active（terminal IS NULL）ConsultSession — ★ 未實施（model 唔存在）→ 恒真；功能落地後補
+  // ③ 無 SCHEDULED/DUE FollowupTask — ★ 未實施（model 唔存在）→ 默認恒真；功能落地後補
+  if (opts.hasOpenFollowup === true) return false;
+  // ④ 無 active（terminal IS NULL）ConsultSession — ★ C2 接活（T244，consult MD C-5）
+  if (opts.activeConsultSession === true) return false;
   return true;
 }
 
@@ -103,6 +107,19 @@ export async function runAutoResolveSweep(
     }
     const n = daysOverride ?? p.autoResolveDays;
     if (!shouldAutoResolve(c, n, now)) continue;
+    // 守門 ④（C2 接活，T244）：active（terminal IS NULL）ConsultSession → 銷售對話進行中唔好關。
+    // 輕量查詢（select id）；daily cron 逐對話查，量級無壓力。
+    const activeConsult = await prisma.consultSession.findFirst({
+      where: { conversationId: c.id, terminal: null },
+      select: { id: true },
+    });
+    if (activeConsult) {
+      log.info(
+        { conversationId: c.id, sessionId: activeConsult.id },
+        "auto-resolve: 守門 ④ 命中（active ConsultSession）— 唔關"
+      );
+      continue;
+    }
 
     try {
       // tx 原子：updateMany where OPEN（併發 inbound 先 commit → 命中 0 → skip 唔錯殺）+ INTERNAL 備註

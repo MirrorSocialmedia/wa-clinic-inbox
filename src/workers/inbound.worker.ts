@@ -227,8 +227,9 @@ async function touchConversation(
   //   - Routing 保留：routedGroupId/routedStaffId/routedRuleId/routedAt 一概唔清（原本派俾邊組就仲係嗰組）
   //   - escalatedAt 清 null（容許重新計時升級）；resolvedBy/resolvedAt 清 null（翻開 = 未再解決）
   //   - 負責人：active → 保留（CASE 唔動 assigneeId）；停用 → dropAssignee → 跌公海（null）
-  //   - CONSULT 復活 / Followup COMPLETED：本 repo 無 ConsultSession/FollowupTask model（未實施）—
-  //     掛鉤點：consult/followup 功能落 DB 後喺 reopen 分支補（MD §3 表；followup MD §4 自帶呢條）。
+  //   - CONSULT 復活：C2 已接活（T245）— 由 handleMessages 嘅 reopen 分支喺 touchConversation 後執行
+  //     （同一 tx：最新 EXPIRED session < 7 日 → terminal=null；audit consultRevived 真值）。
+  //   - Followup COMPLETED：本 repo 無 FollowupTask model（未實施）— 掛鉤點：followup 功能落 DB 後喺 reopen 分支補（followup MD §4 自帶呢條）。
   // 動態 SQL 片段全部係內部常數（零外部輸入）；值全部走 $queryRawUnsafe 參數綁定（防注入）。
   const params: unknown[] = [];
   const p = (v: unknown): string => {
@@ -363,9 +364,36 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
         touchInbound: true,
         reopen: wasResolved ? { dropAssignee } : undefined,
       });
-      // ★ 翻開 audit（零 PII：只記 conversationId / 原 assigneeId / 聯動結果；consultRevived 恒 false —
-      //   ConsultSession model 未實施，功能落地後改真值）
+      // ★ 翻開聯動（cwi-statusrole2-20260910 MD §3 + consult v2.1 C2 / T245）：CONSULT 復活 + audit。
+      //   最新 session terminal="EXPIRED" 且距今 < 7 日 → 復活（terminal=null；turnCount/stage 保留）；
+      //   ≥ 7 日 → 唔復活（新 session 由 C3 觸發時先開）。EXPIRED 距今基準 = session.updatedAt
+      //   （EXPIRED 只由 C3 48h cron 寫，terminal 行之後無其他寫入點）。
+      //   冪等：updateMany where terminal='EXPIRED' 搶佔（併發重跑第二次命中 0）。
+      //   零 PII：audit 只記 conversationId / 原 assigneeId / consultRevived 旗。
+      let consultRevived = false;
       if (wasResolved && convUpdated && convUpdated.status === "OPEN") {
+        const expiredSession = await tx.consultSession.findFirst({
+          where: { conversationId: conv.id, terminal: "EXPIRED" },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true, updatedAt: true },
+        });
+        if (expiredSession) {
+          const reviveCutoff = new Date(Date.now() - 7 * 86_400_000);
+          if (expiredSession.updatedAt >= reviveCutoff) {
+            const r = await tx.consultSession.updateMany({
+              where: { id: expiredSession.id, terminal: "EXPIRED" },
+              data: { terminal: null },
+            });
+            consultRevived = r.count === 1;
+            if (consultRevived) {
+              log.info(
+                { conversationId: conv.id, sessionId: expiredSession.id },
+                "inbound: reopen — EXPIRED consult session <7 日 → 復活（T245）"
+              );
+            }
+          }
+        }
+        // ★ 翻開 audit（零 PII：只記 conversationId / 原 assigneeId / 聯動結果）
         await tx.auditLog.create({
           data: {
             staffId: null, // 系統動作（病人 inbound 觸發，無 staff 參與）
@@ -375,7 +403,7 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
             meta: {
               prevAssigneeId: conv.assigneeId,
               assigneeKept: !dropAssignee,
-              consultRevived: false,
+              consultRevived,
             } as object,
           },
         });

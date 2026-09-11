@@ -382,7 +382,11 @@ model Conversation {
   //   「交返 AI 繼續」掣（C5 UI）負責清返 false。採用（source=adopted）唔置呢個旗。
   humanTookOver  Boolean  @default(false)
   // ★ consult v2.1 C1（§2.1 M-1）：實際發出嘅最後 OUT 文字（採用/改過/typing/AUTO 都記）— 下輪 context 用。
+  //   C2 起 consult 路徑改寫 ConsultSession 同名欄（session 建立時由呢度複製 — 橋接搬遷；
+  //   Conversation 欄保留：C1 e2e + 非 consult 路徑仍用）。
   lastOutboundText String?
+  // ★ consult v2.1 C2（MD §3）：CONSULT 銷售 session（C3 規則引擎落；一對話同時最多一個 active）。
+  consultSessions ConsultSession[]
 
   @@unique([clinicId, contactId])
   @@index([clinicId, status, lastMessageAt])
@@ -852,4 +856,72 @@ model AutomationStat {
   complaints    Int    @default(0)
   rollbacks     Int    @default(0)
   @@unique([clinicId, category, weekStart])
+}
+
+// ★ consult v2.1 C2（MD §3 資料層）：CONSULT 銷售 session。
+// - 一對話同時最多一個 active（terminal=null）— API POST create 守衛（重複 → 409）。
+// - terminal：COMPLETED | HANDOFF | EXPIRED | HUMAN_TOOK_OVER（EXPIRED = C3 48h 無 inbound cron 標）。
+// - slots/objections = C3 規則引擎寫（Json，shape 見 src/lib/sessions/consult-types.ts §3.1）。
+// - candidateCategory = 類別（CLEAR_ALIGNER | FIXED | null）唔係產品 — 鐵律：產品只能喺
+//   ConsultProduct.approvedWording 內照講（isProductUsable 守衛）。
+// - humanTookOver/lastOutboundText = C1 過渡欄（Conversation）嘅 session 級副本 —
+//   session 建立時由 Conversation 複製；C3 起 consult 路徑改寫呢度（Conversation 欄保留）。
+// - 翻開聯動（T245）：最新 session terminal=EXPIRED 且 < 7 日 → inbound.worker reopen 分支復活
+//   （terminal=null；turnCount/stage 保留）；≥ 7 日唔復活（新 session 由 C3 觸發時先開）。
+// - auto-resolve 守門 ④（T244）：有 active（terminal IS NULL）session → 唔 auto-close。
+model ConsultSession {
+  id             String   @id @default(cuid())
+  conversationId String
+  clinicId       String
+  workflow       String                     // ORTHODONTIC_CONSULT | IMPLANT_CONSULT
+  stage          String   @default("DISCOVER")
+  terminal       String?                    // COMPLETED|HANDOFF|EXPIRED|HUMAN_TOOK_OVER
+  slots          Json     @default("{}")
+  objections     Json     @default("[]")
+  candidateCategory String?                 // CLEAR_ALIGNER | FIXED | null（★ 類別，唔係產品）
+  comparedProducts String[] @default([])
+  askedSlots     String[] @default([])
+  turnCount      Int      @default(0)
+  purchaseIntent Float    @default(0)
+  lastAction     String?
+  nextAction     String?
+  ctaGiven       Boolean  @default(false)
+  humanTookOver  Boolean  @default(false)
+  lastOutboundText String? @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  @@index([conversationId, terminal])
+}
+
+// ★ consult v2.1 C2（MD §3 資料層）：approved product 詞表（staff 管嘅參數，同 KnowledgeDoc 同級）。
+// - clinicId null = 全局（所有店可用）。
+// - 鐵律（isProductUsable）：approvedAt == null 或 enabled == false → 唔准出現喺任何 AI 草稿或檢索結果。
+//   C3 檢索 / C4 生成一律經 isProductUsable 過濾。
+// - @@unique([clinicId, workflow, code])：同店同 workflow 唔准重複 code（Postgres NULL 唔撞 unique —
+//   全局 row 可有多個 code，由 application 層守衛）。
+model ConsultProduct {
+  id            String  @id @default(cuid())
+  clinicId      String?                     // null = 全局
+  workflow      String
+  code          String                      // TRAD | IGO | IFULL | HIOSSEN_ETIII | STRAUMANN_ROXOLID …
+  displayName   String
+  category      String?                     // CLEAR_ALIGNER | FIXED | IMPLANT
+  brand         String?
+  productFamily String?
+  model         String?
+  material      String?
+  surface       String?
+  positioning   String  @db.Text            // 呢個方案係咩（L2/L3）
+  approvedWording String @db.Text           // ★ 可以照講嘅句子
+  avoidPhrases  String[] @default([])       // ★ 唔准講
+  timeWording   String? @db.Text            // 療程時間點講（留空 = 唔准講時間）
+  packageNote   String? @db.Text
+  warrantyNote  String? @db.Text
+  priceDocTitle String?                     // 對應 KnowledgeDoc(kind=PRICE).title
+  sortOrder     Int     @default(0)
+  enabled       Boolean @default(true)
+  approvedBy    String?
+  approvedAt    DateTime?
+  @@unique([clinicId, workflow, code])
 }
