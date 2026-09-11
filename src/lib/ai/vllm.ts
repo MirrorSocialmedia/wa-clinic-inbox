@@ -105,6 +105,10 @@ export interface AiChatOptions {
   messages: { role: "system" | "user"; content: string }[];
   /** vLLM guided_json schema（強制結構化輸出） */
   guidedJson?: unknown;
+  /** ★ consult v2.1 C4：per-call 參數覆寫（唔提供 = 原口徑 temperature 0 / AI_TIMEOUT_MS / 600 tokens） */
+  temperature?: number;
+  timeoutMs?: number;
+  maxTokens?: number;
 }
 
 export interface AiChatResult {
@@ -121,8 +125,9 @@ interface ChatCompletionResponse {
 }
 
 async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Promise<AiChatResult> {
+  const timeoutMs = opts.timeoutMs ?? cfg.timeoutMs;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const t0 = Date.now();
   try {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -130,8 +135,8 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
     const payload: Record<string, unknown> = {
       model,
       messages: opts.messages,
-      temperature: 0,
-      max_tokens: 600,
+      temperature: opts.temperature ?? 0,
+      max_tokens: opts.maxTokens ?? 600,
     };
     // 結構化輸出（雙後端兼容 — 見文件頭）：
     if (opts.guidedJson) {
@@ -171,7 +176,7 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
   } catch (err) {
     if (err instanceof AiCallError) throw err;
     const name = err instanceof Error ? err.name : "unknown";
-    const reason = name === "AbortError" ? `timeout ${cfg.timeoutMs}ms` : "network error";
+    const reason = name === "AbortError" ? `timeout ${timeoutMs}ms` : "network error";
     throw new AiCallError(`ai ${reason} (model=${model})`);
   } finally {
     clearTimeout(timer);

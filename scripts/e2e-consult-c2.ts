@@ -248,11 +248,12 @@ async function main(): Promise<void> {
     check("重複 (clinic,workflow,code) → 409", r.status === 409, `status=${r.status}`);
   }
   {
-    // GET list（clinic filter：該店 + 全局）
+    // GET list（clinic filter：該店 + 全局）— ★ C4 後 global 有出廠 seed（5 條）→ 動態計
     const r = await api(adminCookie, `/api/admin/consult-products?clinicId=${tkw}`, "GET");
     const list = r.json as ListResp;
     const codes = (list.products ?? []).map((p) => p.code).sort();
-    check("GET list 含該店 3 + 全局 1（共 4）", r.status === 200 && codes.length === 4 && ["e2ec2A", "e2ec2B", "e2ec2C", "e2ec2D"].every((c) => codes.includes(c)), JSON.stringify(codes));
+    const globalCount = await prisma.consultProduct.count({ where: { clinicId: null } });
+    check("GET list 含該店 3 + 全部 global（含 C4 出廠 seed）", r.status === 200 && codes.length === 3 + globalCount && ["e2ec2A", "e2ec2B", "e2ec2C", "e2ec2D"].every((c) => codes.includes(c)), JSON.stringify(codes));
     const byCode = Object.fromEntries((list.products ?? []).map((p) => [p.code, p]));
     check("usable 旗：A=true B=false C=true D=false", byCode.e2ec2A?.usable === true && byCode.e2ec2B?.usable === false && byCode.e2ec2C?.usable === true && byCode.e2ec2D?.usable === false);
     // usable=1 過濾（鐵律 API 層口徑 = C3 檢索同一 helper）

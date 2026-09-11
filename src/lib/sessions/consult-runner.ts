@@ -28,12 +28,21 @@
  * fail-soft 鐵律：engine 失敗唔阻 AI pipeline（對話照落公海/草稿照行）— 只 log + audit。
  * PII：audit 只記 row/rule/action/stage/terminal/turnCount/intentAfter（metadata only，零病人原文）。
  */
-import type { PrismaClient, Conversation, Clinic } from "@prisma/client";
+import type { Prisma, PrismaClient, Conversation, Clinic } from "@prisma/client";
 import log from "@/lib/log";
 import { publishNotify } from "@/lib/notify";
 import { applyLexicon, type LexiconEntry } from "@/lib/sessions/lexicon";
 import { matchRedFlagTerms } from "@/lib/sessions/red-flags";
 import { isProductUsable } from "@/lib/sessions/consult-products";
+import {
+  consultDiscoveryQuestion,
+  consultExtractSlots,
+  consultGenerateDraft,
+  type ConsultExtractOutput,
+  type ConsultGeneratePayload,
+} from "@/lib/ai/consult-llm";
+import { isAiMockEnabled } from "@/lib/ai/mock";
+import { selectPriceDisclaimer } from "@/lib/ai/price-guard";
 import {
   computePurchaseIntentDelta,
   consultTransition,
@@ -448,4 +457,237 @@ export async function runConsultExpireSweep(
   }
   if (expired > 0) log.info({ expired, idleHours: hours }, "consult-expire: sweep done");
   return { checked: stale.length, expired, failed, idleHours: hours };
+}
+
+// ── ★ consult v2.1 C4（MD §6）：LLM 兩次 call + slot 持久化 ─────────────────
+
+/**
+ * C4：Call #1 抽槽寫入 `session.slots`（C3 runner 接口 — engine 下 turn 讀到生效）。
+ * 鐵律：`clinicalSuitability`/`meta` 永唔由 AI 寫（code 層 guard）；objection/asks flag 只入 audit
+ *（trace）— engine 文本訊號係 authoritative（C3 transition 語義零改動）。
+ * fail-soft：失敗 → log only（extract 失敗時 caller 根本唔會入呢度 — state 不變）。
+ */
+export interface ConsultExtractionPersistInput {
+  prisma: PrismaClient;
+  sessionId: string;
+  slotUpdates: Record<string, string | number>;
+  objection: string | null;
+  askedFlags: {
+    askedComparison: boolean;
+    askedPrice: boolean;
+    asksDuration: boolean;
+    asksClinicalDetail: boolean;
+    asksWhichSuitsMe: boolean;
+    asksHuman: boolean;
+  };
+  msgId: string;
+  mock: boolean;
+}
+
+export async function persistConsultExtraction(input: ConsultExtractionPersistInput): Promise<string[]> {
+  try {
+    const { prisma, sessionId, slotUpdates, objection, askedFlags, msgId, mock } = input;
+    const s = await prisma.consultSession.findUnique({ where: { id: sessionId } });
+    if (!s) return [];
+    const cur: Record<string, unknown> =
+      s.slots && typeof s.slots === "object" && !Array.isArray(s.slots)
+        ? { ...(s.slots as Record<string, unknown>) }
+        : {};
+    const next = { ...cur };
+    const applied: string[] = [];
+    for (const [k, v] of Object.entries(slotUpdates ?? {})) {
+      if (k === "clinicalSuitability" || k === "meta") continue; // 鐵律
+      next[k] = v; // 病人最新表達覆蓋（latest wins）
+      applied.push(k);
+    }
+    if (applied.length > 0) {
+      await prisma.consultSession.update({ where: { id: sessionId }, data: { slots: next as Prisma.InputJsonValue } });
+    }
+    await prisma.auditLog.create({
+      data: {
+        staffId: null,
+        action: "CONSULT_EXTRACT",
+        entity: "ConsultSession",
+        entityId: sessionId,
+        meta: { applied, objection, flags: askedFlags, msgId, mock } as object,
+      },
+    });
+    return applied;
+  } catch (err) {
+    log.warn({ sessionId: input.sessionId, err: String(err) }, "consult: persistExtraction failed（fail-soft）");
+    return [];
+  }
+}
+
+/** claim guard 用嘅產品 ctx（同入 prompt 嘅同一集合 — 鐵律：unapproved 唔會喺度）。 */
+export interface ConsultLlmProductCtx {
+  code: string;
+  displayName: string;
+  brand: string | null;
+  timeWording: string | null;
+  avoidPhrases: string[];
+}
+
+export interface ConsultLlmTurnInput {
+  prisma: PrismaClient;
+  conv: Conversation;
+  clinic: Clinic;
+  msg: { id: string; waMessageId: string | null; body: string | null };
+  /** runConsultEngineTurn 回傳嘅 sessionId（null = 唔應該到呢度 — 安全 skip）。 */
+  sessionId: string | null;
+  workflow: string;
+  action: string;
+  stage: string;
+  candidateCategory: string | null;
+  /** #16 ASK_DISCOVERY 本輪要問嘅 slot key（chooseNextQuestion）— 問題文本由 consultDiscoveryQuestion 生。 */
+  askedSlot: string | null;
+  /** 本輪引用嘅 PRICE doc（price chain — null = 無）；priceRange.shortDisclaimer 用 selectPriceDisclaimer 同源。 */
+  priceDoc: { id: string; title: string; priceMin: number | null; priceMax: number | null; shortDisclaimer: string | null; disclaimer: string | null } | null;
+  /** worker ctxMessages（最近對話 — recentMessages(6) 截尾）。 */
+  ctxMessages: { direction: string; body: string | null }[];
+}
+
+export interface ConsultLlmTurnResult {
+  /** 生成草稿（null = extract-fail 降級 / generate fail — caller 保留原 draft）。 */
+  draft: string | null;
+  model: string | null;
+  /** 本輪 LLM call 數（#1+#2；worker 加主 classify = ≤3/turn 口徑）。 */
+  calls: number;
+  /** MD §6.1：失敗 → 降級普通 QUESTION 回覆，state 不變。 */
+  extractFailed: boolean;
+  /** Call #1 寫入 slot 嘅 key（trace）。 */
+  extractApplied: string[];
+  /** usable 產品 ctx（worker claim guard CG-004/009 用 — isProductUsable 鐵律）。 */
+  usableProducts: ConsultLlmProductCtx[];
+  mock: boolean;
+}
+
+/**
+ * C4：LLM 兩次 call（§6）— Call #1 抽槽（temp 0 / 3s）+ Call #2 生成（temp 0.4）。
+ *
+ * 失敗語義：
+ * - extract fail（timeout 3s / JSON 爛）→ log `consult: extract failed` + state 不變（slot 唔寫）
+ *   + 唔跑 generate + audit CONSULT_LLM_TURN{extractFailed:true}（caller 保留原 classify draft = 降級 QUESTION）
+ * - generate fail → fail-soft 保留原 draft（log + audit generated:false）
+ * 鐵律：usable 產品經 isProductUsable 過濾先入 payload（unapproved/disabled 永遠唔入 prompt）。
+ */
+export async function runConsultLlmTurn(input: ConsultLlmTurnInput): Promise<ConsultLlmTurnResult> {
+  const out: ConsultLlmTurnResult = {
+    draft: null,
+    model: null,
+    calls: 0,
+    extractFailed: false,
+    extractApplied: [],
+    usableProducts: [],
+    mock: isAiMockEnabled(),
+  };
+  const auditTurn = (meta: object) =>
+    input.prisma.auditLog
+      .create({
+        data: {
+          staffId: null,
+          action: "CONSULT_LLM_TURN",
+          entity: "ConsultSession",
+          entityId: input.sessionId ?? input.conv.id,
+          meta: { action: input.action, stage: input.stage, mock: out.mock, ...meta } as object,
+        },
+      })
+      .catch((err: unknown) => log.warn({ err: String(err) }, "consult-llm: audit failed（fail-soft）"));
+
+  if (!input.sessionId) {
+    log.warn({ clinic: input.clinic.code }, "consult-llm: no sessionId — skip（安全）");
+    return out;
+  }
+  try {
+    // 1. usable 產品（鐵律：approvedAt=null / enabled=false 永遠唔入 prompt）
+    const products = await input.prisma.consultProduct.findMany({
+      where: { workflow: input.workflow, OR: [{ clinicId: input.conv.clinicId }, { clinicId: null }] },
+      orderBy: { sortOrder: "asc" },
+    });
+    const usable = products.filter(isProductUsable);
+    out.usableProducts = usable.map((p) => ({
+      code: p.code,
+      displayName: p.displayName,
+      brand: p.brand,
+      timeWording: p.timeWording,
+      avoidPhrases: p.avoidPhrases,
+    }));
+
+    // 2. Call #1 抽槽（temp 0 / 3s timeout）— 失敗 → 降級，state 不變
+    let extract: ConsultExtractOutput;
+    try {
+      extract = await consultExtractSlots({
+        text: input.msg.body ?? "",
+        workflow: input.workflow,
+        recent: input.ctxMessages,
+      });
+      out.calls += 1;
+    } catch (err) {
+      out.extractFailed = true;
+      log.warn(
+        { clinic: input.clinic.code, wamid: input.msg.waMessageId, err: String(err) },
+        "consult: extract failed"
+      );
+      await auditTurn({ calls: out.calls, extractFailed: true, generated: false });
+      return out; // 唔寫 slot、唔跑 generate — caller 保留原 draft（降級普通 QUESTION 回覆）
+    }
+    out.extractApplied = await persistConsultExtraction({
+      prisma: input.prisma,
+      sessionId: input.sessionId,
+      slotUpdates: extract.slotUpdates,
+      objection: extract.objection,
+      askedFlags: {
+        askedComparison: extract.askedComparison,
+        askedPrice: extract.askedPrice,
+        asksDuration: extract.asksDuration,
+        asksClinicalDetail: extract.asksClinicalDetail,
+        asksWhichSuitsMe: extract.asksWhichSuitsMe,
+        asksHuman: extract.asksHuman,
+      },
+      msgId: input.msg.id,
+      mock: out.mock,
+    });
+
+    // 3. Call #2 生成（temp 0.4）— user = 結構化 payload（MD §6.2 逐字欄位）
+    const payload: ConsultGeneratePayload = {
+      action: input.action,
+      stage: input.stage,
+      workflow: input.workflow,
+      candidateCategory: input.candidateCategory,
+      products: usable.map((p) => ({
+        displayName: p.displayName,
+        positioning: p.positioning,
+        approvedWording: p.approvedWording,
+        timeWording: p.timeWording,
+      })),
+      priceRange: input.priceDoc
+        ? {
+            min: input.priceDoc.priceMin,
+            max: input.priceDoc.priceMax,
+            shortDisclaimer: selectPriceDisclaimer(input.priceDoc),
+          }
+        : null,
+      avoidPhrases: [...new Set(usable.flatMap((p) => p.avoidPhrases))],
+      discoveryQuestion:
+        input.action === "ASK_DISCOVERY" ? consultDiscoveryQuestion(input.workflow, input.askedSlot) : null,
+      recentMessages: input.ctxMessages
+        .filter((m) => typeof m.body === "string" && m.body.trim().length > 0)
+        .slice(-6)
+        .map((m) => ({
+          direction: (m.direction === "IN" ? "IN" : "OUT") as "IN" | "OUT",
+          body: m.body as string,
+        })),
+    };
+    const gen = await consultGenerateDraft(payload);
+    out.calls += 1;
+    out.draft = gen.text;
+    out.model = gen.model;
+  } catch (err) {
+    log.warn(
+      { clinic: input.clinic.code, wamid: input.msg.waMessageId, err: String(err) },
+      "consult-llm: turn failed（fail-soft — 保留原 draft）"
+    );
+  }
+  await auditTurn({ calls: out.calls, extractFailed: false, generated: out.draft !== null, extractApplied: out.extractApplied });
+  return out;
 }

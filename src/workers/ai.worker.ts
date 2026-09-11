@@ -40,9 +40,11 @@ import { fillVars } from "@/lib/workflow/definitions";
 import { pickKnowledge, knowledgePromptBlock, matchPriceDocs } from "@/lib/knowledge/retrieve";
 import { getKnowledgeCatalog, type CatalogDoc } from "@/lib/knowledge/catalog";
 import { isPriceIntent, buildPriceDraft, runPriceGuard, NO_PRICE_TEXT } from "@/lib/ai/price-guard";
+import { runClaimGuard } from "@/lib/ai/claim-guard";
+import { CONSULT_LLM_ACTIONS } from "@/lib/ai/consult-llm";
 // ★ Part E（cwi-paintriage-20260903）：PAIN_TRIAGE 痛症分流（E.2 fast path / E.3 session / E.4 紅旗 / E.7 術後 / E.8 lexicon）
 import { getLexicon, applyLexicon } from "@/lib/sessions/lexicon";
-import { runConsultEngineTurn, type ConsultTurnOutcome } from "@/lib/sessions/consult-runner";
+import { runConsultEngineTurn, runConsultLlmTurn, type ConsultTurnOutcome } from "@/lib/sessions/consult-runner";
 import { matchRedFlagTerms, effectiveRedFlagTerms } from "@/lib/sessions/red-flags";
 import { painStep, parsePainState, PAIN_SESSION_TTL_MS } from "@/lib/sessions/pain-triage";
 import { triggerFloor } from "@/lib/sessions/consult-trigger";
@@ -441,6 +443,82 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       lexicon: ptLex,
       redFlagParams: ptParams,
     });
+  }
+
+  // ── ★ consult v2.1 C4（MD §6）：LLM 兩次 call（Call #1 抽槽 + Call #2 生成）+ §5 Claim Guard ──
+  // 觸發 = engine content action（8 個）+ processed + intent/urgency 未壓（喺 canDraft 之前先攞 LLM 草稿）。
+  // 「suppressDraft 嘅 turn 唔准有 LLM call」鐵律由結構保證：
+  //   - END_SESSION（#5/#22，suppressDraft=true）action 唔喺 8 個內
+  //   - 窗口過期（#4）/ humanTookOver（#6）= processed:false（engine 已 gate）
+  //   - URGENT_PAIN/COMPLAINT/HIGH = intent/urgency gate 排除（同 canDraft 核心一致）
+  // call 數 ≤3/turn（主 classify + extract + generate — audit CONSULT_LLM_TURN.meta.calls 可驗）。
+  // pipeline：extract（失敗 → 降級保留原 draft，state 不變）→ generate（isProductUsable 鐵律過濾）
+  //   → price-guard 重跑（deterministic）→ claim guard（§5，喺 price-guard 之後）→ audit。
+  // fail-soft：任何失敗 → 保留原 draft（對話照行）；非 8-action turn 零 LLM call。
+  if (
+    msg.type === "text" &&
+    msg.body &&
+    result.draft !== null &&
+    consultOutcome &&
+    consultOutcome.sessionId &&
+    consultOutcome.transition?.processed === true &&
+    consultOutcome.action !== null &&
+    CONSULT_LLM_ACTIONS.has(consultOutcome.action) &&
+    result.intent !== "URGENT_PAIN" &&
+    result.intent !== "COMPLAINT" &&
+    result.urgency !== "HIGH"
+  ) {
+    const llm = await runConsultLlmTurn({
+      prisma,
+      conv,
+      clinic,
+      msg: { id: msg.id, waMessageId: msg.waMessageId, body: msg.body },
+      sessionId: consultOutcome.sessionId,
+      workflow: consultTrigger as string,
+      action: consultOutcome.action,
+      stage: consultOutcome.stage,
+      candidateCategory: consultOutcome.transition?.candidateCategory ?? null,
+      askedSlot: consultOutcome.transition?.askedSlot ?? null,
+      priceDoc: citedPriceDoc,
+      ctxMessages,
+    });
+    if (llm.draft !== null) {
+      // ① draft 換入（主 classify 只係 fallback — extract 失敗時保留）
+      let finalDraft: string = llm.draft;
+      result = { ...result, draft: finalDraft, model: llm.model ?? result.model };
+      // ② price-guard 重跑（deterministic — 先行；consult draft 取代咗舊 draft，原 guard 結果作廢）
+      const pg = runPriceGuard({ draft: finalDraft, priceDoc: citedPriceDoc, priceIntent: priceTrace.triggered });
+      priceTrace.guard = { blocked: pg.blocked, disclaimerAppended: pg.disclaimerAppended, outOfRange: pg.outOfRange };
+      if (pg.blocked) {
+        finalDraft = pg.draft;
+        result = { ...result, draft: pg.draft, needsHuman: true };
+      } else if (pg.disclaimerAppended) {
+        finalDraft = pg.draft;
+        result = { ...result, draft: pg.draft };
+      }
+      // ③ claim guard（MD §5 — 喺 price-guard 之後；BLOCK → 棄用草稿 → 人手提示 + needsHuman + trace）
+      const cg = runClaimGuard({
+        draft: finalDraft,
+        products: llm.usableProducts.map((p) => ({ ...p })),
+        hasBackendSlot: false, // free-form consult 路徑 — 只 booking flow 先有 backend slot
+        priceDoc: citedPriceDoc ? { priceMin: citedPriceDoc.priceMin, priceMax: citedPriceDoc.priceMax } : null,
+      });
+      if (cg.blocked && cg.code) {
+        log.warn({ clinic: clinic.code, wamid: msg.waMessageId, code: cg.code, codes: cg.codes }, `claim-guard: ${cg.code}`);
+        await prisma.auditLog
+          .create({
+            data: {
+              staffId: null,
+              action: "CONSULT_CLAIM_GUARD_BLOCK",
+              entity: "ConsultSession",
+              entityId: consultOutcome.sessionId,
+              meta: { code: cg.code, codes: cg.codes, action: consultOutcome.action, stage: consultOutcome.stage } as object,
+            },
+          })
+          .catch((err: unknown) => log.warn({ err: String(err) }, "claim-guard: audit failed（fail-soft）"));
+        result = { ...result, draft: cg.draft, needsHuman: true };
+      }
+    }
   }
 
   // ── C6：L3+ 開 session（BOOKING_REQUEST + 無人接手 + 文字訊息 + ★ P2：窗口內）──
