@@ -6,6 +6,9 @@
  *                                       （getSlots 四層降級鏈 — workforce API 逐店刷新 L2 cache；
  *                                       單店失敗唔阻其他店）
  * - bookings-expire    每 5 分鐘（cron pattern: 5 分間隔） → 48h PENDING → EXPIRED + 棄單 Flow 清理
+ * - consult-expire     每 5 分鐘 → consult v2.1 C3（MD §4.2 #23）：48h 無 inbound → active ConsultSession
+ *                                       → EXPIRED + purchaseIntent −0.15 + follow-up audit placeholder
+ *                                       （env CONSULT_SESSION_IDLE_HOURS 預設 48；冪等 terminal=null filter）
  * - health-check       每 5 分鐘（cron pattern: 5 分間隔） → 6 項健康自檢（MD §9.3）：
  *                                       webhook stale / queue depth / AI breaker / workforce degraded / disk / backup
  * - quality-check      每日 06:30 → 逐號 quality_rating（跌 YELLOW/RED → HIGH alert）
@@ -49,6 +52,7 @@ import { runAutoReleaseSweep } from "@/lib/auto-release";
 import { runAutoResolveSweep } from "@/lib/auto-resolve";
 import { runUnassignedSlaSweep } from "@/lib/unassigned-sla";
 import { runRoutingEscalateSweep } from "@/lib/routing/escalate";
+import { runConsultExpireSweep } from "@/lib/sessions/consult-runner";
 
 export async function startCronWorker(): Promise<Worker | null> {
   const worker = new Worker(
@@ -65,6 +69,13 @@ export async function startCronWorker(): Promise<Worker | null> {
         }
         case "bookings-expire": {
           const r = await runExpiry();
+          return { ok: true, ...r };
+        }
+        case "consult-expire": {
+          // consult v2.1 C3（MD §4.2 #23）：48h 無 inbound → active ConsultSession EXPIRED +
+          // purchaseIntent −0.15 + follow-up audit placeholder（env CONSULT_SESSION_IDLE_HOURS 預設 48；
+          // 冪等：terminal=null filter — 重複跑安全；E2E 可手動 enqueue 或直調 runConsultExpireSweep）
+          const r = await runConsultExpireSweep();
           return { ok: true, ...r };
         }
         case "auto-release": {

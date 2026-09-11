@@ -42,6 +42,7 @@ import { getKnowledgeCatalog, type CatalogDoc } from "@/lib/knowledge/catalog";
 import { isPriceIntent, buildPriceDraft, runPriceGuard, NO_PRICE_TEXT } from "@/lib/ai/price-guard";
 // ★ Part E（cwi-paintriage-20260903）：PAIN_TRIAGE 痛症分流（E.2 fast path / E.3 session / E.4 紅旗 / E.7 術後 / E.8 lexicon）
 import { getLexicon, applyLexicon } from "@/lib/sessions/lexicon";
+import { runConsultEngineTurn, type ConsultTurnOutcome } from "@/lib/sessions/consult-runner";
 import { matchRedFlagTerms, effectiveRedFlagTerms } from "@/lib/sessions/red-flags";
 import { painStep, parsePainState, PAIN_SESSION_TTL_MS } from "@/lib/sessions/pain-triage";
 import { triggerFloor } from "@/lib/sessions/consult-trigger";
@@ -420,11 +421,34 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     lexicon: ptLex,
   });
 
+  // ── ★ consult v2.1 C3（§4 規則引擎 — 純函數零 LLM）：每 consult turn transition ─────────────
+  // 觸發 = consultTrigger（FLOOR ?? LLM，C1 口徑）；get/create active session（C2 守衛）+ 25 行
+  // first match wins（紅旗/痛症/COMPLAINT/真人/窗口/叫停/humanTookOver/maxTurns/PRICE≥2/高意向/
+  // objection/臨床/時間/DISCOVER slot 流/EDUCATE/PRESENT/CONSULTATION/CTA）+ action/stage/terminal/
+  // purchaseIntent/turnCount 落 DB + audit。fail-soft：engine 失敗唔阻 pipeline。
+  // terminal action 對話層 = 轉既有 flow（handoff notice / PAIN 路徑 / 下方 C6 booking 路徑）。
+  // LLM 草稿生成唔係 C3 範圍（C4）— 呢度只確保 action + stage 狀態正確落 DB。
+  let consultOutcome: ConsultTurnOutcome | null = null;
+  if (msg.type === "text" && msg.body && consultTrigger !== null) {
+    consultOutcome = await runConsultEngineTurn({
+      prisma,
+      conv,
+      clinic,
+      msg: { id: msg.id, waMessageId: msg.waMessageId, type: msg.type, body: msg.body },
+      intent: result.intent,
+      consultTrigger,
+      winOpen: win.open,
+      lexicon: ptLex,
+      redFlagParams: ptParams,
+    });
+  }
+
   // ── C6：L3+ 開 session（BOOKING_REQUEST + 無人接手 + 文字訊息 + ★ P2：窗口內）──
   // 無 AutomationPolicy row 嘅店 = legacy L1/L2 → 一行都唔改（跌落現有 draft/AUTO）
+  // ★ C3：consult engine 嘅 START_BOOKING action（#9/#20/#21）同樣轉呢度既有 booking flow。
   if (
     win.open && // cwi-window-20260901（P2）：過窗唔開 session（session reply 係自動覆 — 發唔出）
-    result.intent === "BOOKING_REQUEST" &&
+    (result.intent === "BOOKING_REQUEST" || consultOutcome?.action === "START_BOOKING") &&
     msg.type === "text" &&
     updatedConv.assigneeId === null &&
     !activeSession
@@ -519,7 +543,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     result.draft !== null &&
     msg.type === "text" && // ★ AI Workflow T1 (A2)：媒體唔出草稿（只內部通知職員）
     !consultWindowExpired &&
-    !consultTakeoverSuppressed;
+    !consultTakeoverSuppressed &&
+    !consultOutcome?.suppressDraft; // ★ C3：END_SESSION（叫停/推搪）後唔 auto-reply
   if (canDraft) {
     // 冪等：unique(conversationId, inReplyToMessageId) + 前置查（retry 重跑唔會重複 draft）
     let existing = await prisma.aiDraft.findUnique({

@@ -29,6 +29,11 @@ async function registerSchedulers() {
     name: "bookings-expire",
     data: {},
   });
+  // consult v2.1 C3（MD §4.2 #23）：48h 無 inbound → active ConsultSession EXPIRED（冪等；env 可覆寫 idle 時長）
+  await cronQueue.upsertJobScheduler("sched-consult-expire", { pattern: "*/5 * * * *" }, {
+    name: "consult-expire",
+    data: {},
+  });
   // Phase 4（MD §9.3）：5 分鐘健康自檢 + 每日 quality_rating + 每星期一週報
   await cronQueue.upsertJobScheduler("sched-health-check", { pattern: "*/5 * * * *" }, {
     name: "health-check",
