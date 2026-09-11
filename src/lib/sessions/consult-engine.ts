@@ -296,11 +296,15 @@ export function minimumSlotsMet(workflow: ConsultWorkflow, slots: ConsultSlots):
 export function chooseNextQuestion(
   workflow: ConsultWorkflow,
   slots: ConsultSlots,
-  askedSlots: string[]
+  askedSlots: string[],
+  /** ★ C5（MD §8.1 Tab 2 discovery）：關咗嘅問題對應 slot（無 = 全部可問，C3/C4 原行為）。 */
+  skipSlots?: string[]
 ): string | null {
   const table = workflow === "IMPLANT_CONSULT" ? IMPLANT_SLOT_VALUE : ORTHO_SLOT_VALUE;
+  const skip = skipSlots ?? [];
   const cands = Object.entries(table)
     .filter(([k]) => !askedSlots.includes(k))
+    .filter(([k]) => !skip.includes(k))
     .filter(([k]) => (slots[k as keyof ConsultSlots] ?? null) == null)
     .sort((a, b) => b[1] - a[1]);
   return cands.length > 0 ? cands[0][0] : null;
@@ -363,16 +367,19 @@ export const IMPLANT_RULES: ConsultRule[] = [
   { id: "IMPLANT-004", when: (_s, c) => c.asksClinicalDetail, action: "ASK_FOR_CONSULTATION" },
 ];
 
-/** 第一命中 rule（deterministic 順序）— 冇命中 = null。`s` = slots ∪ { purchaseIntent }。 */
+/** 第一命中 rule（deterministic 順序）— 冇命中 = null。`s` = slots ∪ { purchaseIntent }。
+ * ★ C5：`disabled`（Tab 2 關咗嘅 rule id）→ 該 rule 視為唔命中（無 row = C3/C4 原行為）。 */
 export function matchRule(
   workflow: ConsultWorkflow,
   slots: ConsultSlots,
   ctx: RuleCtx,
-  purchaseIntent: number
+  purchaseIntent: number,
+  disabled?: ReadonlySet<string>
 ): ConsultRule | null {
   const rules = workflow === "IMPLANT_CONSULT" ? IMPLANT_RULES : ORTHO_RULES;
   const s: RuleSlots = { ...(slots as OrthoSlots & ImplantSlots), purchaseIntent };
   for (const r of rules) {
+    if (disabled && disabled.has(r.id)) continue;
     try {
       if (r.when(s, ctx)) return r;
     } catch {
@@ -387,9 +394,10 @@ export function deriveCandidateCategory(
   workflow: ConsultWorkflow,
   slots: ConsultSlots,
   ctx: RuleCtx,
-  purchaseIntent: number
+  purchaseIntent: number,
+  disabled?: ReadonlySet<string>
 ): { candidateCategory: string | null; ruleId: string | null } {
-  const rule = matchRule(workflow, slots, ctx, purchaseIntent);
+  const rule = matchRule(workflow, slots, ctx, purchaseIntent, disabled);
   if (workflow !== "ORTHODONTIC_CONSULT") return { candidateCategory: null, ruleId: rule?.id ?? null };
   if (rule?.derive?.candidateCategory) return { candidateCategory: rule.derive.candidateCategory, ruleId: rule.id };
   return { candidateCategory: null, ruleId: rule?.id ?? null };
@@ -400,6 +408,10 @@ export function deriveCandidateCategory(
 export interface TransitionOpts {
   maxTurns?: number; // default 8
   ctaAfterTurns?: number; // default 6
+  /** ★ C5（MD §8.1 Tab 2）：關咗嘅 rule id — 對應 transition row 唔命中（無 = C3/C4 原行為）。 */
+  disabledRules?: ReadonlySet<string>;
+  /** ★ C5（MD §8.1 Tab 2 discovery）：關咗嘅發現問題對應 slot（chooseNextQuestion skip）。 */
+  discovery?: { skipSlots?: string[] };
 }
 
 export interface TransitionResult {
@@ -480,6 +492,9 @@ export function consultTransition(
     ...base,
     ...patch,
   });
+  // ★ C5（MD §8.1 Tab 2）：rule 關咗 → 對應 row 視為唔命中（first-match 繼續往下）。
+  const off = opts.disabledRules;
+  const offRule = (id: string | null): boolean => id !== null && off?.has(id) === true;
 
   // 本輪 objection 狀態（#8 判定用**本輪更新後**嘅 count — GC-18 口徑）
   let thisTurnObjection: ObjectionState | null = null;
@@ -566,38 +581,38 @@ export function consultTransition(
       note: "clinical detail",
     });
   }
-  // ── #14 DISCOVER 指名產品 + 問價 ──
-  if (stage === "DISCOVER" && sig.asksPrice && sig.namedProduct) {
+  // ── #14 DISCOVER 指名產品 + 問價（C5：ORTHO-009 關咗 → 唔命中） ──
+  if (stage === "DISCOVER" && sig.asksPrice && sig.namedProduct && !offRule("ORTHO-009")) {
     return emit(14, { action: "ANSWER_PRICE", ruleId: "ORTHO-009", note: "named product + price" });
   }
-  // ── #15 DISCOVER 要求比較 ──
-  if (stage === "DISCOVER" && sig.askedComparison) {
+  // ── #15 DISCOVER 要求比較（C5：ORTHO-003 關咗 → 唔命中） ──
+  if (stage === "DISCOVER" && sig.askedComparison && !offRule("ORTHO-003")) {
     return emit(15, { stage: "EDUCATE", action: "EDUCATE_COMPARE", ruleId: "ORTHO-003", note: "comparison" });
   }
-  // ── #16 DISCOVER minimum slots 未齊 ──
+  // ── #16 DISCOVER minimum slots 未齊（C5：discovery skipSlots） ──
   if (stage === "DISCOVER" && !minimumSlotsMet(session.workflow, session.slots)) {
     // 每輪最多一條 + askedSlots 唔重問 — 冇得問（全部問過、答案未落 = C4 抽取待中）→ 唔重問（stay）
-    const nextSlot = chooseNextQuestion(session.workflow, session.slots, session.askedSlots);
+    const nextSlot = chooseNextQuestion(session.workflow, session.slots, session.askedSlots, opts.discovery?.skipSlots);
     if (nextSlot !== null) {
       return emit(16, { action: "ASK_DISCOVERY", askedSlot: nextSlot, note: "minimum slots incomplete" });
     }
   }
-  // ── #17 DISCOVER minimum slots 齊 ──
+  // ── #17 DISCOVER minimum slots 齊（C5：rule 關咗 → 只去 candidateCategory derive，row 照行） ──
   if (stage === "DISCOVER" && minimumSlotsMet(session.workflow, session.slots)) {
-    const d = deriveCandidateCategory(session.workflow, session.slots, ruleCtxFromSignals(sig), intentAfter);
+    const d = deriveCandidateCategory(session.workflow, session.slots, ruleCtxFromSignals(sig), intentAfter, off);
     return emit(17, { stage: "PRESENT_OPTIONS", action: "PRESENT_OPTIONS", candidateCategory: d.candidateCategory, ruleId: d.ruleId, note: "minimum slots met" });
   }
-  // ── #18 EDUCATE 比較完成 ──
+  // ── #18 EDUCATE 比較完成（C5：同上） ──
   if (stage === "EDUCATE" && (session.lastAction === "EDUCATE_COMPARE" || session.comparedProducts.length > 0)) {
-    const d = deriveCandidateCategory(session.workflow, session.slots, ruleCtxFromSignals(sig), intentAfter);
+    const d = deriveCandidateCategory(session.workflow, session.slots, ruleCtxFromSignals(sig), intentAfter, off);
     return emit(18, { stage: "PRESENT_OPTIONS", action: "PRESENT_OPTIONS", candidateCategory: d.candidateCategory, ruleId: d.ruleId, note: "comparison done" });
   }
   // ── #19 PRESENT_OPTIONS clinicalSuitability = UNKNOWN ──
   if (stage === "PRESENT_OPTIONS" && (session.slots as OrthoSlots).clinicalSuitability === "UNKNOWN") {
     return emit(19, { stage: "CONSULTATION", action: "ASK_FOR_CONSULTATION", ruleId: "ORTHO-005", note: "clinical UNKNOWN — ask consultation" });
   }
-  // ── #20 PRESENT_OPTIONS purchaseIntent >= 0.6 ──
-  if (stage === "PRESENT_OPTIONS" && intentAfter >= CONSULT_HIGH_INTENT_THRESHOLD) {
+  // ── #20 PRESENT_OPTIONS purchaseIntent >= 0.6（C5：ORTHO-010 關咗 → 唔命中） ──
+  if (stage === "PRESENT_OPTIONS" && intentAfter >= CONSULT_HIGH_INTENT_THRESHOLD && !offRule("ORTHO-010")) {
     return emit(20, { stage: "BOOKING", terminal: "COMPLETED", action: "START_BOOKING", booking: true, ruleId: "ORTHO-010", note: "intent >= 0.6" });
   }
   // ── #21 CONSULTATION 病人接受 ──

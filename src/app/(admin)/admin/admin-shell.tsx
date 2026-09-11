@@ -14,6 +14,7 @@ import {
   Lightbulb,
   LogOut,
   MessageCircle,
+  MessageSquareText,
   Users,
   Workflow,
   type LucideIcon,
@@ -49,6 +50,7 @@ const SECTION_NAMES: Record<string, string> = {
   "/admin/routing-rules": "路由規則",
   "/admin/automation": "AI 自動化",
   "/admin/suggestions": "AI 建議",
+  "/admin/consult": "AI 傾偈設定",
   "/admin/knowledge": "知識庫",
   "/admin/golden": "GoldenCase 評測",
 };
@@ -106,6 +108,8 @@ export function AdminShell({
           icon: Lightbulb,
           badge: pendingSuggestions,
         },
+        // ★ consult v2.1 C5（MD §8.1）：新入口「AI 傾偈設定」（唔叫 Workflow/CONSULT）
+        { href: "/admin/consult", label: "AI 傾偈設定", icon: MessageSquareText },
         { href: "/admin/workflows", label: "Workflow", icon: Workflow },
         { href: "/admin/knowledge", label: "知識庫", icon: BookOpen },
         { href: "/admin/golden", label: "GoldenCase 評測", icon: ClipboardCheck },

@@ -45,6 +45,7 @@ import { CONSULT_LLM_ACTIONS } from "@/lib/ai/consult-llm";
 // ★ Part E（cwi-paintriage-20260903）：PAIN_TRIAGE 痛症分流（E.2 fast path / E.3 session / E.4 紅旗 / E.7 術後 / E.8 lexicon）
 import { getLexicon, applyLexicon } from "@/lib/sessions/lexicon";
 import { runConsultEngineTurn, runConsultLlmTurn, type ConsultTurnOutcome } from "@/lib/sessions/consult-runner";
+import { loadConsultSettings } from "@/lib/sessions/consult-settings";
 import { matchRedFlagTerms, effectiveRedFlagTerms } from "@/lib/sessions/red-flags";
 import { painStep, parsePainState, PAIN_SESSION_TTL_MS } from "@/lib/sessions/pain-triage";
 import { triggerFloor } from "@/lib/sessions/consult-trigger";
@@ -430,6 +431,11 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   // purchaseIntent/turnCount 落 DB + audit。fail-soft：engine 失敗唔阻 pipeline。
   // terminal action 對話層 = 轉既有 flow（handoff notice / PAIN 路徑 / 下方 C6 booking 路徑）。
   // LLM 草稿生成唔係 C3 範圍（C4）— 呢度只確保 action + stage 狀態正確落 DB。
+  // ★ C5（MD §8.1）：UI 設定（Tab 2 開關 / discovery 問題 + Tab 3 進階參數）— 每 consult turn fresh load
+  //   （fail-soft → default = C3/C4 原行為）；engine turn + LLM turn 共用同一份。
+  const consultUi = msg.type === "text" && msg.body && consultTrigger !== null
+    ? await loadConsultSettings(prisma, conv.clinicId)
+    : null;
   let consultOutcome: ConsultTurnOutcome | null = null;
   if (msg.type === "text" && msg.body && consultTrigger !== null) {
     consultOutcome = await runConsultEngineTurn({
@@ -442,6 +448,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       winOpen: win.open,
       lexicon: ptLex,
       redFlagParams: ptParams,
+      settings: consultUi,
     });
   }
 
@@ -481,6 +488,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       askedSlot: consultOutcome.transition?.askedSlot ?? null,
       priceDoc: citedPriceDoc,
       ctxMessages,
+      questionOverrides: consultUi?.discoveryQuestionOverrides ?? null,
     });
     if (llm.draft !== null) {
       // ① draft 換入（主 classify 只係 fallback — extract 失敗時保留）

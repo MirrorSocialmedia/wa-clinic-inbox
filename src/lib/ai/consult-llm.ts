@@ -293,9 +293,12 @@ const IMPLANT_DISCOVERY_QUESTIONS: Record<string, string> = {
 };
 
 /** ASK_DISCOVERY 問題文本（slotKey → 白話問題；null = 冇得問）。 */
-export function consultDiscoveryQuestion(workflow: string, slotKey: string | null): string | null {
+/** 發現問題文本（MD §4.6 出廠表）。★ C5：`overrides`（Tab 2 醫生改過嘅文案 — slot → text；未改用出廠表）。 */
+export function consultDiscoveryQuestion(workflow: string, slotKey: string | null, overrides?: Record<string, string>): string | null {
   if (!slotKey) return null;
   const table = workflow === "IMPLANT_CONSULT" ? IMPLANT_DISCOVERY_QUESTIONS : ORTHO_DISCOVERY_QUESTIONS;
+  const overridden = overrides?.[slotKey];
+  if (overridden && overridden.trim()) return overridden;
   return table[slotKey] ?? null;
 }
 

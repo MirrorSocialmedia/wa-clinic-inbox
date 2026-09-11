@@ -2,11 +2,17 @@
  * ★ consult v2.1 C2（MD §3）：ConsultProduct 條目 PUT/PATCH（ADMIN-only）。
  *
  * PUT    — 增量更新（zod consultProductUpdateSchema；未提供欄位保持原值）+ AuditLog。
+ *          ★ C5（MD §8.1）：
+ *          (a) `positioning` 自動同步 — body 帶 approvedWording 時 positioning 跟同一值
+ *              （MD：positioning 唔入表單，由 approvedWording 自動同步，醫生唔填兩次）。
+ *          (b) **任何內容欄改動 → approvedAt/approvedBy 自動清空**（防簽完先改；要重新確認）。
+ *              內容欄 = 除 enabled/approvedBy/approvedAt 以外嘅所有產品欄。
+ *              回應帶 `approvalCleared: boolean`（UI toast + e2e 斷言口徑）。
  * PATCH  — 啟用/停用（{ enabled: boolean }）— 停用後 isProductUsable=false →
  *          立即離開一切 AI 草稿/檢索（C3 檢索每次 query 都經 helper，唔需要 cache bust）。
+ *          （enabled 唔算「內容改動」— 唔清 approvedAt；重開後保持已確認狀態。）
  *
- * 鐵律提醒：改 approvedAt/approvedBy 唔會自動「批准」以外嘅效果 — usable 純由
- *   enabled && approvedAt!=null 決定（isProductUsable 單一來源）。
+ * 鐵律提醒：usable 純由 enabled && approvedAt!=null 決定（isProductUsable 單一來源）。
  */
 import { type NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/rbac";
@@ -21,6 +27,15 @@ export const dynamic = "force-dynamic";
 interface Params {
   params: Promise<{ id: string }>;
 }
+
+/** ★ C5（MD §8.1）：單一產品讀取（UI 表單 refresh / e2e 斷言）。ADMIN-only。 */
+export const GET = handle(async (req: NextRequest, { params }: Params) => {
+  await requireAdmin(req);
+  const { id } = await params;
+  const product = await prisma.consultProduct.findUnique({ where: { id } });
+  if (!product) return NextResponse.json({ error: "not found" }, { status: 404 });
+  return NextResponse.json({ product, usable: isProductUsable(product) });
+});
 
 export const PUT = handle(async (req: NextRequest, { params }: Params) => {
   const ctx = await requireAdmin(req);
@@ -39,6 +54,25 @@ export const PUT = handle(async (req: NextRequest, { params }: Params) => {
   for (const [k, v] of Object.entries(d)) {
     if (v !== undefined) data[k] = v;
   }
+
+  // ★ C5（MD §8.1）：positioning 自動同步（approvedWording 變 → positioning 跟同一值）。
+  if (d.approvedWording !== undefined && d.approvedWording !== existing.approvedWording) {
+    data.positioning = d.approvedWording;
+  }
+
+  // ★ C5（MD §8.1）：任何內容欄改動 → 清空簽署（防簽完先改）。內容欄 = 除 enabled/approvedBy/approvedAt。
+  const NON_CONTENT_FIELDS = new Set(["enabled", "approvedBy", "approvedAt"]);
+  const contentChanged = Object.entries(existing).some(([k, v]) => {
+    if (NON_CONTENT_FIELDS.has(k)) return false;
+    if (k === "id") return false;
+    if (k === "avoidPhrases") return JSON.stringify(d.avoidPhrases ?? v) !== JSON.stringify(v);
+    if (k === "updatedAt") return false;
+    return d[k as keyof typeof d] !== undefined && (d as Record<string, unknown>)[k] !== v;
+  });
+  if (contentChanged && (existing.approvedAt !== null || existing.approvedBy !== null)) {
+    data.approvedAt = null;
+    data.approvedBy = null;
+  }
   try {
     const updated = await prisma.consultProduct.update({ where: { id }, data });
     await prisma.auditLog.create({
@@ -47,16 +81,18 @@ export const PUT = handle(async (req: NextRequest, { params }: Params) => {
         action: "CONSULT_PRODUCT_UPDATE",
         entity: "ConsultProduct",
         entityId: id,
-        // 零 PII（產品 = staff 管嘅參數）— 只記被改咗嘅欄名
-        meta: { clinicId: updated.clinicId, workflow: updated.workflow, code: updated.code, fields: Object.keys(data), usable: isProductUsable(updated) } as object,
+        // 零 PII（產品 = staff 管嘅參數）— 只記被改咗嘅欄名 + 簽署清空事件
+        meta: { clinicId: updated.clinicId, workflow: updated.workflow, code: updated.code, fields: Object.keys(data), approvalCleared: contentChanged, usable: isProductUsable(updated) } as object,
       },
     });
-    log.info({ staffId: ctx.staff.id, productId: id, fields: Object.keys(data) }, "consult-products: updated");
+    log.info({ staffId: ctx.staff.id, productId: id, fields: Object.keys(data), approvalCleared: contentChanged }, "consult-products: updated");
     return NextResponse.json({
       id,
       enabled: updated.enabled,
       approvedAt: updated.approvedAt,
+      approvedBy: updated.approvedBy,
       usable: isProductUsable(updated),
+      approvalCleared: contentChanged,
     });
   } catch (err) {
     if ((err as { code?: string })?.code === "P2002") {

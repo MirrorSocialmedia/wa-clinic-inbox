@@ -1575,7 +1575,7 @@ export function InboxClient({
 
   // ── composer ──────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    async (body: string): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; takenOverBy?: string | null }> => {
+    async (body: string, source?: "adopted" | "typed"): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; takenOverBy?: string | null }> => {
       const convId = selectedIdRef.current;
       if (!convId) return { ok: false, error: "未選擇對話" };
       // ★ realtime-p0 R1：一次「邏輯發送」一個 UUID；網絡 retry 用同一 key（chat-pane 嘅
@@ -1589,7 +1589,8 @@ export function InboxClient({
             return await fetch("/api/messages/send", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ conversationId: convId, body, clientMessageId }),
+              // ★ consult v2.1 C5（MD §8.4）：source 標記（adopted/typed）— typed → server 置 humanTookOver
+              body: JSON.stringify({ conversationId: convId, body, clientMessageId, ...(source ? { source } : {}) }),
             });
           } catch (err) {
             lastErr = err;

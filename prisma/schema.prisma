@@ -925,3 +925,17 @@ model ConsultProduct {
   approvedAt    DateTime?
   @@unique([clinicId, workflow, code])
 }
+
+// ★ consult v2.1 C5（MD §8.1 Tab 2/3）：AI 傾偈設定 — key-value 參數（純 staff 設定，零 PII）。
+// - clinicId null = 全局預設；店行有自己 row 就覆蓋全局（loadConsultSettings merge — 店行優先）。
+// - keys：`rules`（Tab 2 開關）/ `discovery`（Tab 2 發現問題）/ `advanced`（Tab 3 進階）。
+//   shape 由 src/lib/sessions/consult-settings.ts 嘅 zod schema 定義（DB 只係 Json 容器）。
+// - PG NULL 唔受 unique 約束（同 ConsultProduct 口徑）— global row 由 application 層守衛（C5 API find-first）。
+model ConsultSetting {
+  id        String   @id @default(cuid())
+  clinicId  String?
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+  @@unique([clinicId, key])
+}

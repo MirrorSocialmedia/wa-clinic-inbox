@@ -70,6 +70,8 @@ export interface ConsultTurnInput {
   lexicon: LexiconEntry[];
   /** pain-triage params（redFlagTerms 附加詞 — 同 fast path 同一份）。 */
   redFlagParams: { redFlagTerms: Record<string, string[]> };
+  /** ★ C5（MD §8.1）：UI 設定（Tab 2 開關/discovery + Tab 3 進階）— null/缺省 = default（C3/C4 原行為）。 */
+  settings?: import("./consult-settings").ResolvedConsultSettings | null;
 }
 
 export interface ConsultTurnOutcome {
@@ -180,8 +182,15 @@ export async function runConsultEngineTurn(input: ConsultTurnInput): Promise<Con
       idleExpired: false,
     };
 
-    // ── 4. 純 transition（25 行 first match wins） ──
-    const transition = consultTransition(state, sig);
+    // ── 4. 純 transition（25 行 first match wins）— ★ C5：UI 設定（disabledRules/skipSlots/maxTurns/ctaAfterTurns）─
+    const transition = consultTransition(state, sig, input.settings
+      ? {
+          maxTurns: input.settings.advanced.maxTurns,
+          ctaAfterTurns: input.settings.advanced.ctaAfterTurns,
+          disabledRules: input.settings.disabledRules,
+          discovery: { skipSlots: input.settings.discoverySkipSlots },
+        }
+      : undefined);
 
     // ── 5. persist（#4/#6 processed:false → 零寫入；row 23 per-turn 唔會到） ──
     let suppressDraft = false;
@@ -545,6 +554,8 @@ export interface ConsultLlmTurnInput {
   priceDoc: { id: string; title: string; priceMin: number | null; priceMax: number | null; shortDisclaimer: string | null; disclaimer: string | null } | null;
   /** worker ctxMessages（最近對話 — recentMessages(6) 截尾）。 */
   ctxMessages: { direction: string; body: string | null }[];
+  /** ★ C5（MD §8.1 Tab 2 discovery）：醫生改過嘅發現問題文案（slot → text；缺省 = 出廠表）。 */
+  questionOverrides?: Record<string, string> | null;
 }
 
 export interface ConsultLlmTurnResult {
@@ -669,7 +680,7 @@ export async function runConsultLlmTurn(input: ConsultLlmTurnInput): Promise<Con
         : null,
       avoidPhrases: [...new Set(usable.flatMap((p) => p.avoidPhrases))],
       discoveryQuestion:
-        input.action === "ASK_DISCOVERY" ? consultDiscoveryQuestion(input.workflow, input.askedSlot) : null,
+        input.action === "ASK_DISCOVERY" ? consultDiscoveryQuestion(input.workflow, input.askedSlot, input.questionOverrides ?? undefined) : null,
       recentMessages: input.ctxMessages
         .filter((m) => typeof m.body === "string" && m.body.trim().length > 0)
         .slice(-6)

@@ -5,6 +5,7 @@ import { CalendarClock, CheckCheck, ChevronLeft, ChevronRight, Lock, Sparkles, T
 import type { ClinicLite, ConversationItem, ConvStatus, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
 import { relTime } from "./time";
 import { MiniSchedule } from "./mini-schedule";
+import { ConsultStatusCard } from "./consult-status-card";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -478,6 +479,9 @@ export function DetailPane({
           </button>
         )}
       </div>
+
+      {/* ★ consult v2.1 C5（MD §8.2）：CONSULT 狀態卡（全中文 — 零技術詞；只喺 active session 顯示） */}
+      <ConsultStatusCard conversationId={c.id} refreshKey={(ctxRefreshKey ?? 0) + (notesRefreshKey ?? 0)} />
 
       {/* ★ cwi-h6 §4：內部備註卡（staff-only，唔入 AI；5 條 + 展開全部 + 已讀 receipt；realtime = note:new → parent 重拉） */}
       <div className="bg-panel-2 rounded-[16px] p-3">

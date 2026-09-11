@@ -40,7 +40,7 @@ interface Props {
   loadingOlder: boolean;
   onScrollTop: () => void;
   window: { open: boolean; remainingMs: number; tone: string } | null;
-  onSend: (body: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null }>;
+  onSend: (body: string, source?: "adopted" | "typed") => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null }>;
   staffName: string;
   /** Phase 2：該對話最新嘅 pending AI 草稿（PROPOSED）；null = 無 */
   pendingDraft: DraftInfo | null;
@@ -398,6 +398,9 @@ export function ChatPane(p: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(false);
   const autoFilledDraftRef = useRef<string | null>(null);
+  // ★ consult v2.1 C5（MD §8.4）：composer 內嘅文字係咪由 AI 草稿「採用」嚟（auto-fill / 採用並編輯）。
+  //   發送時 source = adopted（採用並編輯，含改動）vs typed（自己由零打字 → humanTookOver）。
+  const adoptedDraftRef = useRef<string | null>(null);
   // ★ H2：@ autocomplete（note composer）— {query, atPos} = 偵測到嘅 @ 後字串 + @ 字位置
   const [mentionState, setMentionState] = useState<{ query: string; atPos: number } | null>(null);
   const [mentionIdx, setMentionIdx] = useState(0);
@@ -463,8 +466,14 @@ export function ChatPane(p: Props) {
     if (draft.trim() === "") {
       setDraft(p.pendingDraft.draftText);
       autoFilledDraftRef.current = p.pendingDraft.id;
+      adoptedDraftRef.current = p.pendingDraft.id; // ★ C5 §8.4：auto-fill = 採用（source: adopted）
     }
   }, [p.pendingDraft, draft, p.conversation?.assigneeId, p.myStaffId]);
+
+  // ★ C5 §8.4：換對話 → 採用旗清掉（composer 狀態唔會跨對話沿用）
+  useEffect(() => {
+    adoptedDraftRef.current = null;
+  }, [p.conversation?.id]);
 
   if (!p.conversation) {
     return (
@@ -560,14 +569,20 @@ export function ChatPane(p: Props) {
     if (!body || sending || !c) return;
     setSending(true);
     setSendError(null);
-    const r = await p.onSend(body);
+    // ★ C5 §8.4：source 標記 — 由草稿採用嚟（auto-fill/採用並編輯，含改動）= adopted；
+    //   自己由零打字 = typed（server 置 humanTookOver → 側欄「AI 已暫停」）。
+    const source: "adopted" | "typed" = adoptedDraftRef.current ? "adopted" : "typed";
+    const r = await p.onSend(body, source);
     if (!r.ok) {
       // cwi-multiclinic-20260903（MD A.6.2）：423 打字保護 — 文字保留（setDraft 唔郁）；
       // toast「{name} 已接手呢個對話」由 parent（inbox-client）發出；header 負責人名 optimistic 更新。
       setSendError(r.takenOverBy ? "對話已被接手 — 你而家只可發內部備註" : r.error ?? "發送失敗");
       // Phase B：過窗 422 帶 templates 名單 → 出 template 揀選
       if (r.templates && r.templates.length > 0) setTemplateOptions(r.templates);
-    } else setDraft("");
+    } else {
+      setDraft("");
+      adoptedDraftRef.current = null;
+    }
     setSending(false);
   }
 
@@ -911,7 +926,7 @@ export function ChatPane(p: Props) {
         {/* Phase 2：AI 草稿卡 — signature element：全頁唯一 2px brand 邊框（Organic rounded-[26px]）
             cwi-window-20260901（P2）：COPY_ONLY（過窗）= banner + 複製掣 + 採用並發送 disable */}
         {p.pendingDraft && (
-          <div className={`mb-2 rounded-[26px] border-2 bg-panel p-3.5 ${isCopyOnly ? "border-warn" : "border-brand"}`}>
+          <div className={`mb-2 rounded-[26px] border-2 bg-panel p-3.5 ${isCopyOnly ? "border-warn" : "border-brand"}`} data-testid="c5-draft-card">
             <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
               <Sparkles size={15} strokeWidth={2.75} className={isCopyOnly ? "text-warn-text" : "text-brand-text"} />
               <span className={`text-[12.5px] font-semibold ${isCopyOnly ? "text-warn-text" : "text-brand-text"}`}>
@@ -931,6 +946,7 @@ export function ChatPane(p: Props) {
                   <button
                     onClick={() => {
                       setDraft(p.pendingDraft!.draftText);
+                      adoptedDraftRef.current = p.pendingDraft!.id; // ★ C5 §8.4：採用並編輯（含後續改動）= adopted
                       void p.onAdopt(p.pendingDraft!.id);
                     }}
                     disabled={p.draftBusy || locked}
@@ -1123,7 +1139,12 @@ export function ChatPane(p: Props) {
             <div className="flex items-end gap-2">
               <textarea
                 value={draft}
-                onChange={(e) => setDraft(e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  // ★ C5 §8.4：清空 / 手改 composer = 唔再係原稿採用 → 採用旗清（之後發送 = typed）
+                  if (v === "" && draft !== "") adoptedDraftRef.current = null;
+                  setDraft(v);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
@@ -1132,12 +1153,14 @@ export function ChatPane(p: Props) {
                 }}
                 rows={1}
                 placeholder="輸入訊息…（Enter 發送，Shift+Enter 換行）"
+                data-testid="c5-composer"
                 className="flex-1 resize-none rounded-full bg-panel-2 border border-transparent px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
               />
               <button
                 onClick={() => void send()}
                 disabled={sending || !draft.trim()}
                 aria-label="發送"
+                data-testid="c5-send-btn"
                 className="w-10 h-10 max-md:w-12 max-md:h-12 shrink-0 rounded-full bg-brand hover:bg-brand-hover text-panel flex items-center justify-center disabled:opacity-40"
               >
                 <Send size={15} strokeWidth={2.75} />
