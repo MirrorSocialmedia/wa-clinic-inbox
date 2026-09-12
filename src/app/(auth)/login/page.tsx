@@ -27,7 +27,7 @@ export default function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
       if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        await res.json().catch(() => null); // drain response body（error 訊號由 status code 判斷）
         setError(res.status === 429 ? "嘗試次數太多，請稍候再試" : "帳號或密碼錯誤");
         return;
       }

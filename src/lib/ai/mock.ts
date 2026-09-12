@@ -20,7 +20,6 @@
  * ★ mock summary/draft 係固定模板（可含診所名）— 定死、無病人原文。
  */
 import type {
-  AiClinicInfo,
   ClassifyAndDraftInput,
   ClassifyAndDraftResult,
 } from "./types";

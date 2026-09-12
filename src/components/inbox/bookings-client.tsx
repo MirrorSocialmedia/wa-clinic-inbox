@@ -64,7 +64,8 @@ const STATUS_LABEL: Record<BookingStatus, string> = {
 
 const TIME_OF_DAY_LABEL: Record<string, string> = { MORNING: "上晝", AFTERNOON: "下晝", EVENING: "夜晚" };
 
-export function BookingsClient({ user }: { user: UserCtx }) {
+// B-4：user prop 保留（page 傳入；目前零讀取）— _ 前綴慣例標記未用（varsIgnorePattern）
+export function BookingsClient({ user: _user }: { user: UserCtx }) {
   const [bookings, setBookings] = useState<Booking[] | null>(null);
   const [filter, setFilter] = useState<"PENDING" | "ALL">("PENDING");
   const [busyId, setBusyId] = useState<string | null>(null);

@@ -272,7 +272,6 @@ function KeyCard({
   const [painRfExtra, setPainRfExtra] = useState<Record<string, string[]>>({});
   const [painImpTpl, setPainImpTpl] = useState<Record<string, string>>({});
   const [lexEntries, setLexEntries] = useState<LexiconRow[]>([]);
-  const [rfAddText, setRfAddText] = useState("");
 
   // active 變咗（publish/revert 後）→ 表單值跟埋 ACTIVE（未保存嘅 edit 會清 — 可接受 v1）
   useEffect(() => {

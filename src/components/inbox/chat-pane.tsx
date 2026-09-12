@@ -243,7 +243,7 @@ function UndoControls({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [, setBusy] = useState(false); // B-4 清走：busy 值從未讀（只 setBusy 用）
 
   return (
     <span className="relative inline-flex items-center gap-1">

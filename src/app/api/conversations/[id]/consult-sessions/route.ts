@@ -112,7 +112,6 @@ export const POST = handle(async (req: NextRequest, { params }: Params) => {
 
   // 守衛 + 建立同一 tx：Conversation 行鎖串行化同對話併發 create（防雙 active）。
   const result = await prisma.$transaction(async (tx) => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const _lock = await tx.$queryRaw`SELECT id FROM "Conversation" WHERE id = ${id} FOR UPDATE`;
     const existingActive = await tx.consultSession.findFirst({
       where: { conversationId: id, terminal: null },

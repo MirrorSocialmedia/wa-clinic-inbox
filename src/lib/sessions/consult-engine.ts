@@ -72,8 +72,14 @@ export type EngineAction =
 
 // ── session 狀態（純 — caller 由 ConsultSession row 經 toSessionState 映射） ──
 
-/** workflow-specific slots（session.slots Json 平鋪）+ engine meta。 */
-export type ConsultSlots = (OrthoSlots | ImplantSlots) & {
+/**
+ * workflow-specific slots（session.slots Json 平鋪）+ engine meta。
+ * ★ 審計 B-1：反映真實資料 — session.slots 由頭到尾都係部分填充（抽槽只填病人講過嘅欄，v2.1 §6.1；
+ * 新 session = {}）。舊型別 `(OrthoSlots | ImplantSlots)` 要求九欄全齊，同 DB 現實唔符，
+ * 一直靠 `as` 強轉掩蓋。clinicalSuitability 係唯一保證欄（toSessionState 預設補 UNKNOWN — #19 判定靠佢）。
+ */
+export type ConsultSlots = Partial<OrthoSlots & ImplantSlots> & {
+  clinicalSuitability: "UNKNOWN" | "ASSESSED";
   meta?: { priceAskCount?: number };
 };
 
@@ -282,11 +288,11 @@ export const IMPLANT_SLOT_VALUE: Record<string, number> = {
 
 /** minimum slots 齊口徑（consult-types.ts 註逐字）：箍牙 = appearance 或 speed 至少一個；植牙 = missingCount。 */
 export function minimumSlotsMet(workflow: ConsultWorkflow, slots: ConsultSlots): boolean {
+  // B-1 覆檢：cast 已刪 — ConsultSlots 而家係 Partial，缺欄 = undefined，`!= null` 判斷語義不變
   if (workflow === "IMPLANT_CONSULT") {
-    return (slots as ImplantSlots).missingCount != null;
+    return slots.missingCount != null;
   }
-  const s = slots as OrthoSlots;
-  return s.appearancePriority != null || s.speedPriority != null;
+  return slots.appearancePriority != null || slots.speedPriority != null;
 }
 
 /**
@@ -377,7 +383,9 @@ export function matchRule(
   disabled?: ReadonlySet<string>
 ): ConsultRule | null {
   const rules = workflow === "IMPLANT_CONSULT" ? IMPLANT_RULES : ORTHO_RULES;
-  const s: RuleSlots = { ...(slots as OrthoSlots & ImplantSlots), purchaseIntent };
+  // B-1 覆檢：呢個 cast 保留（五處中唯一真需要）— rule 體按 RuleSlots 全形讀所有欄，
+  // 但 DB slots 係部分填充；缺欄 = undefined（rule 體全部係 != null / truthy 檢查，配埋下面 fail-soft try/catch）。
+  const s = { ...slots, purchaseIntent } as RuleSlots;
   for (const r of rules) {
     if (disabled && disabled.has(r.id)) continue;
     try {
@@ -608,7 +616,8 @@ export function consultTransition(
     return emit(18, { stage: "PRESENT_OPTIONS", action: "PRESENT_OPTIONS", candidateCategory: d.candidateCategory, ruleId: d.ruleId, note: "comparison done" });
   }
   // ── #19 PRESENT_OPTIONS clinicalSuitability = UNKNOWN ──
-  if (stage === "PRESENT_OPTIONS" && (session.slots as OrthoSlots).clinicalSuitability === "UNKNOWN") {
+  // B-1 覆檢：cast 已刪 — clinicalSuitability 係 ConsultSlots 必填欄，直接讀
+  if (stage === "PRESENT_OPTIONS" && session.slots.clinicalSuitability === "UNKNOWN") {
     return emit(19, { stage: "CONSULTATION", action: "ASK_FOR_CONSULTATION", ruleId: "ORTHO-005", note: "clinical UNKNOWN — ask consultation" });
   }
   // ── #20 PRESENT_OPTIONS purchaseIntent >= 0.6（C5：ORTHO-010 關咗 → 唔命中） ──
@@ -693,7 +702,8 @@ export function toSessionState(row: {
     turnCount: row.turnCount,
     purchaseIntent: row.purchaseIntent,
     // clinicalSuitability 預設 UNKNOWN（DB slots={}/舊 row 缺欄 normalize — #19 判定靠佢）
-    slots: { clinicalSuitability: "UNKNOWN", ...((row.slots && typeof row.slots === "object" ? row.slots : {}) as object) } as ConsultSlots,
+    // B-1：外層 `as ConsultSlots` 已刪（Partial 型別自然夾）；內層 `as object` 係俾 Json 型 spread 合法，保留
+    slots: { clinicalSuitability: "UNKNOWN", ...((row.slots && typeof row.slots === "object" ? row.slots : {}) as object) },
     candidateCategory: row.candidateCategory,
     comparedProducts: Array.isArray(row.comparedProducts) ? row.comparedProducts : [],
     askedSlots: Array.isArray(row.askedSlots) ? row.askedSlots : [],

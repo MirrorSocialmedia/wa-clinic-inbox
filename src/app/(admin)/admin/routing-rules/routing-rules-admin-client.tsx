@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { applyLexicon } from "@/lib/sessions/lexicon-core"; // pure — client-safe（★ cwi-auditfix-20260908 H-1）
 
 /**

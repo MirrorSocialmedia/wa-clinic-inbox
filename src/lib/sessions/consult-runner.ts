@@ -112,7 +112,6 @@ export async function runConsultEngineTurn(input: ConsultTurnInput): Promise<Con
 
     // ── 1. get/create active session（C2 守衛：tx FOR UPDATE + 只准一個 active） ──
     const session = await prisma.$transaction(async (tx) => {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _lock = await tx.$queryRaw`SELECT id FROM "Conversation" WHERE id = ${conv.id} FOR UPDATE`;
       const existing = await tx.consultSession.findFirst({ where: { conversationId: conv.id, terminal: null } });
       if (existing) return { session: existing, created: false };

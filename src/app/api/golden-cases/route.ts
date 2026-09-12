@@ -14,10 +14,11 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { requireAuth, clinicScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { z } from "zod";
 import prisma from "@/lib/prisma";
 import { deid, deidList } from "@/lib/golden/deid";
-import { createGoldenSchema, updateGoldenSchema } from "@/lib/golden/schemas";
+// ★ 審計 B-4：updateGoldenSchema 從呢度移除 — PUT handler 喺 [id]/route.ts（safeParse 有接）；
+//   集合 route 只經 createGoldenSchema（POST）— 呢度嘅 import 係殘留，唔係漏接 bug
+import { createGoldenSchema } from "@/lib/golden/schemas";
 import log from "@/lib/log";
 
 export const dynamic = "force-dynamic";

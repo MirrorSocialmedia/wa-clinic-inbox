@@ -1,4 +1,4 @@
-import { type NextRequest, NextResponse } from "next/server";
+import { type NextRequest } from "next/server";
 import { destroySession, getSession } from "@/lib/session";
 import { deleteSubscriptionsForStaff } from "@/lib/push";
 import log from "@/lib/log";

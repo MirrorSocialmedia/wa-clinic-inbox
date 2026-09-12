@@ -45,7 +45,12 @@ export function extractAmounts(text: string): number[] {
     const n = Number(raw.replace(/,/g, ""));
     if (Number.isFinite(n)) out.push(n);
   };
-  for (const m of text.matchAll(AMOUNT_AFTER_RE)) push(m[1]), push(m[2]);
+  // ★ 審計 B-2：comma operator 改 block — 兩個 push 必须都行（-range m[2] 漏咗 = 幻覺報價偵測漏一半；
+  //   ESLint no-op expression 亦會誤導下一個維護者「修」成只剩一個 push）
+  for (const m of text.matchAll(AMOUNT_AFTER_RE)) {
+    push(m[1]);
+    push(m[2]);
+  }
   for (const m of text.matchAll(AMOUNT_BEFORE_RE)) push(m[1]);
   return [...new Set(out)];
 }

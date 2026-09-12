@@ -1111,7 +1111,9 @@ export function InboxClient({
       /* ignore */
     }
     return 0;
-  }, []);
+    // ★ 審計 B-3：補 'bumpCursor' 依賴（禁 eslint-disable）— 已實證 bumpCursor = useCallback([]) 只操作
+    //   lastMsgTsRef（useRef Map）→ reference 恆 stable，加依賴 runtime 零 re-create，closure 版本永唔會錯
+  }, [bumpCursor]);
 
   const fetchMessagesAfter = useCallback(
     async (convId: string, afterMs: number): Promise<number> => {
@@ -1270,6 +1272,29 @@ export function InboxClient({
     }
   }, [catchUp]);
 
+  // ★ cwi-hotfix-20260908 §2：markRead 300ms debounce — socket 連發 IN（burst）收斂成一次
+  //   flush；flush 內每個對話只打一次 PATCH（Set 去重）。300ms 窗內換到嘅其他對話都會
+  //   喺同一 flush 各自 markRead 一次（唔會漏）。
+  //   ★ 審計 B-3：由下方搬上嚟（R3 effect 嘅 deps 需要引用佢 — block-scoped TDZ）；
+  //   markRead 係 function declaration（hoisted），引用順序無問題。
+  const markReadPendingRef = useRef<Set<string>>(new Set());
+  const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markReadDebounced = useCallback((id: string) => {
+    markReadPendingRef.current.add(id);
+    if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
+    markReadTimerRef.current = setTimeout(() => {
+      markReadTimerRef.current = null;
+      const ids = [...markReadPendingRef.current];
+      markReadPendingRef.current = new Set();
+      for (const i of ids) void markRead(i); // 首 render 實例只依賴 fetch + setConversations（穩定）
+    }, 300);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
+    };
+  }, []);
+
   // R3 triggers：tab focus 返 / window focus / 每 3 分鐘 idle 掃一次
   useEffect(() => {
     const onVisibility = () => {
@@ -1303,7 +1328,9 @@ export function InboxClient({
       window.removeEventListener("focus", onFocus);
       clearInterval(timer);
     };
-  }, [refetchDelta, fetchMessagesLatest]);
+    // ★ 審計 B-3：補 'markReadDebounced' 依賴（禁 eslint-disable）— 已實證 markReadDebounced = useCallback([])
+    //   只操作兩個 useRef + markRead（body 只 fetch + setConversations，無 state/props closure）→ reference 恆 stable
+  }, [refetchDelta, fetchMessagesLatest, markReadDebounced]);
 
   // ── ★ cwi-realtime-v2 §3：20 秒 reconcile 安全網 ─────────────────────────
   // tab 可見 + 有選中對話 → 每 20s merge 最新一頁（fetchMessagesLatest 已係 by-id merge
@@ -1551,27 +1578,6 @@ export function InboxClient({
       /* ignore */
     }
   }
-
-  // ★ cwi-hotfix-20260908 §2：markRead 300ms debounce — socket 連發 IN（burst）收斂成一次
-  //   flush；flush 內每個對話只打一次 PATCH（Set 去重）。300ms 窗內換到嘅其他對話都會
-  //   喺同一 flush 各自 markRead 一次（唔會漏）。
-  const markReadPendingRef = useRef<Set<string>>(new Set());
-  const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const markReadDebounced = useCallback((id: string) => {
-    markReadPendingRef.current.add(id);
-    if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
-    markReadTimerRef.current = setTimeout(() => {
-      markReadTimerRef.current = null;
-      const ids = [...markReadPendingRef.current];
-      markReadPendingRef.current = new Set();
-      for (const i of ids) void markRead(i); // 首 render 實例只依賴 fetch + setConversations（穩定）
-    }, 300);
-  }, []);
-  useEffect(() => {
-    return () => {
-      if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
-    };
-  }, []);
 
   // ── composer ──────────────────────────────────────────────────────────
   const sendMessage = useCallback(

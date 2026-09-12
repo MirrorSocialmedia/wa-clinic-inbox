@@ -57,6 +57,7 @@ import {
   applyIdleExpiry,
   type ConsultSessionState,
   type ConsultSignals,
+  type ConsultSlots,
 } from "../src/lib/sessions/consult-engine";
 import { triggerFloor } from "../src/lib/sessions/consult-trigger";
 import { isProductUsable } from "../src/lib/sessions/consult-products";
@@ -310,7 +311,8 @@ const baseState = (over: Partial<ConsultSessionState> = {}): ConsultSessionState
   terminal: null,
   turnCount: 1,
   purchaseIntent: 0.5,
-  slots: {},
+  // B-1：ConsultSlots 而家 Partial + clinicalSuitability 必填 — 反映 toSessionState 真實行為
+  slots: { clinicalSuitability: "UNKNOWN" },
   candidateCategory: null,
   comparedProducts: [],
   askedSlots: [],
@@ -320,6 +322,8 @@ const baseState = (over: Partial<ConsultSessionState> = {}): ConsultSessionState
   lastAction: null,
   ...over,
 });
+// B-1：空 slots 常數（= toSessionState 新 session 形態 — clinicalSuitability 保證 UNKNOWN）；純函數 fixture 用
+const US: ConsultSlots = { clinicalSuitability: "UNKNOWN" };
 const baseSig = (over: Partial<ConsultSignals> = {}): ConsultSignals => ({
   redFlagHit: false,
   painSignal: false,
@@ -439,14 +443,14 @@ async function s0Unit(): Promise<void> {
     ],
     [
       "#17 min slots 齊",
-      baseState({ slots: { appearancePriority: "HIGH" } }),
+      baseState({ slots: { ...US, appearancePriority: "HIGH" } }),
       baseSig(),
       (r) => r.row === 17 && r.stage === "PRESENT_OPTIONS" && r.action === "PRESENT_OPTIONS" && r.candidateCategory === "CLEAR_ALIGNER" && r.ruleId === "ORTHO-001",
       "",
     ],
     [
       "#18 EDUCATE 比較完成",
-      baseState({ stage: "EDUCATE", lastAction: "EDUCATE_COMPARE", slots: { appearancePriority: "HIGH" } }),
+      baseState({ stage: "EDUCATE", lastAction: "EDUCATE_COMPARE", slots: { ...US, appearancePriority: "HIGH" } }),
       baseSig(),
       (r) => r.row === 18 && r.stage === "PRESENT_OPTIONS" && r.action === "PRESENT_OPTIONS",
       "",
@@ -516,19 +520,19 @@ async function s0Unit(): Promise<void> {
   check("applyIdleExpiry terminal session → 唔會再 expire", expTerm.expired === false, JSON.stringify(expTerm));
 
   // ── chooseNextQuestion 唔重複 ──
-  check("chooseNextQuestion ortho 空 → appearancePriority（value 最高）", chooseNextQuestion("ORTHODONTIC_CONSULT", {}, []) === "appearancePriority");
+  check("chooseNextQuestion ortho 空 → appearancePriority（value 最高）", chooseNextQuestion("ORTHODONTIC_CONSULT", US, []) === "appearancePriority");
   check(
     "chooseNextQuestion 已問 appearance + 已填 speed → timeline（唔重問已問）",
-    chooseNextQuestion("ORTHODONTIC_CONSULT", { speedPriority: "HIGH" }, ["appearancePriority"]) === "timeline",
+    chooseNextQuestion("ORTHODONTIC_CONSULT", { ...US, speedPriority: "HIGH" }, ["appearancePriority"]) === "timeline",
   );
   check(
     "chooseNextQuestion 全部問完 → null（唔重問）",
-    chooseNextQuestion("ORTHODONTIC_CONSULT", {}, ["appearancePriority", "speedPriority", "timeline", "previousOrtho"]) === null,
+    chooseNextQuestion("ORTHODONTIC_CONSULT", US, ["appearancePriority", "speedPriority", "timeline", "previousOrtho"]) === null,
   );
-  check("chooseNextQuestion skipSlots（C5 設定）→ 跳過", chooseNextQuestion("ORTHODONTIC_CONSULT", {}, [], ["appearancePriority"]) === "speedPriority");
-  check("chooseNextQuestion implant 空 → missingCount", chooseNextQuestion("IMPLANT_CONSULT", {}, []) === "missingCount");
-  check("minimumSlotsMet ortho appearance|speed", minimumSlotsMet("ORTHODONTIC_CONSULT", { appearancePriority: "LOW" }) === true && minimumSlotsMet("ORTHODONTIC_CONSULT", { speedPriority: "HIGH" }) === true && minimumSlotsMet("ORTHODONTIC_CONSULT", {}) === false);
-  check("minimumSlotsMet implant = missingCount", minimumSlotsMet("IMPLANT_CONSULT", { missingCount: 2 }) === true && minimumSlotsMet("IMPLANT_CONSULT", {}) === false);
+  check("chooseNextQuestion skipSlots（C5 設定）→ 跳過", chooseNextQuestion("ORTHODONTIC_CONSULT", US, [], ["appearancePriority"]) === "speedPriority");
+  check("chooseNextQuestion implant 空 → missingCount", chooseNextQuestion("IMPLANT_CONSULT", US, []) === "missingCount");
+  check("minimumSlotsMet ortho appearance|speed", minimumSlotsMet("ORTHODONTIC_CONSULT", { ...US, appearancePriority: "LOW" }) === true && minimumSlotsMet("ORTHODONTIC_CONSULT", { ...US, speedPriority: "HIGH" }) === true && minimumSlotsMet("ORTHODONTIC_CONSULT", US) === false);
+  check("minimumSlotsMet implant = missingCount", minimumSlotsMet("IMPLANT_CONSULT", { ...US, missingCount: "ONE" }) === true && minimumSlotsMet("IMPLANT_CONSULT", US) === false);
 
   // ── purchaseIntent Δ + clamp ──
   check("Δ 高意向 booking 詞 = +0.4", computePurchaseIntentDelta("幾時有位", "幾時有位", { priceAskCount: 0, asksPrice: false }) === 0.4);
@@ -660,6 +664,9 @@ async function s1Fixture(adminCookie: string): Promise<Ctx> {
 // ══════════════════════════════════════════════════════════════════════
 type Ctx = { adminCookie: string; statsBefore: Record<string, unknown> | null };
 const slotsOf = (s: { slots: unknown }) => (typeof s.slots === "string" ? JSON.parse(s.slots) : (s.slots as Record<string, unknown>)) ?? {};
+// B-1 審計：audit meta（Json|null）type-safe 讀法 — runtime 語義不變（meta 係 object 時返原值；null → {}，斷言自然 fail 唔會 throw）
+const ameta = (a: { meta: unknown }): Record<string, unknown> =>
+  (typeof a.meta === "string" ? JSON.parse(a.meta) : (a.meta as Record<string, unknown>)) ?? {};
 const D = {
   discovery: (q: string) => `Hello☺️ 多謝你查詢！${q}`,
   qAppearance: "想多了解下，你比唔比重視戴咗之後人哋見到？",
@@ -678,7 +685,7 @@ async function gc01(): Promise<void> {
   const wa = "e2ec6-gc01";
   const m1 = await inbound(wa, "我想箍牙");
   const t1 = await waitTurn(m1.convId, 1, 16);
-  check("m1 engine row 16（discovery 起步）", t1.a.meta.row === 16);
+  check("m1 engine row 16（discovery 起步）", ameta(t1.a).row === 16);
   const d1 = await poll("GC01 m1 draft", async () => draftOf(m1.msgId));
   check("m1 draft = appearance discovery（精確）", d1?.draftText === D.discovery(D.qAppearance), d1?.draftText);
   // m2：紅旗（無 FLOOR — mock trigger=null → engine 唔 run；urgent 硬安全路徑獨立生效 — 見 D1）
@@ -706,7 +713,7 @@ async function gc01(): Promise<void> {
     "GC01 m3 URGENT_ESCALATION(wamid)",
     async () =>
       (await prisma.staffNotice.findFirst({
-        where: { conversationId: m3.convId, kind: "URGENT_ESCALATION", meta: { path: ["wamid"], equals: m3msg?.waMessageId } },
+        where: { conversationId: m3.convId, kind: "URGENT_ESCALATION", meta: { path: ["wamid"], equals: m3msg?.waMessageId! } },
       })) ?? null,
   );
   check("m3 URGENT_ESCALATION 通知（meta.wamid 精確鎖定）", n3 !== null);
@@ -724,7 +731,7 @@ async function gc02(): Promise<void> {
   const m1 = await inbound(wa, "箍牙幾錢");
   const t1 = await waitTurn(m1.convId, 1, 16);
   const s1 = t1.s;
-  check("m1 row 16（問價無指名 → discovery）", t1.a.meta.row === 16);
+  check("m1 row 16（問價無指名 → discovery）", ameta(t1.a).row === 16);
   check("m1 purchaseIntent = 0.1（首次問價 +0.10）", s1.purchaseIntent === 0.1, String(s1.purchaseIntent));
   const sl1 = slotsOf(s1);
   check("m1 slots.meta.priceAskCount = 1", (sl1.meta as Record<string, number> | undefined)?.priceAskCount === 1);
@@ -742,7 +749,7 @@ async function gc02(): Promise<void> {
   );
   check("m2 pain 問診問句存在（session reply OUT）", out2 !== null);
   const noSales = out2 && !/\$\s?\d|\d{3,}\s*蚊|幾錢|收費|推薦|最適合|保證/.test(out2.body ?? "");
-  check("m2 pain 覆零金額零推銷", !!noSales, out2?.body);
+  check("m2 pain 覆零金額零推銷", !!noSales, out2?.body ?? undefined);
   const s2 = await activeSession(m2.convId);
   check("m2 consult session turnCount 不變（=1）", s2?.turnCount === 1, String(s2?.turnCount));
 }
@@ -753,7 +760,7 @@ async function gc03(): Promise<void> {
   const m1 = await inbound(wa, "我想箍牙，我啲牙好亂，係咪一定要脫牙先箍到？");
   const t1 = await waitTurn(m1.convId, 1, 13);
   const s1 = t1.s;
-  check("m1 row 13（臨床詳情）", t1.a.meta.row === 13);
+  check("m1 row 13（臨床詳情）", ameta(t1.a).row === 13);
   check("m1 stage = CONSULTATION", s1.stage === "CONSULTATION", s1.stage);
   check("m1 ruleId = ORTHO-008", (t1.a.meta as Record<string, unknown>).ruleId === "ORTHO-008");
   const d1 = await poll("GC03 m1 draft", async () => draftOf(m1.msgId));
@@ -768,7 +775,7 @@ async function gc04(): Promise<void> {
   const m1 = await inbound(wa, "我想箍牙，半年做唔做得完？");
   const t1 = await waitTurn(m1.convId, 1, 12);
   const s1 = t1.s;
-  check("m1 row 12（療程時間）", t1.a.meta.row === 12);
+  check("m1 row 12（療程時間）", ameta(t1.a).row === 12);
   check("m1 ruleId = ORTHO-007", (t1.a.meta as Record<string, unknown>).ruleId === "ORTHO-007");
   check("m1 stage 停留 DISCOVER（row 12 唔 move stage — engine 設計）", s1.stage === "DISCOVER", s1.stage);
   const d1 = await poll("GC04 m1 draft", async () => draftOf(m1.msgId));
@@ -831,14 +838,14 @@ async function gc09_10(): Promise<void> {
   const wa = "e2ec6-gc09";
   const m1 = await inbound(wa, "我想cool牙，咩收費？");
   const t1 = await waitTurn(m1.convId, 1, 16);
-  check("m1 row 16 + appearance question", t1.a.meta.row === 16);
+  check("m1 row 16 + appearance question", ameta(t1.a).row === 16);
   const m2 = await inbound(wa, "箍牙，唔想俾人見到");
   const t2 = await waitTurn(m2.convId, 2, 16);
   const d2 = await poll("GC09 m2 draft", async () => draftOf(m2.msgId));
   check("m2 draft = speed question（唔重問已問）", d2?.draftText === D.discovery(D.qSpeed), d2?.draftText);
   const m3 = await inbound(wa, "箍牙，係，想快啲");
   const t3 = await waitTurn(m3.convId, 3, 17);
-  check("m3 row 17 → PRESENT_OPTIONS", t3.a.meta.row === 17 && t3.s.stage === "PRESENT_OPTIONS", t3.s.stage);
+  check("m3 row 17 → PRESENT_OPTIONS", ameta(t3.a).row === 17 && t3.s.stage === "PRESENT_OPTIONS", t3.s.stage);
   check("m3 candidateCategory = CLEAR_ALIGNER（appearance HIGH 規則）", t3.s.candidateCategory === "CLEAR_ALIGNER", String(t3.s.candidateCategory));
   check("m3 ruleId = ORTHO-001", (t3.a.meta as Record<string, unknown>).ruleId === "ORTHO-001");
   const d3 = await poll("GC09 m3 draft", async () => draftOf(m3.msgId));
@@ -848,7 +855,7 @@ async function gc09_10(): Promise<void> {
   // GC-10：同一 conv 續 — 病人自問「邊款最適合我」→ 轉評估
   const m4 = await inbound(wa, "箍牙，咁邊款最適合我？");
   const t4 = await waitTurn(m4.convId, 4, 11);
-  check("GC10 m4 row 11 → CONSULTATION", t4.a.meta.row === 11 && t4.s.stage === "CONSULTATION", t4.s.stage);
+  check("GC10 m4 row 11 → CONSULTATION", ameta(t4.a).row === 11 && t4.s.stage === "CONSULTATION", t4.s.stage);
   check("GC10 m4 ruleId = ORTHO-005", (t4.a.meta as Record<string, unknown>).ruleId === "ORTHO-005");
   const d4 = await poll("GC10 m4 draft", async () => draftOf(m4.msgId));
   check("GC10 m4 draft 推評估（唔做臨床推薦）", (d4?.draftText ?? "").includes("要由醫生評估先確認得到"), d4?.draftText);
@@ -862,7 +869,7 @@ async function gc11(): Promise<void> {
   await waitTurn(m1.convId, 1, 16);
   const m2 = await inbound(wa, "箍牙，I GO 同 I Full 差咩？");
   const t2 = await waitTurn(m2.convId, 2, 15);
-  check("m2 row 15 → EDUCATE/EDUCATE_COMPARE", t2.a.meta.row === 15 && t2.s.stage === "EDUCATE", t2.s.stage);
+  check("m2 row 15 → EDUCATE/EDUCATE_COMPARE", ameta(t2.a).row === 15 && t2.s.stage === "EDUCATE", t2.s.stage);
   check("m2 ruleId = ORTHO-003", (t2.a.meta as Record<string, unknown>).ruleId === "ORTHO-003");
   const d2 = await poll("GC11 m2 draft", async () => draftOf(m2.msgId));
   check("m2 draft = 中立比較（精確）", d2?.draftText === D.compare2, d2?.draftText);
@@ -893,7 +900,7 @@ async function gc13(): Promise<void> {
   check("m1 extract appearance HIGH（slot 已填但該輪問緊 appearance — decide 用 old slots）", sl1.appearancePriority === "HIGH", JSON.stringify(sl1));
   const m2 = await inbound(wa, "箍牙，嗯，了解");
   const t2 = await waitTurn(m2.convId, 2, 17);
-  check("m2 row 17 → PRESENT_OPTIONS（min slots 齊）", t2.a.meta.row === 17 && t2.s.stage === "PRESENT_OPTIONS", t2.s.stage);
+  check("m2 row 17 → PRESENT_OPTIONS（min slots 齊）", ameta(t2.a).row === 17 && t2.s.stage === "PRESENT_OPTIONS", t2.s.stage);
   const d2 = await poll("GC13 m2 draft", async () => draftOf(m2.msgId));
   check("m2 draft = 中立兩款（精確）", d2?.draftText === D.present2, d2?.draftText);
 }
@@ -906,7 +913,7 @@ async function gc14a(): Promise<void> {
   const m2 = await inbound(wa, "箍牙幾錢？");
   const t2 = await waitTurn(m2.convId, 2, 16);
   const s2 = t2.s;
-  check("m2 row 16（無指名產品 → 唔入 row 14）", t2.a.meta.row === 16);
+  check("m2 row 16（無指名產品 → 唔入 row 14）", ameta(t2.a).row === 16);
   const d2 = await poll("GC14a m2 draft", async () => draftOf(m2.msgId));
   check("m2 draft = 一條 discovery 問題（speed — 精確）", d2?.draftText === D.discovery(D.qSpeed), d2?.draftText);
   const sl = slotsOf(s2);
@@ -921,7 +928,7 @@ async function gc14b(): Promise<void> {
   await waitTurn(m1.convId, 1, 16);
   const m2 = await inbound(wa, "箍牙，I GO 最平幾錢？");
   const t2 = await waitTurn(m2.convId, 2, 14);
-  check("m2 row 14 → ANSWER_PRICE（指名產品 + 問價）", t2.a.meta.row === 14);
+  check("m2 row 14 → ANSWER_PRICE（指名產品 + 問價）", ameta(t2.a).row === 14);
   check("m2 ruleId = ORTHO-009", (t2.a.meta as Record<string, unknown>).ruleId === "ORTHO-009");
   const d2 = await poll("GC14b m2 draft", async () => draftOf(m2.msgId));
   check("m2 draft = KB 價格範圍 30000–60000（精確）", d2?.draftText === D.answerPrice, d2?.draftText);
@@ -961,7 +968,7 @@ async function gc17(): Promise<void> {
   check("m1 implant discovery = missingCount 問題（精確）", d1?.draftText === D.discovery(D.qMissingCount), d1?.draftText);
   const m2 = await inbound(wa, "植牙，點解 Straumann 同 Hiossen 差咩？");
   const t2 = await waitTurn(m2.convId, 2, 15);
-  check("m2 row 15 → EDUCATE/EDUCATE_COMPARE", t2.a.meta.row === 15 && t2.s.stage === "EDUCATE", t2.s.stage);
+  check("m2 row 15 → EDUCATE/EDUCATE_COMPARE", ameta(t2.a).row === 15 && t2.s.stage === "EDUCATE", t2.s.stage);
   const d2 = await poll("GC17 m2 draft", async () => draftOf(m2.msgId));
   check("m2 draft = 中立比較（無 usable 植牙產品 → 通用句 — 精確）", d2?.draftText === D.compare0, d2?.draftText);
   check("m2 draft 零 CG-006 詞（無 好過/貴啲就/平啲就/唔耐用）", !/(好過|貴啲就|平啲就|唔耐用)/.test(d2?.draftText ?? ""));
@@ -977,7 +984,7 @@ async function gc18(): Promise<void> {
   check("m1 purchaseIntent = 0.1", t1.s.purchaseIntent === 0.1, String(t1.s.purchaseIntent));
   const m2 = await inbound(wa, "箍牙太貴啦");
   const t2 = await waitTurn(m2.convId, 2, 10);
-  check("m2 row 10 → HANDLE_OBJECTION（新 PRICE objection）", t2.a.meta.row === 10 && (t2.a.meta as Record<string, unknown>).action === "HANDLE_OBJECTION", JSON.stringify(t2.a.meta).slice(0, 120));
+  check("m2 row 10 → HANDLE_OBJECTION（新 PRICE objection）", ameta(t2.a).row === 10 && (t2.a.meta as Record<string, unknown>).action === "HANDLE_OBJECTION", JSON.stringify(t2.a.meta).slice(0, 120));
   const ob2 = typeof t2.s.objections === "string" ? JSON.parse(t2.s.objections) : t2.s.objections;
   check("m2 session.objections = [PRICE count 1]", Array.isArray(ob2) && ob2.length === 1 && ob2[0].type === "PRICE" && ob2[0].count === 1, JSON.stringify(ob2));
   const d2 = await poll("GC18 m2 draft", async () => draftOf(m2.msgId));
@@ -1039,7 +1046,7 @@ async function gc19b(ctx: Ctx): Promise<void> {
   check("conv.humanTookOver = true（打字 = takeover）", c1 !== null);
   const m2 = await inbound(wa, "箍牙，想再問下");
   const u2 = await waitUnprocessed(m2.convId, 6);
-  check("m2 row 6（humanTookOver）processed=false", u2.a.meta.row === 6 && u2.a.meta.processed === false);
+  check("m2 row 6（humanTookOver）processed=false", ameta(u2.a).row === 6 && ameta(u2.a).processed === false);
   check("m2 session.humanTookOver = true（sync）", u2.s.humanTookOver === true);
   check("m2 turnCount 不變（=1）", u2.s.turnCount === 1, String(u2.s.turnCount));
   const d2 = await draftOf(m2.msgId);
@@ -1069,7 +1076,7 @@ async function gc20(): Promise<void> {
   });
   await runScript(["e2e:ai-job", "requeue", "--conversation", convId, "--message", m2.id, "--clinic", clinicId], "REQUEUED");
   const u2 = await waitUnprocessed(convId, 4);
-  check("m2 row 4（窗口過期）processed=false", u2.a.meta.row === 4 && u2.a.meta.processed === false);
+  check("m2 row 4（窗口過期）processed=false", ameta(u2.a).row === 4 && ameta(u2.a).processed === false);
   const c2 = await prisma.conversation.findUnique({ where: { id: convId } });
   check("m2 conv.consultGateAction = WINDOW_EXPIRED_HANDOFF", c2?.consultGateAction === "WINDOW_EXPIRED_HANDOFF", String(c2?.consultGateAction));
   const s2 = await anySession(convId);

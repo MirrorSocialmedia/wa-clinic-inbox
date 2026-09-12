@@ -22,6 +22,14 @@ const eslintConfig = [
     ],
   },
   {
+    // ★ 審計 B-4：no-unused-vars 對兩個 intentional pattern 放行（唔用逐行 disable）：
+    //   - ignoreRestSiblings：`const { passwordHash: _ph, ...safe } = user` — rest destructuring 排除敏感欄（staff routes）
+    //   - argsIgnorePattern：`_kind` 等下划線前綴參數 — API 對齊留參（notify-client playChime）
+    rules: {
+      "@typescript-eslint/no-unused-vars": ["warn", { ignoreRestSiblings: true, argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+    },
+  },
+  {
     // ★ M-3（安全審計）：app 代碼（server/worker/lib）禁 console.* — 一律用 pino logger
     //   （log 集中化 + 可被 PII redaction 包住）。scripts/** 係獨立 CLI（stdout 就是輸出協議，
     //   例 e2e/mock-inbound/backup 腳本），唔受此限 — 見交貨報告偏差說明。

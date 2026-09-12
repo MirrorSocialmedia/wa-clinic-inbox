@@ -5,8 +5,10 @@
      `@theme inline` 的映射照舊，換 token 值就整個 app 換色。
    ───────────────────────────────────────────────────────────────────────────── */
 
-@import "tailwindcss";
+/* ★ 審計 B-5：CSS spec — @import 必須喺所有 rule 之前；font @import 要喺 `@import "tailwindcss"`
+   之前（tailwind import 經 build 展開成一堆 rule，font @import 排喺佢之後會被 browser 忽略 → 字體唔載入） */
 @import url('https://fonts.googleapis.com/css2?family=Caprasimo&family=Figtree:wght@400;600;700&display=swap');
+@import "tailwindcss";
 
 /* ── 手動 dark variant（如果個別位真係要 per-theme 微調先用；一般用 semantic token 就夠） */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));

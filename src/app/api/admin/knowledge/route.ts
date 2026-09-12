@@ -14,10 +14,11 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { z } from "zod";
 import prisma from "@/lib/prisma";
 import { getKnowledgeCatalog, previewCatalog } from "@/lib/knowledge/catalog";
-import { KNOWLEDGE_KINDS, knowledgeDocSchema, bustKnowledgeAfterChange } from "@/lib/knowledge/schema";
+// ★ 審計 B-4：KNOWLEDGE_KINDS 從呢度移除 — 佢喺 knowledgeDocSchema 內部（z.enum）被消費；
+//   呢度嘅 import 係殘留（validation 一直有接 — POST safeParse knowledgeDocSchema，唔係漏接 bug）
+import { knowledgeDocSchema, bustKnowledgeAfterChange } from "@/lib/knowledge/schema";
 import log from "@/lib/log";
 
 export const dynamic = "force-dynamic";
