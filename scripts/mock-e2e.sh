@@ -126,9 +126,9 @@
 #       手動 enqueue → 24mo 全刪（連 NoteReadReceipt/PatientFact）/ 12mo 刪檔+清 mediaPath /
 #       AiDraft 90d（≠PROPOSED）/ StaffNotice 已讀 90d + 未到期零觸碰 + OpsReport + log metadata only
 #   T83 A1 七閘：AUTO + assignee → 只出 draft 唔自動發（log assigned — Send Lock 語義補完）
-#   T84 reopenedFirstReply 閘（cwi-reopenreply-20260910 T84 決策 (b) 收窄版）：翻開後首句三條件齊（QUESTION +
+#   T84 reopenedFirstReply 閘（cwi-reopenreply-20260910 T84 決策 (b)；cwi-consult-d1 補齊訊號詞「之前講過」= 拍板 5 詞）：翻開後首句三條件齊（QUESTION +
 #       距上次解決>7日 + 無不滿訊號）先照普通 auto；任一唔中 → 唔自動發（log reopenedFirstReply）。
-#       含 T2 翻開四聯動 in-test 迴歸 + 新 case A（三齊→auto）/ B（第二句→正常級別）/ C（PAIN）/ D（<7日）/ E（訊號詞「上次」）
+#       含 T2 翻開四聯動 in-test 迴歸 + 新 case A（三齊→auto）/ B（第二句→正常級別）/ C（PAIN）/ D（<7日）/ E（訊號詞「上次」）/ F（訊號詞「之前講過」）
 #   T85 A1 第八閘：員工人手覆後 cooldown（AI_HUMAN_COOLDOWN_MS 預設 30 分鐘）內 AI 唔搶咪（log human-recent）
 #   T86 A2 媒體：send 相 → 客戶端零回覆 + StaffNotice(MEDIA_RECEIVED) 落庫 + /api/notices bell +1 +
 #       AiDraft 零新增（canDraft 限 text）+ 分類照行 + PATCH 標已讀
@@ -2388,7 +2388,7 @@ q "DELETE FROM \"Contact\" WHERE id='$C_T83'" >/dev/null 2>&1
 #   舊斷言「RESOLVED + 來訊 → 唔自動發（log resolved）」升級：T2 翻開四聯動喺 AI 跑之前已將 status 翻 OPEN
 #   → 舊 `resolved` 閘唔再命中；新語義 = 翻開後**首句**（reopenedAt + lastOutboundAt 判斷）+ 任一風險條件
 #   → 唔 auto-send（log reopenedFirstReply）：① intent=QUESTION ② 距上次解決>7日（T2 清咗 resolvedAt →
-#   auto-resolve INTERNAL 備註 waTimestamp 導出）③ 無不滿訊號（上次/點解/仲未/都話咗）
+#   auto-resolve INTERNAL 備註 waTimestamp 導出）③ 無不滿訊號（上次/點解/仲未/都話咗/之前講過 — consult-audit §4 D-1 拍板 5 詞）
 echo "[AI-T1] T84: reopenedFirstReply gate (reopened first reply)..."
 T84=0
 # hermetic：MF=AUTO（T83 已轉 — 冪等確認）+ 清 AutomationPolicy（防上一 run T89 殘留污染 autoLevel）
@@ -2533,7 +2533,26 @@ check "T84E 含不滿訊號：唔自動發（0 OUT）" "$OUT_T84E" "0"
 grep -F "$WAMID_T84E" /tmp/e2e-worker*.log 2>/dev/null | grep -q "reopenedFirstReply" && pass "T84E log reasons 見 reopenedFirstReply（signal）" || { fail "T84E log"; T84=1; }
 t84_clean "$CONV_T84E" "$C_T84E"
 
-[ "$T84" = 0 ] && pass "T84 reopenedFirstReply 閘：base + A/B/C/D/E 全達標" || fail "T84 reopenedFirstReply 閘有項失敗（見上 ❌）"
+# ── T84F（新 case F，cwi-consult-d1）：首句 + QUESTION + >7日 但訊息含訊號詞「之前講過」（③ 唔中）→ 唔 auto ──
+P_T84F="8526116${EPOCH}"; WAMID_T84F="wamid.E2E_T84F_${EPOCH}"; C_T84F="t84f-c-${EPOCH}"; CONV_T84F="t84f-conv-${EPOCH}"
+t84_seed_resolved "$CONV_T84F" "$C_T84F" "$P_T84F" "E2E T84F" "$D10_AGO"
+pnpm -s mock-inbound message --clinic MF --from "$P_T84F" --text "你哋之前講過幾點閂門？" --wamid "$WAMID_T84F" --name "E2E T84F signal2" >/dev/null || fail "T84F mock-inbound POST"
+M_T84F=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T84F'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T84F'" '[{"s":"PROPOSED"}]' 30; then
+  pass "T84F 訊號詞「之前講過」：draft 照出（PROPOSED）"
+else
+  fail "T84F draft"; T84=1
+fi
+sleep 2
+# 嚴核（同 T84E a2 修正）：鎖定 intent=QUESTION — 排除 classifier 誤判令「intent」block 造成 ③ 訊號詞假綠
+INT_T84F=$(q "SELECT \"intent\"::text i FROM \"Conversation\" WHERE id='$CONV_T84F'" | jf i)
+check "T84F intent=QUESTION（訊號詞係唯一 block 因素）" "$INT_T84F" "QUESTION"
+OUT_T84F=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T84F' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
+check "T84F 含不滿訊號（之前講過）：唔自動發（0 OUT）" "$OUT_T84F" "0"
+grep -F "$WAMID_T84F" /tmp/e2e-worker*.log 2>/dev/null | grep -q "reopenedFirstReply" && pass "T84F log reasons 見 reopenedFirstReply（signal）" || { fail "T84F log"; T84=1; }
+t84_clean "$CONV_T84F" "$C_T84F"
+
+[ "$T84" = 0 ] && pass "T84 reopenedFirstReply 閘：base + A/B/C/D/E/F 全達標" || fail "T84 reopenedFirstReply 閘有項失敗（見上 ❌）"
 
 
 # ── T85. A1 第八閘：員工人手覆完 cooldown 內 AI 唔搶咪（log human-recent） ──

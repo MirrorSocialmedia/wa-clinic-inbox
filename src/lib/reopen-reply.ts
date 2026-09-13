@@ -31,12 +31,13 @@
 export const AUTO_RESOLVE_NOTE_PREFIX = "系統自動標記已解決";
 
 /**
- * ③ 不滿訊號詞（T84 (b) 收窄版）。**可擴展**：新增詞 = 擴 block 範圍。
+ * ③ 不滿訊號詞（T84 (b) — 2026-09-13 consult-audit §4 D-1 拍板清單 = 5 詞，cwi-consult-d1 補齊「之前講過」）。
+ * **可擴展**：新增詞 = 擴 block 範圍。
  * 比對慣例跟 repo lexicon 做法：raw ∨ canonical（applyLexicon 後）雙比對，
  * 大小寫不敏感（lowercase 後 includes；詞本身純中文，case 只影響英文夾雜文字），
  * 標點天然容忍（substring 匹配，唔要求詞邊界）。
  */
-export const REOPEN_COMPLAINT_SIGNALS = ["上次", "點解", "仲未", "都話咗"] as const;
+export const REOPEN_COMPLAINT_SIGNALS = ["上次", "點解", "仲未", "都話咗", "之前講過"] as const;
 
 /** ② 距上次解決需 **嚴格大過** 呢個日數先准 auto（= 7 日）。 */
 export const REOPEN_AUTO_REPLY_MIN_DAYS = 7;

@@ -43,6 +43,7 @@
     "test:unit-workflow-store": "tsx scripts/unit-workflow-store.ts",
     "test:unit-cache-bust": "tsx scripts/unit-cache-bust.ts",
     "test:unit-consult-engine": "tsx scripts/unit-consult-engine.ts",
+    "test:unit-reopen-reply": "tsx scripts/unit-reopen-reply.ts",
     "test:unit-knowledge": "tsx scripts/unit-knowledge.ts",
     "test:unit-impressions-f": "tsx scripts/unit-impressions-f.ts",
     "seed:knowledge": "tsx scripts/seed-knowledge.ts",
