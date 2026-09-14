@@ -345,8 +345,9 @@ export async function runConsultEngineTurn(input: ConsultTurnInput): Promise<Con
   }
 }
 
-/** 指名產品匹配（#14）— isProductUsable 過濾（鐵律：未批准/停用產品唔入匹配 = 唔會喺任何草稿出現）。 */
-async function matchNamedProduct(
+/** 指名產品匹配（#14）— isProductUsable 過濾（鐵律：未批准/停用產品唔入匹配 = 唔會喺任何草稿出現）。
+ * ★ cwi-hub-b：export 俾 ai-sandbox 重用（同 worker 同一 function — 鐵律 1）。 */
+export async function matchNamedProduct(
   prisma: PrismaClient,
   clinicId: string,
   workflow: string,

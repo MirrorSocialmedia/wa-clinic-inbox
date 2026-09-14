@@ -409,7 +409,7 @@ function KeyCard({
   const maxVersion = versions.length > 0 ? Math.max(...versions.map((v) => v.version)) : 0;
 
   return (
-    <div className="bg-panel rounded-[22px] border border-line">
+    <div id={`wf-${wf.key}`} className="bg-panel rounded-[22px] border border-line scroll-mt-20">
       {/* 卡頭：key + override badge */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-line">
         <div className="flex items-center gap-2">
@@ -786,6 +786,15 @@ export default function WorkflowsAdmin() {
     load();
   }, [load]);
 
+  // ★ cwi-hub-b-20260914（B.1）：hub 七步跳轉 anchor（例：/admin/workflows#wf-pain-triage）— load 完後 scroll 到目標卡
+  useEffect(() => {
+    if (loading) return;
+    const h = window.location.hash;
+    if (!h) return;
+    const el = document.getElementById(h.slice(1));
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [loading]);
+
   useEffect(() => {
     api<ClinicRow[]>("/api/admin/clinics").then((r) => setClinics(r)).catch(() => undefined);
   }, []);
@@ -814,9 +823,35 @@ export default function WorkflowsAdmin() {
       {loading ? (
         <p className="text-sm text-t2">載入中…</p>
       ) : (
-        workflows.map((wf) => (
-          <KeyCard key={wf.key} wf={wf} clinicId={clinicId} versions={versions[wf.key] ?? []} onChanged={load} />
-        ))
+        <>
+          {workflows.map((wf) => (
+            <KeyCard key={wf.key} wf={wf} clinicId={clinicId} versions={versions[wf.key] ?? []} onChanged={load} />
+          ))}
+          {/* ★ cwi-hub-b-20260914（B.1）：⑥ 出文 anchor 卡（wf-tone）— 只讀摘要：tone 設ting（greetingConfig）+ guard（code 常數）；
+              實際編輯行 /admin/clinics 嘅 greetingConfig 欄（舊頁內容唔改，呢度只係 hub 跳轉落點） */}
+          <div id="wf-tone" className="bg-panel rounded-[22px] border border-line p-4 scroll-mt-20">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="font-semibold text-t1">出文（tone + guard）— 只讀</span>
+              <span className="text-xs text-t3">tone 喺「診所設定」greetingConfig 改；guard 係 code 常數（唔可關）</span>
+            </div>
+            <div className="text-sm text-t2 space-y-1">
+              <div>
+                tone 設定（greetingConfig）：
+                {clinics.filter((c) => (c as { greetingConfig?: unknown }).greetingConfig).length > 0
+                  ? `${clinics.filter((c) => (c as { greetingConfig?: unknown }).greetingConfig).length}/${clinics.length} 間設咗`
+                  : clinics.length > 0
+                    ? `未設定（${clinics.length} 間全用 default 語氣）`
+                    : "—"}
+              </div>
+              <div>
+                價格 guard（price-guard）：引用價必須有 doc 依據，無依據 → 棄草稿轉人手 <span className="text-t3">（3 類規則：無 doc / 價外區 / 短 disclaimer 缺）</span>
+              </div>
+              <div>
+                聲稱 guard（claim-guard）：醫療聲稱違規 → 棄草稿出人手提示 <span className="text-t3">（9 類違規詞庫）</span>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

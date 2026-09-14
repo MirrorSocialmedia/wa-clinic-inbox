@@ -4,8 +4,6 @@ import { usePathname } from "next/navigation";
 import {
   ArrowLeft,
   BarChart3,
-  BookOpen,
-  Bot,
   Building2,
   CalendarDays,
   ClipboardCheck,
@@ -14,7 +12,6 @@ import {
   Lightbulb,
   LogOut,
   MessageCircle,
-  MessageSquareText,
   Users,
   Workflow,
   type LucideIcon,
@@ -50,6 +47,8 @@ const SECTION_NAMES: Record<string, string> = {
   "/admin/routing-rules": "路由規則",
   "/admin/automation": "AI 自動化",
   "/admin/suggestions": "AI 建議",
+  "/admin/ai": "AI 流程",
+  "/admin/ai/keywords": "關鍵詞中心",
   "/admin/consult": "AI 傾偈設定",
   "/admin/knowledge": "知識庫",
   "/admin/golden": "GoldenCase 評測",
@@ -91,27 +90,18 @@ export function AdminShell({
       title: "團隊",
       items: [{ href: "/admin/staff", label: "員工帳號", icon: Users }],
     },
-    {
-      title: "路由",
-      items: [
-        { href: "/admin/skill-groups", label: "技能組", icon: Users },
-        { href: "/admin/routing-rules", label: "路由規則", icon: Workflow },
-      ],
-    },
+    // ★ cwi-hub-b-20260914（Part B B.6）：導航 8→3 — 路由區（技能組/路由規則）併入 hub 第⑤步（側欄唔再獨立顯示；舊 route 全保留）；
+    //   AI 區只留「AI 流程（hub）/ AI 建議 / GoldenCase 評測」— 其餘 8 條舊設定頁內容唔改、舊 URL 照行（hub 七步行尾跳轉）。
     {
       title: "AI",
       items: [
-        { href: "/admin/automation", label: "AI 自動化", icon: Bot },
+        { href: "/admin/ai", label: "AI 流程", icon: Workflow },
         {
           href: "/admin/suggestions",
           label: "AI 建議",
           icon: Lightbulb,
           badge: pendingSuggestions,
         },
-        // ★ consult v2.1 C5（MD §8.1）：新入口「AI 傾偈設定」（唔叫 Workflow/CONSULT）
-        { href: "/admin/consult", label: "AI 傾偈設定", icon: MessageSquareText },
-        { href: "/admin/workflows", label: "Workflow", icon: Workflow },
-        { href: "/admin/knowledge", label: "知識庫", icon: BookOpen },
         { href: "/admin/golden", label: "GoldenCase 評測", icon: ClipboardCheck },
       ],
     },
@@ -126,7 +116,7 @@ export function AdminShell({
 
   // ★ cwi-statusrole2-20260910（MD §5.2）：SUPERVISOR 側欄只留「總覽 / 醫生時間表 / AI 自動化 / AI 建議」—
   //   其餘設定類隱藏（route 層 RBAC 403 係背墊；UI 先做第一層唔好見到 dead link）
-  const SUPERVISOR_NAV = new Set(["/admin", "/schedule", "/admin/automation", "/admin/suggestions"]);
+  const SUPERVISOR_NAV = new Set(["/admin", "/schedule", "/admin/ai", "/admin/automation", "/admin/suggestions"]);
   // ★ cwi-statusrole2-20260910（MD §5.2）取代 cwi-routing-20260906 §8 舊 filter（只露 AI 兩頁）：
   //   SUPERVISOR = 全店唯讀 + AI 級別讀寫 → 側欄 = 總覽 / 醫生時間表 / AI 自動化 / AI 建議
   const visibleGroups =

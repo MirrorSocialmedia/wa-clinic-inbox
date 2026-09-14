@@ -4,6 +4,7 @@ import { ZodError } from "zod";
 import { RbacError } from "@/lib/rbac";
 import { AssignError } from "@/lib/assign";
 import { WorkflowError } from "@/lib/workflow/store";
+import { SandboxError } from "@/lib/ai/sandbox";
 import log from "@/lib/log";
 
 /**
@@ -29,6 +30,10 @@ export function toResponse(err: unknown): NextResponse {
       { error: err.message, ...(err.issues ? { issues: err.issues } : {}) },
       { status: err.status }
     );
+  }
+  // ★ cwi-hub-b：AI 沙盤業務錯誤（400/404/403/502/503 — state 原封語義喺 message）
+  if (err instanceof SandboxError) {
+    return NextResponse.json({ error: err.message }, { status: err.status });
   }
   if (err instanceof ZodError) {
     return NextResponse.json(
