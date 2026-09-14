@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, clinicScope } from "@/lib/rbac";
+import { requireAuth, clinicScope, assertClinicAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -19,10 +19,8 @@ export const GET = handle(async (req: NextRequest) => {
   const clinicParam = url.searchParams.get("clinicId");
   const where: Record<string, unknown> = { ...scope, readAt: null };
   if (clinicParam) {
-    // STAFF 稔非自己綁定店嘅 clinicId → 403（RBAC 鐵律；cwi-h6 多店：集合檢查）
-    if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
-      return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-    }
+    // ★ cwi-hub-a-20260914（Part A）：scope-aware — 外範圍 clinicId → 403（任何受限角色）
+    assertClinicAccess(ctx, clinicParam);
     where.clinicId = clinicParam;
   }
   const notices = await prisma.staffNotice.findMany({

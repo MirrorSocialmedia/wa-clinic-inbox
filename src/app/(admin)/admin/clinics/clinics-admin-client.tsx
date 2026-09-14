@@ -32,6 +32,8 @@ interface Clinic {
   // API 係 clinic 全 row spread（...c）— 呢兩欄已經喺 response 度（JSON = ISO string）
   qualityRating: string | null; // GREEN / YELLOW / RED（null = 未檢查）
   lastWebhookEventAt: string | null;
+  // ★ cwi-hub-a：公司歸屬
+  company: { id: string; code: string; name: string } | null;
 }
 
 interface FormState {
@@ -40,6 +42,14 @@ interface FormState {
   waPhoneNumberId: string;
   waDisplayNumber: string;
   greetingConfig: string; // JSON 文字（編輯器）
+  companyId: string; // ★ cwi-hub-a：公司歸屬（新建必填）
+}
+
+interface CompanyOpt {
+  id: string;
+  code: string;
+  name: string;
+  clinics: { id: string; code: string; name: string }[];
 }
 
 /** .dialog 二次確認請求 — onConfirm = 原本 confirm() 之後會做嘅個動作 */
@@ -57,6 +67,7 @@ const emptyForm: FormState = {
   waPhoneNumberId: "",
   waDisplayNumber: "",
   greetingConfig: "",
+  companyId: "",
 };
 
 const QUALITY_DOT: Record<string, string> = {
@@ -72,11 +83,13 @@ function toForm(c: Clinic): FormState {
     waPhoneNumberId: c.waPhoneNumberId,
     waDisplayNumber: c.waDisplayNumber,
     greetingConfig: c.greetingConfig ? JSON.stringify(c.greetingConfig, null, 2) : "",
+    companyId: c.company?.id ?? "",
   };
 }
 
 export default function ClinicsAdmin() {
   const [clinics, setClinics] = useState<Clinic[]>([]);
+  const [companies, setCompanies] = useState<CompanyOpt[]>([]); // ★ cwi-hub-a
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Clinic | null>(null); // null=關閉, undefined 以外
   const [creating, setCreating] = useState(false);
@@ -88,8 +101,12 @@ export default function ClinicsAdmin() {
   const [pendingAction, setPendingAction] = useState<ConfirmReq | null>(null);
 
   const load = useCallback(async () => {
-    const res = await fetch("/api/admin/clinics", { cache: "no-store" });
+    const [res, coRes] = await Promise.all([
+      fetch("/api/admin/clinics", { cache: "no-store" }),
+      fetch("/api/admin/companies", { cache: "no-store" }),
+    ]);
     if (res.ok) setClinics((await res.json()) as Clinic[]);
+    if (coRes.ok) setCompanies((await coRes.json()) as CompanyOpt[]);
     setLoading(false);
   }, []);
 
@@ -161,6 +178,7 @@ export default function ClinicsAdmin() {
         waPhoneNumberId: form.waPhoneNumberId.trim(),
         waDisplayNumber: form.waDisplayNumber.trim(),
         greetingConfig,
+        companyId: form.companyId, // ★ cwi-hub-a：公司歸屬（POST 必填；PUT 改歸屬）
       };
       const res = editing
         ? await fetch(`/api/admin/clinics/${editing.id}`, {
@@ -323,6 +341,11 @@ export default function ClinicsAdmin() {
                       )}
                     </div>
                     <div className="text-[11.5px] text-t2 mt-1 truncate">
+                      {c.company && (
+                        <span className="mr-1.5 inline-block rounded-full bg-panel-2 px-1.5 py-0.5 text-[10px] font-semibold text-t2">
+                          {c.company.code} {c.company.name}
+                        </span>
+                      )}
                       <span className="font-mono">{c.waDisplayNumber || "未接入 WhatsApp 號"}</span>
                       {" · 對話 "}
                       {c.conversationCount}
@@ -439,6 +462,22 @@ export default function ClinicsAdmin() {
                 value={form.waDisplayNumber}
                 onChange={(e) => setForm({ ...form, waDisplayNumber: e.target.value })}
               />
+            </label>
+            {/* ★ cwi-hub-a：公司歸屬（新建必填；編輯可改歸屬 → COMPANY 範圍即時跟） */}
+            <label className={label}>
+              公司（{creating ? "必填" : "可改歸屬"}）
+              <select
+                className={input}
+                value={form.companyId}
+                onChange={(e) => setForm({ ...form, companyId: e.target.value })}
+              >
+                <option value="">— 揀公司 —</option>
+                {companies.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.code} {c.name}
+                  </option>
+                ))}
+              </select>
             </label>
           </div>
           <label className={label}>

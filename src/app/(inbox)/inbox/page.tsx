@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import prisma from "@/lib/prisma";
+import { resolveSessionScope } from "@/lib/rbac";
 import { getServerSession } from "@/lib/session-server";
 import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
 import { InboxClient } from "@/components/inbox/inbox-client";
@@ -27,28 +28,22 @@ export default async function InboxPage({
   const sp = await searchParams;
   const convParam = typeof sp.conv === "string" ? sp.conv : "";
 
-  // cwi-multiclinic-20260903（MD A.3）：STAFF 列表 scope 同 /api/conversations 一致 —
-  // 自己所有店 ∪ 指派俾自己嘅線（外店單線授權）；SSR 首屏必須包含，headless 無 client refetch 機會。
-  const myClinicIds =
-    session.role === "STAFF"
-      ? session.clinicIds?.length
-        ? session.clinicIds
-        : session.clinicId
-          ? [session.clinicId]
-          : []
-      : [];
-  const scope =
-    session.role === "STAFF" ? { clinicId: { in: myClinicIds } } : {};
-  const convScope =
-    session.role === "STAFF"
-      ? { OR: [{ clinicId: { in: myClinicIds } }, { assigneeId: session.staffId }] }
-      : {};
+  // cwi-hub-a-20260914（Part A）：列表 scope 同 /api/conversations 一致 — 單一來源 resolveSessionScope
+  // （ALL scope / SUPERVISOR = 全店；COMPANY / CLINICS = 範圍集合 ∪ 指派俾自己嘅線）。
+  // SSR 首屏必須包含，headless 無 client refetch 機會。
+  const { scopeType, scopedClinicIds } = await resolveSessionScope(session);
+  const scopedSet =
+    session.role === "SUPERVISOR" || scopeType === "ALL" ? null : scopedClinicIds;
+  const scope = scopedSet ? { clinicId: { in: scopedSet } } : {};
+  const convScope = scopedSet
+    ? { OR: [{ clinicId: { in: scopedSet } }, { assigneeId: session.staffId }] }
+    : {};
   // staffMap 唔限 clinic scope — cwi-inboxfix-20260905（T9 e2e 發現）：跨店負責人的
   // 三態 chip（● 某某 處理緊）需要全店 staff 名；同 /api/conversations 對齊（全量 active）。
   // 零 PII 增量：staff 名對 STAFF 本就喺 API list 回傳（跨店線 assigneeName 一直有值）。
   const [clinics, convs, contacts, staff, pendingBookings, skillGroups, myGroupMembers] = await Promise.all([
-    session.role === "STAFF"
-      ? prisma.clinic.findMany({ where: { id: { in: myClinicIds } } })
+    scopedSet
+      ? prisma.clinic.findMany({ where: { id: { in: scopedSet } }, orderBy: { code: "asc" } })
       : prisma.clinic.findMany({ orderBy: { code: "asc" } }),
     prisma.conversation.findMany({ where: convScope, orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }], take: 200 }),
     // 跟 /api/conversations 一致：全量 fetch（server-side map，只嵌入可見 row 引用嘅 contact）
@@ -178,15 +173,8 @@ export default async function InboxPage({
         email: session.email,
         role: session.role,
         clinicId: session.clinicId,
-        // cwi-multiclinic-20260903：店集合（舊 session 無 clinicIds → fallback [clinicId]）
-        clinicIds:
-          session.role === "STAFF"
-            ? session.clinicIds?.length
-              ? session.clinicIds
-              : session.clinicId
-                ? [session.clinicId]
-                : []
-            : [],
+        // cwi-hub-a-20260914：店集合（STAFF 用已解析 scope 集合 — 舊 session fallback 已喺 resolveSessionScope 內處理）
+        clinicIds: session.role === "STAFF" ? scopedClinicIds : [],
         // ★ cwi-routing-20260906（MD §4.3）：「派俾我 N」膠囊 — 我嘅組 id（client 端 filter + 計數 backup）
         myGroupIds: myGroupMembers.map((g) => g.groupId),
       }}

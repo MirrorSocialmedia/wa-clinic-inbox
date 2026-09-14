@@ -72,6 +72,17 @@ export interface UsageSummary {
   totals: { staffSent: number; aiSent: number; systemSent: number; total: number; aiSharePct: number };
 }
 
+/**
+ * ★ cwi-hub-a-20260914（A.4）：公司分組資料 — UI 先按公司、再按店。
+ * 只含 visible 範圍內嘅公司（ALL = 全部；COMPANY = 自己公司；CLINICS = 指定診所涉及嘅公司）。
+ */
+export interface UsageCompany {
+  id: string;
+  code: string;
+  name: string;
+  clinics: { id: string; code: string }[];
+}
+
 interface RawRow {
   clinicCode: string;
   category: string | null;
@@ -84,9 +95,45 @@ interface RawRow {
 /**
  * 本月用量（按店 × 類別 × 人手/AI/系統）+ App 跟進次數 + 最近 5 週趨勢（含本週）。
  * fail-soft：DB 錯 → throw（caller route 用 handle() 接）。
+ *
+ * ★ cwi-hub-a-20260914（A.4）：`clinicIds` = 範圍內診所 id 集合（null = 全部；
+ *   caller 由 resolveClinicIds 得出 — 本檔唔自行算 clinic 集合）。null 時 `NULL::text[] IS NULL`
+ *   恆真 = 不過滤；週趨勢同樣過濾（否則 COMPANY 範圍 ADMIN 會見到全集團趨勢 — 洩露 + 同 rows 不一致）。
  */
-export async function getUsageSummary(now: Date = new Date()): Promise<UsageSummary> {
+/**
+ * ★ cwi-hub-a-20260914（A.4）：範圍內公司 + 旗下診所（UI 分組頭用）。
+ * clinicIds=null → 全部公司（含零診所公司，保持完整圖景）；否則只回含範圍內診所嘅公司。
+ */
+export async function getUsageCompanies(clinicIds: string[] | null = null): Promise<UsageCompany[]> {
+  const rows = await prisma.$queryRaw<{ clinicId: string; clinicCode: string; companyId: string; companyCode: string; companyName: string }[]>`
+    SELECT c.id AS "clinicId", c.code AS "clinicCode",
+           co.id AS "companyId", co.code AS "companyCode", co.name AS "companyName"
+      FROM "Clinic" c
+      JOIN "Company" co ON co.id = c."companyId"
+     WHERE (${clinicIds}::text[] IS NULL OR c.id = ANY(${clinicIds}::text[]))
+     ORDER BY co.code, c.code
+  `;
+  const companies = new Map<string, UsageCompany>();
+  for (const r of rows) {
+    let co = companies.get(r.companyId);
+    if (!co) {
+      co = { id: r.companyId, code: r.companyCode, name: r.companyName, clinics: [] };
+      companies.set(r.companyId, co);
+    }
+    co.clinics.push({ id: r.clinicId, code: r.clinicCode });
+  }
+  return [...companies.values()].sort((a, b) => a.code.localeCompare(b.code));
+}
+
+export async function getUsageSummary(
+  now: Date = new Date(),
+  clinicIds: string[] | null = null
+): Promise<UsageSummary> {
   const { month, fromUtc, toUtc } = hkMonthRange(now);
+
+  // 範圍過濾（單一參數雙重綁定；null → NULL::text[] IS NULL 恆真；陣列 → ANY 過濾）：
+  // ⚠️ 必需要直接寫入 tagged template（Prisma 參數綁定）— 唔好用 JS 預組字串再嵌入
+  //    （會變單一 text 參數 → 42804 實測）。
 
   const raw = await prisma.$queryRaw<RawRow[]>`
     SELECT c.code AS "clinicCode",
@@ -100,6 +147,7 @@ export async function getUsageSummary(now: Date = new Date()): Promise<UsageSumm
       JOIN "Clinic" c ON c.id = cv."clinicId"
      WHERE m.direction = 'OUT' AND m.channel = 'API'
        AND m."createdAt" >= ${fromUtc} AND m."createdAt" < ${toUtc}
+       AND (${clinicIds}::text[] IS NULL OR c.id = ANY(${clinicIds}::text[]))
      GROUP BY 1, 2
      ORDER BY 1, 2
   `;
@@ -121,6 +169,7 @@ export async function getUsageSummary(now: Date = new Date()): Promise<UsageSumm
       JOIN "Clinic" c ON c.id = cv."clinicId"
      WHERE a.action = 'APP_HANDOFF_CLICK'
        AND a."createdAt" >= ${fromUtc} AND a."createdAt" < ${toUtc}
+       AND (${clinicIds}::text[] IS NULL OR c.id = ANY(${clinicIds}::text[]))
      GROUP BY c.code
      ORDER BY c.code
   `;
@@ -143,10 +192,13 @@ export async function getUsageSummary(now: Date = new Date()): Promise<UsageSumm
     const hi = new Date((mondayHkDay + 7) * DAY_MS - HK_OFFSET_MS);
     const pt = await prisma.$queryRaw<{ total: number; aiAuto: number }[]>`
       SELECT count(*)::int AS total,
-             count(*) FILTER (WHERE "aiAutoSent" = true)::int AS "aiAuto"
-        FROM "Message"
-       WHERE direction = 'OUT' AND channel = 'API'
-         AND "createdAt" >= ${lo} AND "createdAt" < ${hi}
+             count(*) FILTER (WHERE m."aiAutoSent" = true)::int AS "aiAuto"
+        FROM "Message" m
+        JOIN "Conversation" cv ON cv.id = m."conversationId"
+        JOIN "Clinic" c ON c.id = cv."clinicId"
+       WHERE m.direction = 'OUT' AND m.channel = 'API'
+         AND m."createdAt" >= ${lo} AND m."createdAt" < ${hi}
+         AND (${clinicIds}::text[] IS NULL OR c.id = ANY(${clinicIds}::text[]))
     `;
     weekTrend.push({ weekStart, current: i === 0, total: pt[0]?.total ?? 0, aiAuto: pt[0]?.aiAuto ?? 0 });
   }

@@ -17,7 +17,7 @@
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertScheduleReadAccess } from "@/lib/rbac";
+import { requireAuth, assertScheduleReadAccess, assertClinicAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { auditScheduleView } from "@/lib/schedule-view-audit";
 import { hkToday } from "@/lib/duty/client";
@@ -54,7 +54,12 @@ export const GET = handle(async (req: NextRequest) => {
   const clinicRow = await prisma.clinic
     .findUnique({ where: { code: clinicCode }, select: { id: true } })
     .catch(() => null);
-  if (clinicRow) void auditScheduleView(ctx, clinicRow.id, clinicCode);
+  if (clinicRow) {
+    void auditScheduleView(ctx, clinicRow.id, clinicCode);
+    // ★ cwi-hub-a-20260914（Part A）：時間表 scope — scoped ADMIN（COMPANY/CLINICS）外範圍店 → 403；
+    //   STAFF 跨店時間表讀保持（cwi-sched T-B，SCHEDULE_VIEW audit 已記錄）
+    if (ctx.staff.role === "ADMIN") assertClinicAccess(ctx, clinicRow.id);
+  }
 
   const j = await buildFlowSlots(clinicCode, from, to, granularity);
   return NextResponse.json(j);

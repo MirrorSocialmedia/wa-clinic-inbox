@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { fetchDutyRoster, hkToday, type DutyEntry } from "@/lib/duty/client";
 import log from "@/lib/log";
@@ -59,6 +59,9 @@ export const GET = handle(async (req: NextRequest) => {
     }
     clinic = await prisma.clinic.findUnique({ where: { code: clinicParam }, select: { id: true, code: true } });
     if (!clinic) return NextResponse.json({ error: "clinic not found" }, { status: 404 });
+    // ★ cwi-hub-a-20260914（Part A）：時間表 scope — scoped ADMIN（COMPANY/CLINICS）外範圍店 → 403
+    //   （STAFF 跨店讀保持 — cwi-sched T-B；SUPERVISOR 現行全店唯讀唔改）
+    if (ctx.staff.role === "ADMIN") assertClinicAccess(ctx, clinic.id);
   }
 
   // fail-soft：client 永遠唔 throw（3s timeout / 404 / 壞 shape → null）

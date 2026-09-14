@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, invalidateClinicScopeCache } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 
 /**
@@ -24,6 +24,8 @@ const updateSchema = z.object({
   greetingConfig: z.union([z.record(z.string(), z.unknown()), z.null()]).optional(),
   // Phase 2b：逐舖 AI 模式（DRAFT=預設只出建議 / AUTO=AI 可直接自動發）
   aiMode: z.enum(["DRAFT", "AUTO"]).optional(),
+  // ★ cwi-hub-a-20260914：公司歸屬改動（reassign — 改後 COMPANY 範圍即時跟）
+  companyId: z.string().min(1).max(64).optional(),
 });
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -41,7 +43,14 @@ async function updateClinic(req: NextRequest, ctx: Ctx) {
       data[k] = v;
     }
   }
+  // ★ cwi-hub-a：公司存在性驗證
+  if (typeof data.companyId === "string") {
+    const company = await prisma.company.findUnique({ where: { id: data.companyId } });
+    if (!company) return NextResponse.json({ error: "company not found" }, { status: 400 });
+  }
   const clinic = await prisma.clinic.update({ where: { id }, data });
+  // ★ cwi-hub-a：公司歸屬改動 → COMPANY 範圍集合即時失效重算
+  invalidateClinicScopeCache();
   return NextResponse.json(clinic);
 }
 
@@ -51,7 +60,10 @@ export const PATCH = handle(updateClinic);
 export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   await requireAdmin(req);
   const { id } = await ctx.params;
-  const clinic = await prisma.clinic.findUnique({ where: { id } });
+  const clinic = await prisma.clinic.findUnique({
+    where: { id },
+    include: { company: { select: { id: true, code: true, name: true } } },
+  });
   if (!clinic) return NextResponse.json({ error: "not found" }, { status: 404 });
   return NextResponse.json(clinic);
 });
@@ -76,5 +88,7 @@ export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
     );
   }
   await prisma.clinic.delete({ where: { id } });
+  // ★ cwi-hub-a：诊所刪除 → 範圍集合即時失效
+  invalidateClinicScopeCache();
   return NextResponse.json({ ok: true });
 });

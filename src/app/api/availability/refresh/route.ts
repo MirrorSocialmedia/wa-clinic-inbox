@@ -17,7 +17,7 @@
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { refreshAvailability, WorkforceApiError } from "@/lib/workforce/client";
 import { invalidateAvailabilityDay } from "@/lib/availability";
@@ -50,6 +50,10 @@ export const POST = handle(async (req: NextRequest) => {
     if (!own || own.code !== clinicCode) {
       return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
     }
+  } else if (ctx.staff.role === "ADMIN") {
+    // ★ cwi-hub-a-20260914（Part A）：時間表 scope — scoped ADMIN（COMPANY/CLINICS）刷外範圍店 → 403
+    const target = await prisma.clinic.findUnique({ where: { code: clinicCode }, select: { id: true } });
+    if (target) assertClinicAccess(ctx, target.id);
   }
 
   let r: Awaited<ReturnType<typeof refreshAvailability>>;

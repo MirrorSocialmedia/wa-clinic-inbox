@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { RbacError, type AuthContext } from "@/lib/rbac";
+import { RbacError, scopedClinicSet, type AuthContext } from "@/lib/rbac";
 import { publishNotify, publishStaffNotify } from "@/lib/notify";
 import { pushToStaff } from "@/lib/push";
 
@@ -81,22 +81,24 @@ export interface AssignResult {
 }
 
 /**
- * 權限檢查（cwi-h6-20260830 多店矩陣，MD §3；取代 h5 §2.2）：
- *   - ADMIN → 任何動作（force reassign / claim / release）
- *   - CLAIM（toStaffId = 自己）：conv.clinicId ∈ actor.clinicIds；
+ * 權限檢查（cwi-hub-a-20260914 Part A — 範圍收口；原 cwi-h6-20260830 多店矩陣）：
+ *   - ALL scope ADMIN → 任何動作（force reassign / claim / release）；SUPERVISOR 現行無 scope 概念（只能郁自己係 assignee 嘅線）
+ *   - CLAIM（toStaffId = 自己）：conv.clinicId ∈ 自己 scope 集合；
  *     外店 self-claim → 403 CROSS_CLINIC_CLAIM_FORBIDDEN
- *   - ASSIGN（toStaffId = 其他人）：actor 對條線有 access（§0：店集合 ∨ 單線授權 assignee==自己）；
+ *   - ASSIGN（toStaffId = 其他人）：actor 對條線有 access（店集合 ∨ 單線授權 assignee==自己）；
  *     target = 任何 active STAFF/ADMIN（可完全外店 — transaction 內只驗 active）
- *   - RELEASE（toStaffId = null）：現任 assignee ∨ ADMIN
+ *   - RELEASE（toStaffId = null）：現任 assignee ∨ ALL scope ADMIN
  */
 export function assertCanAssign(
-  ctx: Pick<AuthContext, "staff" | "clinicIds">,
+  ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">,
   conv: { clinicId: string; assigneeId: string | null },
   toStaffId: string | null
 ): void {
-  if (ctx.staff.role === "ADMIN") return;
-
-  const inMyClinic = ctx.clinicIds.includes(conv.clinicId);
+  const set = scopedClinicSet(ctx);
+  // ALL scope ADMIN（set=null 且非 SUPERVISOR）→ 任何動作（現行 ADMIN 行為）
+  if (ctx.staff.role === "ADMIN" && set === null) return;
+  // SUPERVISOR：set=null 但無 scope 概念 → 當空集合（只可透過單線授權：現任 assignee）
+  const inMyClinic = set ? set.includes(conv.clinicId) : false;
   // §0 access：店集合 ∨ 單線授權（我係現任 assignee）
   const hasLineAccess = inMyClinic || conv.assigneeId === ctx.staff.id;
 

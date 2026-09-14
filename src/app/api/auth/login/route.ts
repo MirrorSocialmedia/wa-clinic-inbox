@@ -4,6 +4,7 @@ import argon2 from "argon2";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { setSession } from "@/lib/session";
+import { clinicIdsOfCompany } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { isAccountLocked, recordLoginFailure, clearLoginFailures } from "@/lib/auth-lockout";
 import { recordLoginAudit } from "@/lib/auth-audit";
@@ -130,9 +131,13 @@ export const POST = handle(async (req: NextRequest) => {
 
   // ★ cwi-h6-20260830：多店員工 — 查 StaffClinic 一次過寫入 session（clinicIds）；
   //   clinicId = isPrimary 店（排序頭行）— UI default 店 / 通知分組用。
-  //   舊資料（無 StaffClinic 行）fallback StaffUser.clinicId 單店；都無 → toContext fail-closed 401。
+  //   舊資料（無 StaffClinic 行）fallback StaffUser.clinicId 單店。
+  // ★ cwi-hub-a-20260914（Part A）：session clinic snapshot 跟 scope：
+  //   CLINICS（任何角色）= StaffClinic 集合；STAFF+COMPANY = 該公司店集合；ALL = []（运行时解析全店）。
   let clinicIds: string[] = [];
-  if (user.role === "STAFF") {
+  if (user.role === "STAFF" && user.scopeType === "COMPANY") {
+    clinicIds = await clinicIdsOfCompany(user.scopeCompanyId);
+  } else if (user.scopeType === "CLINICS") {
     const rows = await prisma.staffClinic.findMany({
       where: { staffId: user.id },
       select: { clinicId: true },
@@ -148,7 +153,11 @@ export const POST = handle(async (req: NextRequest) => {
     name: user.name,
     role: user.role,
     clinicId: primaryClinicId,
-    clinicIds: user.role === "STAFF" ? clinicIds : [],
+    clinicIds,
+    // ★ cwi-hub-a-20260914（Part A）：公司層範圍 — login 由 StaffUser 寫入（session snapshot；
+    //   admin 改 scope 下次 login 生效，同現行 clinicId 改動語義一致）。
+    scopeType: user.scopeType as "ALL" | "COMPANY" | "CLINICS",
+    scopeCompanyId: user.scopeCompanyId,
     loginAt: Date.now(),
   });
 

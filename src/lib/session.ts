@@ -26,6 +26,11 @@ export interface SessionData {
   /** ★ cwi-h6-20260830：STAFF 綁定店集合（login 時查 StaffClinic 一次過寫入）；ADMIN = []（全店）。
    * 舊 session 冇呢個欄 → toContext fallback [clinicId]。 */
   clinicIds?: string[];
+  /** ★ cwi-hub-a-20260914（Part A）：範圍類型 ALL|COMPANY|CLINICS（login 由 StaffUser.scopeType 寫入）。
+   * 舊 session 冇呢個欄 → fallback：ADMIN 當 ALL、STAFF 當 CLINICS（MD A.2；SUPERVISOR 恆視 ALL — 現行無 scope 概念）。 */
+  scopeType?: "ALL" | "COMPANY" | "CLINICS";
+  /** ★ cwi-hub-a-20260914：COMPANY 範圍嘅公司 id（nullable）。 */
+  scopeCompanyId?: string | null;
   /** login 時間（epoch ms），session 過期檢查用 */
   loginAt: number;
 }

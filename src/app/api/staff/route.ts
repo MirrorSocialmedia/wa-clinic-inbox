@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -20,9 +20,8 @@ export const GET = handle(async (req: NextRequest) => {
 
   const where: Record<string, unknown> = { active: true };
   if (clinicParam) {
-    if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
-      return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-    }
+    // ★ cwi-hub-a-20260914（Part A）：scope-aware — 外範圍 clinicId → 403（任何受限角色）
+    assertClinicAccess(ctx, clinicParam);
     where.clinicId = clinicParam;
   }
   const staff = await prisma.staffUser.findMany({

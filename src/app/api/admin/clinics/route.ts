@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, invalidateClinicScopeCache } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { autoSent24hByClinic } from "@/lib/ai/status";
 
@@ -26,6 +26,8 @@ const createSchema = z.object({
   name: z.string().min(1).max(100),
   waPhoneNumberId: z.string().min(1).max(64),
   waDisplayNumber: z.string().min(1).max(32),
+  // ★ cwi-hub-a-20260914：公司歸屬（必填 — 維持 migration 不變式 NULL=0）
+  companyId: z.string().min(1).max(64),
   greetingConfig: greetingConfigSchema,
 });
 
@@ -33,7 +35,11 @@ export const GET = handle(async (req: NextRequest) => {
   await requireAdmin(req);
 
   const [clinics, convCounts, contactCounts, auto24h] = await Promise.all([
-    prisma.clinic.findMany({ orderBy: { code: "asc" } }),
+    prisma.clinic.findMany({
+      orderBy: { code: "asc" },
+      // ★ cwi-hub-a：帶公司 code/name（UI 列表/表單顯示）
+      include: { company: { select: { id: true, code: true, name: true } } },
+    }),
     prisma.conversation.groupBy({ by: ["clinicId"], _count: { _all: true } }),
     prisma.contact.groupBy({ by: ["clinicId"], _count: { _all: true } }),
     // 近 24h AUTO 自動發統計（定義同 /api/admin/ai-status 一致 — 單一事實來源）
@@ -64,6 +70,9 @@ export const POST = handle(async (req: NextRequest) => {
   await requireAdmin(req);
   const parsed = createSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return toResponse(parsed.error);
+  // ★ cwi-hub-a：公司存在性驗證（唔會製造無公司診所 — NULL=0 不變式）
+  const company = await prisma.company.findUnique({ where: { id: parsed.data.companyId } });
+  if (!company) return NextResponse.json({ error: "company not found" }, { status: 400 });
   const clinic = await prisma.clinic.create({
     data: {
       ...parsed.data,
@@ -72,5 +81,7 @@ export const POST = handle(async (req: NextRequest) => {
         : Prisma.DbNull,
     },
   });
+  // ★ cwi-hub-a：新诊所入公司 → COMPANY 範圍「公司加店自動包含」（T351）即時生效
+  invalidateClinicScopeCache();
   return NextResponse.json(clinic, { status: 201 });
 });

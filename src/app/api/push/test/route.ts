@@ -1,6 +1,6 @@
 import { type NextRequest } from "next/server";
 import { handle } from "@/lib/api-error";
-import { requireAuth } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, scopedClinicSet, type AuthContext } from "@/lib/rbac";
 import prisma from "@/lib/prisma";
 import { pushToStaffResult, isClinicMutedForStaff } from "@/lib/push";
 
@@ -22,18 +22,21 @@ import { pushToStaffResult, isClinicMutedForStaff } from "@/lib/push";
 export const dynamic = "force-dynamic";
 
 export const POST = handle(async (req: NextRequest) => {
-  const { staff, res, clinicIds } = await requireAuth(req);
+  const ctx: AuthContext = await requireAuth(req);
+  const { staff, res } = ctx;
   const cookie = res.headers.get("set-cookie") ?? "";
 
   const body = (await req.json().catch(() => null)) as { clinicId?: unknown } | null;
   let clinicId: string | null = null;
   if (typeof body?.clinicId === "string" && body.clinicId.length > 0) {
-    if (staff.role === "STAFF" && !clinicIds.includes(body.clinicId)) {
-      return Response.json({ error: "no access to clinic" }, { status: 403, headers: { "Set-Cookie": cookie } });
-    }
+    // ★ cwi-hub-a-20260914（Part A）：scope-aware — 外範圍 clinicId → 403（任何受限角色）
+    assertClinicAccess(ctx, body.clinicId);
     clinicId = body.clinicId;
-  } else if (staff.role === "STAFF" && clinicIds.length === 1) {
-    clinicId = clinicIds[0];
+  } else {
+    // 無 clinicId：受限角色只有單一 clinic 先自動填（現行 STAFF 單店行為）；
+    // 多 clinic 受限角色必須明確傳 clinicId（避免猜錯店）
+    const set = scopedClinicSet(ctx);
+    if (set !== null && set.length === 1) clinicId = set[0];
   }
   if (!clinicId) {
     return Response.json({ error: "clinicId required" }, { status: 400, headers: { "Set-Cookie": cookie } });

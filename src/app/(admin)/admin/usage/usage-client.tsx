@@ -18,12 +18,20 @@ interface Row {
   systemSent: number;
   total: number;
 }
+/** ★ cwi-hub-a（A.4）：公司分組（server 已按範圍過濾） */
+interface UsageCompany {
+  id: string;
+  code: string;
+  name: string;
+  clinics: { id: string; code: string }[];
+}
 interface Summary {
   month: string;
   rows: Row[];
   appHandoff: { clinicCode: string; count: number }[];
   weekTrend: { weekStart: string; current: boolean; total: number; aiAuto: number }[];
   totals: { staffSent: number; aiSent: number; systemSent: number; total: number; aiSharePct: number };
+  companies: UsageCompany[];
 }
 
 const CATEGORY_LABEL: Record<string, string> = {
@@ -55,19 +63,60 @@ export default function UsageClient() {
     return { rate: r, serviceTotal, estHkd: Math.round(serviceTotal * r * 100) / 100 };
   }, [data, rate]);
 
+  // ★ cwi-hub-a（A.4）：先按公司、再按店。無 companies 時（舊 response fallback）退返扁平按店。
+  // 注意：useMemo 必需要喺所有 early return 之前（react-hooks/rules-of-hooks — build lint 實測）。
+  const grouped = useMemo(() => {
+    if (!data) return [];
+    const byCode = new Map<string, Row[]>();
+    for (const r of data.rows) {
+      const arr = byCode.get(r.clinicCode) ?? [];
+      arr.push(r);
+      byCode.set(r.clinicCode, arr);
+    }
+    return (data.companies ?? []).map((co) => ({
+      company: co,
+      clinics: co.clinics.map((c) => ({ code: c.code, rows: byCode.get(c.code) ?? [] })),
+    }));
+  }, [data]);
+
   if (err) return <div className="p-4 text-sm text-danger">載入失敗：{err}</div>;
   if (!data) return <div className="p-4 text-sm text-t2">載入中…</div>;
 
-  const clinics = Array.from(new Set(data.rows.map((r) => r.clinicCode))).sort();
+
+  const hasCompanies = (data.companies ?? []).length > 0;
+  const clinics = hasCompanies ? [] : Array.from(new Set(data.rows.map((r) => r.clinicCode))).sort();
   const maxWeek = Math.max(1, ...data.weekTrend.map((w) => w.total));
 
   return (
     <div className="p-4 md:p-6 max-w-5xl mx-auto flex flex-col gap-6">
-      {/* 本月按店 × 類別 */}
+      {/* 本月按公司 → 店 × 類別（★ cwi-hub-a A.4：先公司後店） */}
       <section className="flex flex-col gap-2">
-        <h2 className="text-base font-semibold text-t1">本月（{data.month}）· 按店 × 類別</h2>
-        {clinics.length === 0 ? (
-          <div className="text-sm text-t2">本月零 outbound（API）。</div>
+        <h2 className="text-base font-semibold text-t1">本月（{data.month}）· 按公司 → 店 × 類別</h2>
+        {hasCompanies ? (
+          <div className="overflow-x-auto rounded-xl border border-line">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] text-t2 border-b border-line bg-panel-2">
+                  <th className="px-3 py-2 font-medium">公司 / 店</th>
+                  <th className="px-3 py-2 font-medium">類別</th>
+                  <th className="px-3 py-2 font-medium text-right">人手</th>
+                  <th className="px-3 py-2 font-medium text-right">AI 自動</th>
+                  <th className="px-3 py-2 font-medium text-right">系統</th>
+                  <th className="px-3 py-2 font-medium text-right">合計</th>
+                </tr>
+              </thead>
+              <tbody>
+                {grouped.map(({ company, clinics: coClinics }) => (
+                  <CompanyBlock
+                    key={company.id}
+                    code={company.code}
+                    name={company.name}
+                    clinics={coClinics}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-line">
             <table className="w-full text-sm">
@@ -217,6 +266,31 @@ export default function UsageClient() {
         </div>
       </section>
     </div>
+  );
+}
+
+function CompanyBlock({
+  code,
+  name,
+  clinics,
+}: {
+  code: string;
+  name: string;
+  clinics: { code: string; rows: Row[] }[];
+}) {
+  return (
+    <>
+      {/* 公司頭（MD A.4：先按公司分組） */}
+      <tr className="border-b border-line bg-panel-2/60">
+        <td className="px-3 py-1.5" colSpan={6}>
+          <span className="text-xs font-semibold text-t1">{code} {name}</span>
+          <span className="ml-2 text-[11px] text-t3">（{clinics.length} 間店）</span>
+        </td>
+      </tr>
+      {clinics.map((c) => (
+        <ClinicRows key={c.code} clinic={c.code} rows={c.rows} />
+      ))}
+    </>
   );
 }
 

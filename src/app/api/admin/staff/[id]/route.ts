@@ -27,6 +27,11 @@ const updateSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   role: z.enum(["ADMIN", "STAFF", "SUPERVISOR"]).optional(),
   clinicId: z.string().min(1).max(64).nullable().optional(),
+  // ★ cwi-hub-a-20260914（Part A）：公司層範圍（MD A.3）
+  scopeType: z.enum(["ALL", "COMPANY", "CLINICS"]).optional(),
+  scopeCompanyId: z.string().min(1).max(64).nullable().optional(),
+  /** CLINICS 模式診所集合（replace 語義：送 = 全量替换；唔送 = 保持現行） */
+  clinicIds: z.array(z.string().min(1).max(64)).max(50).optional(),
   active: z.boolean().optional(),
   newPassword: z.string().min(8).max(128).optional(),
 });
@@ -45,23 +50,57 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const self = admin.staff.id === id;
   const effectiveRole = fields.role ?? target.role;
-  const effectiveClinic = fields.clinicId === undefined ? target.clinicId : fields.clinicId;
   const effectiveActive = fields.active ?? target.active;
+  // ★ cwi-hub-a-20260914：effective scope — SUPERVISOR 恆 ALL（現行無 scope 概念）；
+  //   冇送 scope 欄：role 改動 → 重置返該角色 default（STAFF→CLINICS、ADMIN→ALL）；否則保持現行。
+  const effectiveScopeType: "ALL" | "COMPANY" | "CLINICS" =
+    effectiveRole === "SUPERVISOR"
+      ? "ALL"
+      : fields.scopeType ?? (fields.role !== undefined ? (effectiveRole === "STAFF" ? "CLINICS" : "ALL") : (target.scopeType as "ALL" | "COMPANY" | "CLINICS"));
+  const effectiveScopeCompanyId =
+    effectiveScopeType === "COMPANY" ? (fields.scopeCompanyId ?? target.scopeCompanyId) : null;
+  const scopeChanged =
+    fields.role !== undefined ||
+    fields.scopeType !== undefined ||
+    fields.scopeCompanyId !== undefined ||
+    fields.clinicIds !== undefined ||
+    (fields.clinicId !== undefined && effectiveScopeType === "CLINICS");
 
-  // STAFF 必須綁店（任何最終狀態都唔可以係「STAFF + 冇店」）
-  if (effectiveRole === "STAFF" && !effectiveClinic) {
-    return NextResponse.json({ error: "STAFF 必須綁定 clinicId" }, { status: 400 });
+  // CLINICS 模式 → 有效診所集合（送 clinicIds/clinicId = 全量 replace；唔送 = 保持現行 StaffClinic）
+  let clinicList: string[] = [];
+  if (effectiveScopeType === "CLINICS") {
+    if (fields.clinicIds !== undefined || fields.clinicId !== undefined) {
+      const legacy = fields.clinicId ?? null;
+      clinicList = [...new Set([...(fields.clinicIds ?? []), ...(legacy ? [legacy] : [])])];
+    } else {
+      const rows = await prisma.staffClinic.findMany({ where: { staffId: id }, select: { clinicId: true } });
+      clinicList = rows.map((r) => r.clinicId);
+    }
+    // ★ cwi-hub-a：任何角色 CLINICS 模式都要 ≥1 間診所（防止「無範圍 = 跨店」隱藏 ADMIN）
+    if (clinicList.length === 0) {
+      return NextResponse.json({ error: "CLINICS 範圍必須揀最少一間診所" }, { status: 400 });
+    }
   }
-  if (effectiveRole === "ADMIN" && effectiveClinic) {
-    return NextResponse.json({ error: "ADMIN clinicId 必須為 null" }, { status: 400 });
+
+  // scope 驗證（任何最終狀態都要合法 — fail-closed）
+  if (effectiveScopeType === "COMPANY" && !effectiveScopeCompanyId) {
+    return NextResponse.json({ error: "COMPANY 範圍必須揀公司" }, { status: 400 });
   }
-  // ★ cwi-statusrole2-20260910（MD §5.2）：SUPERVISOR = 全店（同 ADMIN 一樣 clinicId 必 null）
+  if (effectiveScopeCompanyId) {
+    const company = await prisma.company.findUnique({ where: { id: effectiveScopeCompanyId } });
+    if (!company) return NextResponse.json({ error: "company not found" }, { status: 400 });
+  }
+  if (clinicList.length > 0) {
+    const found = await prisma.clinic.findMany({ where: { id: { in: clinicList } }, select: { id: true } });
+    if (found.length !== clinicList.length) return NextResponse.json({ error: "clinic not found" }, { status: 400 });
+  }
+  const effectiveClinic = fields.clinicId === undefined ? target.clinicId : fields.clinicId;
+  if (effectiveRole === "ADMIN" && effectiveScopeType === "ALL" && effectiveClinic) {
+    return NextResponse.json({ error: "ADMIN clinicId 必須為 null（跨店）" }, { status: 400 });
+  }
+  // ★ cwi-statusrole2-20260910（MD §5.2）：SUPERVISOR = 全店（clinicId 必 null）
   if (effectiveRole === "SUPERVISOR" && effectiveClinic) {
     return NextResponse.json({ error: "SUPERVISOR clinicId 必須為 null（全店）" }, { status: 400 });
-  }
-  if (effectiveClinic) {
-    const clinic = await prisma.clinic.findUnique({ where: { id: effectiveClinic } });
-    if (!clinic) return NextResponse.json({ error: "clinic not found" }, { status: 400 });
   }
 
   // 鎖死保護：最後一個 active ADMIN 唔可以被降權/停用（自己或他人）
@@ -88,11 +127,29 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
     data: {
       ...(fields.name !== undefined ? { name: fields.name } : {}),
       ...(fields.role !== undefined ? { role: fields.role } : {}),
-      ...(fields.clinicId !== undefined ? { clinicId: fields.clinicId } : {}),
+      // ★ cwi-hub-a-20260914：scope 欄 + clinicId 派生（CLINICS = 頭間店 = 主店；其餘 = null）
+      ...(scopeChanged
+        ? {
+            scopeType: effectiveScopeType,
+            scopeCompanyId: effectiveScopeCompanyId,
+            clinicId: effectiveScopeType === "CLINICS" ? clinicList[0] : null,
+          }
+        : {}),
       ...(fields.active !== undefined ? { active: fields.active } : {}),
       ...(newPassword ? { passwordHash: await argon2.hash(newPassword) } : {}),
     },
   });
+
+  // ★ cwi-hub-a-20260914：StaffClinic 同步（replace 語義；非 CLINICS scope 清走舊行防髒狀態）。
+  //   scope 改動下次 login 生效（session snapshot 語義 — 同現行 clinicId 改動一致）。
+  if (scopeChanged) {
+    await prisma.staffClinic.deleteMany({ where: { staffId: id } });
+    if (effectiveScopeType === "CLINICS") {
+      await prisma.staffClinic.createMany({
+        data: clinicList.map((cid, i) => ({ staffId: id, clinicId: cid, isPrimary: i === 0 })),
+      });
+    }
+  }
 
   // ★ P0-3：active 任何改動都即時生效（60s cache 唔准令停用/重啟遲到）：
   //   1) 本 instance（API route 世界）嘅 requireAuth cache 即時失效 → 下一個 API request 即刻 401

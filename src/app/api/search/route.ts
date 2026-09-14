@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, scopedClinicSet } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -54,17 +54,11 @@ export const GET = handle(async (req: NextRequest) => {
   if (q.length < 1) return NextResponse.json({ error: "q required" }, { status: 400 });
   if (q.length > 200) return NextResponse.json({ error: "q too long" }, { status: 400 });
 
-  // cwi-h6-20260830 多店：clinicIds = null → 無店限制（ADMIN 唔指定 clinicParam）；
-  // STAFF = 綁定店集合；clinicParam 指定時 = [clinicParam]（先驗證 ∈ 集合）
+  // cwi-hub-a-20260914（Part A）：scope-aware — clinicParam 外範圍 → 403（任何受限角色）；
+  //   無 clinicParam = 自己範圍集合（ALL scope / SUPERVISOR = null = 無店限制）
   const clinicParam = url.searchParams.get("clinicId");
-  if (clinicParam && ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
-    return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-  }
-  const clinicIds: string[] | null = clinicParam
-    ? [clinicParam]
-    : ctx.staff.role === "STAFF"
-      ? ctx.clinicIds
-      : null;
+  if (clinicParam) assertClinicAccess(ctx, clinicParam);
+  const clinicIds: string[] | null = clinicParam ? [clinicParam] : scopedClinicSet(ctx);
   const selfId = ctx.staff.id; // 單線授權：我係 assignee 嘅對話（外店派咗落嚟嗰條線）
   // ★ L-2：ILIKE/LIKE 用 escape 後嘅值（bind 照樣）；tsvector/similarity 用原 q
   const qEsc = escapeLikeWildcards(q);

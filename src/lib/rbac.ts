@@ -43,6 +43,12 @@ export interface AuthContext {
   clinicId: string | null;
   /** ★ cwi-h6-20260830：綁定店集合。ADMIN = []（全店，scope 不限）；STAFF = StaffClinic 全部 clinicId（≥1，fail-closed）。舊 session 冇呢個欄 → fallback [clinicId]。 */
   clinicIds: string[];
+  /** ★ cwi-hub-a-20260914（Part A）：已解析範圍類型（含舊 session fallback；SUPERVISOR 恆 ALL = 現行全店）。 */
+  scopeType: "ALL" | "COMPANY" | "CLINICS";
+  /** ★ cwi-hub-a-20260914：已解析 clinic 集合（單一來源 resolveClinicIds 產物）。
+   * ALL scope = 全部 clinic id；COMPANY = 該公司 clinic；CLINICS = StaffClinic 集合。
+   * SUPERVISOR = []（無 scope 概念 — 由 scopedClinicSet 視為全店無限制）。 */
+  scopedClinicIds: string[];
   /** 必需要將呢個 response（或其 set-cookie header）帶返畀 client */
   res: Awaited<ReturnType<typeof getSession>>["res"];
 }
@@ -147,6 +153,107 @@ export async function isStaffSessionCurrent(data: Pick<SessionData, "staffId" | 
   return true;
 }
 
+// ── ★ cwi-hub-a-20260914（Part A）：公司層範圍解析 — 單一來源（MD A.2 鐵律）──────────────
+// 所有下游（列表/三計數/公海/派俾我/時間表/路由組/通知/用量統計）一律經呢組函數，
+// 唔准有第二處自己算 clinic 集合。scope 改動喺 login 寫入 session（snapshot 語義）；
+// clinic 集合變化（加店/改公司歸屬）由 30s cache + invalidateClinicScopeCache 控制。
+export type ScopeType = "ALL" | "COMPANY" | "CLINICS";
+
+const SCOPE_CACHE_TTL_MS = 30_000;
+const allClinicIdsCache = { at: 0, ids: null as string[] | null };
+const companyClinicIdsCache = new Map<string, { at: number; ids: string[] }>();
+
+/** 全部 clinic id（MD A.2 `allEnabledClinicIds`）。
+ * ⚠️ 偏差記錄（CEO 決定 2026-09-14）：`Clinic` model 無 `enabled` 欄（超出本單範圍）→
+ * 實現 = 全部 clinic 行（唔過濾 enabled）。 */
+export async function allEnabledClinicIds(): Promise<string[]> {
+  const now = Date.now();
+  if (allClinicIdsCache.ids && now - allClinicIdsCache.at < SCOPE_CACHE_TTL_MS) {
+    return allClinicIdsCache.ids;
+  }
+  const rows = await prisma.clinic.findMany({ select: { id: true } });
+  allClinicIdsCache.at = now;
+  allClinicIdsCache.ids = rows.map((r) => r.id);
+  return allClinicIdsCache.ids;
+}
+
+/** 某公司嘅 clinic id 集合（COMPANY 範圍；公司加店自動包含 — MD A-4，cache 到期/失效後自動跟）。 */
+export async function clinicIdsOfCompany(companyId: string | null): Promise<string[]> {
+  if (!companyId) return [];
+  const now = Date.now();
+  const hit = companyClinicIdsCache.get(companyId);
+  if (hit && now - hit.at < SCOPE_CACHE_TTL_MS) return hit.ids;
+  const rows = await prisma.clinic.findMany({ where: { companyId }, select: { id: true } });
+  const ids = rows.map((r) => r.id);
+  companyClinicIdsCache.set(companyId, { at: now, ids });
+  if (companyClinicIdsCache.size > 100) companyClinicIdsCache.clear(); // 公司數極少；防 map 無限長
+  return ids;
+}
+
+/** clinic 增刪 / 公司歸屬改動時調 — COMPANY 範圍自動包含即時生效（e2e T351）。 */
+export function invalidateClinicScopeCache(): void {
+  allClinicIdsCache.ids = null;
+  companyClinicIdsCache.clear();
+}
+
+/** MD A.2 單一來源：由（scopeType, scopeCompanyId, StaffClinic 集合）解出 clinic id 集合。 */
+export async function resolveClinicIds(input: {
+  scopeType: ScopeType;
+  scopeCompanyId: string | null;
+  /** CLINICS 模式來源（login 時由 StaffClinic 寫入 session） */
+  staffClinicIds: string[];
+}): Promise<string[]> {
+  switch (input.scopeType) {
+    case "ALL":
+      return allEnabledClinicIds();
+    case "COMPANY":
+      return clinicIdsOfCompany(input.scopeCompanyId);
+    case "CLINICS":
+      return input.staffClinicIds;
+  }
+}
+
+/** session → scopeType（含 MD A.2 舊 session fallback：無 scopeType → ADMIN 當 ALL、STAFF 當 CLINICS。
+ * SUPERVISOR 現行無 scope 概念（全店唯讀）→ 恆 ALL，權限唔改）。 */
+export function sessionScopeType(
+  data: Pick<import("@/lib/session").SessionData, "role" | "scopeType">
+): ScopeType {
+  if (data.role === "SUPERVISOR") return "ALL";
+  if (data.scopeType === "ALL" || data.scopeType === "COMPANY" || data.scopeType === "CLINICS") {
+    return data.scopeType;
+  }
+  return data.role === "ADMIN" ? "ALL" : "CLINICS";
+}
+
+/** SessionData → 已解析 scope（web requireAuth / socket hub / SSR page 共用 funnel）。
+ * CLINICS = session clinicIds（舊 session fallback [clinicId]）；ALL/COMPANY = DB 解析（30s cache）。 */
+export async function resolveSessionScope(
+  data: Pick<
+    import("@/lib/session").SessionData,
+    "role" | "clinicId" | "clinicIds" | "scopeType" | "scopeCompanyId"
+  >
+): Promise<{ scopeType: ScopeType; scopedClinicIds: string[] }> {
+  const scopeType = sessionScopeType(data);
+  if (scopeType === "CLINICS") {
+    const ids = data.clinicIds?.length ? data.clinicIds : data.clinicId ? [data.clinicId] : [];
+    return { scopeType, scopedClinicIds: ids };
+  }
+  const scopedClinicIds = await resolveClinicIds({
+    scopeType,
+    scopeCompanyId: data.scopeCompanyId ?? null,
+    staffClinicIds: [],
+  });
+  return { scopeType, scopedClinicIds };
+}
+
+/** 自己嘅 clinic 集合（**null = 全店無限制**：ALL scope / SUPERVISOR）。
+ * 所有 scope 判斷（clinicScope / conversationScope / assert* / 列表 guard）一律經呢個。 */
+export function scopedClinicSet(ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">): string[] | null {
+  if (ctx.staff.role === "SUPERVISOR") return null; // 現行全店（唯讀語義喺 assertCanWriteConversation）
+  if (ctx.scopeType === "ALL") return null;
+  return ctx.scopedClinicIds;
+}
+
 /**
  * 要求已登入（ADMIN 或 STAFF 都過）。
  * 未登入 / session 无效 → 401；帳號停用 → 401 "account disabled"（P0-3 即時生效）。
@@ -163,7 +270,7 @@ export async function requireAuth(req: NextRequest): Promise<AuthContext> {
   if (!(await isStaffSessionCurrent(data))) {
     throw new RbacError(401, "session invalidated");
   }
-  return toContext(data, res);
+  return await toContext(data, res);
 }
 
 /**
@@ -190,23 +297,21 @@ export async function requireAdminOrSupervisor(req: NextRequest): Promise<AuthCo
 }
 
 /**
- * STAFF 硬性綁定 clinicIds 嘅 query scope helper（cwi-h6-20260830 多店化）：
+ * clinic 過濾 query scope helper（cwi-hub-a-20260914 Part A — 範圍三維度收口）：
  *   where: { ...clinicScope(ctx) }
- * ADMIN → {}（跨店）；STAFF → { clinicId: { in: [店1, 店2, ...] } }（只綁定店）。
+ * ALL scope / SUPERVISOR → {}（唔加 where）；其餘 → { clinicId: { in: [...] } }（MD A.2）。
  * 所有按店過濾嘅 Prisma query 都必過呢個，唔好手寫 clinicId 條件。
  */
-export function clinicScope(ctx: {
-  staff: { role: "ADMIN" | "STAFF" | "SUPERVISOR" };
-  clinicIds: string[];
-}): { clinicId?: { in: string[] } } {
-  if (ctx.staff.role === "STAFF") {
-    if (!ctx.clinicIds.length) {
-      // STAFF 冇店集合 = 壞 session，直接擋
-      throw new RbacError(401, "staff session missing clinics");
-    }
-    return { clinicId: { in: ctx.clinicIds } };
+export function clinicScope(ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">): {
+  clinicId?: { in: string[] };
+} {
+  const set = scopedClinicSet(ctx);
+  if (set === null) return {}; // ALL / SUPERVISOR → 全店
+  if (ctx.staff.role === "STAFF" && set.length === 0) {
+    // STAFF 冇店集合 = 壞 session，直接擋（fail-closed 不變 — unit-rbac C3）
+    throw new RbacError(401, "staff session missing clinics");
   }
-  return {};
+  return { clinicId: { in: set } };
 }
 
 // ── ★ cwi-auditfix-20260908（B-1 兜底）：我嘅技能組集合（in-process 60s cache）─────────
@@ -252,11 +357,13 @@ export function invalidateGroupCache(staffId?: string): void {
  * conv 參數嘅 routed* 欄係 optional — 冇帶 = 嗰兩條支路自然唔成立（唔改 call site select 都唔會假放行）。
  */
 export async function assertConversationAccess(
-  ctx: Pick<AuthContext, "staff" | "clinicIds">,
+  ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">,
   conv: { clinicId: string; assigneeId: string | null; routedStaffId?: string | null; routedGroupId?: string | null }
 ): Promise<void> {
-  if (ctx.staff.role === "ADMIN" || ctx.staff.role === "SUPERVISOR") return;
-  if (ctx.clinicIds.includes(conv.clinicId)) return;
+  // ★ cwi-hub-a-20260914：ALL scope / SUPERVISOR 全店放行（現行 ADMIN/SUPERVISOR 行為）；
+  //   其餘（COMPANY / CLINICS，任何角色）= 店集合 ∨ 單線授權（assignee / routed）。
+  const set = scopedClinicSet(ctx);
+  if (set === null || set.includes(conv.clinicId)) return;
   if (conv.assigneeId === ctx.staff.id) return; // 單線授權（指派）
   // ★ cwi-auditfix-20260908（B-1）：路由單線授權
   if (conv.routedStaffId && conv.routedStaffId === ctx.staff.id) return;
@@ -269,23 +376,23 @@ export async function assertConversationAccess(
  * ADMIN → {}；STAFF → 自己所有店 ∪ 我係負責人嘅對話（單線授權 — 外店派咗落嚟嗰條線）。
  * 注意：呢個係列表層級；單對話 access 仍以 assertConversationAccess 為準。
  */
-export function conversationScope(ctx: {
-  staff: { role: "ADMIN" | "STAFF" | "SUPERVISOR"; id: string };
-  clinicIds: string[];
-}): Record<string, unknown> {
-  if (ctx.staff.role === "STAFF") {
-    if (!ctx.clinicIds.length) throw new RbacError(401, "staff session missing clinics");
-    return { OR: [{ clinicId: { in: ctx.clinicIds } }, { assigneeId: ctx.staff.id }] };
-  }
-  return {};
+export function conversationScope(ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">): Record<string, unknown> {
+  const set = scopedClinicSet(ctx);
+  if (set === null) return {}; // ALL / SUPERVISOR → 全店
+  if (ctx.staff.role === "STAFF" && set.length === 0) throw new RbacError(401, "staff session missing clinics");
+  return { OR: [{ clinicId: { in: set } }, { assigneeId: ctx.staff.id }] };
 }
 
-/** 單店訪問檢查（clinic 級 entity：booking / contact / flow hold 等 — cwi-h6-20260830 多店化：目標店 ∈ 我嘅店集合）。 */
+/** 單店訪問檢查（clinic 級 entity：booking / contact / flow hold 等）。
+ * ★ cwi-hub-a-20260914：scope-aware — 唔單止 STAFF，COMPANY/CLINICS 範圍嘅 ADMIN 砌外範圍店 → 403。
+ * ALL scope / SUPERVISOR 放行（現行行為）。 */
 export function assertClinicAccess(
-  ctx: Pick<AuthContext, "staff" | "clinicIds">,
+  ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">,
   targetClinicId: string
 ): void {
-  if (ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(targetClinicId)) {
+  const set = scopedClinicSet(ctx);
+  if (set === null) return;
+  if (!set.includes(targetClinicId)) {
     throw new RbacError(403, "cross-clinic access denied");
   }
 }
@@ -316,7 +423,7 @@ export function assertCanWriteConversation(ctx: Pick<AuthContext, "staff">): voi
   }
 }
 
-function toContext(data: SessionData, res: AuthContext["res"]): AuthContext {
+async function toContext(data: SessionData, res: AuthContext["res"]): Promise<AuthContext> {
   // Fail-closed：role 必須係已知值（防壞 session / role 字串注入）
   if (data.role !== "ADMIN" && data.role !== "STAFF" && data.role !== "SUPERVISOR") {
     throw new RbacError(401, "invalid session role");
@@ -331,9 +438,13 @@ function toContext(data: SessionData, res: AuthContext["res"]): AuthContext {
         : data.clinicId
           ? [data.clinicId]
           : null;
-  // Fail-closed：STAFF 必須有店集合 — 冇店嘅 STAFF context 會令 query 變無 scope（跨店讀），
+  // ★ cwi-hub-a-20260914（Part A）：scope 解析（單一來源）— web + socket 都經呢個 funnel。
+  const { scopeType, scopedClinicIds } = await resolveSessionScope(data);
+  // Fail-closed：STAFF（CLINICS 模式）必須有店集合 — 冇店嘅 STAFF context 會令 query 變無 scope（跨店讀），
   // 所以喺最底層呢度就擋死，唔靠每個 route 記得調 clinicScope。
-  if (data.role === "STAFF" && !clinicIds) {
+  // （cwi-hub-a：COMPANY/ALL scope STAFF 唔受呢條限制 — 解析後集合自帶 fail-closed：
+  //   空公司 = 空集合 = 冇嘢睇。）
+  if (data.role === "STAFF" && scopeType === "CLINICS" && !clinicIds) {
     throw new RbacError(401, "staff session missing clinicId");
   }
   return {
@@ -345,6 +456,8 @@ function toContext(data: SessionData, res: AuthContext["res"]): AuthContext {
     },
     clinicId: data.clinicId,
     clinicIds: clinicIds ?? [],
+    scopeType,
+    scopedClinicIds,
     res,
   };
 }

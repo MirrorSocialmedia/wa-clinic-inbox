@@ -19,7 +19,7 @@
  * 用法（repo root）：pnpm test:unit-rbac
  * 退出碼：0 = 全過；1 = 有 fail
  */
-import { clinicScope, assertConversationAccess, conversationScope } from "../src/lib/rbac";
+import { clinicScope, assertConversationAccess, conversationScope, assertClinicAccess } from "../src/lib/rbac";
 
 let passes = 0;
 let failures = 0;
@@ -33,10 +33,10 @@ function check(name: string, ok: boolean, detail = ""): void {
   }
 }
 
-const ADMIN = { staff: { role: "ADMIN" as const, id: "adm1", email: "a@x", name: "A" }, clinicIds: [] as string[] };
-const STAFF_A = { staff: { role: "STAFF" as const, id: "stf1", email: "s1@x", name: "S1" }, clinicIds: ["cA"] };
-const STAFF_AB = { staff: { role: "STAFF" as const, id: "stf2", email: "s2@x", name: "S2" }, clinicIds: ["cA", "cB"] };
-const STAFF_EMPTY = { staff: { role: "STAFF" as const, id: "stf3", email: "s3@x", name: "S3" }, clinicIds: [] as string[] };
+const ADMIN = { staff: { role: "ADMIN" as const, id: "adm1", email: "a@x", name: "A" }, clinicIds: [] as string[], scopeType: "ALL" as const, scopedClinicIds: [] as string[] };
+const STAFF_A = { staff: { role: "STAFF" as const, id: "stf1", email: "s1@x", name: "S1" }, clinicIds: ["cA"], scopeType: "CLINICS" as const, scopedClinicIds: ["cA"] };
+const STAFF_AB = { staff: { role: "STAFF" as const, id: "stf2", email: "s2@x", name: "S2" }, clinicIds: ["cA", "cB"], scopeType: "CLINICS" as const, scopedClinicIds: ["cA", "cB"] };
+const STAFF_EMPTY = { staff: { role: "STAFF" as const, id: "stf3", email: "s3@x", name: "S3" }, clinicIds: [] as string[], scopeType: "CLINICS" as const, scopedClinicIds: [] as string[] };
 
 async function main(): Promise<void> {
   // ── clinicScope（3 case）───────────────────────────────────────────
@@ -130,6 +130,46 @@ async function main(): Promise<void> {
       (listAB.OR as { assigneeId?: string }[]).some((o) => o.assigneeId === "stf2")
   );
   check("L2 conversationScope(ADMIN) → {}", JSON.stringify(conversationScope(ADMIN)) === "{}");
+
+  // ── ★ cwi-hub-a-20260914（Part A）：公司層範圍（ALL/COMPANY/CLINICS）──────────────
+  const ADMIN_CO = { staff: { role: "ADMIN" as const, id: "adm2", email: "a2@x", name: "A2" }, clinicIds: [] as string[], scopeType: "COMPANY" as const, scopedClinicIds: ["cB", "cC"] };
+  const ADMIN_CL = { staff: { role: "ADMIN" as const, id: "adm3", email: "a3@x", name: "A3" }, clinicIds: [] as string[], scopeType: "CLINICS" as const, scopedClinicIds: ["cA"] };
+  const SUPERVISOR = { staff: { role: "SUPERVISOR" as const, id: "sup1", email: "su@x", name: "S" }, clinicIds: [] as string[], scopeType: "ALL" as const, scopedClinicIds: [] as string[] };
+
+  check(
+    "H1 clinicScope(COMPANY ADMIN) → { clinicId: { in: [cB,cC] } }",
+    JSON.stringify(clinicScope(ADMIN_CO)) === JSON.stringify({ clinicId: { in: ["cB", "cC"] } })
+  );
+  check("H2 clinicScope(SUPERVISOR) → {}（現行全店，權限唔改）", JSON.stringify(clinicScope(SUPERVISOR)) === "{}");
+  check(
+    "H3 clinicScope(CLINICS ADMIN) → { clinicId: { in: [cA] } }",
+    JSON.stringify(clinicScope(ADMIN_CL)) === JSON.stringify({ clinicId: { in: ["cA"] } })
+  );
+
+  let h4ok = true;
+  try { assertClinicAccess(ADMIN_CO, "cB"); } catch { h4ok = false; }
+  check("H4 assertClinicAccess(COMPANY ADMIN, 範圍內店 cB) → 通過", h4ok);
+
+  let h5threw = false;
+  let h5status = 0;
+  try { assertClinicAccess(ADMIN_CO, "cA"); } catch (e) { h5threw = true; h5status = (e as { status?: number }).status ?? 0; }
+  check("H5 assertClinicAccess(COMPANY ADMIN, 範圍外店 cA) → throw 403", h5threw && h5status === 403, `threw=${h5threw} status=${h5status}`);
+
+  let h6ok = true;
+  try { assertClinicAccess(ADMIN, "cZ"); } catch { h6ok = false; }
+  check("H6 assertClinicAccess(ALL ADMIN, 任何店) → 通過（現行）", h6ok);
+
+  let h7ok = true;
+  try { await assertConversationAccess(ADMIN_CO, { clinicId: "cC", assigneeId: null }); } catch { h7ok = false; }
+  check("H7 assertConversationAccess(COMPANY ADMIN, 範圍內店) → 通過", h7ok);
+
+  let h8ok = true;
+  try { await assertConversationAccess(ADMIN_CO, { clinicId: "cZ", assigneeId: "adm2" }); } catch { h8ok = false; }
+  check("H8 assertConversationAccess(COMPANY ADMIN, 外店但 assignee==自己) → 通過（單線授權）", h8ok);
+
+  let h9threw = false;
+  try { await assertConversationAccess(ADMIN_CO, { clinicId: "cZ", assigneeId: "someoneElse" }); } catch { h9threw = true; }
+  check("H9 assertConversationAccess(COMPANY ADMIN, 外店且非 assignee) → throw 403", h9threw);
 
   console.log(`\nunit-rbac: ${passes} passed, ${failures} failed`);
   process.exit(failures > 0 ? 1 : 0);

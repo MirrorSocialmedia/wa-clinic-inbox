@@ -162,10 +162,26 @@ enum GoldenSource {
   MANUAL         // 人手建立
 }
 
+// ★ cwi-hub-a-20260914（Part A）：公司層 — 三公司 × 六診所（MD A.0 A-1～A-4）。
+// code = A/B/C（老細拍板 2026-09-14）：A 菁薈（TY）/ B 臻善（YMT,TW,MF）/ C 匯樂（TKW,YL；dev WTC 歸 C）。
+model Company {
+  id        String   @id @default(cuid())
+  code      String   @unique          // A / B / C
+  name      String
+  enabled   Boolean  @default(true)
+  clinics   Clinic[]
+  createdAt DateTime @default(now())
+}
+
 model Clinic {
   id               String  @id @default(cuid())
   code             String  @unique            // TKW / MF ...（同 clinic-workforce 用同一套 code，方便對照）
   name             String
+  // ★ cwi-hub-a-20260914（Part A）：公司歸屬 — nullable（migration 期間容許未分配；
+  //   回填後驗證 SELECT count(*) WHERE companyId IS NULL = 0 先繼續，MD A.1 第 5 步）。
+  //   COMPANY 範圍員工見自己公司全部店（公司加店自動包含 — A.4）。
+  companyId        String?
+  company          Company? @relation(fields: [companyId], references: [id])
   waPhoneNumberId  String  @unique            // Meta phone_number_id — 分流嘅 key
   // ★ Phase B（cwi-tmpl-20260824-b1）：WABA id（template 列表 API 作用域 —
   //   GET /{wabaId}/message_templates）。onboarding exchange 帶到先寫入；nullable（舊店可後補）。
@@ -175,6 +191,7 @@ model Clinic {
   greetingConfig   Json?                      // 營業時間/地址/常見 FAQ，餵畀 AI 草稿用
   // Phase 2b：逐舖 AI 模式（default DRAFT = 舊行為；AUTO = AI 可直接自動發）
   aiMode           AiMode  @default(DRAFT)
+  @@index([companyId])
   // Phase 3：該店醫生名錄（SCREEN_PROVIDER 來源；sync 表 — 多對多，醫生可以跨店）
   providers        ProviderClinic[]
   // ★ cwi-h6-20260830：多店員工綁定（StaffClinic M2M）
@@ -198,6 +215,11 @@ model StaffUser {
   role         Role
   // @deprecated（cwi-h6-20260830）：改用 StaffClinic M2M；保留做 primary fallback + 舊 session 兼容（唔 drop）
   clinicId     String?
+  // ★ cwi-hub-a-20260914（Part A，MD A.1）：角色同範圍拆兩個維度（A-1：角色＝可以做咩；範圍＝喺邊度做）。
+  // scopeType = ALL（全集團）| COMPANY（某公司 — 公司加店自動包含 A-4）| CLINICS（指定診所 StaffClinic，可跨公司）。
+  // 舊 session（JWT 無 scopeType）fallback：ADMIN→ALL、STAFF→CLINICS（MD A.2；SUPERVISOR 照現行全店）。
+  scopeType      String  @default("CLINICS")
+  scopeCompanyId String?
   // ★ cwi-h6-20260830：多店員工（M2M）— STAFF 可綁多間店；ADMIN 唔插（全店）
   clinics      StaffClinic[]
   active       Boolean @default(true)

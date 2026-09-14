@@ -10,18 +10,22 @@
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth } from "@/lib/rbac";
+import { requireAuth, scopedClinicSet } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 export const dynamic = "force-dynamic";
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAuth(req);
+  const ctx = await requireAuth(req);
   const scope = new URL(req.url).searchParams.get("scope")?.trim() ?? "";
   if (scope !== "schedule") {
     return NextResponse.json({ error: "scope must be 'schedule'" }, { status: 400 });
   }
+  const set = ctx.staff.role === "ADMIN" ? scopedClinicSet(ctx) : null;
   const clinics = await prisma.clinic.findMany({
+    // ★ cwi-hub-a-20260914（Part A）：時間表店列表跟 scope — scoped ADMIN（COMPANY/CLINICS）只得範圍內店；
+    //   STAFF / SUPERVISOR 保持全店列表（cwi-sched T-B 跨店時間表讀 + SCHEDULE_VIEW audit）
+    where: set ? { id: { in: set } } : undefined,
     select: { id: true, code: true, name: true },
     orderBy: { code: "asc" },
   });

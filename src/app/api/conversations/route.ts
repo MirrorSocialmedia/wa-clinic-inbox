@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, type AuthContext } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, scopedClinicSet, type AuthContext } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
 
@@ -30,19 +30,21 @@ const WINDOW_MS = 24 * 3600 * 1000;
  * ★ cwi-statusrole2-20260910 T1（MD §2）：預設列表 base scope — 單一真相源。
  * 列表 query（無 assigned filter）同 ?counts=1 計數 query 必共用呢個 function，
  * 唔准各寫一次 scope（§2 三計數不變式嘅實作要求）。
- * - STAFF：clinic（clinicParam 有 = 收窄該店）∪ 我係 assignee 嘅線（MD A.3 / I-2 —
- *   跨店指派俾我嘅線永遠喺 scope 內 → 跨店 assignee 天然計入 mine 計數）。
- * - ADMIN/SUPERVISOR：clinicParam（冇 = 全店）。
+ * ★ cwi-hub-a-20260914（Part A）：scope-aware 收口 — 範圍集合一律由 scopedClinicSet（單一來源）：
+ *   - 全店（ALL scope / SUPERVISOR）：clinicParam 收窄（冇 = 全店）。
+ *   - 受限（COMPANY / CLINICS，任何角色）：店集合 ∪ 我係 assignee 嘅線（MD A.3 / I-2 —
+ *     跨範圍指派俾我嘅線永遠喺 scope 內 → 跨範圍 assignee 天然計入 mine 計數）。
  */
 function buildScope(
-  ctx: Pick<AuthContext, "staff" | "clinicIds">,
+  ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">,
   clinicParam: string | null,
 ): Record<string, unknown> {
   const w: Record<string, unknown> = {};
-  if (ctx.staff.role === "STAFF") {
-    w.OR = [{ clinicId: clinicParam ?? { in: ctx.clinicIds } }, { assigneeId: ctx.staff.id }];
-  } else if (clinicParam) {
-    w.clinicId = clinicParam;
+  const set = scopedClinicSet(ctx);
+  if (set === null) {
+    if (clinicParam) w.clinicId = clinicParam;
+  } else {
+    w.OR = [{ clinicId: clinicParam ?? { in: set } }, { assigneeId: ctx.staff.id }];
   }
   return w;
 }
@@ -58,22 +60,23 @@ export const GET = handle(async (req: NextRequest) => {
     return NextResponse.json({ error: "invalid assigned (unassigned|mine|routed)" }, { status: 400 });
   }
 
-  // STAFF 砌別店 clinicId → 403（RBAC 鐵律，E2E 要實測呢條；所有 branch 適用）
-  if (clinicParam && ctx.staff.role === "STAFF" && !ctx.clinicIds.includes(clinicParam)) {
-    return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-  }
+  // ★ cwi-hub-a-20260914（Part A）：scope-aware guard — STAFF / 受限 ADMIN（COMPANY/CLINICS）
+  //   砌外範圍 clinicId → 403（RBAC 鐵律，E2E T350 實測；所有 branch 適用）。ALL / SUPERVISOR 放行。
+  if (clinicParam) assertClinicAccess(ctx, clinicParam);
+  // 範圍集合（單一來源）— null = 全店無限制（ALL scope / SUPERVISOR）
+  const scopedSet = scopedClinicSet(ctx);
 
   const where: Record<string, unknown> = {};
   if (assignedParam) {
     // ★ cwi-inboxfix-20260905（MD I-2 鐵律）：嚴格 scope — 唔經 buildScope 嘅 assignee OR 支路。
-    // unassigned：clinic 限定 + assigneeId:null（外店線絕對漏唔入嚟）。
-    // mine：assigneeId=自己（跨店指派俾自己嘅線保留；STAFF 唔限 clinic — 同 A.3 assignee 支路一致）。
+    // unassigned：clinic 限定 + assigneeId:null（外範圍線絕對漏唔入嚟）。
+    // mine：assigneeId=自己（跨範圍指派俾自己嘅線保留；受限角色唔限 clinic — 同 A.3 assignee 支路一致）。
     if (assignedParam === "unassigned") {
       where.assigneeId = null;
-      if (ctx.staff.role === "STAFF") {
-        where.clinicId = clinicParam ?? { in: ctx.clinicIds };
-      } else if (clinicParam) {
-        where.clinicId = clinicParam;
+      if (scopedSet === null) {
+        if (clinicParam) where.clinicId = clinicParam;
+      } else {
+        where.clinicId = clinicParam ?? { in: scopedSet };
       }
     } else if (assignedParam === "routed") {
       // ★ cwi-routing-20260906（MD §4.3）：「派俾我」= routedStaffId=我 ∨ routedGroupId∈我嘅組，且未指派。
@@ -87,13 +90,13 @@ export const GET = handle(async (req: NextRequest) => {
       const orBranches: Record<string, unknown>[] = [{ routedStaffId: ctx.staff.id }];
       if (myGroups.length > 0) orBranches.push({ routedGroupId: { in: myGroups.map((g) => g.groupId) } });
       where.OR = orBranches;
-      // STAFF：無 clinic 限制（B-1）；ADMIN/SUPERVISOR：clinicParam 收窄（tab 語義照舊）
-      if (ctx.staff.role !== "STAFF" && clinicParam) {
+      // 受限角色：無 clinic 限制（B-1 單線授權語義）；全店（ALL/SUPERVISOR）：clinicParam 收窄（tab 語義照舊）
+      if (scopedSet === null && clinicParam) {
         where.clinicId = clinicParam;
       }
     } else {
       where.assigneeId = ctx.staff.id;
-      if (ctx.staff.role === "ADMIN" && clinicParam) where.clinicId = clinicParam;
+      if (scopedSet === null && clinicParam) where.clinicId = clinicParam;
     }
   } else {
     // 預設列表（無 assigned filter）：base scope 同計數 query 共用 buildScope（MD §2 不變式）。
@@ -143,11 +146,7 @@ export const GET = handle(async (req: NextRequest) => {
   const groupMap = new Map(skillGroups.map((g) => [g.id, g]));
   // providerslot-20260830 T3：hold 卡 — 每個 WA 號最新非終態 hold（join key = Contact.waId）。
   // scope 跟對話一樣（STAFF 自己店 / ADMIN ?clinicId=）；fail-soft → 空 Map。
-  const holdClinicFilter: string | string[] | undefined = clinicParam
-    ? clinicParam
-    : ctx.staff.role === "STAFF"
-      ? ctx.clinicIds
-      : undefined;
+  const holdClinicFilter: string | string[] | undefined = clinicParam ?? scopedSet ?? undefined;
   const holdByPhone = await latestHoldsByPhone(contacts.map((c) => c.waId), holdClinicFilter).catch(() => new Map());
   // ★ booking-ui（D）：PENDING 優先（新請求）；冇 PENDING 先顯示最新 CONFIRMED（撤銷倒數卡）
   const pendingBookingMap = new Map<string, (typeof pendingBookings)[number]>();

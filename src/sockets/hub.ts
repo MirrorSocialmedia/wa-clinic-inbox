@@ -1,7 +1,7 @@
 import type { Server as SocketIOServer, Socket } from "socket.io";
 import type { Redis } from "ioredis";
-import prisma from "@/lib/prisma";
 import { getSocketSession, type SessionData } from "@/lib/session";
+import { resolveSessionScope } from "@/lib/rbac";
 import { isStaffActive, invalidateActiveCache, invalidateStaffSessions, isStaffSessionCurrent } from "@/lib/rbac";
 import { CONTROL_CHANNEL, type ControlMessage } from "@/lib/notify";
 import { applyCacheBust } from "@/lib/cache-bust";
@@ -101,16 +101,21 @@ export function initHub(io: SocketIOServer): void {
     );
 
     if (session.role === "STAFF") {
-      // ★ cwi-h6-20260830：多店員工 join 全部綁定店 room（舊 session 冇 clinicIds → fallback [clinicId]）
-      const roomClinics = session.clinicIds?.length ? session.clinicIds : session.clinicId ? [session.clinicId] : [];
-      void Promise.all(roomClinics.map((cid) => socket.join(`clinic:${cid}`)));
+      // ★ cwi-hub-a-20260914：單一 funnel resolveSessionScope（CLINICS = session 綁定店集合 +
+      //   舊 session fallback；COMPANY scope STAFF = 該公司 clinic rooms — 同列表 scope 一致）。
+      void resolveSessionScope(session)
+        .then(({ scopedClinicIds }) =>
+          Promise.all(scopedClinicIds.map((cid) => socket.join(`clinic:${cid}`)))
+        )
+        .catch((err) =>
+          log.warn({ err: err instanceof Error ? err.message : String(err) }, "socket: staff room join failed")
+        );
     } else if (session.role === "ADMIN" || session.role === "SUPERVISOR") {
-      // ADMIN / SUPERVISOR（★ cwi-routing-20260906 §8：全店唯讀 — 通知照 STAFF 規則，須收晒全店 room）
-      // join 全部已知 clinic room
-      void prisma
-        .clinic.findMany({ select: { id: true } })
-        .then((clinics) =>
-          Promise.all(clinics.map((c) => socket.join(`clinic:${c.id}`)))
+      // ★ cwi-hub-a-20260914（Part A）：通知跟 scope（鐵律）— ALL scope / SUPERVISOR join 全部店；
+      //   COMPANY scope ADMIN 只 join 自己公司嘅 clinic room（30s cache + clinic 改動即時失效）。
+      void resolveSessionScope(session)
+        .then(({ scopedClinicIds }) =>
+          Promise.all(scopedClinicIds.map((cid) => socket.join(`clinic:${cid}`)))
         )
         .catch((err) =>
           log.warn({ err: err instanceof Error ? err.message : String(err) }, "socket: admin room join failed")
@@ -141,12 +146,20 @@ export function initHub(io: SocketIOServer): void {
       ids.add(socket.id);
       void socket.join(`staff:${s.staffId}`);
       if (s.role === "STAFF") {
-        const roomClinics = s.clinicIds?.length ? s.clinicIds : s.clinicId ? [s.clinicId] : [];
-        void Promise.all(roomClinics.map((cid) => socket.join(`clinic:${cid}`)));
+        // ★ cwi-hub-a-20260914：scope-aware（同 connection 分支）— 單一 funnel
+        void resolveSessionScope(s)
+          .then(({ scopedClinicIds }) =>
+            Promise.all(scopedClinicIds.map((cid) => socket.join(`clinic:${cid}`)))
+          )
+          .catch((err) =>
+            log.warn({ err: err instanceof Error ? err.message : String(err) }, "socket: explicit register staff room join failed")
+          );
       } else {
-        void prisma
-          .clinic.findMany({ select: { id: true } })
-          .then((clinics) => Promise.all(clinics.map((c) => socket.join(`clinic:${c.id}`))))
+        // ★ cwi-hub-a-20260914：scope-aware（同 connection 分支）— ALL/SUPERVISOR 全店；COMPANY 只自己公司
+        void resolveSessionScope(s)
+          .then(({ scopedClinicIds }) =>
+            Promise.all(scopedClinicIds.map((cid) => socket.join(`clinic:${cid}`)))
+          )
           .catch((err) =>
             log.warn({ err: err instanceof Error ? err.message : String(err) }, "socket: explicit register admin room join failed")
           );
