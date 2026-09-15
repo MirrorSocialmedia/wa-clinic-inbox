@@ -426,3 +426,86 @@ export function noteTickState(
   const allRead = requiredStaff.length > 0 && requiredStaff.every((s) => got.has(s));
   return { allRead, requiredStaff, readBy: mine };
 }
+
+// ── P2 病人記錄（followup-v2 §3 — cwi-followup-p2-20260915）────────────────
+/** 對話 header chip 數據（summary=1 輕量回應派生 — 無病人 = null，chip 唔顯示）。 */
+export interface PatientChip {
+  patientCode: string | null;
+  /** 舊客 = 索引窗內 ≥2 次到診；新客 = 1 次（summary limit 2 派生） */
+  customerType: "returning" | "new";
+  /** billOsAmt — 只喺 >0 顯示欠款 chip（§3.1） */
+  osAmt: number | null;
+  lastVisitDate: string | null; // YYYY-MM-DD
+}
+
+export interface PatientRecordVisit {
+  visitId: string;
+  visitDate: string; // YYYY-MM-DD（HK 日界）
+  clinicCode: string;
+  bookingStatus: number;
+  visitReasonCodes: string[];
+  providerCode: string | null;
+  /** W 本庫 Provider 映返嘅醫生名（映唔到 = null → UI 顯示 code） */
+  providerName: string | null;
+  hasNote: boolean;
+  noteKind: "STANDARD" | "TEMPLATE" | null;
+  firstLine: string | null; // ≤60 字（MD §2.4 邊界 — 臨床全文只可經 /note）
+}
+
+export interface PatientRecordData {
+  v: 1;
+  patient: {
+    patientApricotId: string;
+    patientCode: string | null;
+    source: "pinned" | "paired";
+    /** 舊客 = 索引窗內 ≥2 次到診；新客 = 1 次（§3.1 header chip） */
+    customerType: "returning" | "new";
+    lastVisitDate: string | null;
+  } | null;
+  visits: PatientRecordVisit[];
+  balance: {
+    v: 1;
+    patientCode: string;
+    asOf: string;
+    balance: { ttlAmt: number | null; osAmt: number | null };
+    syncedAt: string;
+  } | null;
+  appointments: {
+    apricotApptId: string;
+    clinicCode: string;
+    providerApricotId: string;
+    providerName: string;
+    date: string;
+    start: string;
+    end: string;
+    bookingStatus: number;
+    patientApricotId: string;
+    patientCode: string;
+    patientName: string;
+    visitReasons: string[];
+    remarks: string | null;
+  }[];
+  /** §3.1b 一個 syncedAt 管三個分頁（balance.syncedAt 優先 → appointments.syncedAt） */
+  syncedAt: string | null;
+  degraded: boolean;
+  refresh:
+    | { state: "ok"; syncedAt: string }
+    | { state: "rate_limited"; retryAfterSec: number }
+    | { state: "failed" }
+    | null;
+}
+
+/** 兩種樣板（MD §0.3 — 對齊 workforce NoteText；zod 已 strip 多餘欄）。 */
+export interface NoteStandard {
+  kind: "STANDARD";
+  complaints: string;
+  findings: string;
+  diagnosis: string;
+  actions: string;
+}
+export interface NoteTemplate {
+  kind: "TEMPLATE";
+  templateName: string | null;
+  blocks: { label: string; text: string }[];
+}
+export type NoteText = NoteStandard | NoteTemplate;

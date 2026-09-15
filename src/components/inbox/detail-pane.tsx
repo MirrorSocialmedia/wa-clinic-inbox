@@ -6,6 +6,7 @@ import type { ClinicLite, ConversationItem, ConvStatus, PatientAppointment, Pati
 import { relTime } from "./time";
 import { MiniSchedule } from "./mini-schedule";
 import { ConsultStatusCard } from "./consult-status-card";
+import { PatientRecordPanel } from "./patient-record-panel";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -33,6 +34,9 @@ interface Props {
   ctxRefreshKey?: number;
   /** ★ cwi-h6 §4：socket note:new / 備註寫入後 parent 重拉訊號（內部備註卡） */
   notesRefreshKey?: number;
+  /** ★ P2（cwi-followup-p2 §3.4）：側欄分頁（備註／病人記錄／AI）— 桌面＋mobile sheet 共用 */
+  tab?: "notes" | "patient" | "ai";
+  onTabChange?: (t: "notes" | "patient" | "ai") => void;
 }
 
 const STATUS_SEG: { key: ConvStatus; label: string }[] = [
@@ -77,6 +81,8 @@ export function DetailPane({
   onBookingUiChanged,
   ctxRefreshKey = 0,
   notesRefreshKey = 0,
+  tab = "notes",
+  onTabChange = () => {},
 }: Props) {
   const [name, setName] = useState("");
   const [labels, setLabels] = useState<string[]>([]);
@@ -401,7 +407,7 @@ export function DetailPane({
   const canManage = !c.assigneeId || c.assigneeId === myStaffId || userRole === "ADMIN";
 
   // 共用內容（桌面側欄 + 手機 bottom sheet 各渲染一次；state 喺呢個 component 層，兩份同步）
-  const content = (
+  const notesContent = (
     <div className="p-[18px] space-y-3">
       {/* ★ cwi-h6 §4：聯絡人卡壓一格（32px avatar + 姓名 input flex-1 同一行 + 標籤圖標按鈕展開；padding 10px 12px） */}
       <div className="bg-panel-2 rounded-[16px] px-3 py-2.5">
@@ -659,36 +665,6 @@ export function DetailPane({
         )}
       </div>
 
-      {/* AI 分析（Phase 2）— 獨立卡 */}
-      <div className="bg-panel-2 rounded-[22px] p-4">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2.5 inline-flex items-center gap-1.5">
-          <Sparkles size={12} strokeWidth={2.75} /> AI 分析
-        </div>
-        <div className="text-xs space-y-2">
-          <div className="text-t2 leading-relaxed">{c.aiSummary ?? "—"}</div>
-          <div className="flex gap-1.5 flex-wrap">
-            <span className="px-2 py-0.5 rounded-full bg-brand-soft text-brand-text">
-              {c.intent ? INTENT_LABEL[c.intent] ?? c.intent : "意圖 —"}
-            </span>
-            <span
-              className={`px-2 py-0.5 rounded-full ${
-                c.urgency ? URGENCY_META[c.urgency]?.cls ?? "bg-panel text-t2" : "bg-panel text-t3"
-              }`}
-            >
-              {c.urgency ? URGENCY_META[c.urgency]?.label ?? c.urgency : "緊急度 —"}
-            </span>
-          </div>
-          {c.urgent && (
-            <button
-              onClick={() => void onPatch({ urgent: false })}
-              className="w-full text-xs px-2 py-1.5 rounded-full bg-danger hover:opacity-90 text-panel font-medium"
-            >
-              急症中 — 處理完後點擊清紅標
-            </button>
-          )}
-        </div>
-      </div>
-
       {/* status：segmented control（Organic 圓形分段） */}
       <div>
         <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2">狀態</div>
@@ -870,6 +846,75 @@ export function DetailPane({
     </div>
   );
 
+  const aiContent = (
+    <div className="p-[18px] space-y-3">
+      {/* AI 分析（Phase 2）— 獨立卡（S5：搬入「AI」分頁 — 內容原樣） */}
+      <div className="bg-panel-2 rounded-[22px] p-4">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2.5 inline-flex items-center gap-1.5">
+          <Sparkles size={12} strokeWidth={2.75} /> AI 分析
+        </div>
+        <div className="text-xs space-y-2">
+          <div className="text-t2 leading-relaxed">{c.aiSummary ?? "—"}</div>
+          <div className="flex gap-1.5 flex-wrap">
+            <span className="px-2 py-0.5 rounded-full bg-brand-soft text-brand-text">
+              {c.intent ? INTENT_LABEL[c.intent] ?? c.intent : "意圖 —"}
+            </span>
+            <span
+              className={`px-2 py-0.5 rounded-full ${
+                c.urgency ? URGENCY_META[c.urgency]?.cls ?? "bg-panel text-t2" : "bg-panel text-t3"
+              }`}
+            >
+              {c.urgency ? URGENCY_META[c.urgency]?.label ?? c.urgency : "緊急度 —"}
+            </span>
+          </div>
+          {c.urgent && (
+            <button
+              onClick={() => void onPatch({ urgent: false })}
+              className="w-full text-xs px-2 py-1.5 rounded-full bg-danger hover:opacity-90 text-panel font-medium"
+            >
+              急症中 — 處理完後點擊清紅標
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const content = (
+    <div className="flex flex-col min-h-0 flex-1 w-full">
+      {/* ★ P2（cwi-followup-p2 §3.4）：備註／病人記錄／AI 分頁（桌面側欄 + mobile sheet 共用；內容同手機一致） */}
+      <div className="shrink-0 flex gap-1 px-3 pt-2.5" data-e2e="p2-detail-tabs">
+        {([
+          ["notes", "備註"],
+          ["patient", "病人記錄"],
+          ["ai", "AI"],
+        ] as const).map(([k, label]) => (
+          <button
+            key={k}
+            data-e2e={`p2-detail-tab-${k}`}
+            onClick={() => onTabChange(k)}
+            className={`flex-1 py-1.5 rounded-lg text-[11px] border ${
+              tab === k
+                ? "bg-brand text-white border-brand font-medium"
+                : "bg-panel-2 text-t2 border-transparent hover:bg-black/[.04]"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {tab === "patient" ? (
+        <div className="flex-1 min-h-0">
+          <PatientRecordPanel conversationId={c.id} />
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          {tab === "ai" ? aiContent : notesContent}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <>
       {/* 桌面側欄（lg+，同 v2 一樣） */}
@@ -885,7 +930,7 @@ export function DetailPane({
             onClick={onMobileClose}
             className="absolute inset-0 bg-black/40"
           />
-          <div className="absolute inset-x-0 bottom-0 max-h-[85%] bg-panel rounded-t-2xl border-t border-line-strong shadow-2xl overflow-y-auto pb-[env(safe-area-inset-bottom)]">
+          <div className="absolute inset-x-0 bottom-0 max-h-[85%] bg-panel rounded-t-2xl border-t border-line-strong shadow-2xl overflow-y-auto flex flex-col pb-[env(safe-area-inset-bottom)]">
             <div className="sticky top-0 bg-panel pt-2 pb-1 flex justify-center" onClick={onMobileClose}>
               <div className="w-9 h-1 rounded-full bg-line-strong" />
             </div>

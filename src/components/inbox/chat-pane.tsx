@@ -19,9 +19,10 @@ import {
   Users,
   XCircle,
 } from "lucide-react";
-import type { ConversationItem, DraftInfo, DraftTrace, MessageItem, NoteReceipt, StaffInfo } from "./types";
+import type { ConversationItem, DraftInfo, DraftTrace, MessageItem, NoteReceipt, PatientChip, StaffInfo } from "./types";
 import { noteTickState } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
+import { fmtAmt, fmtDateShort } from "@/lib/patient-record-state";
 import { BookingCard } from "./booking-card";
 import { HoldCard } from "./hold-card";
 import { WindowExits } from "./window-exits";
@@ -81,6 +82,8 @@ interface Props {
   onNoteRead: (messageId: string) => void;
   /** ★ booking-ui（D）：預約卡寫動作完成（代落單/確認/重發 Flow/撤銷）→ parent 重拉對話 + 側欄 */
   onBookingActionDone?: () => void;
+  /** ★ P2（cwi-followup-p2）：header〔病人記錄〕— 手機開半屏抽屜 / 桌面切右側欄分頁（parent 依斷點分流） */
+  onOpenPatientRecord?: () => void;
 }
 
 // ── ★ H2：@mention helper（純函數 — autocomplete 偵測 + 內文反推 mentions + 高亮渲染） ──
@@ -308,6 +311,8 @@ export function ChatPane(p: Props) {
   const [outConfirm, setOutConfirm] = useState<{ to: string; desc: string; run: () => void } | null>(null);
   // cwi-window-20260901（P2）：COPY_ONLY 草稿「複製」掣 feedback（「已複製」2s）
   const [copiedDraft, setCopiedDraft] = useState(false);
+  // ★ P2（cwi-followup-p2）：header 病人 chip（summary=1 輕量；fail-soft — 無病人/離線 = 無 chip）
+  const [patientChip, setPatientChip] = useState<PatientChip | null>(null);
   // ★ cwi-inboxfix-20260905（MD §2）：AI trace 收埋做 ⓘ 掣 — 撳先展開（內容唔變）
   const [traceOpen, setTraceOpen] = useState(false);
   // ★ Part F（cwi-raggolden-20260904，F.5）：inbox「加入測試集」— IN 文字 bubble hover 掣 → 預填彈窗
@@ -475,6 +480,37 @@ export function ChatPane(p: Props) {
     adoptedDraftRef.current = null;
   }, [p.conversation?.id]);
 
+  // ★ P2（cwi-followup-p2）：對話切換 → 重拉 summary chip（fail-soft：404/403/離線/無病人 = 無 chip，唔阻 header）
+  //   （必喺 early return 之前 — 條件 hook 會 break React hook order）
+  useEffect(() => {
+    let on = true;
+    setPatientChip(null);
+    const conv = p.conversation;
+    if (!conv) return;
+    fetch(`/api/conversations/${conv.id}/patient-record?summary=1`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (!on) return;
+        if (!j?.patient) {
+          setPatientChip(null);
+          return;
+        }
+        setPatientChip({
+          patientCode: j.patient.patientCode ?? null,
+          customerType: j.patient.customerType === "returning" ? "returning" : "new",
+          osAmt: j.balance?.balance.osAmt ?? null,
+          lastVisitDate: j.patient.lastVisitDate ?? null,
+        });
+      })
+      .catch(() => {
+        if (on) setPatientChip(null);
+      });
+    return () => {
+      on = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.conversation?.id]);
+
   if (!p.conversation) {
     return (
       <section className="flex-1 min-w-0 hidden md:flex items-center justify-center bg-canvas">
@@ -639,6 +675,27 @@ export function ChatPane(p: Props) {
               {c.contact?.profileName || "未命名聯絡人"}
             </div>
             {c.contact?.waId && <div className="text-[11px] text-t3">{c.contact.waId}</div>}
+            {/* ★ P2（cwi-followup-p2 §3.1）：病人 chip — patientCode·舊客/新客 + 欠款（>0 先顯）+ 上次到診 */}
+            {patientChip ? (
+              <div className="flex items-center gap-1 flex-wrap" data-e2e="p2-chip-row">
+                <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-panel-2 text-t2" data-e2e="p2-chip-code">
+                  {patientChip.patientCode ?? "—"} · {patientChip.customerType === "returning" ? "舊客" : "新客"}
+                </span>
+                {patientChip.osAmt != null && patientChip.osAmt > 0 ? (
+                  <span
+                    className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-danger-soft text-danger-text font-medium"
+                    data-e2e="p2-chip-os"
+                  >
+                    ⚠ 欠 {fmtAmt(patientChip.osAmt)}
+                  </span>
+                ) : null}
+                {patientChip.lastVisitDate ? (
+                  <span className="text-[10px] text-t3" data-e2e="p2-chip-lastvisit">
+                    上次到診 {fmtDateShort(patientChip.lastVisitDate)}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
             {assigneeName && (
               <div className={`text-[10px] inline-flex items-center gap-0.5 ${locked ? "text-warn-text" : "text-t3"}`}>
                 <Lock size={9} />
@@ -646,6 +703,14 @@ export function ChatPane(p: Props) {
               </div>
             )}
           </div>
+        </button>
+        {/* ★ P2（cwi-followup-p2 §3.1）：〔病人記錄〕入口 — 手機開半屏抽屜 / 桌面切右側欄分頁 */}
+        <button
+          data-e2e="p2-open-record"
+          onClick={() => p.onOpenPatientRecord?.()}
+          className="px-2.5 py-1 rounded-full text-[11px] border border-line text-brand-text bg-brand-soft hover:opacity-80 whitespace-nowrap"
+        >
+          病人記錄
         </button>
         {/* ★ Phase E：「⋯」menu — 標記投訴 / 標記 AI 錯誤（前線先見到問題） */}
         <div className="relative">

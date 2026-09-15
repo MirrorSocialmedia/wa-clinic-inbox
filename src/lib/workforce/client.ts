@@ -35,10 +35,11 @@
  */
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import log from "@/lib/log";
 import { invalidateAvailabilityDay } from "@/lib/availability";
+import { phoneHashes } from "@/lib/phone-hash";
 
 // ── zod contract（§2 原樣）───────────────────────────────────────────────
 
@@ -164,6 +165,97 @@ export const AppointmentsResponse = z.object({
 });
 export type WorkforceAppointment = z.infer<typeof AppointmentsResponse>["appointments"][number];
 export type AppointmentsResult = z.infer<typeof AppointmentsResponse>;
+
+// ── P2 病人記錄 contract（followup-v2 MD §2.6 #3/#4/#5/#6/#8 — 對齊 CWM dev stub）──
+// ★ export：contract 執行點 — zod strip 唔識欄位（臨床全文只可經 #5 note 欄入下游）。
+
+const VisitRowSchema = z.object({
+  visitId: z.string(),
+  visitDate: z.string(), // YYYY-MM-DD（HK 日界）
+  clinicCode: z.string(),
+  bookingStatus: z.number().int(),
+  visitReasonCodes: z.array(z.string()),
+  providerCode: z.string().nullable(),
+  hasNote: z.boolean(),
+  noteKind: z.enum(["STANDARD", "TEMPLATE"]).nullable(),
+  firstLine: z.string().max(60).nullable(), // ≤60 字（MD §2.4 邊界）
+});
+export const PatientVisitsResponse = z.object({
+  v: z.literal(1),
+  patientCode: z.string(),
+  visits: z.array(VisitRowSchema),
+});
+export type PatientVisit = z.infer<typeof VisitRowSchema>;
+export type PatientVisitsResult = z.infer<typeof PatientVisitsResponse>;
+
+/** 兩種樣板（MD §0.3 — 對齊 CWM NoteText）：STANDARD 四段 / TEMPLATE blocks（Tx 原文保留換行）。 */
+const NoteStandardSchema = z.object({
+  kind: z.literal("STANDARD"),
+  complaints: z.string(),
+  findings: z.string(),
+  diagnosis: z.string(),
+  actions: z.string(),
+});
+const NoteTemplateSchema = z.object({
+  kind: z.literal("TEMPLATE"),
+  templateName: z.string().nullable(),
+  blocks: z.array(z.object({ label: z.string(), text: z.string() })),
+});
+export type NoteText = z.infer<typeof NoteStandardSchema> | z.infer<typeof NoteTemplateSchema>;
+export const VisitNoteResponse = z.object({
+  v: z.literal(1),
+  visitId: z.string(),
+  patientApricotId: z.string(),
+  visitDate: z.string(),
+  noteKind: z.string(),
+  note: z.discriminatedUnion("kind", [NoteStandardSchema, NoteTemplateSchema]),
+});
+export type VisitNoteResult = z.infer<typeof VisitNoteResponse>;
+
+export const PatientBalanceResponse = z.object({
+  v: z.literal(1),
+  patientCode: z.string(),
+  asOf: z.string(),
+  balance: z.object({ ttlAmt: z.number().int().nullable(), osAmt: z.number().int().nullable() }),
+  syncedAt: z.string(),
+});
+export type PatientBalanceResult = z.infer<typeof PatientBalanceResponse>;
+
+/** #3 clinic 模式（MD §2.6 #3 — B 類 + P2 配對）：appointment 行多 phoneHashes[]（永不回原始電話）。 */
+export const ClinicAppointmentsResponse = z.object({
+  v: z.literal(1),
+  syncedAt: z.string().nullable(),
+  stale: z.boolean(),
+  appointments: z.array(
+    z.object({
+      apricotApptId: z.string(),
+      clinicCode: z.string(),
+      providerApricotId: z.string(),
+      providerName: z.string(),
+      date: z.string(),
+      start: z.string(),
+      end: z.string(),
+      bookingStatus: z.number().int(),
+      patientApricotId: z.string(),
+      patientCode: z.string(),
+      patientName: z.string(),
+      visitReasons: z.array(z.string()),
+      remarks: z.string().nullable(),
+      phoneHashes: z.array(z.string()).optional(),
+    })
+  ),
+});
+export type ClinicAppointment = z.infer<typeof ClinicAppointmentsResponse>["appointments"][number];
+export type ClinicAppointmentsResult = z.infer<typeof ClinicAppointmentsResponse>;
+
+/** #8 手動刷新（MD §2.8）：200 成功。429 RATE_LIMITED（retryAfterSec）/ 503 APRICOT_UNAVAILABLE — 唔扮成功。 */
+export const PatientRefreshResponse = z.object({
+  v: z.literal(1),
+  syncedAt: z.string(),
+  visits: z.number().int(),
+  balance: z.object({ ttlAmt: z.number().int().nullable(), osAmt: z.number().int().nullable() }),
+});
+export type PatientRefreshResult = z.infer<typeof PatientRefreshResponse>;
 
 // ── bookable-slots（providerslot-20260830 T1 contract — MD 3.1/3.3 原樣）──────
 // ★ 只出 offerable 格（非 offerable 唔入 payload — 滿/lead-time/未開診前台無法再分）；
@@ -327,9 +419,13 @@ async function wfFetch(
   return res.json();
 }
 
-async function wfGet(path: string, params: Record<string, string>) {
+async function wfGet(
+  path: string,
+  params: Record<string, string>,
+  extraHeaders?: Record<string, string>,
+) {
   if (process.env.WORKFORCE_MOCK === "1") return mockFixture(path, params); // §4
-  return wfFetch("GET", path, params);
+  return wfFetch("GET", path, params, undefined, extraHeaders);
 }
 
 async function wfSend(
@@ -540,6 +636,50 @@ export async function fetchAppointments(phoneHash: string, from: string, to: str
   );
 }
 
+// ── P2 病人記錄 fetcher（followup-v2 MD §2.6 — 全部 scope patients/appointments）──
+// 🔴 鐵律：wa-inbox 唔存臨床全文（#5 全文即時撞，收埋唔 cache）；展開 audit 落 CWM 側
+//    （EXTERNAL_NOTE_VIEWED — W 只傳 X-Staff-Id opaque，唔自己再記內容 audit）。
+
+/** #4 病人到診列表（結構化 + firstLine ≤60 字；404 NOT_FOUND = 零索引行）。 */
+export async function fetchPatientVisits(patientApricotId: string, limit = 50): Promise<PatientVisitsResult> {
+  return PatientVisitsResponse.parse(
+    await wfGet(`/api/external/v1/patients/${encodeURIComponent(patientApricotId)}/visits`, { limit: String(limit) })
+  );
+}
+
+/**
+ * #5 臨床全文（MD §2.4 紅線）：CWM 側 100% 落 EXTERNAL_NOTE_VIEWED audit（staffId + visitId，零內容）。
+ * staffId = wa-inbox StaffUser.id（opaque 傳；唔入 log）。
+ */
+export async function fetchVisitNote(patientApricotId: string, visitId: string, staffId: string): Promise<VisitNoteResult> {
+  const path = `/api/external/v1/patients/${encodeURIComponent(patientApricotId)}/visits/${encodeURIComponent(visitId)}/note`;
+  return VisitNoteResponse.parse(await wfGet(path, {}, { "x-staff-id": staffId }));
+}
+
+/** #6 病人帳單總額（billTtlAmt/billOsAmt；404 PATIENT_NOT_FOUND = 無索引行）。 */
+export async function fetchPatientBalance(patientApricotId: string): Promise<PatientBalanceResult> {
+  return PatientBalanceResponse.parse(
+    await wfGet(`/api/external/v1/patients/${encodeURIComponent(patientApricotId)}/balance`, {})
+  );
+}
+
+/**
+ * #3 appointments clinic 模式（MD §2.6 #3）：該診所該窗全部預約（含 phoneHashes[]）。
+ * from/to ≤38 日窗口（超出 400）；404 NOT_FOUND = 诊所唔存在。
+ */
+export async function fetchAppointmentsByClinic(clinicCode: string, from: string, to: string): Promise<ClinicAppointmentsResult> {
+  return ClinicAppointmentsResponse.parse(
+    await wfGet("/api/external/v1/appointments", { clinicCode, from, to })
+  );
+}
+
+/** #8 手動刷新單一病人（MD §2.8）：即時打 Apricot 三條唯讀 → upsert 索引。429 = 60s 限流（retryAfterSec）。 */
+export async function refreshPatient(patientApricotId: string): Promise<PatientRefreshResult> {
+  return PatientRefreshResponse.parse(
+    await wfSend("POST", `/api/external/v1/patients/${encodeURIComponent(patientApricotId)}/refresh`, {})
+  );
+}
+
 // ── bookable-slots（providerslot-20260830 — T3/T4 reusable）─────────────
 
 /**
@@ -656,6 +796,9 @@ export const MOCK_EXTRA_PROVIDERS_FLAG = ".dev/workforce-mock-extra-providers.js
 export const MOCK_PATIENTS_FILE = ".dev/workforce-mock-patients.json";
 // T4：mock claim hold store（決定性；零 PII；e2e 完清檔）
 export const MOCK_CLAIMS_FILE = ".dev/workforce-mock-claims.json";
+// P2 病人記錄 mock 控制旗（e2e 斷言用；gitignored）：
+export const MOCK_SYNC_FLAG = ".dev/workforce-mock-sync.json"; // { offsetHours?: number } — syncedAt = now - offset（default 5h = 灰「正常」態）
+export const MOCK_REFRESH_FLAG = ".dev/workforce-mock-refresh.json"; // { mode?: "ok"|"fail"|"rate", retryAfterSec?: number }
 // §D（cwi-r2）：mock booking store（create 後 capacity 遞減 / remove 還原）— 決定性，e2e cleanup 清檔
 export const MOCK_BOOKED_FILE = ".dev/workforce-mock-booked.json";
 // cwi-refresh-20260831：mock refresh 端點錯誤旗（shape 逐項對齊 S1 真端點 contract）
@@ -836,7 +979,23 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
   }
 
   if (path === "/api/external/v1/appointments") {
+    // P2：clinic 模式（MD §2.6 #3）— phoneHash 唔傳先行 clinic 路；唔傳 = 400（同真端點）
+    if (params.clinicCode) return mockClinicAppointments(params);
     return mockAppointments(params);
+  }
+
+  // ── P2 病人記錄端點（followup-v2 MD §2.6 — mock 決定性；數據對齊 CWM dev stub）──
+  const p2m = path.match(/^\/api\/external\/v1\/patients\/([^/]+)\/(visits|balance|refresh)$/);
+  if (p2m) {
+    const cpId = decodeURIComponent(p2m[1]);
+    const op = p2m[2];
+    if (op === "visits" && !method) return mockPatientVisits(cpId, params);
+    if (op === "balance" && !method) return mockPatientBalance(cpId);
+    if (op === "refresh" && method === "POST") return mockPatientRefresh(cpId, path);
+  }
+  const p2note = path.match(/^\/api\/external\/v1\/patients\/([^/]+)\/visits\/([^/]+)\/note$/);
+  if (p2note) {
+    return mockVisitNote(decodeURIComponent(p2note[1]), decodeURIComponent(p2note[2]), path);
   }
 
   // ── bookable-slots（providerslot-20260830 T3 — mock 決定性，E2E/開發用）──
@@ -1135,6 +1294,277 @@ function mockAppointments(params: Record<string, string>): unknown {
   });
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: appointments");
   return { v: 1, syncedAt: new Date().toISOString(), stale: false, appointments };
+}
+
+// ── P2 病人記錄 mock（followup-v2 MD §2.6 — 數據對齊 CWM dev stub testdata/mock-apricot-clinical.ts）──
+// cp-std-001  P0001 陳大文 +85291234567            9/14 TY st=4 + 9/22 st=0（未來）| STANDARD note | ttl800/os300
+// cp-tpl-002  P0002 李美玲 +85291234567/+85261234567 9/14 TY st=4 | TEMPLATE storedTemplate | ttl1500/os1500
+// cp-no-003   P0003 黃志強 +85291234567             9/14 TKW st=-3 爽約 | 無 note | 無 bill
+// cp-late-004 P0004 張麗珍 +85261234567             9/14 TY st=1 | 無 note | ttl400/os400
+// ── W e2e 擴展（決定性、零 PII — 欠款=0 chip 負測 + 未釘住配對 fixture）──
+// cp-zs-005   P0005 周潔儀 +85223456789             9/13 TY st=4 | STANDARD note | ttl200/os0
+// cp-pair-006 P0006 吳懿貞 +85234567890             9/14 TY st=4 | STANDARD note | ttl600/os1200
+
+const MOCK_P2_CLINICS = new Set(["TY", "TKW", "MF", "TW", "YL", "YMT", "WTC"]);
+export const MOCK_REFRESH_RESET_FLAG = ".dev/workforce-mock-refresh-reset";
+
+type MockP2Visit = {
+  visitId: string;
+  visitDate: string;
+  clinicCode: string;
+  bookingStatus: number;
+  visitReasonCodes: string[];
+  providerCode: string | null;
+  hasNote: boolean;
+  noteKind: "STANDARD" | "TEMPLATE" | null;
+  firstLine: string | null;
+  /** #5 全文（mock 內部存；#4 回應物理上唔帶） */
+  note?: NoteText;
+};
+type MockP2Appt = {
+  apricotApptId: string;
+  clinicCode: string;
+  providerApricotId: string;
+  providerName: string;
+  date: string;
+  start: string;
+  end: string;
+  bookingStatus: number;
+  patientApricotId: string;
+  patientCode: string;
+  patientName: string;
+  visitReasons: string[];
+  remarks: string | null;
+};
+type MockP2Patient = {
+  patientCode: string;
+  /** E.164（mock 內部配對用；對外永遠只出 hash） */
+  phones: string[];
+  visits: MockP2Visit[];
+  balance: { ttlAmt: number | null; osAmt: number | null };
+  appointments: MockP2Appt[];
+};
+
+const MOCK_P2_PATIENTS: Record<string, MockP2Patient> = {
+  "cp-std-001": {
+    patientCode: "P0001",
+    phones: ["+85291234567"],
+    visits: [
+      {
+        visitId: "cv-std-001-1", visitDate: "2026-09-14", clinicCode: "TY", bookingStatus: 4,
+        visitReasonCodes: ["FILLING", "SCALE"], providerCode: "DR1", hasNote: true, noteKind: "STANDARD",
+        firstLine: "左上後牙咬痛三星期",
+        note: { kind: "STANDARD", complaints: "左上後牙咬痛三星期", findings: "#26 深齲，探痛 (+)", diagnosis: "Deep caries #26", actions: "預留根管治療" },
+      },
+    ],
+    balance: { ttlAmt: 800, osAmt: 300 },
+    appointments: [
+      { apricotApptId: "apt-std-1", clinicCode: "TY", providerApricotId: "DR1", providerName: "黃醫生", date: "2026-09-14", start: "10:00", end: "10:30", bookingStatus: 4, patientApricotId: "cp-std-001", patientCode: "P0001", patientName: "陳大文", visitReasons: ["FILLING", "SCALE"], remarks: null },
+      { apricotApptId: "apt-std-2", clinicCode: "TY", providerApricotId: "DR1", providerName: "黃醫生", date: "2026-09-22", start: "10:00", end: "10:30", bookingStatus: 0, patientApricotId: "cp-std-001", patientCode: "P0001", patientName: "陳大文", visitReasons: ["RECALL"], remarks: null },
+    ],
+  },
+  "cp-tpl-002": {
+    patientCode: "P0002",
+    phones: ["+85291234567", "+85261234567"],
+    visits: [
+      {
+        visitId: "cv-tpl-002-1", visitDate: "2026-09-14", clinicCode: "TY", bookingStatus: 4,
+        visitReasonCodes: ["FILLING"], providerCode: "DR2", hasNote: true, noteKind: "TEMPLATE",
+        firstLine: "定期洗牙",
+        note: {
+          kind: "TEMPLATE", templateName: "CS Cleaning Template v3",
+          blocks: [
+            { label: "主訴", text: "定期洗牙" },
+            { label: "口腔檢查", text: "牙石中度，齦緣輕微紅腫" },
+            { label: "處置", text: "全口超音波洗牙" },
+          ],
+        },
+      },
+    ],
+    balance: { ttlAmt: 1500, osAmt: 1500 },
+    appointments: [
+      { apricotApptId: "apt-tpl-1", clinicCode: "TY", providerApricotId: "DR2", providerName: "謝醫生", date: "2026-09-14", start: "11:00", end: "11:30", bookingStatus: 4, patientApricotId: "cp-tpl-002", patientCode: "P0002", patientName: "李美玲", visitReasons: ["FILLING"], remarks: null },
+    ],
+  },
+  "cp-no-003": {
+    patientCode: "P0003",
+    phones: ["+85291234567"],
+    visits: [
+      {
+        visitId: "cv-no-003-1", visitDate: "2026-09-14", clinicCode: "TKW", bookingStatus: -3,
+        visitReasonCodes: ["CHECKUP"], providerCode: "DR3", hasNote: false, noteKind: null, firstLine: null,
+      },
+    ],
+    balance: { ttlAmt: null, osAmt: null },
+    appointments: [
+      { apricotApptId: "apt-no-1", clinicCode: "TKW", providerApricotId: "DR3", providerName: "張醫生", date: "2026-09-14", start: "09:00", end: "09:30", bookingStatus: -3, patientApricotId: "cp-no-003", patientCode: "P0003", patientName: "黃志強", visitReasons: ["CHECKUP"], remarks: null },
+    ],
+  },
+  "cp-late-004": {
+    patientCode: "P0004",
+    phones: ["+85261234567"],
+    visits: [
+      {
+        visitId: "cv-late-004-1", visitDate: "2026-09-14", clinicCode: "TY", bookingStatus: 1,
+        visitReasonCodes: ["EXTRACT"], providerCode: "DR1", hasNote: false, noteKind: null, firstLine: null,
+      },
+    ],
+    balance: { ttlAmt: 400, osAmt: 400 },
+    appointments: [
+      { apricotApptId: "apt-late-1", clinicCode: "TY", providerApricotId: "DR1", providerName: "黃醫生", date: "2026-09-14", start: "15:00", end: "15:30", bookingStatus: 1, patientApricotId: "cp-late-004", patientCode: "P0004", patientName: "張麗珍", visitReasons: ["EXTRACT"], remarks: null },
+    ],
+  },
+  "cp-zs-005": {
+    patientCode: "P0005",
+    phones: ["+85223456789"],
+    visits: [
+      {
+        visitId: "cv-zs-005-1", visitDate: "2026-09-13", clinicCode: "TY", bookingStatus: 4,
+        visitReasonCodes: ["SP"], providerCode: "DR1", hasNote: true, noteKind: "STANDARD",
+        firstLine: "定期覆診",
+        note: { kind: "STANDARD", complaints: "定期覆診", findings: "無異常", diagnosis: "常規檢查", actions: "三個月後覆診" },
+      },
+      { // 第二條過去 visit（3 月）— e2e「舊客」case（visitCount≥2）；零欠款保持（osAmt=0）
+        visitId: "cv-zs-005-0", visitDate: "2026-03-15", clinicCode: "TY", bookingStatus: 4,
+        visitReasonCodes: ["SP"], providerCode: "DR1", hasNote: false, noteKind: null, firstLine: null,
+      },
+    ],
+    balance: { ttlAmt: 200, osAmt: 0 },
+    // e2e 未-pin 配對 case：窗內一筆預約（對齊 09/13 visit）— #3 phoneHashes hasSome 配對源
+    appointments: [
+      { apricotApptId: "apt-zs-1", clinicCode: "TY", providerApricotId: "DR1", providerName: "黃醫生", date: "2026-09-13", start: "10:00", end: "10:30", bookingStatus: 1, patientApricotId: "cp-zs-005", patientCode: "P0005", patientName: "周潔儀", visitReasons: ["SP"], remarks: null },
+    ],
+  },
+  "cp-pair-006": {
+    patientCode: "P0006",
+    phones: ["+85234567890"],
+    visits: [
+      {
+        visitId: "cv-pair-006-1", visitDate: "2026-09-14", clinicCode: "TY", bookingStatus: 4,
+        visitReasonCodes: ["FILLING"], providerCode: "DR2", hasNote: true, noteKind: "STANDARD",
+        firstLine: "後牙敏感",
+        note: { kind: "STANDARD", complaints: "後牙敏感", findings: "#36 頸部磨耗", diagnosis: "牙頸敏感", actions: "敏感劑塗佈" },
+      },
+    ],
+    balance: { ttlAmt: 600, osAmt: 1200 },
+    appointments: [
+      { apricotApptId: "apt-pair-1", clinicCode: "TY", providerApricotId: "DR2", providerName: "謝醫生", date: "2026-09-14", start: "14:00", end: "14:30", bookingStatus: 4, patientApricotId: "cp-pair-006", patientCode: "P0006", patientName: "吳懿貞", visitReasons: ["FILLING"], remarks: null },
+    ],
+  },
+};
+
+/** e2e reset：touch 呢個檔 → 清空 refresh 限流/已刷新記憶（dev server 長駐，module 狀態跨 e2e run）。 */
+function mockP2MaybeReset(): void {
+  try {
+    const fp = path.resolve(process.cwd(), MOCK_REFRESH_RESET_FLAG);
+    if (existsSync(fp)) {
+      mockP2Refreshed.clear();
+      mockP2RefreshLast.clear();
+      unlinkSync(fp);
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+function mockP2Hashes(cpId: string): string[] {
+  const p = MOCK_P2_PATIENTS[cpId];
+  if (!p) return [];
+  return p.phones.flatMap((raw) => phoneHashes(raw));
+}
+
+/** P2 syncedAt：now - offsetHours（default 5h = 灰「正常」態）；refresh 成功後該病人 → now（「剛剛更新」）。 */
+const mockP2Refreshed = new Set<string>();
+const mockP2RefreshLast = new Map<string, number>();
+function mockP2SyncedAt(cpId?: string): string {
+  mockP2MaybeReset();
+  if (cpId && mockP2Refreshed.has(cpId)) return new Date().toISOString();
+  const off = readFlag<{ offsetHours?: number }>(MOCK_SYNC_FLAG, (f) => typeof f.offsetHours === "number")?.offsetHours;
+  const hours = typeof off === "number" && Number.isFinite(off) && off >= 0 ? off : 5;
+  return new Date(Date.now() - hours * 3600_000).toISOString();
+}
+
+function mockP2Unknown(cpId: string, reqPath: string): never {
+  throw new WorkforceApiError(404, reqPath, "PATIENT_NOT_FOUND");
+}
+
+function mockPatientVisits(cpId: string, params: Record<string, string>): unknown {
+  const reqPath = "/api/external/v1/patients/{cpId}/visits";
+  const p = MOCK_P2_PATIENTS[cpId];
+  if (!p) mockP2Unknown(cpId, reqPath);
+  const limit = Math.min(Math.max(Number(params.limit ?? 50) || 50, 1), 100);
+  const visits = p.visits.slice(0, limit).map(({ note: _note, ...row }) => row);
+  if (!visits.length) throw new WorkforceApiError(404, reqPath, "NOT_FOUND");
+  log.info({ path: reqPath, mock: true, status: 200 }, "workforce MOCK: patient visits");
+  return { v: 1, patientCode: p.patientCode, visits };
+}
+
+function mockVisitNote(cpId: string, visitId: string, reqPath: string): unknown {
+  const p = MOCK_P2_PATIENTS[cpId];
+  if (!p) throw new WorkforceApiError(404, reqPath, "VISIT_NOT_FOUND");
+  const v = p.visits.find((x) => x.visitId === visitId);
+  if (!v) throw new WorkforceApiError(404, reqPath, "VISIT_NOT_FOUND");
+  if (!v.hasNote || !v.note) throw new WorkforceApiError(404, reqPath, "NOTE_NOT_FOUND");
+  log.info({ path: reqPath, mock: true, status: 200 }, "workforce MOCK: visit note（audit = CWM 側 EXTERNAL_NOTE_VIEWED）");
+  return { v: 1, visitId: v.visitId, patientApricotId: cpId, visitDate: v.visitDate, noteKind: v.noteKind, note: v.note };
+}
+
+function mockPatientBalance(cpId: string): unknown {
+  const reqPath = "/api/external/v1/patients/{cpId}/balance";
+  const p = MOCK_P2_PATIENTS[cpId];
+  if (!p) mockP2Unknown(cpId, reqPath);
+  log.info({ path: reqPath, mock: true, status: 200 }, "workforce MOCK: patient balance");
+  return {
+    v: 1,
+    patientCode: p.patientCode,
+    asOf: p.visits[0]?.visitDate ?? "",
+    balance: p.balance,
+    syncedAt: mockP2SyncedAt(cpId),
+  };
+}
+
+function mockClinicAppointments(params: Record<string, string>): unknown {
+  const reqPath = "/api/external/v1/appointments";
+  const clinicCode = (params.clinicCode ?? "").trim();
+  const from = params.from ?? "";
+  const to = params.to ?? "";
+  if (!clinicCode || !MOCK_DATE_RE.test(from) || !MOCK_DATE_RE.test(to)) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  const diffDays = (Date.parse(to) - Date.parse(from)) / 86400000;
+  if (!Number.isFinite(diffDays) || diffDays < 0 || diffDays > 37) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  if (!MOCK_P2_CLINICS.has(clinicCode)) throw new WorkforceApiError(404, reqPath, "NOT_FOUND");
+  const appts: (MockP2Appt & { phoneHashes: string[] })[] = [];
+  for (const [cpId, p] of Object.entries(MOCK_P2_PATIENTS)) {
+    for (const a of p.appointments) {
+      if (a.clinicCode !== clinicCode || a.date < from || a.date > to) continue;
+      appts.push({ ...a, phoneHashes: mockP2Hashes(cpId) });
+    }
+  }
+  appts.sort((x, y) => (x.date === y.date ? x.start.localeCompare(y.start) : x.date.localeCompare(y.date)));
+  log.info({ path: reqPath, mock: true, status: 200 }, "workforce MOCK: clinic appointments");
+  return { v: 1, syncedAt: mockP2SyncedAt(), stale: false, appointments: appts };
+}
+
+function mockPatientRefresh(cpId: string, reqPath: string): unknown {
+  mockP2MaybeReset();
+  const p = MOCK_P2_PATIENTS[cpId];
+  if (!p) mockP2Unknown(cpId, reqPath);
+  const flag = readFlag<{ mode?: string; retryAfterSec?: number }>(MOCK_REFRESH_FLAG, () => true);
+  const mode = flag?.mode ?? "ok";
+  const now = Date.now();
+  const last = mockP2RefreshLast.get(cpId) ?? 0;
+  const bucketLeft = Math.max(1, Math.ceil((60_000 - (now - last)) / 1000));
+  if (mode === "rate" || (mode === "ok" && last > 0 && now - last < 60_000)) {
+    log.info({ path: reqPath, mock: true, status: 429 }, "workforce MOCK: refresh rate limited");
+    throw new WorkforceApiError(429, reqPath, "RATE_LIMITED", Math.max(bucketLeft, flag?.retryAfterSec ?? 37));
+  }
+  if (mode === "fail") {
+    log.info({ path: reqPath, mock: true, status: 503 }, "workforce MOCK: refresh APRICOT_UNAVAILABLE");
+    throw new WorkforceApiError(503, reqPath, "APRICOT_UNAVAILABLE");
+  }
+  mockP2Refreshed.add(cpId);
+  mockP2RefreshLast.set(cpId, now);
+  log.info({ path: reqPath, mock: true, status: 200 }, "workforce MOCK: patient refresh ok");
+  return { v: 1, syncedAt: new Date().toISOString(), visits: p.visits.length, balance: p.balance };
 }
 
 // ── bookable-slots mock（providerslot-20260830 T3 — 決定性；shape = contract）──

@@ -45,6 +45,7 @@ import {
 import { ConversationList } from "./conversation-list";
 import { ChatPane } from "./chat-pane";
 import { DetailPane } from "./detail-pane";
+import { PatientDrawer } from "./patient-drawer";
 
 const PAGE_SIZE = 50;
 const WINDOW_MS = 24 * 3600 * 1000;
@@ -182,6 +183,9 @@ export function InboxClient({
   const [notesRefreshKey, setNotesRefreshKey] = useState(0);
   // 手機：detail bottom sheet（<lg 撳 chat header 先開；桌面側欄常駐）— 換對話即關
   const [detailOpen, setDetailOpen] = useState(false);
+  // ★ P2（cwi-followup-p2）：病人記錄 — 手機半屏抽屜（§3.2）＋ 桌面右側欄分頁（§3.4）
+  const [patientDrawerOpen, setPatientDrawerOpen] = useState(false);
+  const [detailTab, setDetailTab] = useState<"notes" | "patient" | "ai">("notes");
   useEffect(() => {
     setDetailOpen(false);
   }, [selectedConvId]);
@@ -2139,6 +2143,7 @@ export function InboxClient({
           //   — 否則舊對話嘅 socket 訊息會 append 入「未選中」狀態
           selectedIdRef.current = null;
           setSelectedConvId(null);
+          setPatientDrawerOpen(false); // P2：取消選中 → 收埋病人記錄抽屜
           setGapDividerAfterMs(null); // T2：取消選中清中間斷層分隔線
         }}
         onOpenDetail={() => setDetailOpen(true)}
@@ -2174,6 +2179,11 @@ export function InboxClient({
           void fetchConversations(activeClinicRef.current);
           setCtxRefreshKey((k) => k + 1);
         }}
+        onOpenPatientRecord={() => {
+          // lg+ → 桌面右側欄「病人記錄」分頁；<lg → 手機半屏抽屜（§3.2/§3.4）
+          if (window.matchMedia("(min-width: 1024px)").matches) setDetailTab("patient");
+          else setPatientDrawerOpen(true);
+        }}
       />
 
       <DetailPane
@@ -2197,6 +2207,15 @@ export function InboxClient({
         }}
         ctxRefreshKey={ctxRefreshKey}
         notesRefreshKey={notesRefreshKey}
+        tab={detailTab}
+        onTabChange={setDetailTab}
+      />
+
+      {/* ★ P2（cwi-followup-p2 §3.2）：手機半屏抽屜（50vh→90vh；桌面唔渲染 — 走右側欄分頁） */}
+      <PatientDrawer
+        open={patientDrawerOpen}
+        conversationId={selectedConv?.id ?? null}
+        onClose={() => setPatientDrawerOpen(false)}
       />
 
       {/* Phase 2：急症升級 toast（socket urgent:escalation） */}
