@@ -4,7 +4,7 @@ import argon2 from "argon2";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { setSession } from "@/lib/session";
-import { clinicIdsOfCompany } from "@/lib/rbac";
+import { resolveClinicIds } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { isAccountLocked, recordLoginFailure, clearLoginFailures } from "@/lib/auth-lockout";
 import { recordLoginAudit } from "@/lib/auth-audit";
@@ -132,20 +132,28 @@ export const POST = handle(async (req: NextRequest) => {
   // ★ cwi-h6-20260830：多店員工 — 查 StaffClinic 一次過寫入 session（clinicIds）；
   //   clinicId = isPrimary 店（排序頭行）— UI default 店 / 通知分組用。
   //   舊資料（無 StaffClinic 行）fallback StaffUser.clinicId 單店。
-  // ★ cwi-hub-a-20260914（Part A）：session clinic snapshot 跟 scope：
-  //   CLINICS（任何角色）= StaffClinic 集合；STAFF+COMPANY = 該公司店集合；ALL = []（运行时解析全店）。
-  let clinicIds: string[] = [];
-  if (user.role === "STAFF" && user.scopeType === "COMPANY") {
-    clinicIds = await clinicIdsOfCompany(user.scopeCompanyId);
-  } else if (user.scopeType === "CLINICS") {
+  // ★ cwi-hub-a-20260914（Part A）：session clinic snapshot 跟 scope。
+  // ★ cwi-hubaudit-20260915（H-4）：clinic 集合改由 **單一來源** `resolveClinicIds` 決定
+  //   （舊 if/else 同 rbac.ts 重複邏輯 — ALL/COMPANY/CLINICS 語義一處定）；
+  //   授權路徑照舊經 resolveSessionScope（ALL/COMPANY 運行時 DB 解析，唔靠呢個 snapshot）。
+  let staffClinicIds: string[] = [];
+  if (user.scopeType === "CLINICS") {
     const rows = await prisma.staffClinic.findMany({
       where: { staffId: user.id },
       select: { clinicId: true },
       orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
     });
-    clinicIds = rows.map((r) => r.clinicId);
+    staffClinicIds = rows.map((r) => r.clinicId);
   }
-  const primaryClinicId = user.role === "STAFF" ? (clinicIds[0] ?? user.clinicId) : null;
+  const clinicIds = await resolveClinicIds({
+    scopeType: user.scopeType as "ALL" | "COMPANY" | "CLINICS",
+    scopeCompanyId: user.scopeCompanyId,
+    staffClinicIds,
+  });
+  // primaryClinicId 語義逐位保持（UI default 店 / 通知分組）：
+  //   CLINICS = StaffClinic 頭行；COMPANY = 公司店頭行；ALL = StaffUser.clinicId（snapshot 已係全店 — 唔可用 [0]）。
+  const primaryClinicId =
+    user.role === "STAFF" ? (user.scopeType === "ALL" ? user.clinicId : clinicIds[0] ?? user.clinicId) : null;
 
   const res = await setSession(req, {
     staffId: user.id,

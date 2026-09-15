@@ -299,8 +299,12 @@ void (async () => {
 
   // ── S1 fixture ─────────────────────────────────────────────────────
   console.log("\n[S1] fixture");
+  // ★ companyId 為必填（clinic API schema）— 用 S1 migration 嘅公司 A（同 c1/hub-a 口徑）
+  const companyA = await prisma.company.findUnique({ where: { code: "A" }, select: { id: true } });
+  if (!companyA) throw new Error("company A 搵唔到（S1 migration 未跑？）");
   const clinicRes = await api(adminCookie, "/api/admin/clinics", "POST", {
     code: CLINIC_CODE,
+    companyId: companyA.id,
     name: "e2ec5 測試診所",
     waPhoneNumberId: `e2ec5-phone-${Date.now()}`,
     waDisplayNumber: "+852 6000 5501",

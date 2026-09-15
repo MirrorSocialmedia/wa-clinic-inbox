@@ -11,7 +11,8 @@
  *   T363 零副作用（DB 6 類 count + AiCallStats.totalCalls + socket 零事件，前後 snapshot）
  *   T364 紅旗「面腫」→ 顯示命中但唔建 StaffNotice / 唔標 URGENT
  *   T365 多輪（DISCOVER 行到 PRESENT_OPTIONS）+ Redis TTL 30min + 重新開始清空
- *   T366 同真 pipeline 一致性（同一句 沙盤 vs 真 worker：intent / consult trigger / 引用 priceDoc）
+ *   T366 同真 pipeline 一致性（★ cwi-hubaudit S2：同一句 × 三場景 沙盤 vs 真 worker：
+ *       intent / action / picked doc ids / stage / draft 首 30 字全一致；第二輪連續兩句測 off-by-one）
  *   T367 關鍵詞中心交叉警示（chip 四來源 + impact + 改口語表→publish→view→revert）
  *   T368 逐行跳 anchor 正確（7 行）
  *   T369 舊八條 URL 全活（200）
@@ -482,62 +483,108 @@ async function main(): Promise<void> {
     check("socket 零事件（C1 相關）", c1Events.length === 0, c1Events);
   }
 
-  // ═══ T366 — 同真 pipeline 一致性 ══════════════════════════════════
-  console.log("\nT366 沙盤 vs 真 worker");
+  // ═══ T366 — 同真 pipeline 一致性（★ cwi-hubaudit S2/H-3）══════════════
+  // 同一句 × 三場景（新對話 / consult 第二輪 / 紅旗）：sandbox vs 真 worker
+  // intent / action / picked doc ids / stage / draft 首 30 字 全一致。
+  // 第二輪 case 連續兩句 — off-by-one（H-1）必紅；AI_MOCK=1 deterministic。
+  console.log("\nT366 沙盤 vs 真 worker（三場景）");
   {
-    const MSG = "我想cool牙，幾錢？";
-    // 沙盤
-    const sb = await apiPost("/api/admin/ai-sandbox/run", { clinicId: C1, message: MSG }, adminCookie);
-    check("沙盤 run 200", sb.status === 200, sb.status);
-    const s = sb.json as any;
-    // 真 worker：造真 contact/conv/msg + enqueue classify（同 production 同 queue）
-    const contact = await prisma.contact.create({
-      data: { clinicId: C1, waId: `${WA_PREFIX}T366${Date.now().toString(36)}`, profileName: "E2EHUBB T366" },
-    });
-    const now = new Date();
-    const conv = await prisma.conversation.create({ data: { clinicId: C1, contactId: contact.id, unreadCount: 1, lastMessageAt: now, lastInboundAt: now } });
-    const msg = await prisma.message.create({
-      data: {
-        conversationId: conv.id,
-        direction: "IN",
-        channel: "API",
-        type: "text",
-        body: MSG,
-        waMessageId: `wamid.${WA_PREFIX.toLowerCase()}t366${Date.now().toString(36)}`,
-        waTimestamp: now,
-        status: "RECEIVED",
-      },
-    });
-    const q = aiQueueLike();
-    await q.add("classify", { conversationId: conv.id, messageId: msg.id, clinicId: C1 }, { jobId: `ai-${msg.id}` });
-    let draft: any = null;
-    for (let i = 0; i < 60 && !draft; i++) {
-      await new Promise((res) => setTimeout(res, 1000));
-      draft = await prisma.aiDraft.findUnique({ where: { conversationId_inReplyToMessageId: { conversationId: conv.id, inReplyToMessageId: msg.id } } });
+    const sbxStep = (r: any, n: number) => (r?.json?.steps ?? []).find((x: any) => x.n === n);
+    const sbxAction = (r: any) => sbxStep(r, 3)?.detail?.action ?? null;
+    const sbxPicked = (r: any) => (sbxStep(r, 4)?.detail?.picked ?? []).map((d: any) => d.id).sort();
+    const first30 = (s: string | null | undefined) => (s ?? "").slice(0, 30);
+
+    /** 真 worker 一輪：造真 contact/conv/msg + enqueue classify（同 production 同 queue）→ 等 AiDraft。 */
+    const workerTurn = async (waTag: string, body: string, existingConv?: any) => {
+      let contact: any, conv: any;
+      if (existingConv) {
+        contact = await prisma.contact.findUniqueOrThrow({ where: { id: existingConv.contactId } });
+        conv = existingConv;
+      } else {
+        contact = await prisma.contact.create({
+          data: { clinicId: C1, waId: `${WA_PREFIX}${waTag}${Date.now().toString(36)}`, profileName: `E2EHUBB T366 ${waTag}` },
+        });
+        const t0 = new Date();
+        conv = await prisma.conversation.create({ data: { clinicId: C1, contactId: contact.id, unreadCount: 1, lastMessageAt: t0, lastInboundAt: t0 } });
+      }
+      const now = new Date();
+      const msg = await prisma.message.create({
+        data: {
+          conversationId: conv.id,
+          direction: "IN",
+          channel: "API",
+          type: "text",
+          body,
+          waMessageId: `wamid.${WA_PREFIX.toLowerCase()}${waTag.toLowerCase()}${Date.now().toString(36)}`,
+          waTimestamp: now,
+          status: "RECEIVED",
+        },
+      });
+      const q = aiQueueLike();
+      await q.add("classify", { conversationId: conv.id, messageId: msg.id, clinicId: C1 }, { jobId: `ai-${msg.id}` });
+      let draft: any = null;
+      for (let i = 0; i < 60 && !draft; i++) {
+        await new Promise((res) => setTimeout(res, 1000));
+        draft = await prisma.aiDraft.findUnique({ where: { conversationId_inReplyToMessageId: { conversationId: conv.id, inReplyToMessageId: msg.id } } });
+      }
+      await q.close();
+      const session = await prisma.consultSession.findFirst({ where: { conversationId: conv.id }, orderBy: { turnCount: "desc" } });
+      // 本輪 action = 本輪 msg 嘅 engine audit（冇 = null — 同沙盤「本輪 engine 未跑」口徑）
+      let action: string | null = null;
+      if (session) {
+        const audits = await prisma.auditLog.findMany({ where: { action: "CONSULT_ENGINE_TURN", entityId: session.id } });
+        const mine = audits.find((a: any) => (a.meta as any)?.msgId === msg.id);
+        action = (mine?.meta as any)?.action ?? null;
+      }
+      return { contact, conv, msg, draft, session, action };
+    };
+
+    // ── 場景 A：新對話（orthodontic FLOOR + PRICE doc）──
+    const MSG_A = "我想cool牙，幾錢？";
+    const ra = await apiPost("/api/admin/ai-sandbox/run", { clinicId: C1, message: MSG_A }, adminCookie);
+    check("A 沙盤 run 200", ra.status === 200, ra.status);
+    const sa = ra.json as any;
+    const wkA = await workerTurn("T366A", MSG_A);
+    check("A 真 worker 出咗 draft（60s 內）", !!wkA.draft, "no draft");
+    if (sa && wkA.draft) {
+      check("A intent 一致", wkA.draft.intent === sa.intent, { sandbox: sa.intent, worker: wkA.draft.intent });
+      check("A action 一致（本輪 engine action）", wkA.action === sbxAction(ra), { sandbox: sbxAction(ra), worker: wkA.action });
+      check("A picked doc ids 一致", JSON.stringify(sbxPicked(ra)) === JSON.stringify(((wkA.draft.traceJson ?? {}).knowledge?.picked ?? []).map((d: any) => d.id).sort()), { sandbox: sbxPicked(ra), worker: (wkA.draft.traceJson ?? {}).knowledge?.picked });
+      check("A 引用 priceDoc = C1 fixture", (wkA.draft.traceJson ?? {}).price?.docId === doc.id && sbxStep(ra, 4)?.detail?.citedPriceDocId === doc.id, { sandbox: sbxStep(ra, 4)?.detail?.citedPriceDocId, worker: (wkA.draft.traceJson ?? {}).price?.docId, fixture: doc.id });
+      check("A stage 一致", wkA.session ? wkA.session.stage === sa.sessionSnapshot?.stage : false, { sandbox: sa.sessionSnapshot?.stage, worker: wkA.session?.stage });
+      check("A draft 首 30 字一致", first30(sa.draft) === first30(wkA.draft.draftText), { sandbox: first30(sa.draft), worker: first30(wkA.draft.draftText) });
     }
-    await q.close();
-    check("真 worker 出咗 draft（60s 內）", !!draft, "no draft");
-    if (draft) {
-      const trace: any = draft.traceJson ?? {};
-      check(
-        "intent 一致",
-        draft.intent === s.intent,
-        { sandbox: s.intent, worker: draft.intent },
-      );
-      check(
-        "consult trigger 一致",
-        trace?.consult?.trigger === (s.consultTrigger ?? null),
-        { sandbox: s.consultTrigger, worker: trace?.consult?.trigger },
-      );
-      const sbDoc = s.steps?.find((x: any) => x.n === 4)?.detail?.citedPriceDocId;
-      const wkDoc = trace?.price?.docId;
-      check(
-        "引用 priceDoc 一致（C1 fixture doc）",
-        wkDoc === doc.id && sbDoc === doc.id,
-        { sandbox: sbDoc, worker: wkDoc, fixture: doc.id },
-      );
-      check("worker trace 有 knowledge.picked 含 fixture doc", (trace?.knowledge?.picked ?? []).some((d: any) => d.id === doc.id), trace?.knowledge?.picked);
+
+    // ── 場景 B：consult 第二輪（連續兩句 — off-by-one 測試）──
+    const MSG_B = "我想問下洗牙幾錢？";
+    const rb = await apiPost("/api/admin/ai-sandbox/run", { clinicId: C1, message: MSG_B, sandboxId: sa?.sandboxId }, adminCookie);
+    check("B 沙盤 run 200（第二輪）", rb.status === 200, rb.status);
+    const sb = rb.json as any;
+    const wkB = await workerTurn("T366B2", MSG_B, wkA.conv);
+    check("B 真 worker 出咗第二輪 draft", !!wkB.draft, "no draft 2");
+    if (sb && wkB.draft) {
+      check("B intent 一致（答當前句 — 非上一輪）", wkB.draft.intent === sb.intent, { sandbox: sb.intent, worker: wkB.draft.intent });
+      check("B action 一致（本輪無 engine = 雙 null）", wkB.action === sbxAction(rb), { sandbox: sbxAction(rb), worker: wkB.action });
+      check("B picked doc ids 一致", JSON.stringify(sbxPicked(rb)) === JSON.stringify(((wkB.draft.traceJson ?? {}).knowledge?.picked ?? []).map((d: any) => d.id).sort()), { sandbox: sbxPicked(rb), worker: (wkB.draft.traceJson ?? {}).knowledge?.picked });
+      check("B stage 一致", wkA.session ? wkA.session.stage === sb.sessionSnapshot?.stage : false, { sandbox: sb.sessionSnapshot?.stage, worker: wkA.session?.stage });
+      check("B draft 首 30 字一致（off-by-one 殺手 — 答當前句）", first30(sb.draft) === first30(wkB.draft.draftText), { sandbox: first30(sb.draft), worker: first30(wkB.draft.draftText) });
     }
+
+    // ── 場景 C：紅旗（簡體 — S5 簡繁正規化後 臉腫 中 FLOOR swelling）──
+    const MSG_C = "我牙疼，脸肿了";
+    const rc = await apiPost("/api/admin/ai-sandbox/run", { clinicId: C1, message: MSG_C }, adminCookie);
+    check("C 沙盤 run 200", rc.status === 200, rc.status);
+    const sc = rc.json as any;
+    const sc1 = (sc?.steps ?? []).find((s: any) => s.n === 1);
+    const wkC = await workerTurn("T366C", MSG_C);
+    const convC = await prisma.conversation.findUniqueOrThrow({ where: { id: wkC.conv.id } });
+    check("C 沙盤紅旗命中（swelling）", sc1?.detail?.hit === true && (sc1?.detail?.categories ?? []).includes("swelling"), sc1?.detail);
+    check("C 沙盤 URGENT_PAIN + 零草稿", sc?.intent === "URGENT_PAIN" && sc?.draft === null, { intent: sc?.intent, draft: sc?.draft });
+    check("C 沙盤無 consult session（trigger=null）", sc?.sessionSnapshot === null && sc?.consultTrigger === null, sc?.sessionSnapshot);
+    check("C worker 零 AiDraft（URGENT 唔出草稿）", wkC.draft === null, wkC.draft);
+    check("C worker conv.urgent=true", convC.urgent === true, convC.urgent);
+    const urgentNotice = await prisma.staffNotice.findFirst({ where: { clinicId: C1, conversationId: wkC.conv.id, kind: "URGENT_ESCALATION" } });
+    check("C worker 建咗 URGENT_ESCALATION notice", !!urgentNotice, "no notice");
   }
 
   // ═══ T367 — 關鍵詞中心交叉警示 ════════════════════════════════════

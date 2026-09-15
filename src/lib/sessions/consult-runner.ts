@@ -28,9 +28,9 @@
  * fail-soft 鐵律：engine 失敗唔阻 AI pipeline（對話照落公海/草稿照行）— 只 log + audit。
  * PII：audit 只記 row/rule/action/stage/terminal/turnCount/intentAfter（metadata only，零病人原文）。
  */
-import type { Prisma, PrismaClient, Conversation, Clinic } from "@prisma/client";
+import type { Prisma, PrismaClient, Clinic } from "@prisma/client";
 import log from "@/lib/log";
-import { publishNotify } from "@/lib/notify";
+import { prismaConsultStore, type ConsultConvRef, type ConsultStore, type ConsultTurnData } from "./consult-store";
 import { applyLexicon, type LexiconEntry } from "@/lib/sessions/lexicon";
 import { matchRedFlagTerms } from "@/lib/sessions/red-flags";
 import { isProductUsable } from "@/lib/sessions/consult-products";
@@ -57,8 +57,8 @@ import {
 
 export interface ConsultTurnInput {
   prisma: PrismaClient;
-  /** ai.worker 攞到嘅 conversation（step 3 update 前 snapshot — C1 口徑）。 */
-  conv: Conversation;
+  /** conversation 引用（worker 傳真 Conversation — 結構性滿足；沙盤傳合成 ref — cwi-hubaudit S2）。 */
+  conv: ConsultConvRef;
   clinic: Clinic;
   msg: { id: string; waMessageId: string | null; type: string; body: string | null };
   /** classify 後 intent（fast path 覆蓋後）。 */
@@ -70,6 +70,8 @@ export interface ConsultTurnInput {
   lexicon: LexiconEntry[];
   /** pain-triage params（redFlagTerms 附加詞 — 同 fast path 同一份）。 */
   redFlagParams: { redFlagTerms: Record<string, string[]> };
+  /** ★ cwi-hubaudit S2（H-2）：持久化分岔點（預設 = prismaConsultStore — worker 行為零改動；沙盤 = redisConsultStore）。 */
+  store?: ConsultStore;
   /** ★ C5（MD §8.1）：UI 設定（Tab 2 開關/discovery + Tab 3 進階）— null/缺省 = default（C3/C4 原行為）。 */
   settings?: import("./consult-settings").ResolvedConsultSettings | null;
 }
@@ -105,53 +107,18 @@ const NO_OUTCOME: Omit<ConsultTurnOutcome, "sessionId"> = {
  */
 export async function runConsultEngineTurn(input: ConsultTurnInput): Promise<ConsultTurnOutcome> {
   const { prisma, conv, clinic, msg, intent, consultTrigger, winOpen, lexicon, redFlagParams } = input;
+  const store = input.store ?? prismaConsultStore(prisma, conv); // 預設 = 原 prisma 路徑（worker 零改動）；沙盤 = redisConsultStore
   const t0 = Date.now();
   try {
     const body = msg.body ?? "";
     const canonical = applyLexicon(body, lexicon);
 
-    // ── 1. get/create active session（C2 守衛：tx FOR UPDATE + 只准一個 active） ──
-    const session = await prisma.$transaction(async (tx) => {
-      const _lock = await tx.$queryRaw`SELECT id FROM "Conversation" WHERE id = ${conv.id} FOR UPDATE`;
-      const existing = await tx.consultSession.findFirst({ where: { conversationId: conv.id, terminal: null } });
-      if (existing) return { session: existing, created: false };
-      // terminal 後新 FLOOR 觸發 = 開新 session（C2 守衛口徑：只攔 active — 同 C2 API route 一致）
-      const created = await tx.consultSession.create({
-        data: {
-          conversationId: conv.id,
-          clinicId: conv.clinicId,
-          workflow: consultTrigger,
-          // ★ C1 橋接：session 級副本由 Conversation 過渡欄複製（C3 起 consult 路徑只寫 session 欄）
-          humanTookOver: conv.humanTookOver,
-          lastOutboundText: conv.lastOutboundText,
-        },
-      });
-      return { session: created, created: true };
+    // ── 1. get/create active session（經 store — worker 預設 = C2 守衛 tx FOR UPDATE + C1 橋接 + create audit）──
+    const { session, created } = await store.getOrCreateActive({
+      workflow: consultTrigger,
+      bridge: { humanTookOver: conv.humanTookOver ?? false, lastOutboundText: conv.lastOutboundText ?? null },
     });
-    if (session.created) {
-      await prisma.auditLog
-        .create({
-          data: {
-            staffId: null, // AI 自動（無 staff 參與）
-            action: "CONSULT_SESSION_CREATE",
-            entity: "ConsultSession",
-            entityId: session.session.id,
-            meta: {
-              conversationId: conv.id,
-              clinicId: conv.clinicId,
-              workflow: consultTrigger,
-              stage: "DISCOVER",
-              bridgedFromConversation: {
-                humanTookOver: conv.humanTookOver,
-                hasLastOutboundText: conv.lastOutboundText != null,
-              },
-            } as object,
-          },
-        })
-        .catch((err) => log.warn({ err: String(err) }, "consult-engine: create audit failed（fail-soft）"));
-    }
-
-    const row = session.session;
+    const row = session;
     // ── 2. conv → session 欄 sync（C2 交接口：取過後店員 typed → humanTookOver；AI 發出 → lastOutboundText） ──
     const state0 = toSessionState(row);
     // ★ conv.humanTookOver 係 live source（send route 一置就唔會 reset）— session 欄係副本：
@@ -205,107 +172,81 @@ export async function runConsultEngineTurn(input: ConsultTurnInput): Promise<Con
           ? [...state.askedSlots, transition.askedSlot]
           : state.askedSlots;
 
-      const data: Record<string, unknown> = {
+      const data: ConsultTurnData = {
         stage: transition.stage,
         turnCount: state.turnCount + 1,
         purchaseIntent: transition.intentAfter,
         lastAction: transition.action,
         nextAction: transition.action,
-        objections,
+        objections: objections as unknown as Prisma.JsonValue,
         askedSlots,
         ctaGiven: transition.ctaGiven,
       };
       if (transition.terminal !== null) data.terminal = transition.terminal;
       if (transition.candidateCategory !== null) data.candidateCategory = transition.candidateCategory;
-      if (sig.asksPrice) data.slots = slots;
-      // 開頭 sync（只喺有寫入時順帶 — 零額外 query）
-      if (syncHuman) data.humanTookOver = true;
-      if (syncOutbound) data.lastOutboundText = conv.lastOutboundText;
-      // 無任何欄改變時仍寫（turnCount 必定變 — processed turn）
-      await prisma.consultSession.update({ where: { id: row.id }, data });
+      if (sig.asksPrice) data.slots = slots as Prisma.JsonValue;
+      // 無任何欄改變時仍寫（turnCount 必定變 — processed turn）；開頭 sync 只喺有寫入時順帶（零額外 query）
+      await store.persistTurn({
+        sessionId: row.id,
+        data,
+        sync: syncHuman || syncOutbound ? { humanTookOver: syncHuman, lastOutboundText: syncOutbound ? conv.lastOutboundText : undefined } : undefined,
+      });
 
-      await prisma.auditLog
-        .create({
-          data: {
-            staffId: null,
-            action: "CONSULT_ENGINE_TURN",
-            entity: "ConsultSession",
-            entityId: row.id,
-            meta: {
-              row: transition.row,
-              ruleId: transition.ruleId,
-              action: transition.action,
-              stage: transition.stage,
-              terminal: transition.terminal,
-              turnCount: state.turnCount + 1,
-              intentAfter: transition.intentAfter,
-              processed: true,
-              note: transition.note ?? undefined,
-              msgId: msg.id,
-            } as object,
-          },
-        })
-        .catch((err) => log.warn({ err: String(err) }, "consult-engine: turn audit failed（fail-soft）"));
+      await store.audit({
+        action: "CONSULT_ENGINE_TURN",
+        entityId: row.id,
+        meta: {
+          row: transition.row,
+          ruleId: transition.ruleId,
+          action: transition.action,
+          stage: transition.stage,
+          terminal: transition.terminal,
+          turnCount: state.turnCount + 1,
+          intentAfter: transition.intentAfter,
+          processed: true,
+          note: transition.note ?? undefined,
+          msgId: msg.id,
+        },
+      });
     } else {
       // processed:false（#4 窗口 / #6 humanTookOver / #23 per-turn 唔會到）— session 零欄寫入（idle 時鐘唔洗）
       if (syncHuman || syncOutbound) {
-        await prisma.consultSession
-          .update({
-            where: { id: row.id },
-            data: {
-              ...(syncHuman ? { humanTookOver: true } : {}),
-              ...(syncOutbound ? { lastOutboundText: conv.lastOutboundText } : {}),
-            },
-          })
-          .catch((err) => log.warn({ err: String(err) }, "consult-engine: sync update failed（fail-soft）"));
+        await store.persistTurn({
+          sessionId: row.id,
+          data: null,
+          sync: { humanTookOver: syncHuman, lastOutboundText: syncOutbound ? conv.lastOutboundText : undefined },
+        });
       }
       // audit 照寫（processed:false 都留痕 — e2e/audit 斷言 row 4/6；零 PII）
-      await prisma.auditLog
-        .create({
-          data: {
-            staffId: null,
-            action: "CONSULT_ENGINE_TURN",
-            entity: "ConsultSession",
-            entityId: row.id,
-            meta: {
-              row: transition.row,
-              action: transition.action,
-              processed: false,
-              turnCount: state.turnCount,
-              msgId: msg.id,
-            } as object,
-          },
-        })
-        .catch((err) => log.warn({ err: String(err) }, "consult-engine: turn audit failed（fail-soft）"));
+      await store.audit({
+        action: "CONSULT_ENGINE_TURN",
+        entityId: row.id,
+        meta: {
+          row: transition.row,
+          action: transition.action,
+          processed: false,
+          turnCount: state.turnCount,
+          msgId: msg.id,
+        },
+      });
     }
 
-    // ── 6. terminal action 對話層（轉既有 flow — 唔發明） ──
+    // ── 6. terminal action 對話層（轉既有 flow — 唔發明；副作用經 store — 沙盤 = no-op）──
     if (transition.action === "HANDOFF_HUMAN" && transition.terminal === "HANDOFF") {
       // URGENT_PAIN / COMPLAINT 自己條路已經發過 staffNotice — 唔重發
       if (intent !== "URGENT_PAIN" && intent !== "COMPLAINT") {
-        await handoffNotice(prisma, conv, `CONSULT 轉人手（row ${transition.row}）`, {
-          row: transition.row,
-          sessionId: row.id,
-          reason: transition.note ?? undefined,
+        await store.terminalEffect({
+          kind: "HANDOFF_HUMAN",
+          meta: { sessionId: row.id, row: transition.row, reason: transition.note ?? undefined },
         });
       }
     } else if (transition.action === "PAIN_TRIAGE" && intent !== "PAIN") {
       // 痛症但 classify 非 PAIN（真 LLM 語義差）— 補人手通知（pain session 由 #0 fast path 管）
-      await handoffNotice(prisma, conv, "CONSULT 痛症訊號 → PAIN_TRIAGE", { row: 1, sessionId: row.id });
+      await store.terminalEffect({ kind: "PAIN_TRIAGE", meta: { sessionId: row.id, row: 1 } });
     } else if (transition.action === "END_SESSION") {
       suppressDraft = true; // 叫停/推搪後唔 auto-reply（既有 draft 流唔會再出）
       // 排 follow-up = audit placeholder（FollowupTask model 本 repo 未實施 — 只記錄）
-      await prisma.auditLog
-        .create({
-          data: {
-            staffId: null,
-            action: "CONSULT_FOLLOWUP_SCHEDULED",
-            entity: "ConsultSession",
-            entityId: row.id,
-            meta: { reason: transition.row === 5 ? "patient-stop" : "decline", row: transition.row, msgId: msg.id } as object,
-          },
-        })
-        .catch((err) => log.warn({ err: String(err) }, "consult-engine: follow-up audit failed（fail-soft）"));
+      await store.terminalEffect({ kind: "END_SESSION", meta: { sessionId: row.id, row: transition.row, msgId: msg.id } });
     }
 
     log.info(
@@ -320,20 +261,20 @@ export async function runConsultEngineTurn(input: ConsultTurnInput): Promise<Con
         terminal: transition.terminal,
         turn: transition.processed ? state.turnCount + 1 : state.turnCount,
         intent: transition.intentAfter,
-        created: session.created,
+        created: created,
         ms: Date.now() - t0,
       },
       "consult-engine: turn"
     );
     return {
       sessionId: row.id,
-      created: session.created,
+      created: created,
       transition,
       action: transition.action,
       terminal: transition.terminal,
       stage: transition.stage,
       suppressDraft,
-      createdSessionId: session.created ? row.id : null,
+      createdSessionId: created ? row.id : null,
     };
   } catch (err) {
     // fail-soft：engine 失敗唔阻 pipeline（對話照行；下輪照試）
@@ -372,28 +313,7 @@ export async function matchNamedProduct(
   }
 }
 
-/** 既有 handoff 模式（同 COMPLAINT 路徑同一份 staffNotice + publishNotify pattern — 唔發明）。 */
-async function handoffNotice(
-  prisma: PrismaClient,
-  conv: Conversation,
-  title: string,
-  meta: object
-): Promise<void> {
-  try {
-    await prisma.staffNotice.create({
-      data: {
-        clinicId: conv.clinicId,
-        conversationId: conv.id,
-        kind: "HANDOFF_REQUEST",
-        title,
-        meta,
-      },
-    });
-    publishNotify(conv.clinicId, "notice:new", { conversationId: conv.id, kind: "HANDOFF_REQUEST" });
-  } catch (err) {
-    log.warn({ err: String(err) }, "consult-engine: handoff notice failed（fail-soft）");
-  }
-}
+
 
 // ── #23 48h 無 inbound cron（MD §4.2 #23 / §4.5 第 7 行） ─────────────
 
@@ -493,39 +413,24 @@ export interface ConsultExtractionPersistInput {
   mock: boolean;
 }
 
+/** ★ cwi-hubaudit S2：保留兼容 export — 內部經 prismaConsultStore（runner 同一份代碼 — 唔平行實作）。 */
 export async function persistConsultExtraction(input: ConsultExtractionPersistInput): Promise<string[]> {
-  try {
-    const { prisma, sessionId, slotUpdates, objection, askedFlags, msgId, mock } = input;
-    const s = await prisma.consultSession.findUnique({ where: { id: sessionId } });
-    if (!s) return [];
-    const cur: Record<string, unknown> =
-      s.slots && typeof s.slots === "object" && !Array.isArray(s.slots)
-        ? { ...(s.slots as Record<string, unknown>) }
-        : {};
-    const next = { ...cur };
-    const applied: string[] = [];
-    for (const [k, v] of Object.entries(slotUpdates ?? {})) {
-      if (k === "clinicalSuitability" || k === "meta") continue; // 鐵律
-      next[k] = v; // 病人最新表達覆蓋（latest wins）
-      applied.push(k);
-    }
-    if (applied.length > 0) {
-      await prisma.consultSession.update({ where: { id: sessionId }, data: { slots: next as Prisma.InputJsonValue } });
-    }
-    await prisma.auditLog.create({
-      data: {
-        staffId: null,
-        action: "CONSULT_EXTRACT",
-        entity: "ConsultSession",
-        entityId: sessionId,
-        meta: { applied, objection, flags: askedFlags, msgId, mock } as object,
-      },
-    });
-    return applied;
-  } catch (err) {
-    log.warn({ sessionId: input.sessionId, err: String(err) }, "consult: persistExtraction failed（fail-soft）");
-    return [];
-  }
+  const store = prismaConsultStore(input.prisma, { id: input.sessionId, clinicId: "" });
+  return store.persistExtraction({
+    sessionId: input.sessionId,
+    slotUpdates: input.slotUpdates,
+    objection: input.objection,
+    askedFlags: {
+      askedComparison: input.askedFlags.askedComparison,
+      askedPrice: input.askedFlags.askedPrice,
+      asksDuration: input.askedFlags.asksDuration,
+      asksClinicalDetail: input.askedFlags.asksClinicalDetail,
+      asksWhichSuitsMe: input.askedFlags.asksWhichSuitsMe,
+      asksHuman: input.askedFlags.asksHuman,
+    },
+    msgId: input.msgId,
+    mock: input.mock,
+  });
 }
 
 /** claim guard 用嘅產品 ctx（同入 prompt 嘅同一集合 — 鐵律：unapproved 唔會喺度）。 */
@@ -539,7 +444,8 @@ export interface ConsultLlmProductCtx {
 
 export interface ConsultLlmTurnInput {
   prisma: PrismaClient;
-  conv: Conversation;
+  /** conversation 引用（worker = 真 Conversation；沙盤 = 合成 ref — cwi-hubaudit S2）。 */
+  conv: ConsultConvRef;
   clinic: Clinic;
   msg: { id: string; waMessageId: string | null; body: string | null };
   /** runConsultEngineTurn 回傳嘅 sessionId（null = 唔應該到呢度 — 安全 skip）。 */
@@ -556,6 +462,8 @@ export interface ConsultLlmTurnInput {
   ctxMessages: { direction: string; body: string | null }[];
   /** ★ C5（MD §8.1 Tab 2 discovery）：醫生改過嘅發現問題文案（slot → text；缺省 = 出廠表）。 */
   questionOverrides?: Record<string, string> | null;
+  /** ★ cwi-hubaudit S2（H-2）：持久化分岔點（預設 = prismaConsultStore；沙盤 = redisConsultStore）。 */
+  store?: ConsultStore;
 }
 
 export interface ConsultLlmTurnResult {
@@ -592,18 +500,13 @@ export async function runConsultLlmTurn(input: ConsultLlmTurnInput): Promise<Con
     usableProducts: [],
     mock: isAiMockEnabled(),
   };
+  const store = input.store ?? prismaConsultStore(input.prisma, input.conv); // 預設 = 原 prisma 路徑（worker 零改動）；沙盤 = redisConsultStore
   const auditTurn = (meta: object) =>
-    input.prisma.auditLog
-      .create({
-        data: {
-          staffId: null,
-          action: "CONSULT_LLM_TURN",
-          entity: "ConsultSession",
-          entityId: input.sessionId ?? input.conv.id,
-          meta: { action: input.action, stage: input.stage, mock: out.mock, ...meta } as object,
-        },
-      })
-      .catch((err: unknown) => log.warn({ err: String(err) }, "consult-llm: audit failed（fail-soft）"));
+    store.audit({
+      action: "CONSULT_LLM_TURN",
+      entityId: input.sessionId ?? input.conv.id,
+      meta: { action: input.action, stage: input.stage, mock: out.mock, ...meta },
+    });
 
   if (!input.sessionId) {
     log.warn({ clinic: input.clinic.code }, "consult-llm: no sessionId — skip（安全）");
@@ -642,8 +545,7 @@ export async function runConsultLlmTurn(input: ConsultLlmTurnInput): Promise<Con
       await auditTurn({ calls: out.calls, extractFailed: true, generated: false });
       return out; // 唔寫 slot、唔跑 generate — caller 保留原 draft（降級普通 QUESTION 回覆）
     }
-    out.extractApplied = await persistConsultExtraction({
-      prisma: input.prisma,
+    out.extractApplied = await store.persistExtraction({
       sessionId: input.sessionId,
       slotUpdates: extract.slotUpdates,
       objection: extract.objection,

@@ -19,6 +19,7 @@
  * PII：本檔只有詞表常數 + 純函數；rawTexts 只喺 memory 內匹配，唔入 log / DB。
  */
 import type { PainSlotsType } from "./pain-triage";
+import { normalizeST } from "./st-normalize";
 
 export type RedFlagCategory =
   | "bleeding"
@@ -42,7 +43,8 @@ export const RED_FLAG_CATEGORIES: RedFlagCategory[] = [
 /** 內建下限詞（MD E.4 表 + agent 補齊粵語變體）。post_op = 空（非詞觸發）。 */
 export const RED_FLAG_FLOOR: Record<RedFlagCategory, string[]> = {
   bleeding: ["流血不止", "血止唔到", "不停流血", "血流唔停", "噴血"],
-  swelling: ["面腫", "塊面腫咗", "面腫咗", "面頰腫", "頸腫", "眼腫", "眼瞼腫"],
+  // ★ cwi-hubaudit-20260915（S5/H-5）：+ 臉腫 family（mirror 面腫 family — 簡體「脸肿」S→T 正規化後中）
+  swelling: ["面腫", "塊面腫咗", "面腫咗", "面頰腫", "頸腫", "眼腫", "眼瞼腫", "臉腫", "塊臉腫咗", "臉腫咗"],
   airway: ["吞唔到嘢", "呼吸困難", "呼吸唔順", "開唔到口", "牙關緊"],
   fever: ["發燒", "發緊燒", "高燒"],
   trauma: ["撞崩", "跌崩", "甩咗成隻", "成隻飛出嚟", "牙甩咗", "撞斷"],
@@ -90,10 +92,13 @@ export function matchRedFlagTerms(
   const cats: RedFlagCategory[] = [];
   const terms: string[] = [];
   const table = effectiveRedFlagTerms(p);
+  // ★ cwi-hubaudit-20260915（S5/H-5）：比對前簡繁正規化（FLOOR 詞全繁體；簡體「脸肿」→「臉腫」先中）。
+  //   原文照存（caller 傳入嘅 rawTexts 唔改）— 只喺呢度做比對副本。繁體輸入 no-op。
+  const normTexts = rawTexts.map((t) => normalizeST(t));
   for (const c of RED_FLAG_CATEGORIES) {
     if (c === "post_op") continue; // 非詞觸發
     for (const t of table[c]) {
-      if (rawTexts.some((txt) => txt.includes(t))) {
+      if (normTexts.some((txt) => txt.includes(t))) {
         cats.push(c);
         terms.push(t);
         break; // 每類一個詞就夠

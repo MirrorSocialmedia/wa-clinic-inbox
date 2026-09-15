@@ -8,21 +8,19 @@ import { publishNotify } from "@/lib/notify";
 import { pushEvent } from "@/lib/push";
 import { getWindowState } from "@/lib/wa/window";
 import {
-  classifyAndDraft,
   classifySessionTurn,
   classifyPainTurn,
-  getAiConfig,
-  isAiMockEnabled,
   recordAiCall,
-  type AiContextMessage,
   type ClassifyAndDraftResult,
 } from "@/lib/ai";
 import { PROMPT_CONTEXT_MESSAGES } from "@/lib/ai/prompts";
+import { buildAiContext } from "@/lib/ai/pipeline";
+import { runInboundAi, livePersistPort, type InboundConvRef, type DraftRow } from "@/lib/ai/pipeline";
 import { scrubAiSummary } from "@/lib/ai/scrub";
 import { getAutomationLevel } from "@/lib/ai/automation";
 import type { SessionSlots } from "@/lib/ai/session-types";
-import { fetchDutyRoster, hkToday } from "@/lib/duty/client";
-import { applyRouting, applyRoutingFirstReply } from "@/lib/routing/route";
+import { hkToday } from "@/lib/duty/client";
+import { applyRoutingFirstReply } from "@/lib/routing/route";
 // ★ Phase C（cwi-sess-20260824-c1）：slot-filling session runner（C6）
 import { getSlots } from "@/lib/availability";
 import {
@@ -37,20 +35,10 @@ import { confirmBookingCore } from "@/lib/booking/confirm-core";
 import { getParams, getActiveInfo } from "@/lib/workflow/store";
 import { fillVars } from "@/lib/workflow/definitions";
 
-import { pickKnowledge, knowledgePromptBlock, matchPriceDocs } from "@/lib/knowledge/retrieve";
-import { getKnowledgeCatalog, type CatalogDoc } from "@/lib/knowledge/catalog";
-import { isPriceIntent, buildPriceDraft, runPriceGuard, NO_PRICE_TEXT } from "@/lib/ai/price-guard";
-import { runClaimGuard } from "@/lib/ai/claim-guard";
-import { CONSULT_LLM_ACTIONS } from "@/lib/ai/consult-llm";
 // ★ Part E（cwi-paintriage-20260903）：PAIN_TRIAGE 痛症分流（E.2 fast path / E.3 session / E.4 紅旗 / E.7 術後 / E.8 lexicon）
 import { getLexicon, applyLexicon } from "@/lib/sessions/lexicon";
-import { runConsultEngineTurn, runConsultLlmTurn, type ConsultTurnOutcome } from "@/lib/sessions/consult-runner";
-import { loadConsultSettings } from "@/lib/sessions/consult-settings";
-import { matchRedFlagTerms, effectiveRedFlagTerms } from "@/lib/sessions/red-flags";
+import { effectiveRedFlagTerms } from "@/lib/sessions/red-flags";
 import { painStep, parsePainState, PAIN_SESSION_TTL_MS } from "@/lib/sessions/pain-triage";
-import { triggerFloor } from "@/lib/sessions/consult-trigger";
-// ★ cwi-reopenreply-20260910（T84 決策 (b) 收窄版）：翻開後首句閘（reopenedFirstReply）
-import { AUTO_RESOLVE_NOTE_PREFIX, isReopenedFirstReply, isReopenedFirstReplySafe } from "@/lib/reopen-reply";
 import { phoneHash } from "@/lib/phone-hash";
 import { hkDateOffset } from "@/lib/availability";
 import { lookupPatient, fetchAppointments } from "@/lib/workforce/client";
@@ -75,7 +63,7 @@ function lexiconHits(lex: { term: string; canonical: string }[], text: string | 
  *
  * 流程（每 job）：
  *   1. 載入 message + conversation + clinic（消失/不匹配 → skip，唔值得 retry）
- *   2. 組上下文（最近 10 條 in/out）→ classifyAndDraft（mock / vLLM 統一入口）
+ *   2. 組上下文（最近 10 條 in/out）→ 主 classify（mock / vLLM 統一入口）
  *   3. 分類落 Conversation：intent / intentConfidence / urgency / aiSummary
  *      + 鐵律：urgency=HIGH 或 intent=URGENT_PAIN → urgent=true + urgent:escalation
  *   4. 草稿（intent≠URGENT_PAIN 且 urgency≠HIGH 且 model 畀咗 draft）：
@@ -223,312 +211,69 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     orderBy: [{ waTimestamp: "desc" }, { createdAt: "desc" }], // 同秒 tie（WhatsApp ts 秒級）→ 落庫順序定，latest 必須係最新到
     take: PROMPT_CONTEXT_MESSAGES,
   });
-  const ctxMessages: AiContextMessage[] = [...recent].reverse().map((m) => ({
-    direction: m.direction,
-    channel: m.channel,
-    type: m.type,
-    body: m.body,
-    waTimestamp: m.waTimestamp,
-  }));
+  // ★ cwi-hubaudit-20260915（S1 H-1）：ctx 組裝統一 buildAiContext（沙盤同一 function — 包含觸發訊息）。
+  // recent 已 take PROMPT_CONTEXT_MESSAGES（desc）→ reverse 轉由舊到新；buildAiContext 尾截 limit（no-op）。
+  const ctxMessages = buildAiContext(
+    [...recent].reverse().map((m) => ({ dir: m.direction, body: m.body, ts: m.waTimestamp, type: m.type, channel: m.channel }))
+  );
 
-  // ── ★ Part F（cwi-raggolden-20260904，F.3）：RAG 兩階段檢索 — 階段一（選 id）喺 classify 前 ──
-  //   只對 text 觸發訊息；**fail-soft：任何失敗 → picked=[] 照出草稿**（pickKnowledge 零 throw，catch 兜底）。
-  const knowledge =
-    msg.type === "text" && msg.body
-      ? await pickKnowledge({
-          clinicId: conv.clinicId,
-          question: msg.body,
-          context: ctxMessages
-            .slice(0, -1) // 觸發訊息本身唔入 context
-            .map((m) => m.body)
-            .filter((b): b is string => typeof b === "string" && b.trim().length > 0)
-            .slice(-3),
-        }).catch((err) => {
-          log.warn({ err: err instanceof Error ? err.message : String(err) }, "knowledge: fail-soft — 跳過 RAG");
-          return { ran: false, picked: [], discarded: 0, skipped: "fail-soft", latencyMs: 0 };
-        })
-      : { ran: false, picked: [], discarded: 0, skipped: "media", latencyMs: 0 };
-
-  // ── 2. AI call（失敗 = 降級：record + log metadata + throw 俾 BullMQ retry） ──
-  // Phase 4：當日當值名單注入 prompt（AI 可以答「今日邊個喺度」）—
-  // fetchDutyRoster 永遠唔 throw（3s timeout / 404 / 壞 shape → null）；5 分鐘 TTL cache。
-  const dutyToday = hkToday();
-  const dutyEntries = await fetchDutyRoster(clinic.code, dutyToday).catch(() => null);
-  let result: ClassifyAndDraftResult;
-  try {
-    result = await classifyAndDraft({
-      messages: ctxMessages,
-      clinic: {
-        name: clinic.name,
-        greetingConfig: (clinic.greetingConfig as Record<string, unknown> | null) ?? null,
-      },
-      dutyRoster: dutyEntries && dutyEntries.length > 0 ? { date: dutyToday, entries: dutyEntries } : null,
-      // ★ Part F（F.3）：`<knowledge>` 段（擺事實段之後、對話歷史之前；連 title 方便 trace）
-      knowledgeBlock: knowledgePromptBlock(knowledge.picked),
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await recordAiCall(false, message);
-    const attemptsTotal = job.opts.attempts ?? 3;
-    const finalAttempt = (job.attemptsMade ?? 0) + 1 >= attemptsTotal;
-    log.error(
-      {
-        clinic: clinic.id,
-        wamid: msg.waMessageId,
-        mode: isAiMockEnabled() ? "mock" : "real",
-        model: isAiMockEnabled() ? null : getAiConfig().primaryModel,
-        attemptsMade: job.attemptsMade,
-        finalAttempt,
-        err: message,
-      },
-      "ai: call failed — degraded（舊 intent/summary 保留，無 draft，inbox 照常）"
-    );
-    throw err;
-  }
-  await recordAiCall(true, undefined, result.latencyMs, result.tokens);
-
-  // ★ Part E（cwi-paintriage-20260903，E.2）：確定性紅旗 fast path — 訊息本身含 FLOOR ∪ params 紅旗詞
-  //   （lexicon canonical 化後）→ 直升 URGENT_PAIN（fast path 唔問診；E.4 同一份詞表；LLM 只抽槽唔判級）。
-  //   喺 COMPLAINT 通知之前行 — 紅旗 recall 優先（投訴文含紅旗詞 → 紅旗勝）。
-  const ptLex = msg.type === "text" && msg.body ? await getLexicon(conv.clinicId) : [];
-  const ptParams = await getParams("pain-triage", conv.clinicId);
-  if (msg.type === "text" && msg.body) {
-    const rf = matchRedFlagTerms([applyLexicon(msg.body, ptLex)], ptParams);
-    if (rf.hit && result.intent !== "URGENT_PAIN") {
-      log.info(
-        { clinic: clinic.code, wamid: msg.waMessageId, categories: rf.categories, terms: rf.terms },
-        "pain-triage: fast-path red flag (deterministic) → URGENT_PAIN"
-      );
-      result = { ...result, intent: "URGENT_PAIN", urgency: "HIGH", needsHuman: true, draft: null };
-    }
-  }
-
-  // ── ★ consult v2.1 C1（§2.2 M-2）：consult session trigger 最終值 = FLOOR（deterministic）?? LLM 值 ──
-  // FLOOR = code 常數（CONSULT_TRIGGER_FLOOR，UI 顯示但唔可刪）—「觸發唔靠 LLM」；
-  // LLM 值（result.sessionTrigger）只喺 FLOOR 唔中時補充。floor 優先（MD §2.2）。
-  const consultTrigger =
-    msg.type === "text" && msg.body
-      ? triggerFloor(msg.body, applyLexicon(msg.body, ptLex)) ?? result.sessionTrigger ?? null
-      : null;
-
-  // ── ★ Part F（cwi-raggolden-20260904，F.4）：報價鏈 + price-guard（deterministic）──────────
-  //   報價鏈：intent=QUESTION 且 lexicon normalize 後命中價錢意圖 → 檢索優先 PRICE 其次 SERVICE：
-  //   有 PRICE doc → 決定性報價（範圍 + 影響因素 + disclaimer code 強制）；無 → 唔准報價（人手提示 + needsHuman）。
-  //   price-guard：草稿定稿後、入庫前 3 條 deterministic 檢查（① 零引用幻覺價 ② 漏 disclaimer 自動補 ③ 金額出範圍）。
-  //   純決定性層 — mock/real 同一行為；PAIN/URGENT/COMPLAINT（draft null）唔入呢段。
-  const priceTrace: {
-    triggered: boolean;
-    docId: string | null;
-    guard: { blocked: boolean; disclaimerAppended: boolean; outOfRange: boolean };
-  } = { triggered: false, docId: null, guard: { blocked: false, disclaimerAppended: false, outOfRange: false } };
-  let citedPriceDoc: CatalogDoc | null = knowledge.picked.find((d) => d.kind === "PRICE") ?? null;
-  if (msg.type === "text" && msg.body && result.intent === "QUESTION" && result.draft !== null) {
-    const priceIntent = isPriceIntent(applyLexicon(msg.body, ptLex));
-    priceTrace.triggered = priceIntent;
-    if (priceIntent) {
-      if (!citedPriceDoc) {
-        // stage 1 冇揀到 PRICE → PRICE 目錄 keyword match 撳底（code 層、零 LLM）
-        const catalog = await getKnowledgeCatalog(conv.clinicId);
-        citedPriceDoc = matchPriceDocs(catalog, applyLexicon(msg.body, ptLex))[0] ?? null;
-      }
-      if (citedPriceDoc) {
-        priceTrace.docId = citedPriceDoc.id;
-        const built = buildPriceDraft(citedPriceDoc);
-        if (built.text) {
-          result = { ...result, draft: built.text };
-        } else {
-          // PRICE doc 冇 priceMin/Max → 唔出範圍（唔准報價）
-          result = { ...result, draft: NO_PRICE_TEXT, needsHuman: true };
-        }
-      } else {
-        log.info({ clinic: clinic.code, wamid: msg.waMessageId }, "price: no PRICE doc — 唔准報價（轉人手）");
-        result = { ...result, draft: NO_PRICE_TEXT, needsHuman: true };
-      }
-    }
-    // trace：本輪 citation 咗邊條 PRICE doc（有即記錄 — 不論報價鏈有冇觸發）
-    if (citedPriceDoc) priceTrace.docId = citedPriceDoc.id;
-    // price-guard（deterministic — 草稿生成後入庫前）
-    const guard = runPriceGuard({ draft: result.draft, priceDoc: citedPriceDoc, priceIntent });
-    priceTrace.guard = { blocked: guard.blocked, disclaimerAppended: guard.disclaimerAppended, outOfRange: guard.outOfRange };
-    if (guard.blocked) {
-      result = { ...result, draft: guard.draft, needsHuman: true };
-    } else if (guard.disclaimerAppended) {
-      result = { ...result, draft: guard.draft };
-    }
-  }
-
-  // ★ Phase C (cwi-sess-20260824-c1)：投訴 → 內部通知軌（HANDOFF_REQUEST — 要真人跟進）
-  //   R2 鐵律：commit-then-emit（create 已 commit 先發 socket）。
-  if (result.intent === "COMPLAINT") {
-    await prisma.staffNotice.create({
-      data: {
-        clinicId: conv.clinicId,
-        conversationId: conv.id,
-        kind: "HANDOFF_REQUEST",
-        title: "病人投訴 — 需要真人跟進",
-        meta: { wamid: msg.waMessageId, intent: result.intent },
-      },
-    });
-    publishNotify(conv.clinicId, "notice:new", { conversationId: conv.id, kind: "HANDOFF_REQUEST" });
-  }
-
-  // ── 3. 分類落 Conversation ───────────────────────────────────────────
-  // ★ H-3 第二層（deterministic scrub，零 AI 依賴）：AI 可能唔聽 prompt 寫咗身份資料 —
-  //   落庫/推送前將 profileName（完整 + ≥2 字子串）同 waId 後 8 位替換做 病人/***
-  // ── cwi-window-20260901（P2）：窗口狀態（W-2）──
-  // 過窗：AI 草稿照生成但 mode=COPY_ONLY（UI 只准複製）；C6 session 唔開（session reply = 自動覆，
-  // 過窗發唔出 → 避免一堆 FAILED outbound）；AUTO 自動覆本就有 window-closed 閘（下方 blocks）。
-  // ★ consult v2.1 C1：喺 step 3 update 之前攞（update 唔改 lastInboundAt）— M-3 gate action 要用。
-  const win = getWindowState(conv.lastInboundAt);
-  // ★ consult v2.1 C1（§2.3 M-3 gate 級）：窗口已過 + consult trigger → WINDOW_EXPIRED_HANDOFF
-  //   （唔生成 free-form 草稿、出既有三出路、對話保留唔關；完整 transition table 屬 C3）。
-  const consultGateAction = !win.open && consultTrigger !== null ? "WINDOW_EXPIRED_HANDOFF" : null;
-
-  const safeSummary = scrubAiSummary(result.summary, { profileName: contact?.profileName, waId: contact?.waId });
-  const urgent = result.intent === "URGENT_PAIN" || result.urgency === "HIGH";
-  const updatedConv = await prisma.conversation.update({
-    where: { id: conv.id },
-    data: {
-      intent: result.intent,
-      intentConfidence: result.confidence,
-      urgency: result.urgency,
-      aiSummary: safeSummary.length > 0 ? safeSummary.slice(0, 50) : null,
-      // urgent 只 set true 唔 set false — 已標急症嘅對話唔會被新一條普通訊息蓋掉
-      ...(urgent ? { urgent: true } : {}),
-      // ★ consult v2.1 C1（§2.2 M-2）：最近一輪最終 consult trigger（FLOOR ?? LLM）
-      sessionTrigger: consultTrigger,
-      // ★ consult v2.1 C1（§2.3 M-3 gate 級）：最近一輪 consult 閘動作（過窗 + trigger）
-      consultGateAction,
-    },
+  // ── ★ cwi-hubaudit-20260915（S4/H-2）：計算核心 → `runInboundAi`（同沙盤同一 function）──
+  //   RAG → classify → red flag → consult trigger → 報價鏈 → COMPLAINT 通知 → 窗口 → 分類落 Conversation
+  //   → 規則路由 → consult engine turn → consult LLM turn（+price/claim guard）→ canDraft → AUTO level+blocks
+  //   全部共用；持久化/發送點全經 `PersistPort`（唯一 mode 分岔點 — livePersistPort 每段 = 原本檔對應
+  //   段落逐字搬入，鐵律 1 行為零改動；沙盤 = noopPersistPort 零副作用）。
+  const convRef: InboundConvRef = {
+    id: conv.id,
+    clinicId: conv.clinicId,
+    contactId: conv.contactId,
+    lastInboundAt: conv.lastInboundAt,
+    assigneeId: conv.assigneeId,
+    status: conv.status,
+    humanTookOver: conv.humanTookOver,
+    lastOutboundText: conv.lastOutboundText,
+    urgent: conv.urgent,
+    resolvedAt: conv.resolvedAt,
+    reopenedAt: conv.reopenedAt,
+    lastOutboundAt: conv.lastOutboundAt,
+    pinnedPatientApricotId: conv.pinnedPatientApricotId,
+    routedRuleId: conv.routedRuleId,
+  };
+  const port = livePersistPort({
+    jobAttemptsMade: job.attemptsMade,
+    jobAttemptsTotal: job.opts.attempts,
+    wamid: msg.waMessageId,
+    clinicId: conv.clinicId,
+    clinicCode: clinic.code,
   });
-
-  // ── ★ cwi-routing-20260906（§2）：規則式路由 — 標記 + 通知（R-2：唔掂 assigneeId，對話仍公海）──
-  //   掛鉤點 = classify 落 DB 之後、任何通知之前。R-8：URGENT_PAIN/HIGH 嘅全店 urgent:escalation
-  //   廣播（下方 step 5 路徑）照行 — 路由只額外加組標記 + 組通知，唔取代、唔收窄。
-  //   fail-soft：引擎內部吞錯 — 路由失敗唔阻 AI pipeline（對話照落公海）。
-  const routing = await applyRouting({
-    conv: {
-      id: conv.id,
-      clinicId: conv.clinicId,
-      contactId: conv.contactId,
-      assigneeId: updatedConv.assigneeId,
-      pinnedPatientApricotId: conv.pinnedPatientApricotId,
-      status: conv.status,
-      routedRuleId: conv.routedRuleId,
-    },
+  const outcome = await runInboundAi({
     clinic,
+    msg: { id: msg.id, type: msg.type, body: msg.body, waMessageId: msg.waMessageId, aiDraftId: msg.aiDraftId },
+    conv: convRef,
     contact,
-    msg: { id: msg.id, type: msg.type, body: msg.body ?? "", waMessageId: msg.waMessageId },
-    intent: result.intent,
-    urgency: result.urgency,
-    lexicon: ptLex,
+    ctxMessages,
+    isMedia,
+    persist: port,
   });
-
-  // ── ★ consult v2.1 C3（§4 規則引擎 — 純函數零 LLM）：每 consult turn transition ─────────────
-  // 觸發 = consultTrigger（FLOOR ?? LLM，C1 口徑）；get/create active session（C2 守衛）+ 25 行
-  // first match wins（紅旗/痛症/COMPLAINT/真人/窗口/叫停/humanTookOver/maxTurns/PRICE≥2/高意向/
-  // objection/臨床/時間/DISCOVER slot 流/EDUCATE/PRESENT/CONSULTATION/CTA）+ action/stage/terminal/
-  // purchaseIntent/turnCount 落 DB + audit。fail-soft：engine 失敗唔阻 pipeline。
-  // terminal action 對話層 = 轉既有 flow（handoff notice / PAIN 路徑 / 下方 C6 booking 路徑）。
-  // LLM 草稿生成唔係 C3 範圍（C4）— 呢度只確保 action + stage 狀態正確落 DB。
-  // ★ C5（MD §8.1）：UI 設定（Tab 2 開關 / discovery 問題 + Tab 3 進階參數）— 每 consult turn fresh load
-  //   （fail-soft → default = C3/C4 原行為）；engine turn + LLM turn 共用同一份。
-  const consultUi = msg.type === "text" && msg.body && consultTrigger !== null
-    ? await loadConsultSettings(prisma, conv.clinicId)
-    : null;
-  let consultOutcome: ConsultTurnOutcome | null = null;
-  if (msg.type === "text" && msg.body && consultTrigger !== null) {
-    consultOutcome = await runConsultEngineTurn({
-      prisma,
-      conv,
-      clinic,
-      msg: { id: msg.id, waMessageId: msg.waMessageId, type: msg.type, body: msg.body },
-      intent: result.intent,
-      consultTrigger,
-      winOpen: win.open,
-      lexicon: ptLex,
-      redFlagParams: ptParams,
-      settings: consultUi,
-    });
-  }
-
-  // ── ★ consult v2.1 C4（MD §6）：LLM 兩次 call（Call #1 抽槽 + Call #2 生成）+ §5 Claim Guard ──
-  // 觸發 = engine content action（8 個）+ processed + intent/urgency 未壓（喺 canDraft 之前先攞 LLM 草稿）。
-  // 「suppressDraft 嘅 turn 唔准有 LLM call」鐵律由結構保證：
-  //   - END_SESSION（#5/#22，suppressDraft=true）action 唔喺 8 個內
-  //   - 窗口過期（#4）/ humanTookOver（#6）= processed:false（engine 已 gate）
-  //   - URGENT_PAIN/COMPLAINT/HIGH = intent/urgency gate 排除（同 canDraft 核心一致）
-  // call 數 ≤3/turn（主 classify + extract + generate — audit CONSULT_LLM_TURN.meta.calls 可驗）。
-  // pipeline：extract（失敗 → 降級保留原 draft，state 不變）→ generate（isProductUsable 鐵律過濾）
-  //   → price-guard 重跑（deterministic）→ claim guard（§5，喺 price-guard 之後）→ audit。
-  // fail-soft：任何失敗 → 保留原 draft（對話照行）；非 8-action turn 零 LLM call。
-  if (
-    msg.type === "text" &&
-    msg.body &&
-    result.draft !== null &&
-    consultOutcome &&
-    consultOutcome.sessionId &&
-    consultOutcome.transition?.processed === true &&
-    consultOutcome.action !== null &&
-    CONSULT_LLM_ACTIONS.has(consultOutcome.action) &&
-    result.intent !== "URGENT_PAIN" &&
-    result.intent !== "COMPLAINT" &&
-    result.urgency !== "HIGH"
-  ) {
-    const llm = await runConsultLlmTurn({
-      prisma,
-      conv,
-      clinic,
-      msg: { id: msg.id, waMessageId: msg.waMessageId, body: msg.body },
-      sessionId: consultOutcome.sessionId,
-      workflow: consultTrigger as string,
-      action: consultOutcome.action,
-      stage: consultOutcome.stage,
-      candidateCategory: consultOutcome.transition?.candidateCategory ?? null,
-      askedSlot: consultOutcome.transition?.askedSlot ?? null,
-      priceDoc: citedPriceDoc,
-      ctxMessages,
-      questionOverrides: consultUi?.discoveryQuestionOverrides ?? null,
-    });
-    if (llm.draft !== null) {
-      // ① draft 換入（主 classify 只係 fallback — extract 失敗時保留）
-      let finalDraft: string = llm.draft;
-      result = { ...result, draft: finalDraft, model: llm.model ?? result.model };
-      // ② price-guard 重跑（deterministic — 先行；consult draft 取代咗舊 draft，原 guard 結果作廢）
-      const pg = runPriceGuard({ draft: finalDraft, priceDoc: citedPriceDoc, priceIntent: priceTrace.triggered });
-      priceTrace.guard = { blocked: pg.blocked, disclaimerAppended: pg.disclaimerAppended, outOfRange: pg.outOfRange };
-      if (pg.blocked) {
-        finalDraft = pg.draft;
-        result = { ...result, draft: pg.draft, needsHuman: true };
-      } else if (pg.disclaimerAppended) {
-        finalDraft = pg.draft;
-        result = { ...result, draft: pg.draft };
-      }
-      // ③ claim guard（MD §5 — 喺 price-guard 之後；BLOCK → 棄用草稿 → 人手提示 + needsHuman + trace）
-      const cg = runClaimGuard({
-        draft: finalDraft,
-        products: llm.usableProducts.map((p) => ({ ...p })),
-        hasBackendSlot: false, // free-form consult 路徑 — 只 booking flow 先有 backend slot
-        priceDoc: citedPriceDoc ? { priceMin: citedPriceDoc.priceMin, priceMax: citedPriceDoc.priceMax } : null,
-      });
-      if (cg.blocked && cg.code) {
-        log.warn({ clinic: clinic.code, wamid: msg.waMessageId, code: cg.code, codes: cg.codes }, `claim-guard: ${cg.code}`);
-        await prisma.auditLog
-          .create({
-            data: {
-              staffId: null,
-              action: "CONSULT_CLAIM_GUARD_BLOCK",
-              entity: "ConsultSession",
-              entityId: consultOutcome.sessionId,
-              meta: { code: cg.code, codes: cg.codes, action: consultOutcome.action, stage: consultOutcome.stage } as object,
-            },
-          })
-          .catch((err: unknown) => log.warn({ err: String(err) }, "claim-guard: audit failed（fail-soft）"));
-        result = { ...result, draft: cg.draft, needsHuman: true };
-      }
-    }
-  }
-
+  const {
+    result,
+    knowledge,
+    priceTrace,
+    lexicon: ptLex,
+    redFlagParams: ptParams,
+    consultTrigger,
+    win,
+    consultGateAction,
+    safeSummary,
+    urgent,
+    updatedConv,
+    routing,
+    consultOutcome,
+    autoLevel,
+    blocks,
+    canDraft,
+    draftMode,
+    consultWindowExpired,
+  } = outcome;
   // ── C6：L3+ 開 session（BOOKING_REQUEST + 無人接手 + 文字訊息 + ★ P2：窗口內）──
   // 無 AutomationPolicy row 嘅店 = legacy L1/L2 → 一行都唔改（跌落現有 draft/AUTO）
   // ★ C3：consult engine 嘅 START_BOOKING action（#9/#20/#21）同樣轉呢度既有 booking flow。
@@ -595,97 +340,28 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     });
   }
 
-  // ── 4. AI 草稿（鐵律：URGENT_PAIN / HIGH 永不生成 — code 層第一重擋） ─────
-  // Phase 2b：needsHuman=true 都可以出 draft（staff 審批；AUTO 模式永遠唔會自動發）
-  let draft: {
-    id: string;
-    draftText: string;
-    status: string;
-    /** cwi-window-20260901（P2）：NORMAL（窗口內）/ COPY_ONLY（過窗 — UI 只准複製） */
-    mode: string;
-  } | null = null;
-  // ★ consult v2.1 C1（§2.3 M-3）：過窗 + consult trigger → 唔出 free-form 草稿（出既有三出路；對話保留）。
-  //   限 consult-trigger 範圍 — 非 consult 過窗對話行為零改動（COPY_ONLY 草稿照出）。
-  const consultWindowExpired = !win.open && consultTrigger !== null;
-  // ★ consult v2.1 C1（§2.1 M-1）：店員自己打字接手（humanTookOver）+ 本輪係 consult trigger → 停出草稿
-  //   （「交返 AI 繼續」掣 = C5 UI；C1 只 backend 狀態 + API。限 consult 範圍 — 非 consult 零改動；
-  //   C2/C3 會將 takeover 語義移去 ConsultSession）。
-  const consultTakeoverSuppressed = updatedConv.humanTookOver && consultTrigger !== null;
-  if (consultWindowExpired) {
-    log.info(
-      { clinic: clinic.code, wamid: msg.waMessageId, trigger: consultTrigger, gate: consultGateAction },
-      "ai: consult window expired — no free-form draft（既有三出路：App 覆 / template / 等病人；對話保留）"
-    );
-  } else if (consultTakeoverSuppressed) {
-    log.info(
-      { clinic: clinic.code, wamid: msg.waMessageId, trigger: consultTrigger },
-      "ai: human took over — consult draft suppressed（等「交返 AI 繼續」）"
-    );
-  }
-  const canDraft =
-    result.intent !== "URGENT_PAIN" &&
-    result.intent !== "COMPLAINT" && // ★ Phase C：投訴唔出 AI 草稿 — 呢啲說話要人講
-    result.urgency !== "HIGH" &&
-    result.draft !== null &&
-    msg.type === "text" && // ★ AI Workflow T1 (A2)：媒體唔出草稿（只內部通知職員）
-    !consultWindowExpired &&
-    !consultTakeoverSuppressed &&
-    !consultOutcome?.suppressDraft; // ★ C3：END_SESSION（叫停/推搪）後唔 auto-reply
+  // ── 4. AI 草稿入庫（port：worker = 冪等 create + message.aiDraftId 連結 —
+  //   原 step 4 代碼逐字搬入 livePersistPort.createDraft；canDraft/draftMode 由 runInboundAi 算好）──
+  let draft: DraftRow | null = null;
   if (canDraft) {
-    // 冪等：unique(conversationId, inReplyToMessageId) + 前置查（retry 重跑唔會重複 draft）
-    let existing = await prisma.aiDraft.findUnique({
-      where: {
-        conversationId_inReplyToMessageId: {
-          conversationId: conv.id,
-          inReplyToMessageId: msg.id,
-        },
-      },
+    draft = await port.createDraft({
+      convId: conv.id,
+      msgId: msg.id,
+      msgAiDraftId: msg.aiDraftId,
+      draftText: result.draft as string,
+      model: result.model,
+      latencyMs: result.latencyMs,
+      intent: result.intent,
+      mode: draftMode,
     });
-    if (!existing) {
-      try {
-        existing = await prisma.aiDraft.create({
-          data: {
-            conversationId: conv.id,
-            inReplyToMessageId: msg.id,
-            draftText: result.draft as string,
-            model: result.model,
-            latencyMs: result.latencyMs,
-            // ★ Phase E（cwi-ai-20260825-t5）：per-draft intent 快照（統計「當時」值；歷史 row null → UNKNOWN）
-            intent: result.intent,
-            // cwi-window-20260901（P2 / W-2）：過窗草稿 = COPY_ONLY（內容有用但發唔出 — UI 只准複製去 App）
-            mode: win.open ? "NORMAL" : "COPY_ONLY",
-          },
-        });
-      } catch (err) {
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-          // 競態（並行 retry 撞 unique）→ 取已存在嗰條
-          existing = await prisma.aiDraft.findUnique({
-            where: {
-              conversationId_inReplyToMessageId: {
-                conversationId: conv.id,
-                inReplyToMessageId: msg.id,
-              },
-            },
-          });
-        } else {
-          throw err;
-        }
-      }
-    }
-    draft = existing;
-    // 連結 message ↔ draft（send route 用嚟判採用狀態；UI 顯示上下文）
-    if (msg.aiDraftId !== draft!.id) {
-      await prisma.message.update({ where: { id: msg.id }, data: { aiDraftId: draft!.id } });
-    }
   }
-
   // ── 4.5 AUTO 模式 ─────
   // ★ Fix B（cwi-fix-20260825-f1）：自動覆資格由 resolver 決定（per intent），唔再直 key aiMode —
   //   儀表板逐類 L1/L2 先真正生效；〔全店降 L1〕panic（"*"→L1 policy）即真停自動覆。
   //   行為保證：冇 policy row 嘅店 = resolver fallback aiMode（AUTO→L2 / DRAFT→L1）→ byte 不變。
   //   bonus：AI_GLOBAL_MAX_LEVEL=L1 而家連 L2 自動覆都壓到（env kill 全覆蓋）。
   let autoSent = false;
-  const autoLevel = await getAutomationLevel(conv.clinicId, result.intent);
+  // ★ cwi-hubaudit S4：autoLevel + blocks（全部 gate）由 runInboundAi 算好（原 4.5 語句逐字搬入 pipeline）
   if (clinic.aiMode === "AUTO" && autoLevel === "L1") {
     // 舊行為會自動發、新 policy 壓咗落 L1 — log 一次俾 debug（metadata only）
     log.info(
@@ -693,103 +369,20 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       "ai: AUTO mode — suppressed by AutomationPolicy L1 (draft only)"
     );
   }
-  // ★ Part F（F.7）：trace gates 用 — autoLevel=L1 時 blocks 固定 ["policy-L1"]（舊行為等價）
-  const blocks: string[] = autoLevel === "L1" ? ["policy-L1"] : [];
-  if (autoLevel !== "L1") {
-    if (result.intent === "URGENT_PAIN") blocks.push("URGENT_PAIN"); // 鐵律：code 第二重擋
-    if (result.intent === "COMPLAINT") blocks.push("COMPLAINT");     // ★ Phase C：投訴絕不自動發（要人講）
-    if (result.urgency === "HIGH") blocks.push("HIGH");             // 鐵律：code 第二重擋
-    if (result.needsHuman) blocks.push("needsHuman");               // 鐵律：人工永遠唔自動發
-    // ★ Part F（cwi-raggolden-20260904，F.3）：L2 自動覆前提 — 價錢問題（priceIntent）有引用先准自動覆，
-    //   零引用強制降 L1（轉人手）。範圍 = priceIntent：「無引用唔准自動覆」嘅風險集中喺價錢聲稱（幻覺價）；
-    //   非價錢 QUESTION 維持 F 前行為（W1/W4 golden 回歸「牙唔啱食嘢」零引用自動覆必須綠 — 七閘+回歸硬要求）。
-    //   priceTrace.triggered = priceIntent；docId = 本輪最終 citation 咗嘅 PRICE doc（stage1 揀 ∪ code keyword fallback）。
-    if (result.intent === "QUESTION" && priceTrace.triggered && !priceTrace.docId) blocks.push("no-knowledge-citation");
-    if (draft === null) blocks.push("no-draft");
-    if (!win.open) blocks.push("window-closed");
-    // ★ Phase A：真人接手 = AI 收聲（Send Lock 語義補完 — 有負責人只佢可發 WhatsApp；
-    // messages/send route 有 423 擋人，AI auto-send 路徑一直冇呢重閘）
-    if (updatedConv.assigneeId !== null) blocks.push("assigned");
-    // RESOLVED 對話病人翻頭一句「唔該」唔應該觸發自動覆
-    if (updatedConv.status === "RESOLVED") blocks.push("resolved");
-    // ★ cwi-reopenreply-20260910（T84 決策 (b) 收窄版）：翻開後**首句** — 三條件齊（QUESTION + 距上次解決
-    //   >7 日 + 無不滿訊號）先照普通新對話 auto；任一唔中 → 强制 DRAFT（PROPOSED 照出）。
-    //   背景：T2 翻開四聯動喺 AI 跑之前已將 status 翻 OPEN → 上面 `resolved` 閘唔再命中 —
-    //   呢條閘接棒「翻開後首句」語義（reopenedAt + lastOutboundAt 判斷首句）。
-    //   第二句起（lastOutboundAt > reopenedAt，outbound SENT 路徑即時維護）閘自然失效 = 完全正常級別。
-    if (isReopenedFirstReply(updatedConv)) {
-      // 「翻開前最後一次解決時間」：resolvedAt（T2 翻開已清，防禦性）→ 否則最新 auto-resolve INTERNAL 備註
-      //   （waTimestamp <= reopenedAt）→ 仍無 = null = 條件②唔中（保守 DRAFT；手動 resolve 無痕可溯）。
-      let lastResolved: Date | null = updatedConv.resolvedAt;
-      if (lastResolved == null && updatedConv.reopenedAt != null) {
-        const note = await prisma.message.findFirst({
-          where: {
-            conversationId: conv.id,
-            direction: "OUT",
-            channel: "INTERNAL",
-            type: "note",
-            body: { startsWith: AUTO_RESOLVE_NOTE_PREFIX },
-            waTimestamp: { lte: updatedConv.reopenedAt },
-          },
-          orderBy: { waTimestamp: "desc" },
-          select: { waTimestamp: true },
-        });
-        lastResolved = note?.waTimestamp ?? null;
-      }
-      const rr = isReopenedFirstReplySafe({
-        intent: result.intent,
-        lastResolvedAt: lastResolved,
-        raw: msg.body,
-        canonical: msg.body && ptLex.length > 0 ? applyLexicon(msg.body, ptLex) : null,
-      });
-      if (!rr.safe) {
-        blocks.push("reopenedFirstReply");
-        // metadata only（intent 名 + 原因 token — 零病人原文）
-        log.info(
-          { clinic: clinic.code, wamid: msg.waMessageId, intent: result.intent, reasons: rr.reasons.join("+") },
-          "ai: reopenedFirstReply gate — 翻開首句三條件唔齊（draft only）"
-        );
-      }
-    }
-    // ★ Phase A (A2)：媒體訊息 — 唔覆客、唔出草稿、只通知職員
-    if (isMedia) blocks.push("media");
-    // 可選第八閘：未 claim 但真人啱啱插咗嘴（冷靜期 — ★ Phase D：params 由 WorkflowDefinition
-    // 「triage」ACTIVE row 讀（三級 fallback + fail-soft；env AI_HUMAN_COOLDOWN_MS 保留做底））
-    // ★ consult v2.1 C1（§2.1 M-1，MD §2.1 代碼）：cooldown 只計最後 OUT 係 HUMAN_TYPED（店員自己打字）。
-    //   採用（AI_ADOPTED）/ AI 自動（AI_AUTO）/ 舊 row（null）都唔算「真人插嘴」→ 人手介入死鎖根治。
-    const triageParams = await getParams("triage", conv.clinicId);
-    const cooldownMs = triageParams.humanCooldownMs;
-    const lastOut = await prisma.message.findFirst({
-      where: {
-        conversationId: conv.id,
-        direction: "OUT",
-        channel: { not: "INTERNAL" }, // ★ INTERNAL 備註（assign/transfer 自動落）唔係「覆病人」— 唔觸發冷靜期
-      },
-      orderBy: { createdAt: "desc" },
-      select: { sentVia: true, createdAt: true },
-    });
-    const humanCooldownActive =
-      lastOut?.sentVia === "HUMAN_TYPED" &&
-      Date.now() - lastOut.createdAt.getTime() < cooldownMs;
-    if (humanCooldownActive) blocks.push("human-recent");
-    // ★ Phase D 第九閘：confidence 低過 floor → low-confidence（floor 由 triage params 校）
-    if (result.confidence < triageParams.confidenceFloor) blocks.push("low-confidence");
-    if (blocks.length > 0) {
-      // metadata only（唔含 draft/summary 內容）
-      log.info(
-        { clinic: clinic.code, wamid: msg.waMessageId, reasons: blocks.join("+") },
-        "ai: AUTO mode — not eligible, fallback to DRAFT (pending draft for staff)"
-      );
-    } else {
-      autoSent = await attemptAutoSend({ conv: updatedConv, clinic, draft: draft!, msg, result });
-      // 重讀 draft status（可能已標 SENT_AUTO；enqueue 失敗會回退 PROPOSED）
-      if (draft) {
-        const fresh = await prisma.aiDraft.findUnique({ where: { id: draft.id }, select: { status: true } });
-        if (fresh) draft = { ...draft, status: fresh.status };
-      }
+  if (blocks.length > 0) {
+    // metadata only（唔含 draft/summary 內容）
+    log.info(
+      { clinic: clinic.code, wamid: msg.waMessageId, reasons: blocks.join("+") },
+      "ai: AUTO mode — not eligible, fallback to DRAFT (pending draft for staff)"
+    );
+  } else {
+    autoSent = await attemptAutoSend({ conv: updatedConv, clinic, draft: draft!, msg, result });
+    // 重讀 draft status（可能已標 SENT_AUTO；enqueue 失敗會回退 PROPOSED）
+    if (draft) {
+      const fresh = await prisma.aiDraft.findUnique({ where: { id: draft.id }, select: { status: true } });
+      if (fresh) draft = { ...draft, status: fresh.status };
     }
   }
-
   // draft:ready 只喺 draft 仍然 PROPOSED（即 staff 仲要審批）時推 —
   // 已自動發出（SENT_AUTO）唔好再彈「AI 建議」卡俾 staff
   // ★ Part F（cwi-raggolden-20260904，F.7）：trace panel — 每輪寫入 traceJson（gates/lexicon/檢索/price/latency）。

@@ -16,11 +16,15 @@ export interface LexiconEntry {
 /**
  * canonical 化（紅旗 match 前必經）。longest-term-first 防短詞先食咗一截；
  * 唔命中 → 原文；term 出現多次 → 全部替換（client-side，冇 DB 參與）。
+ * ★ cwi-hubaudit-20260915（S5/H-5）：入口先做簡繁正規化（st-normalize — 純字表零依賴，
+ *   client-safe 維持）：詞表全繁體，簡體客「脸肿」→「臉腫」先中到；繁體輸入 no-op。
  */
+import { normalizeST } from "./st-normalize";
+
 export function applyLexicon(text: string, entries: LexiconEntry[]): string {
   if (!text || entries.length === 0) return text;
   const sorted = [...entries].sort((a, b) => b.term.length - a.term.length);
-  let out = text;
+  let out = normalizeST(text); // 簡繁正規化（繁體輸入 = no-op 快路徑）
   for (const e of sorted) {
     if (e.term === e.canonical) continue;
     out = out.split(e.term).join(e.canonical);

@@ -9,6 +9,8 @@
  * - 純函數（零 IO）— 可單測。PII：詞表係 code 常數，零病人資料；輸入文字只喺 memory 內比對。
  */
 
+import { normalizeST } from "./st-normalize";
+
 /** MD §2.2 逐字 — FLOOR 詞表（code 常數；UI 顯示但唔可刪）。 */
 export const CONSULT_TRIGGER_FLOOR: Record<string, string[]> = {
   ORTHODONTIC_CONSULT: ["矯齒", "箍牙", "牙箍", "cool牙", "invisalign", "隱適美", "隱形牙箍", "牙套矯正"],
@@ -25,8 +27,9 @@ export type ConsultTrigger = "ORTHODONTIC_CONSULT" | "IMPLANT_CONSULT";
  * @returns 命中嘅 workflow key（"ORTHODONTIC_CONSULT" | "IMPLANT_CONSULT"）；都唔中 → null
  */
 export function triggerFloor(textRaw: string, textCanonical: string): string | null {
-  const raw = (textRaw ?? "").toLowerCase();
-  const canonical = (textCanonical ?? "").toLowerCase();
+  // ★ cwi-hubaudit-20260915（S5/H-5）：比對前簡繁正規化（FLOOR 觸發詞全繁體；raw + canonical 都正規化 — 冪等 no-op 安全）。
+  const raw = normalizeST(textRaw ?? "").toLowerCase();
+  const canonical = normalizeST(textCanonical ?? "").toLowerCase();
   for (const [workflow, terms] of Object.entries(CONSULT_TRIGGER_FLOOR)) {
     for (const term of terms) {
       const t = term.toLowerCase();

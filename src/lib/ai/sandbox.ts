@@ -7,7 +7,7 @@
  * 2. mode 分支**只准喺持久化同發送層**：本檔零 prisma.create/update/delete（全唯讀）、
  *    零 publishNotify / pushEvent / enqueueOutboundSend / recordAiCall / AuditLog。
  * 3. 紅旗命中 → 只顯示結果（steps[0] detail），唔建 StaffNotice、唔標 URGENT。
- * 4. 真 LLM call（classifyAndDraft / pickKnowledge / consultExtractSlots / consultGenerateDraft —
+ * 4. 真 LLM call（主 classify / RAG 檢索 / consult extract / consult generate —
  *    本地 GPU 零成本）；真知識庫、真 workforce 讀（fetchDutyRoster 唯讀）。
  * 5. 每次 run log（ai-sandbox scope — metadata only，零病人原文）。
  * 6. 多輪 state 存 Redis `sandbox:{staffId}:{sandboxId}`，TTL 30 分鐘，**永不落 DB**；
@@ -21,10 +21,10 @@
  * | COMPLAINT staffNotice  | 唔建（只在 steps 顯示 intent）                                   |
  * | conversation.update    | 唔寫（intent/trigger 存 Redis state 快照回傳）                    |
  * | applyRouting           | 用同一 `resolveEffectiveRules` + `matchRule` + `resolvePatientType`，跳 claim/audit/notice |
- * | runConsultEngineTurn   | 用同一純函數 `detectConsultSignals` + `computePurchaseIntentDelta` + `consultTransition` +
- *                         `matchNamedProduct`（同 function），state 存 Redis 唔落 ConsultSession |
- * | runConsultLlmTurn      | 用同一 `consultExtractSlots`（Call#1）+ `consultGenerateDraft`（Call#2）+
- *                         `runPriceGuard` + `runClaimGuard`，slot merge 同款 latest-wins guard，跳 persist/audit |
+ * | runConsultEngineTurn   | ★ cwi-hubaudit S2：同一 function `runConsultEngineTurn`（session 讀寫經 redisConsultStore —
+ *                         ConsultStore 唯一 mode 分岔點；terminal 副作用 no-op）|
+ * | runConsultLlmTurn      | ★ cwi-hubaudit S2：同一 function `runConsultLlmTurn`（extract/generate/persistExtraction
+ *                         同一份 + store）+ `runPriceGuard` + `runClaimGuard`（同 worker C4 順序）|
  * | AiDraft create         | 唔建（draft 字串直接回傳）                                        |
  * | AUTO 發 + socket + push| 唔發（⑦ 步只算 level + blocks 顯示）                              |
  * | booking/PAIN session   | 唔開（slot-filling session 唔屬 CONSULT 多輪範圍 — B.5 沙盤多輪 = consult engine）|
@@ -34,37 +34,20 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { getRedis } from "@/lib/queue";
 import {
-  classifyAndDraft,
-  type AiContextMessage,
-  type ClassifyAndDraftResult,
-} from "@/lib/ai";
-import { PROMPT_CONTEXT_MESSAGES } from "@/lib/ai/prompts";
-import { getAutomationLevel, clearAutomationLevelCache } from "@/lib/ai/automation";
-import { fetchDutyRoster, hkToday } from "@/lib/duty/client";
-import { getParams } from "@/lib/workflow/store";
+  buildAiContext,
+  runInboundAi,
+  noopPersistPort,
+  type InboundConvRef,
+  type InboundAiOutcome,
+} from "@/lib/ai/pipeline";
+import { clearAutomationLevelCache } from "@/lib/ai/automation";
 import { bustParamsCache } from "@/lib/workflow/store";
-import { pickKnowledge, knowledgePromptBlock, matchPriceDocs } from "@/lib/knowledge/retrieve";
-import { getKnowledgeCatalog } from "@/lib/knowledge/catalog";
-import { isPriceIntent, buildPriceDraft, runPriceGuard, NO_PRICE_TEXT, selectPriceDisclaimer } from "@/lib/ai/price-guard";
-import { runClaimGuard } from "@/lib/ai/claim-guard";
-import { CONSULT_LLM_ACTIONS, consultExtractSlots, consultGenerateDraft, consultDiscoveryQuestion } from "@/lib/ai/consult-llm";
-import { getLexicon, applyLexicon, type LexiconEntry } from "@/lib/sessions/lexicon";
 import { bustLexiconCache } from "@/lib/sessions/lexicon";
-import { matchRedFlagTerms, type RedFlagResult } from "@/lib/sessions/red-flags";
-import { triggerFloor } from "@/lib/sessions/consult-trigger";
 import {
-  consultTransition,
-  detectConsultSignals,
-  computePurchaseIntentDelta,
   type ConsultSessionState,
   type TransitionResult,
 } from "@/lib/sessions/consult-engine";
-import type { ConsultWorkflow } from "@/lib/sessions/consult-types";
-import { matchNamedProduct, type ConsultLlmProductCtx } from "@/lib/sessions/consult-runner";
-import { isProductUsable } from "@/lib/sessions/consult-products";
-import { loadConsultSettings } from "@/lib/sessions/consult-settings";
-import { resolveEffectiveRules, matchRule, resolvePatientType } from "@/lib/routing/route";
-import { getWindowState } from "@/lib/wa/window";
+import { redisConsultStore } from "@/lib/sessions/consult-store";
 import type { AutomationLevel } from "@/lib/ai/automation";
 
 const sLog = log.child({ scope: "ai-sandbox" });
@@ -117,24 +100,6 @@ async function clearState(staffId: string, sandboxId: string): Promise<void> {
   await getRedis().del(sandboxKey(staffId, sandboxId));
 }
 
-/** 新 CONSULT session 初始 state — 同 ConsultSession 建 row 嘅 DB defaults 經 toSessionState 後一致。 */
-function freshConsultState(workflow: string): ConsultSessionState {
-  return {
-    workflow: workflow as ConsultWorkflow,
-    stage: "DISCOVER",
-    terminal: null,
-    turnCount: 0,
-    purchaseIntent: 0,
-    slots: { clinicalSuitability: "UNKNOWN" },
-    candidateCategory: null,
-    comparedProducts: [],
-    askedSlots: [],
-    objections: [],
-    ctaGiven: false,
-    humanTookOver: false,
-    lastAction: null,
-  };
-}
 
 // ── 型別 ──────────────────────────────────────────────────────────────
 
@@ -252,286 +217,88 @@ export async function runSandboxTurn(input: SandboxTurnInput): Promise<SandboxTu
   st.lastInboundAt = st.messages[st.messages.length - 1].ts;
   const turn = st.messages.filter((m) => m.dir === "IN").length;
 
-  const ctxMessages: AiContextMessage[] = st.messages
-    .slice(0, -1) // 本句唔入 context（同 worker：觸發訊息本身唔入 context）
-    .slice(-PROMPT_CONTEXT_MESSAGES)
-    .map((m) => ({
-      direction: m.dir,
-      channel: "API",
-      type: "text",
-      body: m.body,
-      waTimestamp: new Date(m.ts),
-    }));
+  // ★ cwi-hubaudit-20260915（S1 H-1 修復）：觸發訊息（當前句）**必喺** ctxMessages — 同 worker
+  //   `buildAiContext` 同一組裝點（worker 口徑：觸發訊息已喺 DB，ctxMessages 包含佢）。
+  //   舊 `.slice(0, -1)` 係把 RAG-context 規則誤套落 ctxMessages 本身（H-2 平行實作分岔）→
+  //   第一輪零輸入無草稿、第二輪答上一輪。
+  const ctxMessages = buildAiContext(st.messages);
 
-  // ── 2. ④ 搵資料 — RAG 兩階段（同 worker F.3：fail-soft → picked=[]）──
-  const knowledge = await pickKnowledge({
+  // ── 2–10. ①〜⑥ 計算核心 → `runInboundAi`（★ cwi-hubaudit S4：同 worker 同一 function）──
+  //   RAG → classify → 紅旗 → consult trigger → 報價鏈 → COMPLAINT → 窗口 → 分類（in-memory 副本）
+  //   → 路由（display subset）→ consult engine turn → consult LLM turn（+price/claim guard）
+  //   → canDraft → AUTO level+blocks（machine gates，⑦ 步顯示用同一份）。
+  //   mode 分岔只喺 `noopPersistPort`（零 DB 寫 / 零通知 / 零用量統計 — 鐵律 3）
+  //   + `redisConsultStore`（consult session 讀寫 — 同 worker 嘅 prisma store 同一 interface）。
+  //   窗口判定照真 pipeline：本句到 = 窗口開（convRef.lastInboundAt = now — 同舊 getWindowState(new Date())）。
+  const convRef: InboundConvRef = {
+    id: sandboxId,
     clinicId: clinic.id,
-    question: message,
-    context: ctxMessages.map((m) => m.body).filter((b): b is string => typeof b === "string" && b.trim().length > 0).slice(-3),
-  }).catch((err) => {
-    sLog.warn({ err: err instanceof Error ? err.message : String(err) }, "sandbox: knowledge fail-soft");
-    return { ran: false, picked: [], discarded: 0, skipped: "fail-soft", latencyMs: 0 };
+    contactId: `sbx-${sandboxId}`,
+    lastInboundAt: new Date(),
+    assigneeId: null,
+    status: "OPEN",
+    humanTookOver: st.state?.humanTookOver ?? false,
+    lastOutboundText: null,
+    urgent: false,
+    resolvedAt: null,
+    reopenedAt: null,
+    lastOutboundAt: null,
+    pinnedPatientApricotId: null,
+    routedRuleId: null,
+  };
+  const sandboxStore = redisConsultStore({
+    getSession: () => st.state,
+    setSession: (s) => {
+      st.state = s;
+    },
+    sessionId: `sbx-${sandboxId}`,
   });
-  let llmCalls = knowledge.ran ? 1 : 0;
-
-  // ── 3. ② 理解 — 主 classify（真 LLM #1；失敗 = 502 降級，state 唔改）──
-  const dutyToday = hkToday();
-  const dutyEntries = await fetchDutyRoster(clinic.code, dutyToday).catch(() => null);
-  let result: ClassifyAndDraftResult;
+  const sandboxPort = noopPersistPort({ clinicCode: clinic.code });
+  let outcome: InboundAiOutcome;
   try {
-    result = await classifyAndDraft({
-      messages: ctxMessages,
-      clinic: { name: clinic.name, greetingConfig: (clinic.greetingConfig as Record<string, unknown> | null) ?? null },
-      dutyRoster: dutyEntries && dutyEntries.length > 0 ? { date: dutyToday, entries: dutyEntries } : null,
-      knowledgeBlock: knowledgePromptBlock(knowledge.picked),
+    outcome = await runInboundAi({
+      clinic,
+      msg: { id: `sbx-msg-${turn}`, type: "text", body: message, waMessageId: null, aiDraftId: null },
+      conv: convRef,
+      contact: null,
+      ctxMessages,
+      isMedia: false,
+      consultStore: sandboxStore,
+      persist: sandboxPort,
     });
   } catch (err) {
-    // 同 worker 降級語義：state 唔改（回滚呢輪 push 嘅 IN）+ 502
-    sLog.warn({ clinic: clinic.code, err: err instanceof Error ? err.message : String(err) }, "sandbox: classify failed — 502");
-    st.messages.pop();
-    throw new SandboxError(502, "AI 服務唔通（sglang 失敗）— 呢輪無結果，state 原封");
-  }
-  llmCalls += 1;
-  // ★ 鐵律 2：唔 recordAiCall（零用量統計）
-
-  // ── 4. ① 安全閘 — 紅旗 fast path（同 worker E.2：lexicon canonical 後 FLOOR∪params）──
-  const lex: LexiconEntry[] = await getLexicon(clinic.id).catch(() => []);
-  const ptParams = await getParams("pain-triage", clinic.id).catch(() => null);
-  const rf: RedFlagResult = ptParams ? matchRedFlagTerms([applyLexicon(message, lex)], ptParams) : { hit: false, categories: [], terms: [] };
-  if (rf.hit && result.intent !== "URGENT_PAIN") {
-    result = { ...result, intent: "URGENT_PAIN", urgency: "HIGH", needsHuman: true, draft: null };
-  }
-
-  // ── 5. ② 理解 — consult trigger（FLOOR ?? LLM — 同 worker C1 口徑）──
-  const consultTrigger = triggerFloor(message, applyLexicon(message, lex)) ?? result.sessionTrigger ?? null;
-
-  // ── 6. ⑥ 出文 — 報價鏈（同 worker F.4：PRICE 檢索 → buildPriceDraft → price-guard）──
-  const priceTrace = { triggered: false, docId: null as string | null, guard: { blocked: false, disclaimerAppended: false, outOfRange: false } };
-  let citedPriceDoc = knowledge.picked.find((d) => d.kind === "PRICE") ?? null;
-  if (result.intent === "QUESTION" && result.draft !== null) {
-    const priceIntent = isPriceIntent(applyLexicon(message, lex));
-    priceTrace.triggered = priceIntent;
-    if (priceIntent) {
-      if (!citedPriceDoc) {
-        const catalog = await getKnowledgeCatalog(clinic.id);
-        citedPriceDoc = matchPriceDocs(catalog, applyLexicon(message, lex))[0] ?? null;
-      }
-      if (citedPriceDoc) {
-        priceTrace.docId = citedPriceDoc.id;
-        const built = buildPriceDraft(citedPriceDoc);
-        if (built.text) result = { ...result, draft: built.text };
-        else result = { ...result, draft: NO_PRICE_TEXT, needsHuman: true };
-      } else {
-        result = { ...result, draft: NO_PRICE_TEXT, needsHuman: true };
-      }
+    // 同 worker 降級語義：classify 失敗 = state 唔改（回滾呢輪 push 嘅 IN）+ 502
+    if (sandboxPort.classifyFailed) {
+      st.messages.pop();
+      throw new SandboxError(502, "AI 服務唔通（sglang 失敗）— 呢輪無結果，state 原封");
     }
-    if (citedPriceDoc) priceTrace.docId = citedPriceDoc.id;
-    const guard = runPriceGuard({ draft: result.draft, priceDoc: citedPriceDoc, priceIntent });
-    priceTrace.guard = { blocked: guard.blocked, disclaimerAppended: guard.disclaimerAppended, outOfRange: guard.outOfRange };
-    if (guard.blocked) result = { ...result, draft: guard.draft, needsHuman: true };
-    else if (guard.disclaimerAppended) result = { ...result, draft: guard.draft };
+    throw err;
   }
-
-  // ── 7. 窗口（同 worker P2：沙盤 = 病人而家打字 → 本句到 = 窗口開）──
-  const win = getWindowState(new Date());
-  const consultGateAction = !win.open && consultTrigger !== null ? "WINDOW_EXPIRED_HANDOFF" : null;
-
-  // ── 8. ⑤ 派俾邊個 — 同一套 resolveEffectiveRules + matchRule + resolvePatientType（跳 claim/audit/notice）──
-  let routing: { rule: { id: string; name: string; targetType: string; targetGroupId: string | null; targetStaffId: string | null } | null } = { rule: null };
-  try {
-    const rules = await resolveEffectiveRules(clinic.id);
-    const patientType = await resolvePatientType({ pinnedPatientApricotId: null, waId: null });
-    const matched = matchRule(rules, {
-      intent: result.intent,
-      textRaw: message,
-      textCanonical: applyLexicon(message, lex),
-      patientType,
-      lexicon: lex,
-    });
-    routing = { rule: matched ? { id: matched.id, name: matched.name, targetType: matched.targetType, targetGroupId: matched.targetGroupId, targetStaffId: matched.targetStaffId } : null };
-  } catch (err) {
-    sLog.warn({ err: err instanceof Error ? err.message : String(err) }, "sandbox: routing fail-soft");
-  }
-
-  // ── 9. ③ 對話模式 — CONSULT engine（同純函數 + Redis state；唔落 ConsultSession/AuditLog）──
-  let consultTransitionResult: TransitionResult | null = null;
-  let consultCreated = false;
-  let suppressDraft = false;
-  let consultAction: string | null = null;
-  let consultSettings: Awaited<ReturnType<typeof loadConsultSettings>> | null = null;
-  if (consultTrigger !== null && (st.state === null || st.state.terminal === null)) {
-    if (st.state === null || st.state.terminal !== null) {
-      st.state = freshConsultState(consultTrigger);
-      consultCreated = true;
-    }
-    const state = st.state;
-    consultSettings = await loadConsultSettings(prisma, clinic.id).catch(() => null);
-    const settings = consultSettings;
-    const namedProduct = await matchNamedProduct(prisma, clinic.id, consultTrigger, `${message} ${applyLexicon(message, lex)}`);
-    const priceAskCount = state.slots.meta?.priceAskCount ?? 0;
-    const textSignals = detectConsultSignals({
-      canonicalText: applyLexicon(message, lex),
-      rawText: message,
-      workflow: state.workflow,
-      external: { redFlagHit: rf.hit, complaint: result.intent === "COMPLAINT", windowExpired: !win.open, namedProduct },
-    });
-    const sig = {
-      ...textSignals,
-      intentDelta: computePurchaseIntentDelta(applyLexicon(message, lex), message, { priceAskCount, asksPrice: textSignals.asksPrice }),
-      idleExpired: false,
-    };
-    const transition = consultTransition(state, sig, settings
-      ? {
-          maxTurns: settings.advanced.maxTurns,
-          ctaAfterTurns: settings.advanced.ctaAfterTurns,
-          disabledRules: settings.disabledRules,
-          discovery: { skipSlots: settings.discoverySkipSlots },
-        }
-      : undefined);
-    consultTransitionResult = transition;
-    consultAction = transition.action;
-    // ── persist 到 Redis state（同 runner step 5 嘅欄語義；processed:false 零改動）──
-    if (transition.processed) {
-      const updatedObjection = transition.objection;
-      const objections = updatedObjection
-        ? [...state.objections.filter((o) => o.type !== updatedObjection.type), updatedObjection]
-        : state.objections;
-      const slots: Record<string, unknown> = { ...state.slots };
-      if (sig.asksPrice) slots.meta = { ...(slots.meta as object | undefined), priceAskCount: priceAskCount + 1 };
-      const askedSlots =
-        transition.askedSlot && !state.askedSlots.includes(transition.askedSlot)
-          ? [...state.askedSlots, transition.askedSlot]
-          : state.askedSlots;
-      st.state = {
-        ...state,
-        stage: transition.stage,
-        turnCount: state.turnCount + 1,
-        purchaseIntent: transition.intentAfter,
-        lastAction: transition.action,
-        objections,
-        askedSlots,
-        ctaGiven: transition.ctaGiven,
-        terminal: transition.terminal !== null ? transition.terminal : state.terminal,
-        candidateCategory: transition.candidateCategory !== null ? transition.candidateCategory : state.candidateCategory,
-        slots: sig.asksPrice ? (slots as ConsultSessionState["slots"]) : state.slots,
-      };
-    }
-    if (transition.action === "END_SESSION") suppressDraft = true;
-    // ★ 鐵律 3：HANDOFF_HUMAN / PAIN_TRIAGE terminal → 只顯示，唔建 StaffNotice
-  }
-
-  // ── 10. ⑥ 出文 — CONSULT LLM（同 worker C4 gate：8 action + processed + intent/urgency 未壓）──
-  let extractFailed = false;
-  if (
-    result.draft !== null &&
-    consultTransitionResult &&
-    consultTransitionResult.processed === true &&
-    consultAction !== null &&
-    CONSULT_LLM_ACTIONS.has(consultAction) &&
-    result.intent !== "URGENT_PAIN" &&
-    result.intent !== "COMPLAINT" &&
-    result.urgency !== "HIGH"
-  ) {
-    try {
-      // 1. usable 產品（同 runner：isProductUsable 鐵律 — unapproved 永遠唔入 prompt）
-      const products = await prisma.consultProduct.findMany({
-        where: { workflow: consultTrigger!, OR: [{ clinicId: clinic.id }, { clinicId: null }] },
-        orderBy: { sortOrder: "asc" },
-      });
-      const usable = products.filter(isProductUsable);
-      const usableProducts: ConsultLlmProductCtx[] = usable.map((p) => ({
-        code: p.code,
-        displayName: p.displayName,
-        brand: p.brand,
-        timeWording: p.timeWording,
-        avoidPhrases: p.avoidPhrases,
-      }));
-      // 2. Call #1 抽槽（同 function；失敗 = 降級保留原 draft，state 不變）
-      let extract: Awaited<ReturnType<typeof consultExtractSlots>>;
-      try {
-        extract = await consultExtractSlots({
-          text: message,
-          workflow: consultTrigger!,
-          recent: ctxMessages.map((m) => ({ direction: m.direction, body: m.body })),
-        });
-        llmCalls += 1;
-      } catch (err) {
-        extractFailed = true;
-        sLog.warn({ clinic: clinic.code, err: err instanceof Error ? err.message : String(err) }, "sandbox: extract failed — 保留原 draft");
-        extract = null as unknown as typeof extract;
-      }
-      if (extract) {
-        // slot merge（同 persistConsultExtraction latest-wins + clinicalSuitability/meta 鐵律 guard）
-        if (st.state) {
-          const cur = st.state.slots ?? {};
-          const next: Record<string, unknown> = { ...cur };
-          for (const [k, v] of Object.entries(extract.slotUpdates ?? {})) {
-            if (k === "clinicalSuitability" || k === "meta") continue; // 鐵律
-            next[k] = v;
-          }
-          st.state = { ...st.state, slots: next as ConsultSessionState["slots"] };
-        }
-        // 3. Call #2 生成（同 payload 欄位 — MD §6.2）
-        const payload = {
-          action: consultAction,
-          stage: consultTransitionResult.stage,
-          workflow: consultTrigger!,
-          candidateCategory: consultTransitionResult.candidateCategory,
-          products: usable.map((p) => ({
-            displayName: p.displayName,
-            positioning: p.positioning,
-            approvedWording: p.approvedWording,
-            timeWording: p.timeWording,
-          })),
-          priceRange: citedPriceDoc
-            ? { min: citedPriceDoc.priceMin, max: citedPriceDoc.priceMax, shortDisclaimer: selectPriceDisclaimer(citedPriceDoc) }
-            : null,
-          avoidPhrases: [...new Set(usable.flatMap((p) => p.avoidPhrases))],
-          discoveryQuestion:
-            consultAction === "ASK_DISCOVERY"
-              ? consultDiscoveryQuestion(consultTrigger!, consultTransitionResult.askedSlot, consultSettings?.discoveryQuestionOverrides ?? undefined)
-              : null,
-          recentMessages: ctxMessages
-            .filter((m) => typeof m.body === "string" && m.body.trim().length > 0)
-            .slice(-6)
-            .map((m) => ({ direction: (m.direction === "IN" ? "IN" : "OUT") as "IN" | "OUT", body: m.body as string })),
-        };
-        const gen = await consultGenerateDraft(payload);
-        llmCalls += 1;
-        if (gen.text) {
-          let finalDraft: string = gen.text;
-          result = { ...result, draft: finalDraft, model: gen.model ?? result.model };
-          // price-guard 重跑（同 worker — consult draft 取代咗舊 draft）
-          const pg = runPriceGuard({ draft: finalDraft, priceDoc: citedPriceDoc, priceIntent: priceTrace.triggered });
-          priceTrace.guard = { blocked: pg.blocked, disclaimerAppended: pg.disclaimerAppended, outOfRange: pg.outOfRange };
-          if (pg.blocked) {
-            finalDraft = pg.draft;
-            result = { ...result, draft: pg.draft, needsHuman: true };
-          } else if (pg.disclaimerAppended) {
-            finalDraft = pg.draft;
-            result = { ...result, draft: pg.draft };
-          }
-          // claim guard（同 worker §5 — BLOCK → 棄用草稿 → 人手提示 + needsHuman）
-          const cg = runClaimGuard({
-            draft: finalDraft,
-            products: usableProducts.map((p) => ({ ...p })),
-            hasBackendSlot: false,
-            priceDoc: citedPriceDoc ? { priceMin: citedPriceDoc.priceMin, priceMax: citedPriceDoc.priceMax } : null,
-          });
-          if (cg.blocked && cg.code) {
-            sLog.warn({ clinic: clinic.code, code: cg.code }, "sandbox: claim-guard blocked");
-            result = { ...result, draft: cg.draft, needsHuman: true };
-          }
-        }
-      }
-    } catch (err) {
-      // 同 runner fail-soft：保留原 draft（對話照行）
-      sLog.warn({ clinic: clinic.code, err: err instanceof Error ? err.message : String(err) }, "sandbox: consult llm turn failed — 保留原 draft");
-    }
-  }
-
+  const {
+    result,
+    knowledge,
+    priceTrace,
+    citedPriceDoc,
+    rf,
+    consultTrigger,
+    win,
+    consultGateAction,
+    routing,
+    consultOutcome,
+    autoLevel: level,
+    canDraft,
+    draftMode: pipelineDraftMode,
+    consultWindowExpired,
+    consultTakeoverSuppressed,
+    extractFailed,
+  } = outcome;
+  const suppressDraft = consultOutcome?.suppressDraft ?? false;
+  const consultCreated = consultOutcome?.created ?? false;
+  const consultAction = consultOutcome?.action ?? null;
+  const engineTransition = consultOutcome?.transition ?? null;
+  const llmCalls = (knowledge.ran ? 1 : 0) + 1 + outcome.consultLlmCalls;
   // ── 11. ⑦ 發唔發 — 同一套 getAutomationLevel（讀）+ blocks 顯示（唔發）──
-  const level = await getAutomationLevel(clinic.id, result.intent);
+  // ★ S4：level = runInboundAi 算好嘅 autoLevel（同一個 getAutomationLevel + 5min cache）
   const blocks: string[] = [];
   if (result.intent === "URGENT_PAIN" || result.urgency === "HIGH") blocks.push("急症/高緊急 — 任何模式永不自動發");
   if (rf.hit) blocks.push("紅旗命中 — 轉真人（沙盤只顯示）");
@@ -544,16 +311,11 @@ export async function runSandboxTurn(input: SandboxTurnInput): Promise<SandboxTu
     blocks.push("L3/L4 — 真 pipeline 開 booking slot-filling session（沙盤唔開）");
   const willAutoSend = level === "L2" && blocks.length === 0 && result.draft !== null;
 
-  // ── 12. 草稿最終判定 + draftMode（同 worker P2/M-1/M-3 語義）──
-  const consultWindowExpired = !win.open && consultTrigger !== null;
-  const consultTakeoverSuppressed = st.state?.humanTookOver === true && consultTrigger !== null;
-  let finalDraft: string | null = result.draft;
-  let draftMode: string | null = finalDraft === null ? "NO_DRAFT" : win.open ? "NORMAL" : "COPY_ONLY";
-  if (consultWindowExpired || consultTakeoverSuppressed) {
-    finalDraft = null;
-    draftMode = "NO_DRAFT";
-    blocks.push(consultWindowExpired ? "consult 過窗 — 唔出 free-form 草稿" : "店員接手（humanTookOver）— 停出草稿");
-  }
+  // ── 12. 草稿最終判定 + draftMode（★ S4：canDraft/draftMode 由 runInboundAi 算好 — 同 worker 同一判定點）──
+  const finalDraft: string | null = canDraft ? result.draft : null;
+  const draftMode: string | null = canDraft ? pipelineDraftMode : "NO_DRAFT";
+  if (!canDraft && consultWindowExpired) blocks.push("consult 過窗 — 唔出 free-form 草稿");
+  else if (!canDraft && consultTakeoverSuppressed) blocks.push("店員接手（humanTookOver）— 停出草稿");
   if (finalDraft !== null) {
     // OUT = 沙盤草稿入 context（下輪 LLM 睇到 — 同真 pipeline 對話歷史口徑）
     st.messages.push({ dir: "OUT", body: finalDraft, ts: new Date().toISOString() });
@@ -579,15 +341,15 @@ export async function runSandboxTurn(input: SandboxTurnInput): Promise<SandboxTu
     detail: { intent: result.intent, confidence: result.confidence, urgency: result.urgency, needsHuman: result.needsHuman, consultTrigger, sessionTriggerLlm: result.sessionTrigger ?? null },
   });
   // ③ 對話模式
-  if (consultTransitionResult) {
+  if (engineTransition) {
     const s = st.state!;
     steps.push({
       n: 3, name: STEP_NAMES[3],
       status: s.terminal ? "paused" : "ok",
-      summary: `${consultTrigger} session ${consultCreated ? "（新開）" : ""}：${state_stage_before(consultTransitionResult, s)} → ${s.stage}（row ${consultTransitionResult.row} / ${consultAction}）${s.terminal ? ` · 終止：${s.terminal}` : ""}`,
+      summary: `${consultTrigger} session ${consultCreated ? "（新開）" : ""}：${state_stage_before(engineTransition, s)} → ${s.stage}（row ${engineTransition.row} / ${consultAction}）${s.terminal ? ` · 終止：${s.terminal}` : ""}`,
       detail: {
-        workflow: consultTrigger, created: consultCreated, row: consultTransitionResult.row, action: consultAction,
-        stage: s.stage, stageBefore: consultTransitionResult.stage, terminal: s.terminal,
+        workflow: consultTrigger, created: consultCreated, row: engineTransition.row, action: consultAction,
+        stage: s.stage, stageBefore: engineTransition.stage, terminal: s.terminal,
         turnCount: s.turnCount, purchaseIntent: s.purchaseIntent, suppressDraft, gate: consultGateAction,
       },
     });
@@ -687,7 +449,7 @@ export async function runSandboxTurn(input: SandboxTurnInput): Promise<SandboxTu
 // ── helpers（step 摘要用 — 零邏輯，純呈現）────────────────────────────
 
 function state_stage_before(t: TransitionResult, after: ConsultSessionState): string {
-  // transition.stage = 本輪**開始時**嘅 stage（consultTransition base = session.stage）；
+  // transition.stage = 本輪**開始時**嘅 stage（engine transition base = session.stage）；
   // after.stage = 更新後。顯示「開始 → 更新後」。
   return t.stage === after.stage ? t.stage : `${t.stage}→${after.stage}`;
 }
