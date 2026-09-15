@@ -43,6 +43,7 @@ export const GET = handle(async (req: NextRequest) => {
     intents: r.intents,
     keywords: r.keywords,
     patientType: r.patientType,
+    treatmentTypes: r.treatmentTypes,
     targetType: r.targetType,
     targetGroupId: r.targetGroupId,
     targetGroupName: r.targetGroupId ? (groupName.get(r.targetGroupId)?.name ?? null) : null,
@@ -81,8 +82,12 @@ export const POST = handle(async (req: NextRequest) => {
   const raw = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   if (!raw) return NextResponse.json({ error: "bad_request" }, { status: 400 });
 
-  const [err, rule] = validateRuleBody(raw);
-  if (err) return NextResponse.json({ error: "bad_request", message: err }, { status: 400 });
+  const [err, rule] = await validateRuleBody(raw);
+  if (err) {
+    // cwi-followup-p0-20260915：字典取唔到 = 上游問題（502）；其餘 = 用戶輸入錯（400）
+    const status = err.startsWith("treatmentTypes 驗證失敗") ? 502 : 400;
+    return NextResponse.json({ error: status === 502 ? "workforce_unavailable" : "bad_request", message: err }, { status });
+  }
   const targetErr = await assertTargetsExist(rule!);
   if (targetErr) return NextResponse.json({ error: "bad_request", message: targetErr }, { status: 400 });
 
@@ -104,6 +109,7 @@ export const POST = handle(async (req: NextRequest) => {
       intents: rule!.intents,
       keywords: rule!.keywords,
       patientType: rule!.patientType,
+      treatmentTypes: rule!.treatmentTypes,
       targetType: rule!.targetType,
       targetGroupId: rule!.targetGroupId,
       targetStaffId: rule!.targetStaffId,

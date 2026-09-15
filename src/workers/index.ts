@@ -90,9 +90,14 @@ async function registerSchedulers() {
     name: "reminder-scan",
     data: {},
   });
+  // ★ cwi-followup-p0-20260915（MD §1.1）：公司主資料同步 — 每日 03:00（workforce → wa-inbox 快取；冪等）
+  await cronQueue.upsertJobScheduler("sched-company-sync", { pattern: "0 3 * * *" }, {
+    name: "company-sync",
+    data: {},
+  });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00, company-sync daily 03:00)"
   );
 }
 

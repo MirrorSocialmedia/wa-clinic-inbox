@@ -113,6 +113,23 @@ export const DictionariesResponse = z.object({
 });
 export type DictionariesResult = z.infer<typeof DictionariesResponse>;
 
+/** ★ cwi-followup-p0-20260915（MD §1.1）：公司主資料快取來源（workforce GET /companies，scope org）。
+ *  形狀對齊 workforce contract fixture test/fixtures/external-v1-companies.json（sha256 錨定）。
+ *  只回機構代碼表（id/name/code）— 零病人資料、零電話。 */
+const CompanyClinicSchema = z.object({ id: z.string(), code: z.string(), name: z.string() });
+export const CompaniesResponse = z.object({
+  v: z.literal(1),
+  companies: z.array(
+    z.object({
+      companyApricotId: z.string().optional(), // CWM Company 表而家無 apricot id 欄 → 唔回
+      id: z.string(), // = workforce Company.id（wa-inbox sourceId）
+      name: z.string(),
+      clinics: z.array(CompanyClinicSchema),
+    })
+  ),
+});
+export type CompaniesResult = z.infer<typeof CompaniesResponse>;
+
 const LastVisitSchema = z.object({ date: z.string(), providerName: z.string(), visitReasons: z.array(z.string()) });
 export const PatientLookupResponse = z.object({
   v: z.literal(1),
@@ -500,6 +517,14 @@ export async function fetchDictionaries(kind: "VISIT_REASON" | "BOOKING_TYPE"): 
   return result;
 }
 
+/**
+ * ★ cwi-followup-p0-20260915（MD §1.1）：公司主資料（wa-inbox Company 快取來源）。
+ * 唔設 cache — 同步 job 直接 call（03:00 cron + 手動「立即同步」）。
+ */
+export async function fetchCompanies(): Promise<CompaniesResult> {
+  return CompaniesResponse.parse(await wfGet("/api/external/v1/companies", {}));
+}
+
 /** 舊客匹配（phoneHash — 由 wa-inbox 用 PHONE_HASH_KEY 算好先傳；raw phone 永遠唔出 wa-inbox） */
 export async function lookupPatient(phoneHash: string): Promise<PatientLookupResult> {
   return PatientLookupResponse.parse(await wfGet("/api/external/v1/patient-lookup", { phoneHash }));
@@ -802,6 +827,10 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
     return mockDictionaries(params);
   }
 
+  if (path === "/api/external/v1/companies") {
+    return mockCompanies();
+  }
+
   if (path === "/api/external/v1/patient-lookup") {
     return mockPatientLookup(params);
   }
@@ -1045,6 +1074,21 @@ function mockDictionaries(params: Record<string, string>): unknown {
   if (!Array.isArray(items)) throw new WorkforceApiError(500, path);
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: dictionaries");
   return { v: 1, kind, items };
+}
+
+/** ★ cwi-followup-p0-20260915：companies mock — 決定性 fixture（sourceId 同 CWM dev seed 完全一樣，
+ *  dev 實跑同 mock 兩條路徑落同一套 id）。CJK 名稱同兩 repo dev DB 逐字一樣。 */
+function mockCompanies(): unknown {
+  const path = "/api/external/v1/companies";
+  log.info({ path, mock: true, status: 200 }, "workforce MOCK: companies");
+  return {
+    v: 1,
+    companies: [
+      { id: "fup0cmpa0000000000000000001", name: "菁薈", clinics: [{ id: "fup0tycl0000000000000000001", code: "TY", name: "TY 診所" }] },
+      { id: "fup0cmpb0000000000000000002", name: "臻善", clinics: [{ id: "fup0ymtc0000000000000000002", code: "YMT", name: "YMT 診所" }, { id: "e2ereconcltw00000000001", code: "TW", name: "E2E Recon TW 診所" }, { id: "e2ereconclmf00000000002", code: "MF", name: "E2E Recon MF 診所" }] },
+      { id: "fup0cmpc0000000000000000003", name: "匯樂", clinics: [{ id: "fup0tkwc0000000000000000003", code: "TKW", name: "TKW 診所" }, { id: "fup0ylcl0000000000000000004", code: "YL", name: "YL 診所" }, { id: "fup0wtcl0000000000000000005", code: "WTC", name: "WTC 診所" }] },
+    ],
+  };
 }
 
 type MockPatientData = {

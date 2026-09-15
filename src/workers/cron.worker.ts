@@ -32,12 +32,17 @@
  * - routing-escalate   每 5 分鐘 → cwi-routing-20260906（§3）：投訴兩級升級第二級 —
  *                                       規則命中後 N 分鐘（規則參數 escalateAfterMin）仍未接手
  *                                       → 通知升級組（出廠 = 主管組）+ 標 escalatedAt（只升一次；原子 claim 冪等）
+ * - company-sync       每日 03:00 → cwi-followup-p0-20260915（MD §1.1）：公司主資料同步（workforce →
+ *                                       wa-inbox 快取）— name-match 填 sourceId + upsert + Clinic.companyId；
+ *                                       結果落 CompanySyncRun（hub 健康列；冪等，重跑安全）
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
  */
 import { Worker } from "bullmq";
 import { cronQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import log from "@/lib/log";
+import prisma from "@/lib/prisma";
+import { syncCompaniesFromWorkforce } from "@/lib/company-sync";
 import { refreshAllClinics } from "@/lib/availability";
 import { runExpiry } from "@/lib/booking/expiry";
 import { runHealthCheck, type HealthOverrides } from "@/lib/health/check";
@@ -154,6 +159,17 @@ export async function startCronWorker(): Promise<Worker | null> {
           // Phase B（cwi-tmpl-20260824-b1）：T-24h 預約提醒；E2E 可手動 enqueue（pnpm e2e:cron reminder-scan）
           const r = await runReminderScan();
           return { ok: true, ...r };
+        }
+        case "company-sync": {
+          // cwi-followup-p0-20260915（MD §1.1）：公司主資料同步（冪等）— 結果落 CompanySyncRun
+          const r = await syncCompaniesFromWorkforce();
+          await prisma.companySyncRun.create({
+            data: r.ok
+              ? { status: "ok", summary: JSON.stringify(r.summary) }
+              : { status: "failed", summary: JSON.stringify({}), error: r.error },
+          });
+          log.info({ ok: r.ok }, "cron: company-sync → workforce 同步完成");
+          return r.ok ? { ok: true, ...r.summary } : { ok: false, error: r.error };
         }
         default:
           log.warn({ jobName: job.name }, "cron worker: unknown job — skip");

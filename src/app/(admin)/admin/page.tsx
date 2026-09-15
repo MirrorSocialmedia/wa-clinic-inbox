@@ -6,6 +6,7 @@ import { AccountCard } from "@/components/inbox/account-card";
 import { AlertsPanel, type AlertItem } from "./alerts-panel";
 import { HeldAlertsPanel } from "./held-alerts-panel";
 import { TotpCard } from "./totp-card";
+import { CompanySyncCard } from "./company-sync-card";
 
 /**
  * /admin — 總覽 + AI 狀態卡（Phase 2）。
@@ -346,6 +347,9 @@ export default async function AdminOverviewPage() {
           YELLOW/RED = 被 ban 前哨（每日 06:30 自動拉；跌落即 HIGH alert + 通知）。
         </p>
       </section>
+
+      {/* ── cwi-followup-p0-20260915（MD §1.1）：公司同步健康列（workforce 主資料快取 + 立即同步） ── */}
+      <CompanySyncCard />
 
       {/* ── 安全審計 H-2：TOTP 兩步驟（最小卡片） ── */}
       <TotpCard enabled={totpEnabled} />

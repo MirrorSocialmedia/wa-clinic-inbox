@@ -1,4 +1,5 @@
 import prisma from "@/lib/prisma";
+import { fetchDictionaries } from "@/lib/workforce/client";
 
 /**
  * ★ cwi-routing-20260906（MD §4.2）：路由規則 API 共用校驗（admin 管理頁 + reorder 同源）。
@@ -7,6 +8,8 @@ import prisma from "@/lib/prisma";
  * - intents / keywords 空 = 唔限；patientType null = 唔限（NEW | RETURNING）
  * - targetType: GROUP（要 targetGroupId）/ STAFF（要 targetStaffId）/ CLINIC_POOL（兩者都 null）
  * - escalateAfterMin 同 escalateToGroupId 要麼一齊有、要麼一齊無（升級兩件套）
+ * - ★ cwi-followup-p0-20260915（MD §1.3）：treatmentTypes = VISIT_REASON 字典 code 子集
+ *   （下拉選 — 唔准人手打字；code 唔喺字典 → 400；字典取唔到 → 502 fail-closed）
  */
 
 export const ROUTE_INTENTS = ["BOOKING_REQUEST", "QUESTION", "URGENT_PAIN", "COMPLAINT", "OUT_OF_SCOPE", "OTHER"] as const;
@@ -21,6 +24,7 @@ export interface RuleInput {
   intents: string[];
   keywords: string[];
   patientType: string | null;
+  treatmentTypes: string[];
   targetType: "GROUP" | "STAFF" | "CLINIC_POOL";
   targetGroupId: string | null;
   targetStaffId: string | null;
@@ -29,11 +33,12 @@ export interface RuleInput {
   escalateToGroupId: string | null;
 }
 
-/** 校驗 raw body → RuleInput；失敗返 [error message, null]。partial=true 時允許只送部分欄（PATCH）。 */
-export function validateRuleBody(
+/** 校驗 raw body → RuleInput；失敗返 [error message, null]。partial=true 時允許只送部分欄（PATCH）。
+ *  ★ cwi-followup-p0-20260915：改 async — treatmentTypes 要對 workforce 字典校驗（body 有先 call）。 */
+export async function validateRuleBody(
   raw: Record<string, unknown>,
   opts: { partial?: boolean; current?: Partial<RuleInput> } = {}
-): [string | null, RuleInput | null] {
+): Promise<[string | null, RuleInput | null]> {
   const base: RuleInput = {
     name: opts.current?.name ?? "",
     clinicId: opts.current?.clinicId ?? null,
@@ -42,6 +47,7 @@ export function validateRuleBody(
     intents: opts.current?.intents ?? [],
     keywords: opts.current?.keywords ?? [],
     patientType: opts.current?.patientType ?? null,
+    treatmentTypes: opts.current?.treatmentTypes ?? [],
     targetType: opts.current?.targetType ?? "CLINIC_POOL",
     targetGroupId: opts.current?.targetGroupId ?? null,
     targetStaffId: opts.current?.targetStaffId ?? null,
@@ -94,6 +100,25 @@ export function validateRuleBody(
       return ["patientType must be null|NEW|RETURNING", null];
     }
     base.patientType = raw.patientType as string | null;
+  }
+  if (set("treatmentTypes")) {
+    if (!Array.isArray(raw.treatmentTypes) || !raw.treatmentTypes.every((x) => typeof x === "string" && x.trim().length > 0) || raw.treatmentTypes.length > 30) {
+      return ["treatmentTypes must be string[] (≤30, 非空字串)", null];
+    }
+    const codes = [...new Set(raw.treatmentTypes.map((x: string) => x.trim()))];
+    if (codes.length > 0) {
+      // 對 workforce VISIT_REASON 字典校驗（唔准人手打字 — code 必喺字典）
+      let dict: { code: string }[];
+      try {
+        dict = (await fetchDictionaries("VISIT_REASON")).items;
+      } catch (e) {
+        return [`treatmentTypes 驗證失敗（workforce 字典取唔到）：${e instanceof Error ? e.message : String(e)}`.slice(0, 200), null];
+      }
+      const valid = new Set(dict.map((d) => d.code));
+      const bad = codes.filter((c) => !valid.has(c));
+      if (bad.length > 0) return [`treatmentTypes 有 code 唔喺 VISIT_REASON 字典：${bad.join(",")}`, null];
+    }
+    base.treatmentTypes = codes;
   }
   if (set("targetType")) {
     if (!ROUTE_TARGET_TYPES.includes(raw.targetType as (typeof ROUTE_TARGET_TYPES)[number])) {

@@ -27,6 +27,8 @@ interface RuleRow {
   intents: string[];
   keywords: string[];
   patientType: string | null;
+  /** ★ cwi-followup-p0-20260915（MD §1.3）：治療類型（VISIT_REASON 字典 code）— 空 = 唔限 */
+  treatmentTypes: string[];
   targetType: "GROUP" | "STAFF" | "CLINIC_POOL";
   targetGroupId: string | null;
   targetGroupName: string | null;
@@ -77,6 +79,7 @@ function conditionSummary(r: RuleRow): string {
   if (r.intents.length > 0) parts.push(r.intents.map((i) => INTENTS.find((x) => x.value === i)?.label ?? i).join("/"));
   if (r.keywords.length > 0) parts.push(`${r.keywords.join("/")}（關鍵詞）`);
   if (r.patientType) parts.push(r.patientType === "NEW" ? "新客" : "舊客");
+  if (r.treatmentTypes.length > 0) parts.push(`治療類型 ${r.treatmentTypes.join("/")}`);
   return parts.length > 0 ? parts.join(" + ") : "（空條件 — 全收）";
 }
 
@@ -356,6 +359,17 @@ function RuleEditor({
   const [keywords, setKeywords] = useState<string[]>(initial?.keywords ?? []);
   const [kwInput, setKwInput] = useState("");
   const [patientType, setPatientType] = useState<string>(initial?.patientType ?? "");
+  // ★ cwi-followup-p0-20260915（MD §1.3）：治療類型 — VISIT_REASON 字典下拉（唔准人手打字）
+  const [treatmentTypes, setTreatmentTypes] = useState<string[]>(initial?.treatmentTypes ?? []);
+  const [dictItems, setDictItems] = useState<{ code: string; des: string }[]>([]);
+  const [dictFailed, setDictFailed] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/dictionaries?kind=VISIT_REASON")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j) => setDictItems(j.items ?? []))
+      .catch(() => setDictFailed(true));
+  }, []);
   const [targetType, setTargetType] = useState<RuleRow["targetType"]>(initial?.targetType ?? "GROUP");
   const [targetGroupId, setTargetGroupId] = useState(initial?.targetGroupId ?? data.groups[0]?.id ?? "");
   const [targetStaffId, setTargetStaffId] = useState(initial?.targetStaffId ?? data.staff[0]?.id ?? "");
@@ -404,6 +418,7 @@ function RuleEditor({
         intents,
         keywords,
         patientType: patientType || null,
+        treatmentTypes,
         targetType,
         targetGroupId: targetType === "GROUP" ? targetGroupId || null : null,
         targetStaffId: targetType === "STAFF" ? targetStaffId || null : null,
@@ -486,6 +501,28 @@ function RuleEditor({
               <option value="RETURNING">舊客</option>
             </select>
           </label>
+          {/* ★ cwi-followup-p0-20260915（MD §1.3）：治療類型 — 字典下拉多選（唔准人手打字） */}
+          <div className="col-span-2">
+            <div className="text-xs font-medium text-t2 mb-1.5">
+              治療類型（多選；留空 = 唔限）
+              {dictFailed && <span className="text-danger-text ml-2">字典取唔到 — 未能選擇</span>}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {dictItems.map((d) => (
+                <button
+                  key={d.code}
+                  type="button"
+                  onClick={() => setTreatmentTypes((prev) => (prev.includes(d.code) ? prev.filter((x) => x !== d.code) : [...prev, d.code]))}
+                  className={`px-3 py-1 rounded-full text-xs border ${
+                    treatmentTypes.includes(d.code) ? "bg-brand-soft border-brand text-brand-text font-semibold" : "border-line text-t2 hover:bg-panel-2"
+                  }`}
+                >
+                  {d.code} {d.des}
+                </button>
+              ))}
+              {!dictFailed && dictItems.length === 0 && <span className="text-xs text-t3">（字典空）</span>}
+            </div>
+          </div>
         </div>
 
         <div>

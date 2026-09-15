@@ -21,7 +21,7 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
   const raw = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   if (!raw) return NextResponse.json({ error: "bad_request" }, { status: 400 });
 
-  const [err, rule] = validateRuleBody(raw, {
+  const [err, rule] = await validateRuleBody(raw, {
     partial: true,
     current: {
       name: current.name,
@@ -31,6 +31,7 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
       intents: current.intents,
       keywords: current.keywords,
       patientType: current.patientType,
+      treatmentTypes: current.treatmentTypes,
       targetType: current.targetType,
       targetGroupId: current.targetGroupId,
       targetStaffId: current.targetStaffId,
@@ -39,7 +40,11 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
       escalateToGroupId: current.escalateToGroupId,
     },
   });
-  if (err) return NextResponse.json({ error: "bad_request", message: err }, { status: 400 });
+  if (err) {
+    // cwi-followup-p0-20260915：字典取唔到 = 上游問題（502）；其餘 = 用戶輸入錯（400）
+    const status = err.startsWith("treatmentTypes 驗證失敗") ? 502 : 400;
+    return NextResponse.json({ error: status === 502 ? "workforce_unavailable" : "bad_request", message: err }, { status });
+  }
   const targetErr = await assertTargetsExist(rule!);
   if (targetErr) return NextResponse.json({ error: "bad_request", message: targetErr }, { status: 400 });
 
@@ -62,6 +67,7 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
       intents: rule!.intents,
       keywords: rule!.keywords,
       patientType: rule!.patientType,
+      treatmentTypes: rule!.treatmentTypes,
       targetType: rule!.targetType,
       targetGroupId: rule!.targetGroupId,
       targetStaffId: rule!.targetStaffId,

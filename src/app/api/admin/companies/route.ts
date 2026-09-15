@@ -20,6 +20,7 @@ export const GET = handle(async (req: NextRequest) => {
       code: true,
       name: true,
       enabled: true,
+      sourceId: true, // cwi-followup-p0-20260915：workforce 快取 key（null = 未配對）
       clinics: {
         select: { id: true, code: true, name: true },
         orderBy: { code: "asc" },
