@@ -32,6 +32,10 @@ const CJK_PHRASES = [
 const EN_PATTERNS = [/\bstop\b/i, /\bunsubscribe\b/i, /\bdo not contact me\b/i, /\bstop following up\b/i];
 
 const MAX_DETECT_LEN = 40;
+/** 出廠詞表總數（hub 健康警示「opt-out 詞未設」判定 — 0 = 詞表被清空）。 */
+export function optOutWordCount(): number {
+  return CJK_PHRASES.length + EN_PATTERNS.length;
+}
 
 /** 純函數（unit 可測）：body 係咪 opt-out 意圖。 */
 export function detectOptOutIntent(body: string | null | undefined): boolean {

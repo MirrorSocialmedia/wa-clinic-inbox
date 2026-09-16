@@ -3,8 +3,10 @@
 import { usePathname } from "next/navigation";
 import {
   ArrowLeft,
+  BadgeDollarSign,
   BarChart3,
   BellRing,
+  BookOpenText,
   Building2,
   CalendarDays,
   ClipboardCheck,
@@ -87,6 +89,8 @@ export function AdminShell({
         { href: "/admin/clinics", label: "診所設定", icon: Building2 },
         { href: "/schedule", label: "醫生時間表", icon: CalendarDays },
         { href: "/admin/followups", label: "主動跟進", icon: BellRing },
+        { href: "/admin/clinical-terms", label: "術語對照表", icon: BookOpenText },
+        { href: "/admin/quotes", label: "報價確認", icon: BadgeDollarSign },
       ],
     },
     {

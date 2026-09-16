@@ -450,6 +450,8 @@ export interface PatientRecordVisit {
   hasNote: boolean;
   noteKind: "STANDARD" | "TEMPLATE" | null;
   firstLine: string | null; // ≤60 字（MD §2.4 邊界 — 臨床全文只可經 /note）
+  /** cwi-followup-p4 S4：藥物 code（CWM 字典映名 + 抗生素旗；零全文 — code+name 只） */
+  rxCodes: { code: string; name: string; isAntibiotic: boolean }[];
 }
 
 export interface PatientRecordData {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import FollowupHubTab from "./followup-hub-tab";
 
 /**
  * ★ cwi-hub-b-20260914（Part B B.2/B.3/B.5）：AI 流程 hub client。
@@ -105,6 +106,8 @@ export default function AiHub({ role }: { role: string }) {
   const [runErr, setRunErr] = useState<string | null>(null);
   const [demoIdx, setDemoIdx] = useState(0);
   const [goldenMsg, setGoldenMsg] = useState<string | null>(null);
+  // ★ cwi-followup-p4 S6（MD §5.4）：hub 第二 tab「主動跟進」（三步 + 健康警示 5 項）
+  const [tab, setTab] = useState<"flow" | "followup">("flow");
   const logRef = useRef<HTMLDivElement>(null);
   const keyRef = useRef(0);
 
@@ -248,6 +251,35 @@ export default function AiHub({ role }: { role: string }) {
 
   return (
     <div className="flex flex-col gap-5">
+      {/* ── cwi-followup-p4 S6（MD §5.4）：tab 切換 — 病人嚟訊（七步） | 主動跟進（三步）── */}
+      <div className="flex gap-1 border-b border-line" role="tablist" data-e2e="hub-tabs">
+        <button
+          role="tab"
+          aria-selected={tab === "flow"}
+          onClick={() => setTab("flow")}
+          data-e2e="hub-tab-flow"
+          className={`px-4 py-2 text-[13px] border-b-2 -mb-px font-medium ${
+            tab === "flow" ? "border-brand text-t1" : "border-transparent text-t3 hover:text-t2"
+          }`}
+        >
+          病人嚟訊（七步）
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === "followup"}
+          onClick={() => setTab("followup")}
+          data-e2e="hub-tab-followup"
+          className={`px-4 py-2 text-[13px] border-b-2 -mb-px font-medium ${
+            tab === "followup" ? "border-brand text-t1" : "border-transparent text-t3 hover:text-t2"
+          }`}
+        >
+          主動跟進（三步）
+        </button>
+      </div>
+      {tab === "followup" ? (
+        <FollowupHubTab />
+      ) : (
+      <>
       {/* ── 頂部：系統健康列（B-4 — 紅底先顯示；全部正常 = 整列唔 render）── */}
       {(healthBad.length > 0 || swBad) && (
         <div className="flex flex-wrap gap-2" role="alert">
@@ -464,6 +496,8 @@ export default function AiHub({ role }: { role: string }) {
           {!summary && !loadErr && <div className="px-5 py-6 text-[12.5px] text-t3">載入中…</div>}
         </div>
       </section>
+      </>
+      )}
     </div>
   );
 }

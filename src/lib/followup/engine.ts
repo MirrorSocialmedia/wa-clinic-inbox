@@ -32,8 +32,12 @@ import { hkDateOffset, hkTodayStr } from "@/lib/availability";
 import {
   fetchAppointmentsByClinic,
   fetchPatientBalance,
+  fetchClinicVisits,
+  fetchQuotes,
   WorkforceApiError,
+  type BatchVisit,
   type ClinicAppointment,
+  type WorkforceQuote,
 } from "@/lib/workforce/client";
 import { getWindowState } from "@/lib/wa/window";
 
@@ -310,6 +314,7 @@ interface FollowupRuleRow {
   trigger: string;
   delayValue: number;
   delayUnit: string;
+  reasonCodes: string[]; // C/D 類：visitReason code 集（P4）
   minAmount: number | null;
   templateName: string;
   level: string;
@@ -527,6 +532,267 @@ export interface FollowupScanResult {
   optOut: number;
   noConversation: number;
   workforceFail: number;
+  booked: number; // P4：E 類「報價後已有 booking」跳過數
+}
+
+// ── C：AFTER_TREATMENT（術後關懷 — P4；batch #1 visits + rxCodes 抗生素判定）──
+// 觸發：visitReasonCodes ∩ rule.reasonCodes 唔空 **且** 該 visit rxCodes 有抗生素
+//   （AND 語義 — 老細 2026-09-16 拍板；progress 設計 #10）。洗牙（0008）唔喺 rule.reasonCodes → 唔會出。
+// 口徑：bookingStatus >= 0（實際到診/已排；-3 爽約 / -7 釋放唔計）；
+//   同病人多筆合格 visit → 取最近一筆（dueAt 由佢起）。
+async function scanAfterTreatment(
+  rule: FollowupRuleRow,
+  clinics: { id: string; code: string }[],
+  now: Date,
+  counters: Record<string, number>
+): Promise<void> {
+  const delayMs = delayToMs(rule.delayValue, rule.delayUnit);
+  const windowDays = Math.ceil(delayMs / DAY_MS) + 14; // 緩衝：note 遲到索引
+  const from = hkDateOffset(-windowDays, now);
+  const to = hkTodayStr(now);
+  for (const clinic of clinics) {
+    let visits: BatchVisit[];
+    try {
+      visits = (await fetchClinicVisits(clinic.code, from, to, { reasonCodes: rule.reasonCodes })).visits;
+    } catch (e) {
+      if (e instanceof WorkforceApiError && (e.status === 404 || e.status === 503 || e.status === 0)) {
+        counters.workforceFail = (counters.workforceFail ?? 0) + 1;
+        continue;
+      }
+      throw e;
+    }
+    const { byHash } = await loadClinicPairing(clinic.id);
+    // 同病人取最近合格 visit
+    const best = new Map<string, BatchVisit>();
+    for (const v of visits) {
+      if (v.bookingStatus < 0) continue; // 爽約/釋放唔計
+      if (!v.visitReasonCodes.some((c) => rule.reasonCodes.includes(c))) continue; // visitReason ∩ rule（defensive — server 已過濾，mock 唔會）
+      if (!v.rxCodes.some((rx) => rx.isAntibiotic)) continue; // 無抗生素 → 唔觸發（AND）
+      const prev = best.get(v.patientApricotId);
+      if (!prev || v.visitDate > prev.visitDate) best.set(v.patientApricotId, v);
+    }
+    for (const v of best.values()) {
+      if (new Date(`${v.visitDate}T23:59:59+08:00`).getTime() > now.getTime()) continue; // 未完結嘅日
+      const dueAt = new Date(new Date(`${v.visitDate}T00:00:00+08:00`).getTime() + delayMs);
+      if (dueAt.getTime() > now.getTime()) continue; // 未到期
+      const pair = (v.phoneHashes ?? []).map((h) => byHash.get(h)).find(Boolean);
+      if (!pair || !pair.conversationId) {
+        counters.noConversation = (counters.noConversation ?? 0) + 1;
+        continue;
+      }
+      const template = await prisma.followupTemplate.findUnique({ where: { key: rule.templateName } });
+      await createTask(
+        rule,
+        {
+          clinicId: clinic.id,
+          conversationId: pair.conversationId,
+          contactId: pair.contactId,
+          patientApricotId: v.patientApricotId,
+          phoneHashes: v.phoneHashes ?? [],
+          ruleId: rule.id,
+          dueAt,
+          templateName: rule.templateName,
+          templateVars: { visitDate: v.visitDate },
+          contextJson: { visitId: v.visitId, visitDate: v.visitDate, matchedReasons: v.visitReasonCodes.filter((c) => rule.reasonCodes.includes(c)), hasAntibiotic: true, clinicCode: clinic.code },
+        },
+        template,
+        now,
+        counters
+      );
+    }
+  }
+}
+
+// ── D：RECALL_NO_REPEAT（定期召回 — P4；冪等 = 期間再做過同類唔會出）──────
+// 觸發：rule.reasonCodes 指定治療類型；window 內該病人**最近**一筆同類到診
+//   max(visitDate)；now - maxVisitDate >= interval（delayValue/delayUnit）→ due。
+//   window = min(365, 1.5×interval + 30d) — 365 係 CWM #1 上限；interval ≤ 12 月全覆蓋。
+// decide（progress #11）：window 內冇同類 visit = 唔敢斷言「從前有做」→ 唔觸發（寧缺勿濫）。
+async function scanRecallNoRepeat(
+  rule: FollowupRuleRow,
+  clinics: { id: string; code: string }[],
+  now: Date,
+  counters: Record<string, number>
+): Promise<void> {
+  const intervalMs = delayToMs(rule.delayValue, rule.delayUnit);
+  const windowDays = Math.min(365, Math.ceil((intervalMs * 1.5) / DAY_MS) + 30);
+  const from = hkDateOffset(-windowDays, now);
+  const to = hkTodayStr(now);
+  for (const clinic of clinics) {
+    let visits: BatchVisit[];
+    try {
+      visits = (await fetchClinicVisits(clinic.code, from, to, { reasonCodes: rule.reasonCodes })).visits;
+    } catch (e) {
+      if (e instanceof WorkforceApiError && (e.status === 404 || e.status === 503 || e.status === 0)) {
+        counters.workforceFail = (counters.workforceFail ?? 0) + 1;
+        continue;
+      }
+      throw e;
+    }
+    const { byHash } = await loadClinicPairing(clinic.id);
+    const latest = new Map<string, BatchVisit>();
+    for (const v of visits) {
+      if (v.bookingStatus < 0) continue;
+      if (!v.visitReasonCodes.some((c) => rule.reasonCodes.includes(c))) continue; // visitReason ∩ rule（defensive）
+      const prev = latest.get(v.patientApricotId);
+      if (!prev || v.visitDate > prev.visitDate) latest.set(v.patientApricotId, v);
+    }
+    for (const v of latest.values()) {
+      const lastMs = new Date(`${v.visitDate}T00:00:00+08:00`).getTime();
+      if (now.getTime() - lastMs < intervalMs) continue; // 期間再做過 / 未夠 interval → 唔出（冪等）
+      const dueAt = new Date(lastMs + intervalMs);
+      if (dueAt.getTime() > now.getTime()) continue;
+      const pair = (v.phoneHashes ?? []).map((h) => byHash.get(h)).find(Boolean);
+      if (!pair || !pair.conversationId) {
+        counters.noConversation = (counters.noConversation ?? 0) + 1;
+        continue;
+      }
+      const template = await prisma.followupTemplate.findUnique({ where: { key: rule.templateName } });
+      await createTask(
+        rule,
+        {
+          clinicId: clinic.id,
+          conversationId: pair.conversationId,
+          contactId: pair.contactId,
+          patientApricotId: v.patientApricotId,
+          phoneHashes: v.phoneHashes ?? [],
+          ruleId: rule.id,
+          dueAt,
+          templateName: rule.templateName,
+          templateVars: { lastVisitDate: v.visitDate, intervalMonths: rule.delayValue },
+          contextJson: { lastVisitDate: v.visitDate, visitId: v.visitId, matchedReasons: v.visitReasonCodes.filter((c) => rule.reasonCodes.includes(c)), intervalUnit: rule.delayUnit, clinicCode: clinic.code },
+        },
+        template,
+        now,
+        counters
+      );
+    }
+  }
+}
+
+// ── E：QUOTED_NOT_BOOKED（報價未成交 — P4；CWM 報價 + W 本地 Bookings 為準）──
+// 觸發：quote（confirmed/corrected 或 pending 高信心，非 discarded）
+//   + sourceVisitDate + delay <= now + 報價之後冇「對應 booking」。
+// decide（progress #12）：對應 booking = 該病人對話之後任何 booking（唔 match 療程類型 —
+//   保守口徑：有 booking = 病人返咗門診 = 唔算「未成交」）。
+//   主查 = W 本地 BookingRequest（PENDING/CONFIRMED，requestedDate >= 報價日）；
+//   輔助 = CWM appointments feed（bookingStatus >= 0，date >= 報價日）— 本地無行先查。
+async function scanQuotedNotBooked(
+  rule: FollowupRuleRow,
+  clinics: { id: string; code: string }[],
+  now: Date,
+  counters: Record<string, number>
+): Promise<void> {
+  const delayMs = delayToMs(rule.delayValue, rule.delayUnit);
+  let quotes: WorkforceQuote[];
+  try {
+    quotes = (await fetchQuotes({ status: "confirmed,corrected,pending", limit: 500 })).quotes;
+  } catch (e) {
+    if (e instanceof WorkforceApiError && (e.status === 404 || e.status === 503 || e.status === 0)) {
+      counters.workforceFail = (counters.workforceFail ?? 0) + 1;
+      return;
+    }
+    throw e;
+  }
+  // patient → 對話（pinned 配對 — 本地）
+  const clinicIds = clinics.map((c) => c.id);
+  const convs = await prisma.conversation.findMany({
+    where: { clinicId: { in: clinicIds } },
+    select: { id: true, clinicId: true, contactId: true, pinnedPatientApricotId: true },
+  });
+  const convByPatient = new Map<string, { id: string; clinicId: string; contactId: string }>();
+  for (const c of convs) {
+    if (c.pinnedPatientApricotId) convByPatient.set(`${c.clinicId}|${c.pinnedPatientApricotId}`, c);
+  }
+  // 報價後 booking 主查（本地 Bookings — 一次 query 晒）
+  const dueQuotes: WorkforceQuote[] = quotes.filter((q) => {
+    if (q.status === "discarded") return false;
+    if (q.status === "pending" && q.certainty !== "high") return false;
+    return new Date(`${q.sourceVisitDate}T00:00:00+08:00`).getTime() + delayMs <= now.getTime();
+  });
+  if (!dueQuotes.length) return;
+  const patientIds = [...new Set(dueQuotes.map((q) => q.patientApricotId))];
+  const convIds = convs.map((c) => c.id);
+  const bookRows = await prisma.bookingRequest.findMany({
+    where: { conversationId: { in: convIds }, status: { in: ["PENDING", "CONFIRMED"] } },
+    select: { conversationId: true, requestedDate: true },
+  });
+  const bookedByConv = new Map<string, string[]>(); // convId → requestedDate[]
+  for (const b of bookRows) {
+    const arr = bookedByConv.get(b.conversationId) ?? [];
+    arr.push(b.requestedDate);
+    bookedByConv.set(b.conversationId, arr);
+  }
+  const apptClinicCache = new Map<string, ClinicAppointment[] | null>();
+  for (const clinic of clinics) {
+    const clinicQuotes = dueQuotes.filter((q) => q.clinicCode === clinic.code);
+    if (!clinicQuotes.length) continue;
+    const { byHash } = await loadClinicPairing(clinic.id);
+    // 同一病人只建一條（取最新報價）
+    const best = new Map<string, WorkforceQuote>();
+    for (const q of clinicQuotes) {
+      const prev = best.get(q.patientApricotId);
+      if (!prev || q.sourceVisitDate > prev.sourceVisitDate) best.set(q.patientApricotId, q);
+    }
+    for (const q of best.values()) {
+      const conv = convByPatient.get(`${clinic.id}|${q.patientApricotId}`);
+      if (!conv) {
+        counters.noConversation = (counters.noConversation ?? 0) + 1;
+        continue;
+      }
+      // 主查：本地 booking（對話級）
+      const localDates = bookedByConv.get(conv.id) ?? [];
+      let booked = localDates.some((d) => d >= q.sourceVisitDate);
+      if (!booked && localDates.length === 0) {
+        // 輔助：CWM appointments（本地無行 = 可能另一渠道落單）
+        const from = q.sourceVisitDate;
+        const to = hkDateOffset(1, now);
+        let appts = apptClinicCache.get(clinic.code);
+        if (appts === undefined) {
+          try {
+            const res = await fetchAppointmentsByClinic(clinic.code, from, to);
+            appts = res.appointments;
+          } catch (e) {
+            if (e instanceof WorkforceApiError && (e.status === 404 || e.status === 503 || e.status === 0)) {
+              appts = null;
+            } else {
+              throw e;
+            }
+          }
+          apptClinicCache.set(clinic.code, appts);
+        }
+        if (appts) {
+          booked = appts.some(
+            (a) => a.patientApricotId === q.patientApricotId && a.bookingStatus >= 0 && a.date >= q.sourceVisitDate
+          );
+        }
+      }
+      if (booked) {
+        counters.booked = (counters.booked ?? 0) + 1;
+        continue;
+      }
+      const dueAt = new Date(new Date(`${q.sourceVisitDate}T00:00:00+08:00`).getTime() + delayMs);
+      const amount = q.amountMin == null ? null : q.amountMax && q.amountMax !== q.amountMin ? `${q.amountMin}-${q.amountMax}` : `${q.amountMin}${q.perUnit ? "@" : ""}`;
+      await createTask(
+        rule,
+        {
+          clinicId: clinic.id,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          patientApricotId: q.patientApricotId,
+          phoneHashes: [], // 報價 lane 無 phoneHashes（患者經 pinned 配對）
+          ruleId: rule.id,
+          dueAt,
+          templateName: rule.templateName,
+          templateVars: { quoteDate: q.sourceVisitDate, item: q.nameCn ?? q.text, amount: amount ?? "" },
+          contextJson: { quoteId: q.id, quoteDate: q.sourceVisitDate, item: q.text, nameCn: q.nameCn, amountMin: q.amountMin, amountMax: q.amountMax, perUnit: q.perUnit, intent: q.intent, quoteStatus: q.status, certainty: q.certainty, clinicCode: clinic.code },
+        },
+        await prisma.followupTemplate.findUnique({ where: { key: rule.templateName } }),
+        now,
+        counters
+      );
+    }
+  }
 }
 
 export async function runFollowupScan(now: Date = new Date()): Promise<FollowupScanResult> {
@@ -545,6 +811,7 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
     workforceFail: 0,
     balanceMiss: 0,
     belowThreshold: 0,
+    booked: 0,
   };
   // 計數映射：shouldSkipCreation 回傳 key → 對外 summary
   const origCreate = createTask;
@@ -565,9 +832,17 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
         case "OUTSTANDING_BALANCE":
           await scanOutstandingBalance(rule, scope, now, counters);
           break;
+        case "AFTER_TREATMENT": // C（P4）
+          await scanAfterTreatment(rule, scope, now, counters);
+          break;
+        case "RECALL_NO_REPEAT": // D（P4）
+          await scanRecallNoRepeat(rule, scope, now, counters);
+          break;
+        case "QUOTED_NOT_BOOKED": // E（P4）
+          await scanQuotedNotBooked(rule, scope, now, counters);
+          break;
         default:
-          // C/D/E（P4）— 規則唔會出廠 enabled；防呆 log
-          log.warn({ rule: rule.id, trigger: rule.trigger }, "followup: 未知 trigger（P4 範圍）— 跳過");
+          log.warn({ rule: rule.id, trigger: rule.trigger }, "followup: 未知 trigger — 跳過");
           break;
       }
     } catch (err) {
@@ -588,6 +863,7 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
     optOut: counters.optOut ?? 0,
     noConversation: counters.noConversation ?? 0,
     workforceFail: counters.workforceFail ?? 0,
+    booked: counters.booked ?? 0,
   };
   log.info({ ...result }, "followup: scan done");
   return result;

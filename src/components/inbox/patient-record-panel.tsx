@@ -315,12 +315,36 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
               )
             ) : null}
             {tab === "meds" ? (
-              /* 藥物：P1 契約無藥物欄（#4 唔回 rxCodes）— empty-state 指引（已拍板） */
-              <div className="text-center py-10" data-e2e="p2-meds-empty">
-                <Pill size={20} className="mx-auto mb-2 opacity-40 text-t3" />
-                <div className="text-[12px] text-t2">藥物資訊寫喺臨床記錄內</div>
-                <div className="text-[11px] text-t3 mt-1">喺「到診」分頁撳「展開臨床記錄」查看</div>
-              </div>
+              /* 藥物：cwi-followup-p4 S4/S6 — #4 回 rxCodes（CWM 字典映名 + 抗生素旗；零全文） */
+              data.visits.every((v) => (v.rxCodes ?? []).length === 0) ? (
+                <div className="text-center py-10" data-e2e="p2-meds-empty">
+                  <Pill size={20} className="mx-auto mb-2 opacity-40 text-t3" />
+                  <div className="text-[12px] text-t2">索引窗內冇藥物記錄</div>
+                  <div className="text-[11px] text-t3 mt-1">藥物 code 由臨床記錄抽取；詳細內容喺「到診」分頁「展開臨床記錄」</div>
+                </div>
+              ) : (
+                <div className="space-y-2" data-e2e="p2-meds-list">
+                  {data.visits
+                    .filter((v) => (v.rxCodes ?? []).length > 0)
+                    .map((v) => (
+                      <div key={v.visitId} className="bg-panel border border-line rounded-xl p-3" data-e2e={`p2-meds-${v.visitId}`}>
+                        <div className="text-[11px] text-t3 mb-1.5">{v.visitDate} 用藥</div>
+                        <div className="space-y-1">
+                          {(v.rxCodes ?? []).map((rx) => (
+                            <div key={rx.code} className="flex items-center gap-2 text-[12px]" data-e2e={`p2-rx-${v.visitId}-${rx.code}`}>
+                              <Pill size={12} className="text-brand-text shrink-0" />
+                              <span className="text-t1">{rx.name}</span>
+                              <span className="text-t3 font-mono text-[10px]">({rx.code})</span>
+                              {rx.isAntibiotic && (
+                                <span className="px-1 py-0.5 rounded text-[9px] bg-danger-soft text-danger-text">抗生素</span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )
             ) : null}
             {tab === "bills" ? (
               /* 帳單：#6 只回 ttlAmt/osAmt 總額 — 總額卡（已拍板） */

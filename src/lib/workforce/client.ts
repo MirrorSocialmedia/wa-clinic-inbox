@@ -169,6 +169,12 @@ export type AppointmentsResult = z.infer<typeof AppointmentsResponse>;
 // ── P2 病人記錄 contract（followup-v2 MD §2.6 #3/#4/#5/#6/#8 — 對齊 CWM dev stub）──
 // ★ export：contract 執行點 — zod strip 唔識欄位（臨床全文只可經 #5 note 欄入下游）。
 
+const RxCodeSchema = z.object({
+  code: z.string(),
+  name: z.string(),
+  isAntibiotic: z.boolean(), // cwi-followup-p4 S4：C 類抗生素判定
+});
+
 const VisitRowSchema = z.object({
   visitId: z.string(),
   visitDate: z.string(), // YYYY-MM-DD（HK 日界）
@@ -177,6 +183,7 @@ const VisitRowSchema = z.object({
   visitReasonCodes: z.array(z.string()),
   providerCode: z.string().nullable(),
   hasNote: z.boolean(),
+  rxCodes: z.array(RxCodeSchema), // cwi-followup-p4 S4（零全文 — code+name+抗生素旗）
   noteKind: z.enum(["STANDARD", "TEMPLATE"]).nullable(),
   firstLine: z.string().max(60).nullable(), // ≤60 字（MD §2.4 邊界）
 });
@@ -187,6 +194,72 @@ export const PatientVisitsResponse = z.object({
 });
 export type PatientVisit = z.infer<typeof VisitRowSchema>;
 export type PatientVisitsResult = z.infer<typeof PatientVisitsResponse>;
+
+// ── cwi-followup-p4（S3/S4/S5）：batch #1 visits + 報價 + 術語表 ──────────
+export const BatchVisitsResponse = z.object({
+  v: z.literal(1),
+  visits: z.array(
+    z.object({
+      visitId: z.string(),
+      patientApricotId: z.string(),
+      patientCode: z.string(),
+      phoneHashes: z.array(z.string()), // 只 hash（零原始電話）
+      visitDate: z.string(),
+      clinicCode: z.string(),
+      bookingStatus: z.number().int(),
+      visitReasonCodes: z.array(z.string()),
+      providerCode: z.string().nullable(),
+      hasNote: z.boolean(),
+      quotedItems: z.unknown().nullable(),
+      rxCodes: z.array(RxCodeSchema),
+      billTtlAmt: z.number().int().nullable(),
+      billOsAmt: z.number().int().nullable(),
+    })
+  ),
+});
+export type BatchVisit = z.infer<typeof BatchVisitsResponse>["visits"][number];
+export type BatchVisitsResult = z.infer<typeof BatchVisitsResponse>;
+
+export const QuoteSchema = z.object({
+  id: z.string(),
+  patientApricotId: z.string(),
+  clinicCode: z.string(),
+  sourceVisitDate: z.string(),
+  text: z.string(),
+  termShorthand: z.string().nullable(),
+  nameCn: z.string().nullable(),
+  amountMin: z.number().int().nullable(),
+  amountMax: z.number().int().nullable(),
+  perUnit: z.boolean(),
+  fdiTeeth: z.array(z.string()),
+  intent: z.enum(["not_done", "unknown"]),
+  certainty: z.enum(["high", "low"]),
+  source: z.enum(["parser", "llm", "manual"]),
+  status: z.enum(["pending", "confirmed", "corrected", "discarded"]),
+});
+export const QuotesResponse = z.object({ v: z.literal(1), quotes: z.array(QuoteSchema) });
+export type WorkforceQuote = z.infer<typeof QuoteSchema>;
+export type QuotesResult = z.infer<typeof QuotesResponse>;
+export const QuoteDecisionResponse = z.object({
+  v: z.literal(1),
+  id: z.string(),
+  status: z.enum(["confirmed", "corrected", "discarded"]),
+  termMapUpserted: z.boolean(),
+});
+export type QuoteDecisionResult = z.infer<typeof QuoteDecisionResponse>;
+
+export const TermEntrySchema = z.object({
+  id: z.string(),
+  shorthand: z.string(),
+  nameCn: z.string(),
+  nameEn: z.string().nullable(),
+  usedFor: z.array(z.string()),
+  active: z.boolean(),
+  updatedAt: z.string(),
+});
+export const TermMapResponse = z.object({ v: z.literal(1), terms: z.array(TermEntrySchema) });
+export type WorkforceTerm = z.infer<typeof TermEntrySchema>;
+export type TermMapResult = z.infer<typeof TermMapResponse>;
 
 /** 兩種樣板（MD §0.3 — 對齊 CWM NoteText）：STANDARD 四段 / TEMPLATE blocks（Tx 原文保留換行）。 */
 const NoteStandardSchema = z.object({
@@ -374,6 +447,17 @@ const WORKFORCE_TIMEOUT_MS = 3000;
  * real mode fetch：log 只 path + status（零 body）。
  * 4xx/5xx 時只 parse error body 嘅 `code` 欄（分類標籤，供路由分支）— body 本身唔入 log、唔洩傳。
  */
+// 🔴 鐵律 7：CWM 外部調用限速 ≥400ms/call（in-process gate；mock 路豁免）。
+const CWM_MIN_INTERVAL_MS = Math.max(0, Number(process.env.WORKFORCE_MIN_INTERVAL_MS ?? 400));
+let lastCwmCallAt = 0;
+async function cwmRateGate(): Promise<void> {
+  if (process.env.WORKFORCE_MOCK === "1") return;
+  if (CWM_MIN_INTERVAL_MS <= 0) return;
+  const wait = lastCwmCallAt + CWM_MIN_INTERVAL_MS - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastCwmCallAt = Date.now();
+}
+
 async function wfFetch(
   method: "GET" | "POST" | "PUT",
   path: string,
@@ -381,6 +465,7 @@ async function wfFetch(
   body?: unknown,
   extraHeaders?: Record<string, string>,
 ): Promise<unknown> {
+  await cwmRateGate();
   const url = new URL(path, process.env.WORKFORCE_API_URL); // http://127.0.0.1:<port>
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
@@ -647,6 +732,83 @@ export async function fetchPatientVisits(patientApricotId: string, limit = 50): 
   );
 }
 
+/** #1 病人到診 batch（MD §2.6 #1 — C/D 引擎觸發來源；≤366 日窗口）。 */
+export async function fetchClinicVisits(
+  clinicCode: string,
+  from: string,
+  to: string,
+  opts?: { reasonCodes?: string[]; bookingStatuses?: number[] }
+): Promise<BatchVisitsResult> {
+  const params: Record<string, string> = { clinicCode, from, to };
+  (opts?.reasonCodes ?? []).forEach((c) => appendAll(params, "reasonCodes", c));
+  (opts?.bookingStatuses ?? []).forEach((b) => appendAll(params, "bookingStatus", String(b)));
+  return BatchVisitsResponse.parse(await wfGet(`/api/external/v1/patients/visits`, params));
+}
+function appendAll(params: Record<string, string>, key: string, val: string): void {
+  params[key] = params[key] ? `${params[key]},${val}` : val;
+}
+
+/** E 類報價查詢（CWM /quotes — per patient 或 batch；零原始電話）。 */
+export async function fetchQuotes(opts?: {
+  patientApricotId?: string;
+  status?: string;
+  limit?: number;
+}): Promise<QuotesResult> {
+  const params: Record<string, string> = {};
+  if (opts?.patientApricotId) params.patientApricotId = opts.patientApricotId;
+  if (opts?.status) params.status = opts.status;
+  if (opts?.limit) params.limit = String(opts.limit);
+  return QuotesResponse.parse(await wfGet(`/api/external/v1/quotes`, params));
+}
+
+/** 報價確認隊列決定：✓ confirm / ✎ correct / ✗ discard（teachTerm = 順手教字典）。 */
+export async function decideQuote(
+  id: string,
+  body: {
+    action: "confirm" | "correct" | "discard";
+    fields?: { amountMin?: number; amountMax?: number; termShorthand?: string | null; nameCn?: string; text?: string };
+    teachTerm?: { shorthand: string; nameCn: string; nameEn?: string; usedFor?: string[] };
+    correctionNote?: string;
+    decidedBy?: string;
+  }
+): Promise<QuoteDecisionResult> {
+  return QuoteDecisionResponse.parse(
+    await wfSend("POST", `/api/external/v1/quotes/${encodeURIComponent(id)}/decision`, {}, body)
+  );
+}
+
+/** 術語表讀（admin 頁）— CWM /clinical-term-map。 */
+export async function fetchTermMap(): Promise<TermMapResult> {
+  return TermMapResponse.parse(await wfGet(`/api/external/v1/clinical-term-map`, {}));
+}
+
+/** 術語表寫（admin 頁；只詞表可改 — 解析規則唔可編輯）。 */
+export async function putTermMap(
+  terms: { shorthand: string; nameCn: string; nameEn?: string | null; usedFor?: string[]; active?: boolean }[]
+): Promise<TermMapResult> {
+  return TermMapResponse.parse(await wfSend("PUT", `/api/external/v1/clinical-term-map`, {}, { terms }));
+}
+
+// ── cwi-followup-p4 S6：hub 健康警示（索引 job / 電話正規化率 — 零內容狀態）──
+export const ClinicalIndexStatusResponse = z.object({
+  v: z.literal(1),
+  lastNightly: z
+    .object({
+      status: z.string(),
+      finishedAt: z.string().nullable(),
+      errors: z.number().int(),
+      lastError: z.string().nullable(),
+    })
+    .nullable(),
+  phoneNormalize: z.object({ total: z.number().int(), withHash: z.number().int(), rate: z.number().nullable() }),
+});
+export type ClinicalIndexStatus = z.infer<typeof ClinicalIndexStatusResponse>;
+
+/** hub 健康警示：最近 NIGHTLY 索引 job + phoneHashes 正規化率（CWM 側算，零內容）。 */
+export async function fetchClinicalIndexStatus(): Promise<ClinicalIndexStatus> {
+  return ClinicalIndexStatusResponse.parse(await wfGet(`/api/external/v1/clinical-index/status`, {}));
+}
+
 /**
  * #5 臨床全文（MD §2.4 紅線）：CWM 側 100% 落 EXTERNAL_NOTE_VIEWED audit（staffId + visitId，零內容）。
  * staffId = wa-inbox StaffUser.id（opaque 傳；唔入 log）。
@@ -810,6 +972,7 @@ export const MOCK_REFRESH_429_FLAG = ".dev/workforce-mock-refresh-429.json"; // 
 export const MOCK_REFRESH_409_FLAG = ".dev/workforce-mock-refresh-409.json"; // { clinicCode? } → 409 APRICOT_BUSY
 export const MOCK_REFRESH_404_FLAG = ".dev/workforce-mock-refresh-404.json"; // { clinicCode? } → 404 CLINIC_NOT_FOUND
 export const MOCK_REFRESH_403_FLAG = ".dev/workforce-mock-refresh-403.json"; // { clinicCode? } → 403 FORBIDDEN（scope 未加）
+export const MOCK_CLINICAL_FLAG = ".dev/workforce-mock-clinical.json"; // cwi-followup-p4：{ visits?, quotes?, terms? } — C/D/E + 術語表 mock
 export const MOCK_REFRESH_400_FLAG = ".dev/workforce-mock-refresh-400.json"; // { clinicCode? } → 400 BAD_REQUEST
 export const MOCK_REFRESH_FAILDAY_FLAG = ".dev/workforce-mock-refresh-failday.json"; // [date, ...] → 該日 ok:false（逐日失敗 UI）
 // 寫入 mock 回 dayRefreshed:false（T145：唔 bust 斷言）
@@ -1002,6 +1165,27 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
     return mockVisitNote(decodeURIComponent(p2note[1]), decodeURIComponent(p2note[2]), path);
   }
 
+  // ── cwi-followup-p4：C/D/E + 術語表 mock（.dev/workforce-mock-clinical.json — file-backed 決定性）──
+  if (path === "/api/external/v1/patients/visits" && !method) {
+    return mockClinicVisits(params);
+  }
+  if (path === "/api/external/v1/quotes" && !method) {
+    return mockQuotes(params);
+  }
+  const qd = path.match(/^\/api\/external\/v1\/quotes\/([^/]+)\/decision$/);
+  if (qd && method === "POST") {
+    return mockQuoteDecision(decodeURIComponent(qd[1]), body, path);
+  }
+  if (path === "/api/external/v1/clinical-term-map" && !method) {
+    return mockTermMap();
+  }
+  if (path === "/api/external/v1/clinical-index/status" && !method) {
+    return mockIndexStatus();
+  }
+  if (path === "/api/external/v1/clinical-term-map" && method === "PUT") {
+    return mockTermMapPut(body, path);
+  }
+
   // ── bookable-slots（providerslot-20260830 T3 — mock 決定性，E2E/開發用）──
 
   if (path === "/api/external/v1/bookable-slots") {
@@ -1036,6 +1220,150 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
   }
 
   throw new WorkforceApiError(404, path);
+}
+
+// ── cwi-followup-p4 mock helpers（file-backed — .dev/workforce-mock-clinical.json）──
+type MockQuoteRow = {
+  id: string;
+  patientApricotId: string;
+  clinicCode: string;
+  sourceVisitDate: string;
+  text: string;
+  termShorthand: string | null;
+  nameCn: string | null;
+  amountMin: number | null;
+  amountMax: number | null;
+  perUnit: boolean;
+  fdiTeeth: string[];
+  intent: "not_done" | "unknown";
+  certainty: "high" | "low";
+  source: "parser" | "llm" | "manual";
+  status: "pending" | "confirmed" | "corrected" | "discarded";
+};
+type MockTermRow = {
+  id: string;
+  shorthand: string;
+  nameCn: string;
+  nameEn: string | null;
+  usedFor: string[];
+  active: boolean;
+  updatedAt: string;
+};
+type MockIndexStatus = {
+  lastNightly?: { status: string; finishedAt: string | null; errors: number; lastError: string | null } | null;
+  phoneNormalize?: { total: number; withHash: number; rate: number | null } | null;
+};
+type MockQuoteDecisionInput = {
+  action?: string;
+  fields?: { amountMin?: number; amountMax?: number; termShorthand?: string | null; nameCn?: string; text?: string };
+  teachTerm?: { shorthand: string; nameCn: string; nameEn?: string; usedFor?: string[] };
+};
+type MockTermPutInput = { terms?: (Partial<MockTermRow> & { shorthand: string; nameCn: string })[] };
+interface MockClinicalFile {
+  visits?: Record<string, unknown>[]; // 與真 #1 batch 輸出同 shape（zod 喺 caller 驗）
+  quotes?: MockQuoteRow[];
+  terms?: MockTermRow[];
+  indexStatus?: MockIndexStatus;
+}
+function readClinical(): MockClinicalFile {
+  try {
+    return JSON.parse(readFileSync(path.resolve(process.cwd(), MOCK_CLINICAL_FLAG), "utf8")) as MockClinicalFile;
+  } catch {
+    return {};
+  }
+}
+function writeClinical(f: MockClinicalFile): void {
+  try {
+    writeFileSync(path.resolve(process.cwd(), MOCK_CLINICAL_FLAG), JSON.stringify(f, null, 2));
+  } catch {
+    /* e2e fixture 寫唔到 = 下個斷言 red */
+  }
+}
+/** #1 batch visits（C/D 觸發源；mock 唔做 server-side reasonCodes 過濾 — 引擎口徑唔依賴佢）。 */
+function mockClinicVisits(_params: Record<string, string>): unknown {
+  const f = readClinical();
+  return { v: 1, visits: f.visits ?? [] };
+}
+/** E 報價查詢（status 過濾做咗 — 對齊真端點口徑）。 */
+function mockQuotes(params: Record<string, string>): unknown {
+  const f = readClinical();
+  let quotes = f.quotes ?? [];
+  const statusRaw = params.status ? params.status.split(",") : null;
+  if (statusRaw && statusRaw.length) quotes = quotes.filter((q) => statusRaw.includes(q.status));
+  const pid = params.patientApricotId;
+  if (pid) quotes = quotes.filter((q) => q.patientApricotId === pid);
+  const limit = params.limit ? parseInt(params.limit, 10) : 500;
+  return { v: 1, quotes: quotes.slice(0, Number.isFinite(limit) ? limit : 500) };
+}
+/** 確認隊列決定（file-backed：更新 quote.status → 重掃口徑決定性）。 */
+function mockQuoteDecision(id: string, bodyIn: unknown, reqPath: string): unknown {
+  const b = (bodyIn ?? {}) as MockQuoteDecisionInput;
+  const f = readClinical();
+  const quotes = f.quotes ?? [];
+  const q = quotes.find((x) => x.id === id);
+  if (!q) throw new WorkforceApiError(404, reqPath);
+  const statusMap: Record<string, MockQuoteRow["status"]> = { confirm: "confirmed", correct: "corrected", discard: "discarded" };
+  const action = typeof b.action === "string" ? b.action : "";
+  if (!statusMap[action]) throw new WorkforceApiError(400, reqPath);
+  q.status = statusMap[action];
+  if (action === "correct" && b.fields) {
+    if (typeof b.fields.amountMin === "number") q.amountMin = b.fields.amountMin;
+    if (typeof b.fields.amountMax === "number") q.amountMax = b.fields.amountMax;
+    if (typeof b.fields.termShorthand === "string") q.termShorthand = b.fields.termShorthand;
+    if (b.fields.termShorthand === null) { q.termShorthand = null; q.nameCn = null; }
+    if (typeof b.fields.nameCn === "string") q.nameCn = b.fields.nameCn;
+  }
+  let termMapUpserted = false;
+  if (b.teachTerm && typeof b.teachTerm === "object") {
+    const terms = f.terms ?? [];
+    const t = b.teachTerm;
+    const existing = terms.find((x) => x.shorthand === t.shorthand);
+    if (existing) {
+      existing.nameCn = t.nameCn ?? existing.nameCn;
+      if (typeof t.nameEn === "string") existing.nameEn = t.nameEn;
+      existing.active = true;
+    } else {
+      terms.push({ id: `mock-${t.shorthand}`, shorthand: t.shorthand, nameCn: t.nameCn, nameEn: t.nameEn ?? null, usedFor: t.usedFor ?? ["quote_extraction"], active: true, updatedAt: new Date().toISOString() });
+    }
+    f.terms = terms;
+    termMapUpserted = true;
+  }
+  f.quotes = quotes;
+  writeClinical(f);
+  return { v: 1, id, status: q.status, termMapUpserted };
+}
+/** 索引 job / 正規化率（預設 ok — e2e fixture 可用 indexStatus 覆蓋）。 */
+function mockIndexStatus(): unknown {
+  const f = readClinical();
+  const idx = f.indexStatus;
+  if (idx) return { v: 1, lastNightly: idx.lastNightly ?? null, phoneNormalize: idx.phoneNormalize ?? { total: 0, withHash: 0, rate: null } };
+  return { v: 1, lastNightly: { status: "DONE", finishedAt: new Date().toISOString(), errors: 0, lastError: null }, phoneNormalize: { total: 0, withHash: 0, rate: null } };
+}
+/** 術語表（預設空 — e2e fixture 自帶）。 */
+function mockTermMap(): unknown {
+  const f = readClinical();
+  return { v: 1, terms: f.terms ?? [] };
+}
+/** 術語表寫（整批 upsert — file-backed）。 */
+function mockTermMapPut(bodyIn: unknown, _reqPath: string): unknown {
+  const b = (bodyIn ?? {}) as MockTermPutInput;
+  const f = readClinical();
+  const terms = f.terms ?? [];
+  for (const t of b.terms ?? []) {
+    const existing = terms.find((x) => x.shorthand === t.shorthand);
+    if (existing) {
+      existing.nameCn = t.nameCn ?? existing.nameCn;
+      if (t.nameEn !== undefined) existing.nameEn = t.nameEn ?? null;
+      if (t.usedFor) existing.usedFor = t.usedFor;
+      if (t.active !== undefined) existing.active = t.active;
+      existing.updatedAt = new Date().toISOString();
+    } else {
+      terms.push({ id: `mock-${t.shorthand}`, shorthand: t.shorthand, nameCn: t.nameCn, nameEn: t.nameEn ?? null, usedFor: t.usedFor ?? ["quote_extraction"], active: t.active !== false, updatedAt: new Date().toISOString() });
+    }
+  }
+  f.terms = terms;
+  writeClinical(f);
+  return { v: 1, terms };
 }
 
 // ── mock 寫入端點 helper（決定性；log 同 real mode 一樣只 path+status）──
@@ -1495,12 +1823,32 @@ function mockP2Unknown(cpId: string, reqPath: string): never {
 function mockPatientVisits(cpId: string, params: Record<string, string>): unknown {
   const reqPath = "/api/external/v1/patients/{cpId}/visits";
   const p = MOCK_P2_PATIENTS[cpId];
-  if (!p) mockP2Unknown(cpId, reqPath);
   const limit = Math.min(Math.max(Number(params.limit ?? 50) || 50, 1), 100);
-  const visits = p.visits.slice(0, limit).map(({ note: _note, ...row }) => row);
-  if (!visits.length) throw new WorkforceApiError(404, reqPath, "NOT_FOUND");
+  let visits: unknown[];
+  let patientCode = "PC";
+  if (p) {
+    // P2 靜態 fixture 無 rxCodes（pre-P4）— backfill 空陣列（真值：visit 藥物 code 本可空；PatientVisitsResponse 必填欄）
+    visits = p.visits.map(({ note: _note, ...row }) => ({ ...row, rxCodes: (row as { rxCodes?: unknown }).rxCodes ?? [] }));
+    patientCode = p.patientCode;
+  } else {
+    // ★ cwi-followup-p4 S6：臨床 mock fixture（.dev/workforce-mock-clinical.json）— 與 batch #1 同源（e2e C/D/E + 藥物 tab rxCodes）
+    const f = readClinical();
+    const rows = (f.visits ?? []).filter((v) => v.patientApricotId === cpId);
+    visits = rows.map((v) => {
+      const { patientApricotId: _a, phoneHashes: _h, quotedItems: _q, billTtlAmt: _b, billOsAmt: _o, ...rest } = v;
+      // 必填欄 backfill（真值本可空）— 防 fixture 漏欄 zod 炸
+      return { ...rest, rxCodes: rest.rxCodes ?? [], noteKind: rest.noteKind ?? null, firstLine: rest.firstLine ?? null };
+    });
+    if (rows[0]?.patientCode != null) patientCode = String(rows[0].patientCode);
+    if (!visits.length) {
+      mockP2Unknown(cpId, reqPath);
+      throw new WorkforceApiError(404, reqPath, "NOT_FOUND");
+    }
+  }
+  const out = visits.slice(0, limit);
+  if (!out.length) throw new WorkforceApiError(404, reqPath, "NOT_FOUND");
   log.info({ path: reqPath, mock: true, status: 200 }, "workforce MOCK: patient visits");
-  return { v: 1, patientCode: p.patientCode, visits };
+  return { v: 1, patientCode, visits: out };
 }
 
 function mockVisitNote(cpId: string, visitId: string, reqPath: string): unknown {
