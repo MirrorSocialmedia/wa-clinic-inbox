@@ -5,7 +5,7 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
   return (
     <div className="min-h-screen bg-white text-gray-900">
       <header className="border-b px-6 py-4">
-        <span className="text-sm font-semibold">⟨公司名稱⟩</span>
+        <span className="text-sm font-semibold">BACCARAT YL LIMITED</span>
       </header>
       {children}
       <footer className="mt-16 border-t px-6 py-8 text-xs text-gray-500">
@@ -14,7 +14,7 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
           <a className="underline" href="/terms">服務條款</a>
           <a className="underline" href="/data-deletion">刪除資料</a>
         </nav>
-        <p className="mt-2">© 2026 ⟨公司名稱⟩</p>
+        <p className="mt-2">© 2026 BACCARAT YL LIMITED</p>
       </footer>
     </div>
   );

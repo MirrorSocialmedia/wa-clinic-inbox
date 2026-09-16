@@ -2,8 +2,8 @@
 // 內容 = Kenneth 模板 §① 逐字（iron rule §4 唔准改寫）；保留期 24 個月、伺服器地區「香港」（同 retention-purge default 一致）；
 // 公司 4 值 + 生效日期 = PENDING 佔位，S5 老細提供後填。
 export const metadata = {
-  title: "私隱政策 Privacy Policy | ⟨公司名稱⟩",
-  description: "⟨公司名稱⟩ WhatsApp 客戶服務系統之個人資料收集及使用聲明",
+  title: "私隱政策 Privacy Policy | BACCARAT YL LIMITED",
+  description: "BACCARAT YL LIMITED WhatsApp 客戶服務系統之個人資料收集及使用聲明",
 };
 
 export default function PrivacyPage() {
@@ -11,14 +11,14 @@ export default function PrivacyPage() {
     <main className="mx-auto max-w-3xl px-6 py-12 text-[15px] leading-7">
       <h1 className="text-2xl font-semibold">私隱政策 Privacy Policy</h1>
       <p className="mt-1 text-sm text-gray-500">
-        生效日期 Effective date：⟨2026-09-15⟩｜最後更新 Last updated：⟨2026-09-15⟩
+        生效日期 Effective date：2026-10-01｜最後更新 Last updated：2026-09-16
       </p>
 
       {/* ── 中文 ───────────────────────────────────────────── */}
       <section className="mt-8 space-y-4">
         <h2 className="text-lg font-semibold">1. 關於我們</h2>
         <p>
-          ⟨公司名稱⟩（下稱「我們」）於香港經營牙科診所，地址：⟨診所地址⟩。
+          BACCARAT YL LIMITED（下稱「我們」）於香港經營牙科診所，地址：ROOM 1101-02, 11/F OFFICE TOWER WEO GRAND PLAZA, 625 & 639 Nathan Road, Mong Kok, Hong Kong。
           我們透過 WhatsApp 為病人提供查詢、預約及跟進服務。本政策說明我們如何收集、使用、
           儲存及保護你的個人資料，並按照香港《個人資料（私隱）條例》（第486章）行事。
         </p>
@@ -73,9 +73,9 @@ export default function PrivacyPage() {
         <h2 className="text-lg font-semibold">9. 聯絡我們</h2>
         <p>
           資料保障主任 Data Protection Officer<br />
-          電郵 Email：⟨privacy@example.com⟩<br />
-          電話 Tel：⟨+852 xxxx xxxx⟩<br />
-          地址 Address：⟨診所地址⟩
+          電郵 Email：info@aegisdentalhk.com<br />
+          電話 Tel：+852 6704 5481<br />
+          地址 Address：ROOM 1101-02, 11/F OFFICE TOWER WEO GRAND PLAZA, 625 & 639 Nathan Road, Mong Kok, Hong Kong
         </p>
       </section>
 
@@ -83,7 +83,7 @@ export default function PrivacyPage() {
       <section className="mt-12 space-y-4 border-t pt-8">
         <h2 className="text-lg font-semibold">English Summary</h2>
         <p>
-          ⟨Company Name⟩ operates dental clinics in Hong Kong and uses WhatsApp to handle patient
+          BACCARAT YL LIMITED operates dental clinics in Hong Kong and uses WhatsApp to handle patient
           enquiries, appointments and follow-ups. We collect your WhatsApp phone number, display
           name and message content, together with appointment, treatment and billing information
           from our clinic management system.
@@ -104,7 +104,7 @@ export default function PrivacyPage() {
           You may request access to, correction or deletion of your data, and may opt out of
           proactive messages at any time by replying “STOP”. See our{" "}
           <a className="underline" href="/data-deletion">data deletion instructions</a>. Contact:{" "}
-          ⟨privacy@example.com⟩.
+          info@aegisdentalhk.com.
         </p>
       </section>
     </main>

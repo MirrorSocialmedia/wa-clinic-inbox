@@ -1,12 +1,12 @@
 // 服務條款 — 公開頁（Meta App Review 用）。cwi-legal-20260915。
 // 內容 = Kenneth 模板 §② 逐字（iron rule §4 唔准改寫）；公司 4 值 + 生效日期 = PENDING 佔位，S5 老細提供後填。
-export const metadata = { title: "服務條款 Terms of Service | ⟨公司名稱⟩" };
+export const metadata = { title: "服務條款 Terms of Service | BACCARAT YL LIMITED" };
 
 export default function TermsPage() {
   return (
     <main className="mx-auto max-w-3xl px-6 py-12 text-[15px] leading-7">
       <h1 className="text-2xl font-semibold">服務條款 Terms of Service</h1>
-      <p className="mt-1 text-sm text-gray-500">生效日期：⟨2026-09-15⟩</p>
+      <p className="mt-1 text-sm text-gray-500">生效日期：2026-10-01</p>
 
       <section className="mt-8 space-y-4">
         <h2 className="text-lg font-semibold">1. 服務範圍</h2>
@@ -48,7 +48,7 @@ export default function TermsPage() {
         <p>我們可能不時修訂本條款，修訂後將於本頁公布。</p>
 
         <h2 className="text-lg font-semibold">8. 聯絡</h2>
-        <p>⟨privacy@example.com⟩｜⟨+852 xxxx xxxx⟩｜⟨診所地址⟩</p>
+        <p>info@aegisdentalhk.com｜+852 6704 5481｜ROOM 1101-02, 11/F OFFICE TOWER WEO GRAND PLAZA, 625 & 639 Nathan Road, Mong Kok, Hong Kong</p>
       </section>
 
       <section className="mt-12 space-y-4 border-t pt-8">

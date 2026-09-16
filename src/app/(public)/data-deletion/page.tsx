@@ -1,19 +1,19 @@
 // 刪除資料指引 — 公開頁（Meta App Dashboard「User data deletion instructions URL」必填）。cwi-legal-20260915。
 // 內容 = Kenneth 模板 §③ 逐字（iron rule §4 唔准改寫）；處理時限 30 日（模板 canonical 政策值）；
 // 公司 4 值 + 最後更新日期 = PENDING 佔位，S5 老細提供後填。
-export const metadata = { title: "刪除資料指引 Data Deletion | ⟨公司名稱⟩" };
+export const metadata = { title: "刪除資料指引 Data Deletion | BACCARAT YL LIMITED" };
 
 export default function DataDeletionPage() {
   return (
     <main className="mx-auto max-w-3xl px-6 py-12 text-[15px] leading-7">
       <h1 className="text-2xl font-semibold">刪除資料指引 Data Deletion Instructions</h1>
-      <p className="mt-1 text-sm text-gray-500">最後更新：⟨2026-09-15⟩</p>
+      <p className="mt-1 text-sm text-gray-500">最後更新：2026-09-16</p>
 
       <section className="mt-8 space-y-4">
         <h2 className="text-lg font-semibold">如何要求刪除你的資料</h2>
         <ol className="list-decimal pl-6 space-y-1">
-          <li>電郵至 <b>⟨privacy@example.com⟩</b>，主旨註明「刪除個人資料」。</li>
-          <li>或致電 <b>⟨+852 xxxx xxxx⟩</b> 於診所營業時間內提出。</li>
+          <li>電郵至 <b>info@aegisdentalhk.com</b>，主旨註明「刪除個人資料」。</li>
+          <li>或致電 <b>+852 6704 5481</b> 於診所營業時間內提出。</li>
           <li>或透過 WhatsApp 向我們發送訊息「刪除我的資料」。</li>
         </ol>
         <p>
@@ -41,14 +41,14 @@ export default function DataDeletionPage() {
         </p>
 
         <h2 className="text-lg font-semibold">聯絡</h2>
-        <p>⟨privacy@example.com⟩｜⟨+852 xxxx xxxx⟩｜⟨診所地址⟩</p>
+        <p>info@aegisdentalhk.com｜+852 6704 5481｜ROOM 1101-02, 11/F OFFICE TOWER WEO GRAND PLAZA, 625 & 639 Nathan Road, Mong Kok, Hong Kong</p>
       </section>
 
       <section className="mt-12 space-y-4 border-t pt-8">
         <h2 className="text-lg font-semibold">English</h2>
         <p>
-          To request deletion of your data, email <b>⟨privacy@example.com⟩</b> with the subject
-          “Data Deletion Request”, call <b>⟨+852 xxxx xxxx⟩</b>, or send us a WhatsApp message
+          To request deletion of your data, email <b>info@aegisdentalhk.com</b> with the subject
+          “Data Deletion Request”, call <b>+852 6704 5481</b>, or send us a WhatsApp message
           saying “Delete my data”. We may ask you to verify your name and registered phone number,
           and will process verified requests within <b>30 days</b>.
         </p>
