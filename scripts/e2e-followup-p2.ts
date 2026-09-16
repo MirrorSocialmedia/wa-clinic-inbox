@@ -338,25 +338,38 @@ async function main(): Promise<void> {
   }
   /** 手機 viewport 選中對話（列表 button:has-text；喺 chat view 先返回列表） */
   async function selectConv(pg: Page, name: string, diag?: { errors: string[]; apis: string[] }): Promise<void> {
-    const back = pg.locator('button[aria-label="返回列表"]') as Locator;
-    if (await back.isVisible().catch(() => false)) {
-      await back.click();
-      await pg.waitForTimeout(400);
-    }
-    const row = pg.locator(`button:has-text("${name}")`) as unknown as Locator;
-    try {
-      await row.first().click({ timeout: 20000 });
-    } catch (e) {
-      if (diag) {
-        const body = await pg.evaluate(() => document.body.innerText.slice(0, 250)).catch(() => "<eval fail>");
-        const btnCount = await pg.evaluate(() => document.querySelectorAll("button").length).catch(() => -1);
-        console.log(`  [diag] selectConv fail: body=${JSON.stringify(String(body).slice(0, 200))} buttons=${btnCount}`);
-        console.log(`  [diag] console errors: ${JSON.stringify(diag.errors.slice(-5))}`);
-        console.log(`  [diag] bad apis: ${JSON.stringify(diag.apis.slice(-8))}`);
+    /** Next 15 dev loadManifest race / 對話列表 API 瞬時 500（已知 flake；fetchConversations 靜默返空）
+        → 整段（click + chip-row 斷）重試最多 3 次，中間 reload 2.5s 間隔。harness retry only，零邏輯改動。 */
+    let lastErr: unknown = null;
+    for (let att = 1; att <= 3; att++) {
+      try {
+        const back = pg.locator('button[aria-label="返回列表"]') as Locator;
+        if (await back.isVisible().catch(() => false)) {
+          await back.click();
+          await pg.waitForTimeout(400);
+        }
+        const row = pg.locator(`button:has-text("${name}")`) as unknown as Locator;
+        await row.first().click({ timeout: 15000 });
+        await pg.waitForSelector('[data-e2e="p2-chip-row"]', { timeout: 15000 });
+        return;
+      } catch (e) {
+        lastErr = e;
+        if (diag) {
+          const body = await pg.evaluate(() => document.body.innerText.slice(0, 250)).catch(() => "<eval fail>");
+          const btnCount = await pg.evaluate(() => document.querySelectorAll("button").length).catch(() => -1);
+          console.log(`  [diag] selectConv fail（att ${att}/3）: body=${JSON.stringify(String(body).slice(0, 200))} buttons=${btnCount}`);
+          console.log(`  [diag] console errors: ${JSON.stringify(diag.errors.slice(-5))}`);
+          console.log(`  [diag] bad apis: ${JSON.stringify(diag.apis.slice(-8))}`);
+        }
+        if (att < 3) {
+          console.log(`  [retry] selectConv "${name}" att ${att} fail → reload 2.5s 後重試`);
+          await pg.reload({ waitUntil: "domcontentloaded" });
+          await pg.waitForTimeout(2500); // dev recompile 後重試（對齊 loadInbox 口徑）
+          await quietBanner(pg).catch(() => {});
+        }
       }
-      throw e;
     }
-    await pg.waitForSelector('[data-e2e="p2-chip-row"]', { timeout: 20000 });
+    throw lastErr;
   }
   /** loadInbox：Next 15 dev loadManifest race（已知 flake）→ HTML 500 error page；偵測到就重試（最多 3 次） */
   async function loadInbox(pg: Page, reload: boolean): Promise<void> {

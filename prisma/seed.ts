@@ -311,6 +311,93 @@ async function main(): Promise<void> {
   }
   console.log(`[seed] routing: ${GROUPS.length} groups + ${RULES.length} rules ensured (CONSULT=${consultGroup?.id ?? "MISSING"} COMPLAINT=${complaintGroup?.id ?? "MISSING"} SUPV=${supvGroup?.id ?? "MISSING"})`);
 
+  // ★ cwi-followup-p3-20260916（followup-v2 MD §4 + 老細 07:31 拍板）：follow-up 引擎 seed。
+  // 鐵律：template 全部 approved=false（老細審批中）— 未審批 + 窗口過咗 → task SKIPPED(NO_TEMPLATE)
+  //   唔會真發（安全設計）。P4 備註（老細拍板，P3 唔建 C/D 規則）：
+  //   - C 類 visitReasons = 0017 EXTRACTION + 植牙（0013 IMPLANT RV 等）+ 牙周；
+  //   - D 類間隔 = 洗牙 6 個月（箍牙覆診/植牙年檢醫生再定）；
+  //   - F 類 minAmount = 500 HKD（出廠規則值，下方 FOLLOWUP_RULES）。
+  const FOLLOWUP_TEMPLATES: { key: string; name: string; text: string }[] = [
+    {
+      key: "conversation_followup",
+      name: "對話跟進（A）",
+      text: "{{salutation}}你好，呢度係{{clinicName}}。留意到你過去幾日冇回覆，想跟你確認下：之前嘅嘢有冇咗解？如果仲有問題或者想重新約診，隨時覆訊息嚟，我哋幫你跟進。",
+    },
+    {
+      key: "appt_reminder",
+      name: "預約提醒（B）",
+      text: "{{salutation}}你好，呢度係{{clinicName}}。提醒你{{apptDate}}（{{apptTime}}）約咗{{providerName}}覆診，請提前 10 分鐘抵達。如需改期，請直接回覆呢條訊息，我哋幫你安排。期待見到您！",
+    },
+    {
+      key: "no_show",
+      name: "爽約跟進（B）",
+      text: "{{salutation}}你好，呢度係{{clinicName}}。你{{apptDate}}（{{apptTime}}）嘅預約我哋冇等到你到診，擔心你係有事臨時改咗。如果仲想覆診，請回覆呢條訊息重新預約；有其他情況都歡迎留言，我哋再同你聯絡。",
+    },
+    {
+      key: "outstanding_balance",
+      name: "欠款提醒（F）",
+      text: "{{salutation}}你好，呢度係{{clinicName}}。根據記錄，你嘅賬單尚有未繳費用港幣 ${{osAmt}}。如已繳費請忽略；如對金額有疑問或者想安排分期/繳費，請回覆呢條訊息，我哋同你確認。謝謝！",
+    },
+    {
+      key: "post_op_check",
+      name: "術後關懷（C · P4）",
+      text: "{{salutation}}你好，呢度係{{clinicName}}。{{visitDate}}做完治療之後，想關心下你嘅情況：有冇明顯腫脹、疼痛加劇、出血或者發燒？有任何唔舒服請立即聯絡我哋。祝早日康復！",
+    },
+    {
+      key: "recall_cleaning",
+      name: "洗牙召回（D · P4）",
+      text: "{{salutation}}你好，呢度係{{clinicName}}。距離你上次洗牙已經有一段時間，建議安排一次常規洗牙，保持牙齒同牙肉健康。想約時間嘅話回覆呢條訊息就得，我哋幫你搵位。期待再見！",
+    },
+  ];
+  for (const t of FOLLOWUP_TEMPLATES) {
+    const existing = await prisma.followupTemplate.findUnique({ where: { key: t.key } });
+    if (existing) continue; // create-if-missing — 老細審批/改字後 re-seed 唔會洗走
+    await prisma.followupTemplate.create({
+      data: { key: t.key, name: t.name, text: t.text, approved: false },
+    });
+  }
+  console.log(`[seed] followup templates: ${FOLLOWUP_TEMPLATES.length} ensured（全部 approved=false — 老細審批中）`);
+
+  // 出廠規則（MD §4 + 老細 07:31：F minAmount=500；A/B/F 三類先上，全 L1 入隊列等人撳）
+  const FOLLOWUP_RULES: {
+    name: string;
+    trigger: "CONVERSATION_IDLE" | "BEFORE_APPOINTMENT" | "AFTER_NO_SHOW" | "OUTSTANDING_BALANCE";
+    delayValue: number;
+    delayUnit: "HOUR" | "DAY" | "WEEK" | "MONTH";
+    minAmount: number | null;
+    templateName: string;
+  }[] = [
+    { name: "對話空窗跟進（7 日）", trigger: "CONVERSATION_IDLE", delayValue: 7, delayUnit: "DAY", minAmount: null, templateName: "conversation_followup" },
+    { name: "預約提醒（診前 1 日）", trigger: "BEFORE_APPOINTMENT", delayValue: 1, delayUnit: "DAY", minAmount: null, templateName: "appt_reminder" },
+    { name: "爽約跟進（1 日後）", trigger: "AFTER_NO_SHOW", delayValue: 1, delayUnit: "DAY", minAmount: null, templateName: "no_show" },
+    { name: "欠款提醒（≥ $500）", trigger: "OUTSTANDING_BALANCE", delayValue: 1, delayUnit: "HOUR", minAmount: 500, templateName: "outstanding_balance" },
+  ];
+  for (const r of FOLLOWUP_RULES) {
+    const existing = await prisma.followupRule.findFirst({ where: { clinicId: null, name: r.name } });
+    if (existing) continue; // create-if-missing（同 routing rule 口徑 — re-seed 唔洗走 UI 改動）
+    await prisma.followupRule.create({
+      data: {
+        clinicId: null,
+        name: r.name,
+        enabled: true,
+        trigger: r.trigger,
+        delayValue: r.delayValue,
+        delayUnit: r.delayUnit,
+        reasonCodes: [],
+        minAmount: r.minAmount,
+        templateName: r.templateName,
+        level: "L1",
+        maxSends: 1,
+        cancelOnReply: true,
+        cancelOnBooking: true,
+        cancelOnArrival: true,
+        cancelOnResolved: true,
+        cancelOnPaid: true,
+      },
+    });
+  }
+  console.log(`[seed] followup rules: ${FOLLOWUP_RULES.length} ensured（A/B/F 全 L1；C/D/E 等 P4）`);
+
   // credentials 檔：舊行（existing 用戶）+ 今次新建行 — 一次寫定（冪等）
   const ordered: string[] = [];
   for (const u of USERS) {

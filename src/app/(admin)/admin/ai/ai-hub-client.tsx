@@ -87,6 +87,7 @@ const HEALTH_LABEL: Record<string, string> = {
   meta: "Meta token",
   vapid: "VAPID",
   sw: "SW",
+  followup: "跟進 template",
 };
 
 export default function AiHub({ role }: { role: string }) {

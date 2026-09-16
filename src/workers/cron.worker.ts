@@ -43,6 +43,7 @@ import { cronQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
 import { syncCompaniesFromWorkforce } from "@/lib/company-sync";
+import { runFollowupScan } from "@/lib/followup/engine";
 import { refreshAllClinics } from "@/lib/availability";
 import { runExpiry } from "@/lib/booking/expiry";
 import { runHealthCheck, type HealthOverrides } from "@/lib/health/check";
@@ -170,6 +171,12 @@ export async function startCronWorker(): Promise<Worker | null> {
           });
           log.info({ ok: r.ok }, "cron: company-sync → workforce 同步完成");
           return r.ok ? { ok: true, ...r.summary } : { ok: false, error: r.error };
+        }
+        case "followup-scan": {
+          // ★ cwi-followup-p3-20260916（followup-v2 MD §4.1）：每 10 分鐘掃 enabled 規則建/發 task；
+          //   E2E 可手動 enqueue（pnpm e2e:cron followup-scan）。冪等 — 重跑安全（查重重複不建）。
+          const r = await runFollowupScan();
+          return { ...r };
         }
         default:
           log.warn({ jobName: job.name }, "cron worker: unknown job — skip");

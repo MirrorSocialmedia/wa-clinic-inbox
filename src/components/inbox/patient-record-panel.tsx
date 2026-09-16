@@ -15,7 +15,7 @@
  *   - 一個 syncedAt 管三個分頁（§3.1b）
  *
  * RBAC：requireAuth + assertConversationAccess 喺 route 側執行（SUPERVISOR 全店唯讀 /
- *   STAFF 自己範圍）— 本組件 GET-only，結構性唯讀。
+ *   STAFF 自己範圍）— 本組件 GET-only + §4.6 opt-out toggle（PATCH；SUPERVISOR canEdit=false 唔渲染）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Loader2, Pill } from "lucide-react";
@@ -80,6 +80,8 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
   const [noteLoading, setNoteLoading] = useState(false);
   const [noteError, setNoteError] = useState<string | null>(null);
   const [noteData, setNoteData] = useState<NoteText | null>(null);
+  // §4.6 跟進通知 toggle（病人卡 — MD 手動 toggle；contact 級）
+  const [optOutBusy, setOptOutBusy] = useState(false);
   // 自動靜默刷新只一次（per conversation）— 防循環
   const autoRanFor = useRef<string | null>(null);
 
@@ -110,6 +112,34 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
     },
     [conversationId],
   );
+
+  // §4.6：跟進通知 toggle（手動 — opt-out 永遠優先；唔影響病人主動查詢嘅正常回覆）
+  const toggleOptOut = useCallback(async () => {
+    const c = data?.contact;
+    if (!c || !c.canEdit || optOutBusy) return;
+    const next = !c.followupOptOut;
+    setOptOutBusy(true);
+    try {
+      const res = await fetch(`/api/followups/contacts/${c.id}/opt-out`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ optOut: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setData((prev) =>
+        prev && prev.contact
+          ? {
+              ...prev,
+              contact: { ...prev.contact, followupOptOut: next, optOutSource: next ? "manual" : null, optOutAt: next ? new Date().toISOString() : null },
+            }
+          : prev
+      );
+    } catch {
+      alert("跟進通知更新失敗，請稍後再試");
+    } finally {
+      setOptOutBusy(false);
+    }
+  }, [data, optOutBusy]);
 
   // 對話切換 / resetKey → 全新載入（展開狀態清晒）
   useEffect(() => {
@@ -215,6 +245,29 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
               呢個對話未釘住病人、預約索引窗內又冇配對 — 可喺詳情「病人」卡手動釘住
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {/* §4.6 跟進通知（病人卡 toggle — contact 級，未配對都顯示；SUPERVISOR 唯讀唔渲染掣） */}
+      {data?.contact ? (
+        <div className="shrink-0 mx-2.5 mt-1.5 px-2 py-1.5 rounded-lg bg-panel-2 flex items-center justify-between text-[11px]" data-e2e="p3-optout-row">
+          <span className="text-t2">
+            跟進通知{data.contact.followupOptOut ? "（已停止 — 病人 opt-out）" : ""}
+          </span>
+          {data.contact.canEdit ? (
+            <button
+              data-e2e="p3-optout-toggle"
+              disabled={optOutBusy}
+              onClick={() => void toggleOptOut()}
+              className={`px-2 py-0.5 rounded-md border text-[11px] disabled:opacity-50 ${
+                data.contact.followupOptOut
+                  ? "bg-danger-soft text-danger-text border-danger-text/30"
+                  : "bg-panel text-t2 border-line hover:bg-panel-2"
+              }`}
+            >
+              {optOutBusy ? "更新中…" : data.contact.followupOptOut ? "恢復跟進" : "停止跟進"}
+            </button>
+          ) : null}
         </div>
       ) : null}
 

@@ -39,7 +39,7 @@ export interface HubStep {
 }
 
 export interface HubHealthItem {
-  id: "sglang" | "redis" | "workforce" | "meta" | "vapid" | "sw";
+  id: "sglang" | "redis" | "workforce" | "meta" | "vapid" | "sw" | "followup";
   ok: boolean;
   /** 紅底時顯示嘅原因（ok=true 時 UI 唔顯示） */
   reason: string;
@@ -401,6 +401,28 @@ async function buildHealthRow(clinics: { id: string; code: string; aiMode: strin
   // workforce（key 失效 / 斷線）
   const wf = await probeWorkforce(clinics);
   items.push({ id: "workforce", ok: wf.ok, reason: wf.ok ? "" : wf.reason });
+
+  // ★ cwi-followup-p3-20260916（鐵律 3）：follow-up — enabled 規則引用嘅 template 未審批 → 紅底
+  //   （窗口過咗嘅發送會 SKIPPED(NO_TEMPLATE)；審批咗先會真發）
+  try {
+    const [fuRules, fuTemplates, fuSkipped] = await Promise.all([
+      prisma.followupRule.findMany({ where: { enabled: true }, select: { templateName: true } }),
+      prisma.followupTemplate.findMany({ select: { key: true, approved: true } }),
+      prisma.followupTask.count({
+        where: { status: "SKIPPED", cancelReason: "NO_TEMPLATE", handledAt: { gte: new Date(Date.now() - 3_600_000) } },
+      }),
+    ]);
+    const approvedKeys = new Set(fuTemplates.filter((t) => t.approved).map((t) => t.key));
+    const unapproved = [...new Set(fuRules.map((r) => r.templateName).filter((k) => !approvedKeys.has(k)))];
+    if (unapproved.length > 0) {
+      const extra = fuSkipped > 0 ? `；近 1 小時 ${fuSkipped} 條 SKIPPED(NO_TEMPLATE)` : "";
+      items.push({ id: "followup", ok: false, reason: `${unapproved.length} 個 follow-up template 未審批（${unapproved.join(", ")}）— 過窗發送會 SKIPPED${extra}` });
+    } else {
+      items.push({ id: "followup", ok: true, reason: "" });
+    }
+  } catch {
+    items.push({ id: "followup", ok: true, reason: "" }); // fail-soft：health 頁唔好因 followup 查詢炸
+  }
 
   // Meta token（WA_MOCK=1 = dev 常綠；real = token 有冇 + phone id）
   if (process.env.WA_MOCK === "1") {

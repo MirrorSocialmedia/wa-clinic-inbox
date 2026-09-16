@@ -61,6 +61,10 @@ next-env.d.ts
 /.dev/workforce-mock-booked.json
 /.dev/workforce-mock-patients.json
 /.dev/workforce-mock-calls.jsonl
+/.dev/workforce-mock-refresh.json
+/.dev/workforce-mock-refresh-reset
+/.dev/workforce-mock-sync.json
+/.dev/workforce-mock-followup.json
 /.dev/workforce-mock-refresh-429.json
 /.dev/workforce-mock-refresh-409.json
 /.dev/workforce-mock-refresh-404.json

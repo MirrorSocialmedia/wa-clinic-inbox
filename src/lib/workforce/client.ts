@@ -794,6 +794,10 @@ export const MOCK_HELD_FLAG = ".dev/workforce-mock-held.json";
 // cwi-sched-20260901 T150：mock base day 加 N 個醫生（>3 收埋分支測試用；缺檔 = 0）
 export const MOCK_EXTRA_PROVIDERS_FLAG = ".dev/workforce-mock-extra-providers.json"; // [{ clinicCode, extra }]
 export const MOCK_PATIENTS_FILE = ".dev/workforce-mock-patients.json";
+// ★ cwi-followup-p3-20260916：follow-up e2e 動態 fixture（e2e 寫入相對日期 — 明日預約/前日爽約）
+//   { appointments?: [{ clinicCode, date, start, end, providerApricotId, providerName, patientApricotId, bookingStatus, apricotApptId, phoneHashes? }],
+//     balances?: { <cpId>: { osAmt: number|null, ttlAmt?: number|null } } }
+export const MOCK_FOLLOWUP_FLAG = ".dev/workforce-mock-followup.json";
 // T4：mock claim hold store（決定性；零 PII；e2e 完清檔）
 export const MOCK_CLAIMS_FILE = ".dev/workforce-mock-claims.json";
 // P2 病人記錄 mock 控制旗（e2e 斷言用；gitignored）：
@@ -1511,6 +1515,19 @@ function mockVisitNote(cpId: string, visitId: string, reqPath: string): unknown 
 
 function mockPatientBalance(cpId: string): unknown {
   const reqPath = "/api/external/v1/patients/{cpId}/balance";
+  // ★ P3：動態 balance 覆蓋（e2e 寫入 — osAmt 600/0 等場景）
+  const fu = readMockFollowup();
+  const fuBal = fu?.balances?.[cpId];
+  if (fuBal) {
+    log.info({ path: reqPath, mock: true, status: 200, dynamic: true }, "workforce MOCK: patient balance（followup 動態）");
+    return {
+      v: 1,
+      patientCode: `P3-${cpId}`,
+      asOf: new Date().toISOString().slice(0, 10),
+      balance: { ttlAmt: fuBal.ttlAmt ?? fuBal.osAmt ?? null, osAmt: fuBal.osAmt },
+      syncedAt: mockP2SyncedAt(cpId),
+    };
+  }
   const p = MOCK_P2_PATIENTS[cpId];
   if (!p) mockP2Unknown(cpId, reqPath);
   log.info({ path: reqPath, mock: true, status: 200 }, "workforce MOCK: patient balance");
@@ -1540,8 +1557,61 @@ function mockClinicAppointments(params: Record<string, string>): unknown {
     }
   }
   appts.sort((x, y) => (x.date === y.date ? x.start.localeCompare(y.start) : x.date.localeCompare(y.date)));
+  // ★ P3：合併動態 follow-up fixture（e2e 寫入相對日期 — 明日 0/102、前日 -3）
+  const fu = readMockFollowup();
+  if (fu?.appointments) {
+    for (const a of fu.appointments) {
+      if (a.clinicCode !== clinicCode || a.date < from || a.date > to) continue;
+      appts.push({
+        apricotApptId: a.apricotApptId,
+        clinicCode: a.clinicCode,
+        providerApricotId: a.providerApricotId,
+        providerName: a.providerName,
+        date: a.date,
+        start: a.start,
+        end: a.end,
+        bookingStatus: a.bookingStatus,
+        patientApricotId: a.patientApricotId,
+        patientCode: `P3-${a.patientApricotId}`,
+        patientName: `P3 Patient ${a.patientApricotId}`,
+        visitReasons: [],
+        remarks: null,
+        phoneHashes: a.phoneHashes ?? [],
+      });
+    }
+    appts.sort((x, y) => (x.date === y.date ? x.start.localeCompare(y.start) : x.date.localeCompare(y.date)));
+  }
   log.info({ path: reqPath, mock: true, status: 200 }, "workforce MOCK: clinic appointments");
   return { v: 1, syncedAt: mockP2SyncedAt(), stale: false, appointments: appts };
+}
+
+/** P3 動態 follow-up fixture 型（.dev/workforce-mock-followup.json）。 */
+export interface MockFollowupFixture {
+  appointments?: {
+    clinicCode: string;
+    date: string;
+    start: string;
+    end: string;
+    providerApricotId: string;
+    providerName: string;
+    patientApricotId: string;
+    bookingStatus: number;
+    apricotApptId: string;
+    phoneHashes?: string[];
+  }[];
+  balances?: Record<string, { osAmt: number | null; ttlAmt?: number | null }>;
+}
+
+/** 讀 P3 動態 follow-up fixture（容錯：檔不存在/損壞 → null）。 */
+function readMockFollowup(): MockFollowupFixture | null {
+  try {
+    const raw = readFileSync(MOCK_FOLLOWUP_FLAG, "utf8");
+    const obj = JSON.parse(raw) as MockFollowupFixture;
+    if (!obj || typeof obj !== "object") return null;
+    return obj;
+  } catch {
+    return null;
+  }
 }
 
 function mockPatientRefresh(cpId: string, reqPath: string): unknown {

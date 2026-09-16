@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 import {
   ArrowLeft,
   BarChart3,
+  BellRing,
   Building2,
   CalendarDays,
   ClipboardCheck,
@@ -42,6 +43,7 @@ const SECTION_NAMES: Record<string, string> = {
   "/admin/staff": "員工帳號",
   "/admin/onboarding": "WhatsApp 接入",
   "/admin/templates": "訊息範本",
+  "/admin/followups": "主動跟進",
   "/admin/workflows": "Workflow",
   "/admin/skill-groups": "技能組",
   "/admin/routing-rules": "路由規則",
@@ -84,6 +86,7 @@ export function AdminShell({
       items: [
         { href: "/admin/clinics", label: "診所設定", icon: Building2 },
         { href: "/schedule", label: "醫生時間表", icon: CalendarDays },
+        { href: "/admin/followups", label: "主動跟進", icon: BellRing },
       ],
     },
     {

@@ -121,6 +121,16 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
 
   return NextResponse.json({
     v: 1,
+    // §4.6 病人卡 opt-out toggle（MD：手動 toggle）— contact 級，配對有冇都顯示；
+    // SUPERVISOR 全店唯讀 → canEdit=false（UI 唔渲染掣）
+    contact: {
+      id: contact.id,
+      profileName: contact.profileName,
+      followupOptOut: contact.followupOptOut,
+      optOutSource: contact.optOutSource,
+      optOutAt: contact.optOutAt,
+      canEdit: auth.staff.role !== "SUPERVISOR",
+    },
     patient: resolved
       ? {
           patientApricotId: resolved.patientApricotId,

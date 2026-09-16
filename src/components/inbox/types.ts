@@ -454,6 +454,15 @@ export interface PatientRecordVisit {
 
 export interface PatientRecordData {
   v: 1;
+  /** §4.6 病人卡 opt-out toggle（contact 級 — 配對有冇都顯示）；SUPERVISOR canEdit=false */
+  contact: {
+    id: string;
+    profileName: string | null;
+    followupOptOut: boolean;
+    optOutSource: string | null;
+    optOutAt: string | null;
+    canEdit: boolean;
+  };
   patient: {
     patientApricotId: string;
     patientCode: string | null;

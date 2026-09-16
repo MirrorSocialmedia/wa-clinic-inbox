@@ -95,9 +95,15 @@ async function registerSchedulers() {
     name: "company-sync",
     data: {},
   });
+  // ★ cwi-followup-p3-20260916（followup-v2 MD §4.1）：follow-up 排程 — 每 10 分鐘掃 enabled 規則
+  //   （A 對話空窗 / B 預約提醒+爽約 / F 欠款；L2 到期即發，L1 入隊列等人撳；冪等查重重跑安全）
+  await cronQueue.upsertJobScheduler("sched-followup-scan", { pattern: "*/10 * * * *" }, {
+    name: "followup-scan",
+    data: {},
+  });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00, company-sync daily 03:00)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00, company-sync daily 03:00, followup-scan */10m)"
   );
 }
 

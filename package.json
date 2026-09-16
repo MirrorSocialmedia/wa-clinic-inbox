@@ -75,7 +75,8 @@
     "e2e:rt-smoke": "tsx scripts/e2e-rt-smoke.ts",
     "e2e:push": "tsx scripts/e2e-push.ts",
     "e2e:multiclinic-ui": "tsx scripts/e2e-multiclinic-ui.ts",
-    "e2e:manual-booking": "tsx scripts/e2e-manual-booking.ts"
+    "e2e:manual-booking": "tsx scripts/e2e-manual-booking.ts",
+    "test:unit-followup": "tsx scripts/unit-followup.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

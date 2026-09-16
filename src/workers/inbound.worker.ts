@@ -7,6 +7,9 @@ import log, { redactDeep } from "@/lib/log";
 import { notifyAlert } from "@/lib/health/notify";
 import { Prisma, type Clinic, type Contact, type Conversation, type Message } from "@prisma/client";
 import { INBOUND_CONCURRENCY } from "./concurrency";
+// ★ cwi-followup-p3-20260916：follow-up inbound hook（opt-out 偵測 + 回覆標記）
+import { detectOptOutIntent, applyFollowupOptOut } from "@/lib/followup/opt-out";
+import { markFollowupReplied } from "@/lib/followup/engine";
 
 /** 冪等寫入用嘅 DB client（top-level prisma 或 $transaction 嘅 tx — 同一套 model API）。 */
 type Db = Prisma.TransactionClient;
@@ -440,6 +443,24 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
 
     if (result.convUpdated) {
       await notifyNewMessage(clinic.id, result.convUpdated, result.msg);
+    }
+
+    // ★ cwi-followup-p3-20260916（followup-v2 MD §4.6 + 鐵律 5）：follow-up inbound hook（best-effort —
+    //   失敗只 log warn，唔影響訊息主流程）：
+    //   ① 病人回覆咗 SENT follow-up → task COMPLETED + 「跟進回覆」badge（唔 claim、唔改 assignee）
+    //   ② opt-out 短句自動偵測 → 標記 + StaffNotice（誤傷防護：≤40 字先偵測）
+    try {
+      await markFollowupReplied(result.msg.conversationId, waTs);
+      if (result.msg.body) {
+        if (detectOptOutIntent(result.msg.body)) {
+          const convRow = result.convUpdated ?? (await prisma.conversation.findUnique({ where: { id: result.msg.conversationId }, select: { contactId: true } }));
+          if (convRow?.contactId) {
+            await applyFollowupOptOut({ contactId: convRow.contactId, source: "auto", now: waTs });
+          }
+        }
+      }
+    } catch (err) {
+      log.warn({ wamid, err: err instanceof Error ? err.message : String(err) }, "inbound: follow-up hook failed（best-effort — 唔阻主流程）");
     }
 
     log.info(
