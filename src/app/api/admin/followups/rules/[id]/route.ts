@@ -4,13 +4,16 @@ import { requireAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
- * ★ cwi-followup-p3-20260916：規則編輯（ADMIN-only）。
+ * ★ cwi-followup-p3-20260916 → cwi-followup-v3-20260916：規則編輯（ADMIN-only）。
  *
  * PATCH /api/admin/followups/rules/:id
- *   body（全可選）：{ enabled?, delayValue?, delayUnit?, minAmount?, level?, maxSends?,
- *                    cancelOnReply?, cancelOnBooking?, cancelOnArrival?, cancelOnResolved?, cancelOnPaid? }
- *   驗證：delayValue 1–365；delayUnit HOUR/DAY/WEEK/MONTH；minAmount >= 0（null = 唔設門檻）；
- *   level L1/L2。改動即時生效（下一次掃描用新值；進行中 task 唔受影響 — 發送前取消檢查重跑）。
+ *   body（全可選）：{ enabled?, delayValue?, delayUnit?, level?, maxSends?,
+ *                    dedupWindowDays?, firstUseConfirmedAt?,
+ *                    cancelOnReply?, cancelOnBooking?, cancelOnArrival?, cancelOnResolved? }
+ *   驗證：delayValue 1–365；delayUnit HOUR/DAY/WEEK/MONTH；level 只收 L1（v3 全部硬性 L1 — 建議層）；
+ *   dedupWindowDays 1–30（B-4② 同病人同 trigger 終態抑制窗）；
+ *   firstUseConfirmedAt = B1 首啟用確認（ISO 串；BEFORE_APPOINTMENT 規則啟用時 UI 彈確認後帶上）。
+ *   改動即時生效（下一次掃描用新值）。（v3 已剔 minAmount/cancelOnPaid — F 類整類剷走。）
  */
 export const dynamic = "force-dynamic";
 
@@ -38,17 +41,10 @@ export const PATCH = handle(async (req, { params }) => {
     if (!UNITS.has(u)) return NextResponse.json({ error: "bad delayUnit" }, { status: 400 });
     data.delayUnit = u;
   }
-  if (body.minAmount !== undefined) {
-    if (body.minAmount === null) data.minAmount = null;
-    else {
-      const v = Number(body.minAmount);
-      if (!Number.isFinite(v) || v < 0) return NextResponse.json({ error: "minAmount >= 0" }, { status: 400 });
-      data.minAmount = Math.round(v);
-    }
-  }
+  // ★ v3：全部硬性 L1（建議層）— L2 自動發已取消；DB 欄保留（enum 唔拆），engine 忽略
   if (body.level !== undefined) {
     const lv = String(body.level);
-    if (lv !== "L1" && lv !== "L2") return NextResponse.json({ error: "level L1|L2" }, { status: 400 });
+    if (lv !== "L1") return NextResponse.json({ error: "v3: 全部跟進 = L1 建議（冇 L2 自動發）" }, { status: 400 });
     data.level = lv;
   }
   if (body.maxSends !== undefined) {
@@ -56,7 +52,19 @@ export const PATCH = handle(async (req, { params }) => {
     if (!Number.isInteger(v) || v < 1 || v > 10) return NextResponse.json({ error: "maxSends 1-10" }, { status: 400 });
     data.maxSends = v;
   }
-  for (const k of ["cancelOnReply", "cancelOnBooking", "cancelOnArrival", "cancelOnResolved", "cancelOnPaid"] as const) {
+  // ★ v3 B-4②：dedupWindowDays（同病人同 trigger 終態後 N 日內唔再出）— 老細拍板 default 7
+  if (body.dedupWindowDays !== undefined) {
+    const v = Number(body.dedupWindowDays);
+    if (!Number.isInteger(v) || v < 1 || v > 30) return NextResponse.json({ error: "dedupWindowDays 1-30" }, { status: 400 });
+    data.dedupWindowDays = v;
+  }
+  // ★ v3 §3 B1：首啟用確認（「確認診所冇其他渠道發預約提醒？」）— UI 彈確認後帶 ISO 串
+  if (typeof body.firstUseConfirmedAt === "string") {
+    const d = new Date(body.firstUseConfirmedAt);
+    if (Number.isNaN(d.getTime())) return NextResponse.json({ error: "bad firstUseConfirmedAt" }, { status: 400 });
+    data.firstUseConfirmedAt = d;
+  }
+  for (const k of ["cancelOnReply", "cancelOnBooking", "cancelOnArrival", "cancelOnResolved"] as const) {
     if (typeof body[k] === "boolean") data[k] = body[k];
   }
 

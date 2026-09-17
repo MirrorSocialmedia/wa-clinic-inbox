@@ -1,0 +1,3 @@
+-- cwi-followup-v3-20260916：no-op。
+-- 原計劃 DROP VALUE 'OUTSTANDING_BALANCE' 已併入 20260917000004 嘅 type rebuild（本環境 PG 不支持 DROP VALUE）。
+-- 留檔保持 migration 序列完整。

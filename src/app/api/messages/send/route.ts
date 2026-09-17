@@ -62,6 +62,9 @@ const schema = z
     // adopted → Message.sentVia=AI_ADOPTED（唔算「真人插嘴」— cooldown 死鎖根治）；
     // typed → HUMAN_TYPED + Conversation.humanTookOver=true（consult 路徑停出草稿）。
     source: z.enum(["adopted", "typed"]).optional(),
+    // ★ cwi-followup-v3：窗口內 free-form 採用跟進建議 — 發送後 claim 該 SUGGESTED task → SENT。
+    //   （建議卡「採用並編輯」入 composer 後發送帶呢個；同 AI 草稿卡流程一致，sentVia=AI_ADOPTED。）
+    followupTaskId: z.string().min(1).max(64).optional(),
   })
   .refine((d) => (d.body ? 1 : 0) + (d.templateName ? 1 : 0) === 1, {
     message: "body 同 templateName 必須二揀一",
@@ -306,6 +309,22 @@ export const POST = handle(async (req: NextRequest) => {
   //   非負責人（ADMIN 豁免路徑）唔觸 — 呢個欄只反映現任負責人嘅活動。
   if (conv.assigneeId && conv.assigneeId === ctx.staff.id) {
     await prisma.$executeRaw`UPDATE "Conversation" SET "assigneeLastActionAt" = ${now} WHERE "id" = ${conv.id}`;
+  }
+
+  // ★ cwi-followup-v3：窗口內 free-form 採用跟進建議 → claim SUGGESTED task 做 SENT（記 sentMessageId）。
+  //   併發冪等：updateMany where status=SUGGESTED 搶佔；後到者 count=0 靜默跳（fail-soft 唔阻發送）。
+  if (parsed.data.followupTaskId) {
+    try {
+      await prisma.followupTask.updateMany({
+        where: { id: parsed.data.followupTaskId, status: "SUGGESTED" },
+        data: { status: "SENT", sentMessageId: msg.id, handledAt: now, handledBy: ctx.staff.id },
+      });
+    } catch (err) {
+      log.warn(
+        { followupTaskId: parsed.data.followupTaskId, err: err instanceof Error ? err.message : String(err) },
+        "send: followup task claim failed（fail-soft — 發送照做）"
+      );
+    }
   }
 
   await prisma.$executeRaw`

@@ -7,6 +7,7 @@ import { getRedis, closeRedis } from "@/lib/queue";
 import { NOTIFY_CHANNEL, type NotifyMessage } from "@/lib/notify";
 import { bootMediaSecurityCheck } from "@/lib/wa/media";
 import { bootKeyPathCheck } from "@/lib/boot-key-paths";
+import { retentionPolicyMismatches } from "@/lib/ops/retention-policy";
 import log from "@/lib/log";
 
 /**
@@ -27,6 +28,16 @@ const app = next({ dev });
 const handle = app.getRequestHandler();
 
 app.prepare().then(() => {
+  // ★ cwi-followup-v3（MD §6 A-2 + T432）：保留期 env 必須明確寫入且同政策一致，否則拒絕啟動。
+  //   政策 = 對話 24 個月 / 媒體 12 個月（docs/decisions/retention.md；privacy 頁同源）。
+  {
+    const mismatches = retentionPolicyMismatches();
+    if (mismatches.length > 0) {
+      log.error({ mismatches }, "boot: 保留期 env 同政策唔一致（MD §6 A-2）— 拒絕啟動；修正 env 或改政策後重啟");
+      process.exit(1);
+    }
+  }
+
   const server = createServer();
 
   // Socket.IO：只攞 /socket.io path 嘅 request + upgrade，其他全部 fall through 畀 Next

@@ -290,7 +290,8 @@ model Contact {
   followupOptOut Boolean @default(false)
   optOutAt       DateTime?
   optOutSource   String?                      // auto（關鍵詞）| manual（staff toggle）
-  salutation     String?                      // 先生／小姐／太太（template 顯示用）
+  salutation     String?                      // 先生／小姐／太太（template 顯示用；B-9：唔自動估 — AI 唔准由名估性別）
+  locale         String?                      // ★ cwi-followup-v3 B-9：zh（default）| en — 決定 *_en template
   @@unique([clinicId, waId])                  // 同一病人喺兩間店 = 兩條 Contact（隔離）
 }
 
@@ -409,6 +410,10 @@ model Conversation {
   // ★ cwi-followup-p3-20260916（MD §4.5）：病人回覆咗 follow-up（task COMPLETED 聯動）—
   //   badge「跟進回覆」24h 內顯示（同 reopenedAt 口徑；client derive）。
   followupRepliedAt DateTime? @db.Timestamptz
+  // ★ cwi-followup-v3-20260916（B-6）：C 類術後關懷跟進建議發出後開 72h 窗口 —
+  //   窗口內病人痛症訊號（intent=PAIN）→ AI pipeline 強制 PAIN_TRIAGE（唔入 consult）。
+  //   由 engine.sendFollowupTask（trigger=AFTER_TREATMENT）寫；null = 無窗口。
+  postOpFollowupAt DateTime? @db.Timestamptz
   // ★ cwi-routing-20260906（R-2 鐵律）：路由結果標記（唔係 assignee — 公海照見、Send Lock 唔生效）。
   // routed* 只由路由引擎寫（classify 後掛鉤）；assign 流程零改動。
   routedGroupId  String?                      // 路由命中組（CLINIC_POOL 目標 = null）
@@ -995,7 +1000,8 @@ enum FollowupTrigger {
   CONVERSATION_IDLE   // A 對話跟進（wa-inbox 自己 lastInboundAt/lastOutboundAt 空窗）
   BEFORE_APPOINTMENT  // B 預約提醒（bookingStatus ∈ {0,102}，應診前）
   AFTER_NO_SHOW       // B 爽約跟進（bookingStatus = -3 — 明確 = -3，唔照抄 treatment-summary 的 >= 0）
-  OUTSTANDING_BALANCE // F 欠款提醒（billOsAmt >= minAmount）
+  // ★ cwi-followup-v3-20260916：F 欠款 trigger 整類剷走 — enum 值已遷走（20260917000004/5），
+  //   schema 同 DB 對齊（S5 T420 核收時發現 schema 殘留，補剔 — 避免未來 db push 漂移）。
   AFTER_TREATMENT     // C 術後關懷（P4）
   RECALL_NO_REPEAT    // D 定期召回（P4）
   QUOTED_NOT_BOOKED   // E 報價未成交（P4）
@@ -1010,13 +1016,15 @@ enum FollowupUnit {
   WEEK
   MONTH
 }
+// ★ cwi-followup-v3-20260916：Follow-up 重新定位 — 「自動發訊息」→「員工提示層」。
+// 語義：FollowupTask = 未處理建議（唔再係「待發送任務」）；cron 零 outbound（T430）。
 enum FollowupStatus {
-  SCHEDULED // 已排（dueAt 未到）
-  DUE       // 到期（L1 等隊列人撳 / L2 等 cron 發）
-  SENT      // 已發
-  SKIPPED   // 跳過（cancelReason = NO_TEMPLATE 等 — 窗過咗但 template 未審批）
-  CANCELLED // 發送前取消檢查命中（OPT_OUT/REPLIED/BOOKED/ARRIVED/RESOLVED/PAID）
-  COMPLETED // 病人回覆咗 follow-up（唔 claim，對話落公海 + badge）
+  SUGGESTED // 未處理建議（取代 SCHEDULED/DUE — 建 task 即此態；UI 膠囊/建議卡讀此）
+  SENT      // 員工採用後已發（記 sentMessageId）
+  SKIPPED   // 跳過（cancelReason = MANUAL（員工撳跳過）/ NO_TEMPLATE（窗過 + template 未審批 — 建 task 前抑制用））
+  CANCELLED // 取消條件命中（OPT_OUT/REPLIED/BOOKED/ARRIVED/RESOLVED/NO_CONVERSATION）或人手取消（MANUAL）
+  COMPLETED // 病人自己回覆咗（唔 claim，對話落公海 + badge）
+  EXPIRED   // 時效過期（§2.4 — 自動；唔通知唔提示，過咗就算）
 }
 enum FollowupSource {
   RULE
@@ -1032,8 +1040,7 @@ model FollowupRule {
   trigger     FollowupTrigger
   delayValue  Int
   delayUnit   FollowupUnit
-  reasonCodes String[]         // visitReason code（P4 用）
-  minAmount   Int?             // F 類：欠款門檻（HKD；老細 07:31 拍板出廠 500）
+  reasonCodes String[]         // visitReason code（C/D 類）
   templateName String          // → FollowupTemplate.key
   level       FollowupLevel   @default(L1)
   maxSends    Int             @default(1)
@@ -1041,7 +1048,13 @@ model FollowupRule {
   cancelOnBooking  Boolean    @default(true)
   cancelOnArrival  Boolean    @default(true)
   cancelOnResolved Boolean    @default(true)
-  cancelOnPaid     Boolean    @default(true) // F 類
+  // ★ cwi-followup-v3：B-4 跨店去重窗口（日；老細拍板 default 7，可配）
+  dedupWindowDays    Int        @default(7)
+  // ★ cwi-followup-v3 §3：B1 首次啟用確認彈窗（確認診所無其他渠道發預約提醒）— null = 未確認
+  firstUseConfirmedAt DateTime? @db.Timestamptz
+  // ★ cwi-followup-v3 A-1：依賴斷線留痕 — 每輪 scan 後寫（OK|DEP_FAIL|EMPTY）；3 連 DEP_FAIL → hub 紅字
+  lastScanAt     DateTime? @db.Timestamptz
+  lastScanResult String?    // OK | DEP_FAIL | EMPTY
   createdBy   String?
   updatedAt   DateTime        @updatedAt
   @@index([clinicId, enabled])
@@ -1056,7 +1069,7 @@ model FollowupTask {
   ruleId         String?
   source         FollowupSource @default(RULE)
   dueAt          DateTime       @db.Timestamptz
-  status         FollowupStatus @default(SCHEDULED)
+  status         FollowupStatus @default(SUGGESTED)
   templateName   String?        // → FollowupTemplate.key
   templateVars   Json?          // 渲染變數（顯示用：日期/金額/醫生名 — 零 PII 原文）
   contextJson    Json?          // ★ 顯示用結構化數據（到診日期/欠款/預約 apptId）— 零臨床全文

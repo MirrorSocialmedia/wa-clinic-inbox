@@ -245,6 +245,7 @@ export async function runSandboxTurn(input: SandboxTurnInput): Promise<SandboxTu
     lastOutboundAt: null,
     pinnedPatientApricotId: null,
     routedRuleId: null,
+    postOpFollowupAt: null, // ★ cwi-followup-v3 B-6：沙盤無術後關懷窗（sandbox 不測試 B-6）
   };
   const sandboxStore = redisConsultStore({
     getSession: () => st.state,

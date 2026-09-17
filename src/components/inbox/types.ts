@@ -31,6 +31,32 @@ export interface WindowState {
 
 export type ConvStatus = "OPEN" | "PENDING" | "RESOLVED";
 
+/**
+ * ★ cwi-followup-v3：對話內跟進建議卡數據（GET /api/followups/tasks?conversationId=）。
+ * 系統只指出邊個對話要跟＋點解；發唔發、改唔改字 = 員工決定（cron 零 outbound）。
+ */
+export interface FollowupSuggestion {
+  id: string;
+  conversationId: string | null;
+  ruleName: string | null;
+  /** FollowupTrigger（B1/B2/C/D/E/A 六類；F 已剷） */
+  trigger: string | null;
+  /** 建議過期時間（時效表 — 過期由 cron 標 EXPIRED） */
+  dueAt: string;
+  templateName: string | null;
+  templateApproved: boolean | null;
+  templateLanguage: string;
+  /** 已填變數嘅 template 預覽（窗口內 = composer 草稿底稿；過窗 = 只可發呢段） */
+  templatePreview: string | null;
+  patientName: string | null;
+  salutation: string | null;
+  optOut: boolean;
+  /** 顯示用結構化數據（零臨床全文） */
+  contextJson: Record<string, unknown> | null;
+  templateVars: Record<string, string | number | null> | null;
+  createdAt: string;
+}
+
 export interface ConversationItem {
   id: string;
   clinicId: string;
@@ -61,6 +87,8 @@ export interface ConversationItem {
   routedStaffName?: string | null;
   /** ★ cwi-statusrole2-20260910（MD §3）：最近一次已解決翻開時間 — badge「↻ 重新開啟」24h 窗口用 */
   reopenedAt?: Date | string | null;
+  /** ★ cwi-followup-v3：最舊未處理跟進建議（SUGGESTED）dueAt — 「待跟進」膠囊 client filter + 最舊先排序；null = 冇 */
+  followupDueAt?: string | null;
   contact: ContactInfo | null;
   /** ★ booking-ui（A）：已釘住舊客（chat 卡藍掣「幫我喺 Apricot 落單」可見性）— null = 未釘住 */
   pinnedPatient: { patientApricotId: string } | null;
@@ -463,6 +491,10 @@ export interface PatientRecordData {
     followupOptOut: boolean;
     optOutSource: string | null;
     optOutAt: string | null;
+    /** ★ cwi-followup-v3 B-9：稱呼（人手可改；系統唔自動估）；null = template 回退「您」 */
+    salutation: string | null;
+    /** ★ cwi-followup-v3 B-9：zh（default）| en — 決定 *_en template */
+    locale: string | null;
     canEdit: boolean;
   };
   patient: {

@@ -1,5 +1,7 @@
 /**
  * e2e-followup-p4.ts — P4 臨床跟進 C/D/E（followup-v2 MD §5.5 五項驗收 + 術語表 + hub tab）
+ * ★ cwi-followup-v3-20260916 對齊：F 類剷（規則 7→6）/ 取消條件 6→5 / 健康警示 5→6（+A-1 scan_dep_fail）
+ *   / sendPolicy = cron 零 outbound（無 dailyCap）/ D 類時效 = 建議日 +14d（§2.4，過期 → EXPIRED）
  *
  * 前置：dev server 127.0.0.1:3100（WA_MOCK=1）；worker 跑緊（tsx src/workers/index.ts，
  *   .env WORKFORCE_MOCK=1）；Postgres 15432；redis 6379。
@@ -13,12 +15,12 @@
  *
  * 斷言（MD §5.5）：
  *   T400 基建 + 冪等洗｜T401 cron enqueue 掛接（C 正例先出）
- *   T402 C 拔牙後 1 日 task（DUE）｜T403 C 洗牙唔出 + C 無抗生素唔出｜T404 C 今日 → SCHEDULED
- *   T405 D 洗牙 6 月 task（DUE）｜T406 D 3 月唔出 + 再洗過唔出（冪等）
+ *   T402 C 拔牙後 1 日 task（SUGGESTED）｜T403 C 洗牙唔出 + C 無抗生素唔出｜T404 C 今日 → 無 task（未到期）
+ *   T405 D 洗牙 7 月前 → 建議日（visit+6 月）已過 → EXPIRED（v3 §2.4 D+14d）｜T406 D 3 月唔出 + 再洗過唔出（冪等）
  *   T407 E 正例 task（未審批 template → task 照建）｜T408 E 已有 booking 唔出 + booked 計數
  *   T409 E 三實測樣本抽到（S1 12000 / S2 4K+900@+5-6K / S3 5500@+18K）+ suggest/consider 標未做
  *   T410 術語表加詞即時生效（PUT → GET）+ 收貨順手教字典（correct + teachTerm）
- *   T411 hub API（7 規則 / 六項取消 / 健康警示 5 項 / E template 未審批紅）+ hub 頁「主動跟進」tab
+ *   T411 hub API（6 規則（F 剷）/ 五項取消 / 健康警示 6 項（+scan_dep_fail）/ sendPolicy 零 outbound / E template 未審批紅）+ hub 頁「主動跟進」tab
  *   T412 藥物 tab：patient-record visits[].rxCodes（code→name + 抗生素旗）
  *   T413 opt-out 優先（checkCancellations → OPT_OUT）｜T414 冪等（重跑零新 task）+ 零殘留
  *
@@ -297,22 +299,22 @@ async function main() {
   const tC2 = await tasksOf(FIX.C2.cpId);
   const tC3 = await tasksOf(FIX.C3.cpId);
   const tC4 = await taskOfTrigger(FIX.C4.cpId, (await ruleId("AFTER_TREATMENT"))!);
-  check("T402 C 拔牙 2 日前 + 抗生素 → task DUE（治療後 1 日到期）", !!tC1 && tC1.status === "DUE", tC1 && { status: tC1.status, dueAt: tC1.dueAt });
+  check("T402 C 拔牙 2 日前 + 抗生素 → task SUGGESTED（治療後 1 日到期）", !!tC1 && tC1.status === "SUGGESTED", tC1 && { status: tC1.status, dueAt: tC1.dueAt });
   check("T403a C 洗牙（0008 唔喺 rule）+ 抗生素 → 無 task", tC2.length === 0, tC2);
   check("T403b C 拔牙但無抗生素（IBU）→ 無 task", tC3.length === 0, tC3);
-  // 口徑（同 P3 A 類「到門檻先建」）：未到期唔建 task — 今日拔牙，明日 scan 先出 DUE
+  // 口徑（同 P3 A 類「到門檻先建」）：未到期唔建 task — 今日拔牙，明日 scan 先出 SUGGESTED
   check("T404 C 今日拔牙（未到期）→ 無 task（明日 scan 先出 — 口徑同 P3 A 類）", tC4 == null, tC4);
 
   const tD1 = await taskOfTrigger(FIX.D1.cpId, (await ruleId("RECALL_NO_REPEAT"))!);
   const tD2 = await tasksOf(FIX.D2.cpId);
   const tD3 = await tasksOf(FIX.D3.cpId);
-  check("T405 D 洗牙 7 月前（> 6 月）→ task DUE", !!tD1 && tD1.status === "DUE", tD1 && { status: tD1.status, dueAt: tD1.dueAt });
+  check("T405 D 洗牙 7 月前（> 6 月）→ 建議日（visit+6 月）已過 → EXPIRED（v3 §2.4 D+14d）", !!tD1 && tD1.status === "EXPIRED", tD1 && { status: tD1.status, dueAt: tD1.dueAt });
   check("T406a D 洗牙 3 月前（< 6 月）→ 無 task", tD2.length === 0, tD2);
   check("T406b D 期間再洗過（最新 2 月前 < 6 月）→ 無 task（冪等）", tD3.length === 0, tD3);
 
   const tE1 = await taskOfTrigger(FIX.E1.cpId, (await ruleId("QUOTED_NOT_BOOKED"))!);
   const tE2 = await tasksOf(FIX.E2.cpId);
-  check("T407 E confirmed 報價 8 日前 + 無 booking → task（template 未審批 → task 照建，send 時先 SKIPPED）", !!tE1 && ["DUE", "SCHEDULED"].includes(tE1.status), tE1 && { status: tE1.status, ctx: tE1.contextJson });
+  check("T407 E confirmed 報價 8 日前 + 無 booking → task SUGGESTED（template 未審批 → 過窗發送先唔俾發）", !!tE1 && tE1.status === "SUGGESTED", tE1 && { status: tE1.status, ctx: tE1.contextJson });
   check(
     "T407b E task 用最新報價（S3：implant 18000 / br 5500@ 之一）",
     !!tE1 && /implant|br|植牙|牙橋|18000|5500/.test(JSON.stringify(tE1.contextJson ?? {})),
@@ -380,14 +382,14 @@ async function main() {
   console.log("\n[T411] hub 主動跟進 tab");
   const hubRes = await fetch(`${BASE}/api/admin/followup-hub`, { headers: H });
   const hub = (await hubRes.json()) as any;
-  check("T411a hub 7 規則（P3 4 + P4 3）", hub.rules?.length === 7, hub.rules?.map((r: any) => r.trigger));
+  check("T411a hub 6 規則（P3 4 + P4 2 — F 類 OUTSTANDING_BALANCE v3 剷）", hub.rules?.length === 6, hub.rules?.map((r: any) => r.trigger));
   const eRule = hub.rules?.find((r: any) => r.trigger === "QUOTED_NOT_BOOKED");
   check("T411b E 規則 template 未審批（quote_followup approved=false → 紅）", !!eRule && eRule.templateApproved === false, eRule);
-  check("T411c 取消條件六項 + OPT_OUT 鎖定", hub.cancelConditions?.length === 6 && hub.cancelConditions.find((c: any) => c.key === "OPT_OUT")?.locked === true, hub.cancelConditions?.length);
-  check("T411d 健康警示 5 項", hub.health?.length === 5, hub.health?.map((h: any) => h.id));
+  check("T411c 取消條件五項 + OPT_OUT 鎖定（v3）", hub.cancelConditions?.length === 5 && hub.cancelConditions.find((c: any) => c.key === "OPT_OUT")?.locked === true, hub.cancelConditions?.length);
+  check("T411d 健康警示 6 項（v3 + A-1 scan_dep_fail）", hub.health?.length === 6, hub.health?.map((h: any) => h.id));
   const warnUnapproved = hub.health?.find((h: any) => h.id === "template_unapproved");
   check("T411e 健康警示：template 未審批 = 紅（ok=false）", !!warnUnapproved && warnUnapproved.ok === false, warnUnapproved);
-  check("T411f 每日上限 = 唔設（靠 L1）", /唔設|L1/.test(String(hub.sendPolicy?.dailyCap ?? "")), hub.sendPolicy);
+  check("T411f sendPolicy = cron 零 outbound（v3 無 dailyCap — 員工決定發唔發）", /零 outbound/.test(String(hub.sendPolicy?.note ?? "")), hub.sendPolicy);
   // hub 頁 HTML 含「主動跟進（三步）」tab
   const pageRes = await fetch(`${BASE}/admin/ai`, { headers: { cookie } });
   const pageHtml = await pageRes.text();

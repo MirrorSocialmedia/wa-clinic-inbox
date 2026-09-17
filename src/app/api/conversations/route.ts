@@ -56,8 +56,8 @@ export const GET = handle(async (req: NextRequest) => {
   const statusParam = url.searchParams.get("status");
   const assignedParam = url.searchParams.get("assigned");
   const countsParam = url.searchParams.get("counts") === "1";
-  if (assignedParam && !["unassigned", "mine", "routed"].includes(assignedParam)) {
-    return NextResponse.json({ error: "invalid assigned (unassigned|mine|routed)" }, { status: 400 });
+  if (assignedParam && !["unassigned", "mine", "routed", "followup"].includes(assignedParam)) {
+    return NextResponse.json({ error: "invalid assigned (unassigned|mine|routed|followup)" }, { status: 400 });
   }
 
   // ★ cwi-hub-a-20260914（Part A）：scope-aware guard — STAFF / 受限 ADMIN（COMPANY/CLINICS）
@@ -67,6 +67,23 @@ export const GET = handle(async (req: NextRequest) => {
   const scopedSet = scopedClinicSet(ctx);
 
   const where: Record<string, unknown> = {};
+  // ★ cwi-followup-v3：「待跟進」膠囊 — 有未處理跟進建議（SUGGESTED）嘅對話。
+  //   計數不變式：膠囊數字 === 列表 row 數（count 同 list 共用同一 followupConvIds 集合 + 同 scope）。
+  //   每次 fetch 都回 followupDueAt（item 欄）— client 端 filter + 最舊先排序（同公海/我負責 client 端 filter 同構）。
+  const followupOldestDue = new Map<string, number>();
+  {
+    const sugg = await prisma.followupTask.findMany({
+      where: { status: "SUGGESTED", conversationId: { not: null } },
+      select: { conversationId: true, dueAt: true },
+    });
+    for (const t of sugg) {
+      const cid = t.conversationId as string;
+      const ts = t.dueAt.getTime();
+      const prev = followupOldestDue.get(cid);
+      if (prev === undefined || ts < prev) followupOldestDue.set(cid, ts);
+    }
+  }
+  const followupConvIds = [...followupOldestDue.keys()];
   if (assignedParam) {
     // ★ cwi-inboxfix-20260905（MD I-2 鐵律）：嚴格 scope — 唔經 buildScope 嘅 assignee OR 支路。
     // unassigned：clinic 限定 + assigneeId:null（外範圍線絕對漏唔入嚟）。
@@ -93,6 +110,15 @@ export const GET = handle(async (req: NextRequest) => {
       // 受限角色：無 clinic 限制（B-1 單線授權語義）；全店（ALL/SUPERVISOR）：clinicParam 收窄（tab 語義照舊）
       if (scopedSet === null && clinicParam) {
         where.clinicId = clinicParam;
+      }
+    } else if (assignedParam === "followup") {
+      // ★ cwi-followup-v3（MD §2.1）：有 SUGGESTED 建議嘅對話（scope 跟 buildScope 同源；排除 RESOLVED）
+      where.id = { in: followupConvIds };
+      where.status = { not: "RESOLVED" };
+      if (scopedSet === null) {
+        if (clinicParam) where.clinicId = clinicParam;
+      } else {
+        where.OR = [{ clinicId: clinicParam ?? { in: scopedSet } }, { assigneeId: ctx.staff.id }];
       }
     } else {
       where.assigneeId = ctx.staff.id;
@@ -125,6 +151,14 @@ export const GET = handle(async (req: NextRequest) => {
     orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }],
     take: 200,
   });
+  // ★ cwi-followup-v3（MD §2.1）：待跟進列表排序 = 建議日期最舊先（唔係最新）— 久咗未跟先最緊要
+  if (assignedParam === "followup") {
+    convs.sort(
+      (a, b) =>
+        (followupOldestDue.get(a.id) ?? Infinity) - (followupOldestDue.get(b.id) ?? Infinity) ||
+        Number(b.urgent) - Number(a.urgent)
+    );
+  }
   const [contacts, staff, clinics, skillGroups, pendingBookings] = await Promise.all([
     prisma.contact.findMany({ select: { id: true, waId: true, profileName: true, labels: true } }),
     prisma.staffUser.findMany({ select: { id: true, name: true } }),
@@ -164,7 +198,7 @@ export const GET = handle(async (req: NextRequest) => {
   //   unassigned = assigneeId:null；mine = assigneeId:me（STAFF 跨店線經 base OR 支路計入）；
   //   routed = unassigned ∧ (routedStaffId=me ∨ routedGroupId∈myGroups)（同 buildScope 同源 —
   //   取代舊 B-1 專屬 no-clinic query；MD v2 C-4 修訂口徑）。
-  let counts: { all: number; unassigned: number; mine: number; routed: number; pending: number; resolved: number } | null = null;
+  let counts: { all: number; unassigned: number; mine: number; routed: number; pending: number; resolved: number; followup: number } | null = null;
   if (countsParam) {
     const scope = buildScope(ctx, clinicParam);
     const notResolved = { status: { not: "RESOLVED" as const } };
@@ -175,7 +209,7 @@ export const GET = handle(async (req: NextRequest) => {
     const myGroupIds = myGroupsForCount.map((g) => g.groupId);
     const routedOR: Record<string, unknown>[] = [{ routedStaffId: ctx.staff.id }];
     if (myGroupIds.length > 0) routedOR.push({ routedGroupId: { in: myGroupIds } });
-    const [all, unassigned, mine, routed, pending, resolved] = await Promise.all([
+    const [all, unassigned, mine, routed, pending, resolved, followup] = await Promise.all([
       // all = 工作隊列總數（排除 RESOLVED — 「已解決」係右側細字連結嘅獨立入口）
       prisma.conversation.count({ where: { ...scope, ...notResolved } }),
       // unassigned（公海）= 未指派 ∧ !RESOLVED
@@ -188,8 +222,10 @@ export const GET = handle(async (req: NextRequest) => {
       prisma.conversation.count({ where: { ...scope, status: "PENDING" } }),
       // resolved：API 兼容保留（UI 已無已解決膠囊；「睇已解決 →」連結無數字）
       prisma.conversation.count({ where: { ...scope, status: "RESOLVED" } }),
+      // ★ cwi-followup-v3：待跟進 = 有 SUGGESTED 建議 ∧ !RESOLVED（同 list 同一 followupConvIds — 不變式）
+      prisma.conversation.count({ where: { ...scope, ...notResolved, id: { in: followupConvIds } } }),
     ]);
-    counts = { all, unassigned, mine, routed, pending, resolved };
+    counts = { all, unassigned, mine, routed, pending, resolved, followup };
   }
 
   const items = convs.map((cv) => {
@@ -226,6 +262,11 @@ export const GET = handle(async (req: NextRequest) => {
         reopenedAt: cv.reopenedAt,
         // ★ cwi-followup-p3-20260916（鐵律 5）：badge「跟進回覆」— 24h 內由 client derive
         followupRepliedAt: cv.followupRepliedAt,
+        // ★ cwi-followup-v3：「待跟進」膠囊 — 最舊 SUGGESTED 建議 dueAt（null = 冇未處理建議）
+        followupDueAt: (() => {
+          const ts = followupOldestDue.get(cv.id);
+          return ts === undefined ? null : new Date(ts).toISOString();
+        })(),
         routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId)?.name ?? null) : null,
         routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
         contact: contactMap.get(cv.contactId) ?? null,

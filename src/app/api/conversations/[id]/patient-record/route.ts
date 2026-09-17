@@ -129,6 +129,9 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       followupOptOut: contact.followupOptOut,
       optOutSource: contact.optOutSource,
       optOutAt: contact.optOutAt,
+      // ★ cwi-followup-v3 B-9：稱呼（人手可改 — 系統唔自動估）+ locale（決定 *_en template）
+      salutation: contact.salutation,
+      locale: contact.locale,
       canEdit: auth.staff.role !== "SUPERVISOR",
     },
     patient: resolved

@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Bell,
   CalendarDays,
   Check,
   CheckCheck,
@@ -19,9 +20,55 @@ import {
   Users,
   XCircle,
 } from "lucide-react";
-import type { ConversationItem, DraftInfo, DraftTrace, MessageItem, NoteReceipt, PatientChip, StaffInfo } from "./types";
+import type { ConversationItem, DraftInfo, DraftTrace, FollowupSuggestion, MessageItem, NoteReceipt, PatientChip, StaffInfo } from "./types";
 import { noteTickState } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
+
+// ★ cwi-followup-v3（MD §2.2）：跟進建議卡 — trigger 顯示名 + 原因行（只食結構化數據，零臨床全文）
+const FOLLOWUP_TRIGGER_LABEL: Record<string, string> = {
+  BEFORE_APPOINTMENT: "預約提醒",
+  AFTER_NO_SHOW: "未到診提醒",
+  AFTER_TREATMENT: "術後跟進",
+  RECALL_NO_REPEAT: "召回（未回診）",
+  QUOTED_NOT_BOOKED: "已報價未預約",
+  CONVERSATION_IDLE: "對話空窗",
+};
+
+function followupReasonLine(s: FollowupSuggestion): string | null {
+  const v = (s.templateVars ?? {}) as Record<string, unknown>;
+  const cx = (s.contextJson ?? {}) as Record<string, unknown>;
+  const pick = (...ks: string[]): string | null => {
+    for (const k of ks) {
+      const x = v[k] ?? cx[k];
+      if (x != null && x !== "") return String(x);
+    }
+    return null;
+  };
+  switch (s.trigger) {
+    case "BEFORE_APPOINTMENT": {
+      const d = pick("apptDate"); const t = pick("apptTime"); const dr = pick("providerName");
+      return [d, t, dr].filter(Boolean).join(" ") || "有預約未提醒";
+    }
+    case "AFTER_NO_SHOW": {
+      const d = pick("apptDate"); const t = pick("apptTime");
+      return [d ? `預約 ${d}${t ?? ""}` : null, "未到診"].filter(Boolean).join(" · ");
+    }
+    case "AFTER_TREATMENT":
+      return pick("visitDate") ? `到診 ${pick("visitDate")} · 術後跟進窗` : "治療後跟進窗";
+    case "RECALL_NO_REPEAT": {
+      const d = pick("lastVisitDate"); const m = pick("intervalMonths");
+      return [d ? `上次到診 ${d}` : null, m != null && m !== "" ? `${m} 個月未回` : null].filter(Boolean).join(" · ");
+    }
+    case "QUOTED_NOT_BOOKED": {
+      const d = pick("quoteDate"); const item = pick("item");
+      return [d ? `${d} 報價` : null, item].filter(Boolean).join(" · ") || "報價後未預約";
+    }
+    case "CONVERSATION_IDLE":
+      return "客户一阵未回覆";
+    default:
+      return null;
+  }
+}
 import { fmtAmt, fmtDateShort } from "@/lib/patient-record-state";
 import { BookingCard } from "./booking-card";
 import { HoldCard } from "./hold-card";
@@ -41,7 +88,7 @@ interface Props {
   loadingOlder: boolean;
   onScrollTop: () => void;
   window: { open: boolean; remainingMs: number; tone: string } | null;
-  onSend: (body: string, source?: "adopted" | "typed") => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null }>;
+  onSend: (body: string, source?: "adopted" | "typed", /** ★ cwi-followup-v3：窗口內 free-form 採用 — 帶跟進建議 task id（server fail-soft claim SUGGESTED→SENT） */ followupTaskId?: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null }>;
   staffName: string;
   /** Phase 2：該對話最新嘅 pending AI 草稿（PROPOSED）；null = 無 */
   pendingDraft: DraftInfo | null;
@@ -84,6 +131,16 @@ interface Props {
   onBookingActionDone?: () => void;
   /** ★ P2（cwi-followup-p2）：header〔病人記錄〕— 手機開半屏抽屜 / 桌面切右側欄分頁（parent 依斷點分流） */
   onOpenPatientRecord?: () => void;
+  /** ★ cwi-followup-v3（MD §2.2）：該對話現行未處理跟進建議（SUGGESTED）；null = 無 */
+  suggestion?: FollowupSuggestion | null;
+  /** ★ cwi-followup-v3：過窗採用 — 發 template（POST /api/followups/tasks/:id action=send） */
+  onSuggestionSend?: (taskId: string) => Promise<{ ok: boolean; error?: string }>;
+  /** ★ cwi-followup-v3：跳過 — SKIPPED(MANUAL) + dedupWindowDays 內唔再出 */
+  onSuggestionSkip?: (taskId: string) => Promise<{ ok: boolean; error?: string }>;
+  /** ★ cwi-followup-v3：窗口內 free-form 採用發送成功（composer onSend 回執）→ parent 清建議卡 + 重拉計數 */
+  onSuggestionSent?: () => void;
+  /** ★ cwi-followup-v3：建議卡送/跳進行中（disable 掣） */
+  suggestionBusy?: boolean;
 }
 
 // ── ★ H2：@mention helper（純函數 — autocomplete 偵測 + 內文反推 mentions + 高亮渲染） ──
@@ -406,6 +463,8 @@ export function ChatPane(p: Props) {
   // ★ consult v2.1 C5（MD §8.4）：composer 內嘅文字係咪由 AI 草稿「採用」嚟（auto-fill / 採用並編輯）。
   //   發送時 source = adopted（採用並編輯，含改動）vs typed（自己由零打字 → humanTookOver）。
   const adoptedDraftRef = useRef<string | null>(null);
+  // ★ cwi-followup-v3：composer 內文字係咪由跟進建議「採用並編輯」嚟 — 發送時帶 followupTaskId（claim SENT）
+  const adoptedFollowupRef = useRef<string | null>(null);
   // ★ H2：@ autocomplete（note composer）— {query, atPos} = 偵測到嘅 @ 後字串 + @ 字位置
   const [mentionState, setMentionState] = useState<{ query: string; atPos: number } | null>(null);
   const [mentionIdx, setMentionIdx] = useState(0);
@@ -431,6 +490,7 @@ export function ChatPane(p: Props) {
     setTemplateOptions(null);
     pinnedRef.current = true;
     autoFilledDraftRef.current = null;
+    adoptedFollowupRef.current = null; // ★ cwi-followup-v3：換對話 → 建議採用旗清掉
     noteReadSentRef.current = new Set();
   }, [p.conversation?.id]);
 
@@ -608,7 +668,9 @@ export function ChatPane(p: Props) {
     // ★ C5 §8.4：source 標記 — 由草稿採用嚟（auto-fill/採用並編輯，含改動）= adopted；
     //   自己由零打字 = typed（server 置 humanTookOver → 側欄「AI 已暫停」）。
     const source: "adopted" | "typed" = adoptedDraftRef.current ? "adopted" : "typed";
-    const r = await p.onSend(body, source);
+    // ★ cwi-followup-v3：窗口內 free-form 採用 → 帶 followupTaskId（server fail-soft claim SUGGESTED→SENT）
+    const followupTaskId = adoptedFollowupRef.current;
+    const r = await p.onSend(body, source, followupTaskId ?? undefined);
     if (!r.ok) {
       // cwi-multiclinic-20260903（MD A.6.2）：423 打字保護 — 文字保留（setDraft 唔郁）；
       // toast「{name} 已接手呢個對話」由 parent（inbox-client）發出；header 負責人名 optimistic 更新。
@@ -618,6 +680,8 @@ export function ChatPane(p: Props) {
     } else {
       setDraft("");
       adoptedDraftRef.current = null;
+      adoptedFollowupRef.current = null;
+      p.onSuggestionSent?.(); // ★ cwi-followup-v3：窗口內採用發送成功 → parent 清建議卡 + 重拉計數
     }
     setSending(false);
   }
@@ -632,6 +696,24 @@ export function ChatPane(p: Props) {
       setTemplateOptions(null);
     }
     setTemplateBusy(false);
+  }
+
+  /** ★ cwi-followup-v3：過窗採用 — 發 template（engine sendFollowupTask — sentVia=AI_ADOPTED） */
+  async function suggestionSend() {
+    const s = p.suggestion;
+    if (!s || !p.onSuggestionSend) return;
+    const r = await p.onSuggestionSend(s.id);
+    if (!r.ok) setSendError(r.error ?? "template 發送失敗");
+    else setSendError(null);
+  }
+
+  /** ★ cwi-followup-v3：跳過 — SKIPPED(MANUAL) + dedupWindowDays 內唔再出 */
+  async function suggestionSkip() {
+    const s = p.suggestion;
+    if (!s || !p.onSuggestionSkip) return;
+    const r = await p.onSuggestionSkip(s.id);
+    if (!r.ok) setSendError(r.error ?? "跳過失敗");
+    else setSendError(null);
   }
 
   // ★ Phase E：標記投訴 / AI 錯誤 → POST /flag（24h 內冪等 no-op）
@@ -675,7 +757,7 @@ export function ChatPane(p: Props) {
               {c.contact?.profileName || "未命名聯絡人"}
             </div>
             {c.contact?.waId && <div className="text-[11px] text-t3">{c.contact.waId}</div>}
-            {/* ★ P2（cwi-followup-p2 §3.1）：病人 chip — patientCode·舊客/新客 + 欠款（>0 先顯）+ 上次到診 */}
+            {/* ★ P2（cwi-followup-p2 §3.1）+ v3：病人 chip — patientCode·舊客/新客 + 未結餘額（中性灰，>0 先顯）+ 上次到診 */}
             {patientChip ? (
               <div className="flex items-center gap-1 flex-wrap" data-e2e="p2-chip-row">
                 <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-panel-2 text-t2" data-e2e="p2-chip-code">
@@ -683,10 +765,10 @@ export function ChatPane(p: Props) {
                 </span>
                 {patientChip.osAmt != null && patientChip.osAmt > 0 ? (
                   <span
-                    className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-danger-soft text-danger-text font-medium"
+                    className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-panel-2 text-t2"
                     data-e2e="p2-chip-os"
                   >
-                    ⚠ 欠 {fmtAmt(patientChip.osAmt)}
+                    未結餘額 {fmtAmt(patientChip.osAmt)}
                   </span>
                 ) : null}
                 {patientChip.lastVisitDate ? (
@@ -987,6 +1069,89 @@ export function ChatPane(p: Props) {
           )
         )}
         {flowError && <div className="text-xs text-danger-text mb-1.5">{flowError}</div>}
+
+        {/* ★ cwi-followup-v3（MD §2.2）：跟進建議卡 — AI 草稿卡上面、同款 zone。
+            系統只指出邊個對話要跟＋點解；發唔發 = 員工撳。
+            窗口內 = 「採用並編輯」填 composer（free-form 可改）→ 發送帶 followupTaskId（sentVia=AI_ADOPTED 無 cooldown）；
+            過窗 = 只可發 template（預覽已填變數）；template 未審批 = 等審批 + 唔俾發；
+            跳過 = SKIPPED(MANUAL) + dedupWindowDays(7) 內唔再出。 */}
+        {p.suggestion &&
+          (() => {
+            const s = p.suggestion;
+            const inWindow = !!p.window?.open;
+            const winH = p.window ? Math.max(0, Math.ceil((p.window.remainingMs ?? 0) / 3600000)) : 0;
+            const noTpl = !s.templateName || s.templatePreview == null;
+            const unapproved = !noTpl && s.templateApproved === false;
+            const reason = followupReasonLine(s);
+            return (
+              <div className="mb-2 rounded-[26px] border-2 border-dashed border-brand/60 bg-panel p-3.5" data-e2e="fu-sugg-card">
+                <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                  <Bell size={15} strokeWidth={2.75} className="text-brand-text" />
+                  <span className="text-[12.5px] font-semibold text-brand-text">
+                    跟進建議 · {s.trigger ? FOLLOWUP_TRIGGER_LABEL[s.trigger] ?? s.trigger : "跟進"}
+                  </span>
+                  {s.ruleName && <span className="text-[10px] text-t3">（{s.ruleName}）</span>}
+                  <span className="ml-auto flex gap-1.5 max-md:w-full max-md:order-last max-md:mt-2 max-md:[&>button]:flex-1">
+                    {inWindow && (
+                      <button
+                        onClick={() => {
+                          if (s.templatePreview == null) return;
+                          setDraft(s.templatePreview);
+                          adoptedFollowupRef.current = s.id; // ★ free-form 採用 = adopted + followupTaskId
+                          adoptedDraftRef.current = null;
+                        }}
+                        disabled={p.suggestionBusy || locked || s.templatePreview == null}
+                        title={locked ? "先接手（become 負責人）先可以發 WhatsApp" : s.templatePreview == null ? "未設 template — 窗口內可以自己打字" : undefined}
+                        className="text-xs px-3 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-40"
+                        data-e2e="fu-sugg-adopt"
+                      >
+                        採用並編輯
+                      </button>
+                    )}
+                    {!inWindow && (
+                      <button
+                        onClick={() => void suggestionSend()}
+                        disabled={p.suggestionBusy || locked || noTpl || unapproved}
+                        title={locked ? "先接手（become 負責人）先可以發 WhatsApp" : unapproved ? "等 template 審批中" : noTpl ? "未設 template" : undefined}
+                        className="text-xs px-3 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-40"
+                        data-e2e="fu-sugg-send-template"
+                      >
+                        發送 template
+                      </button>
+                    )}
+                    <button
+                      onClick={() => void suggestionSkip()}
+                      disabled={p.suggestionBusy}
+                      className="text-xs px-3 py-1 rounded-full border border-line-strong text-t2 hover:bg-panel-2 disabled:opacity-40"
+                      data-e2e="fu-sugg-skip"
+                    >
+                      跳過（7 日唔再出）
+                    </button>
+                  </span>
+                </div>
+                <div className="text-[11px] mb-1.5" data-e2e="fu-sugg-window">
+                  {inWindow ? (
+                    <span className="text-t2">窗口 {winH}h · free-form 發得</span>
+                  ) : noTpl ? (
+                    <span className="text-warn-text">已過窗 · 未設 template（系統發唔出；複製去手機 App 覆）</span>
+                  ) : unapproved ? (
+                    <span className="text-warn-text">已過窗 · 等 template 審批中（唔俾發）</span>
+                  ) : (
+                    <span className="text-t2">已過窗 · 只可發 template</span>
+                  )}
+                  {reason && <span className="text-t3"> · {reason}</span>}
+                </div>
+                {s.templatePreview != null && (
+                  <div className="text-[13px] leading-[1.65] text-t1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
+                    {s.templatePreview}
+                  </div>
+                )}
+                {locked && (
+                  <div className="text-[10px] text-warn-text mt-1">🔒 先〔接手〕成為負責人，先可以採用/發送去 WhatsApp</div>
+                )}
+              </div>
+            );
+          })()}
 
         {/* Phase 2：AI 草稿卡 — signature element：全頁唯一 2px brand 邊框（Organic rounded-[26px]）
             cwi-window-20260901（P2）：COPY_ONLY（過窗）= banner + 複製掣 + 採用並發送 disable */}

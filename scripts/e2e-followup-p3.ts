@@ -1,25 +1,25 @@
 /**
- * e2e-followup-p3.ts — P3 Follow-up 引擎（followup-v2 MD §4.7 五項 + opt-out + 零殘留）
+ * e2e-followup-p3.ts — P3 迴歸（★ cwi-followup-v3-20260916 更新：員工提示層口徑）
  *
  * 前置：dev server 127.0.0.1:3100（WA_MOCK=1）；worker 跑緊（tsx src/workers/index.ts，
- *   .env WORKFORCE_MOCK=1 — mock 經 Prisma .env load 生效）；Postgres 15432；redis 6379。
+ *   .env WORKFORCE_MOCK=1）；Postgres 15432；redis 6379。
  * 跑法：pnpm -s tsx scripts/e2e-followup-p3.ts
  *
  * 決定性：
  *   - mock 動態 fixture `.dev/workforce-mock-followup.json`（symlink → /tmp 避 Next watcher）：
- *     明日預約 0（b01/w01/w21/w41）+ 前日爽約 -3（n01）+ 配對源 1（f01/f21）+ opt-out 病人 0（o01）；
- *     balances：f01=600（過 500 門檻）/ f21=0（PAID 取消測試）。
+ *     明日預約 0（b01/w01/w21/w41）+ 前日爽約 -3（n01）+ opt-out 病人 0（o01）。
+ *     （F 欠款 mock 已隨 v3 整類剷走 — engine 唔再 call balance。）
  *   - 第一次 scan 經 cron queue enqueue（worker 執行 — 證明 cron 掛接）；其餘走引擎直接調。
  *
- * 斷言（MD §4.7）：
- *   T380 基建 + 冪等洗｜T381 A 類跑通（DUE + SCHEDULED 兩態）｜T382 B 預約提醒跑通
- *   T383 B 爽約跑通｜T384 F 欠款跑通（600 建 / 0 唔建）｜T385 opt-out 零 task（scan 唔建）
- *   T386 取消六項各測（OPT_OUT/REPLIED/BOOKED/ARRIVED/RESOLVED/PAID）
- *   T387 窗口過咗唔發 free-form（未審批 → SKIPPED(NO_TEMPLATE)；審批後 → template 發）
- *   T388 窗口內可 text（未審批 template 照發 text）｜T389 L2 直發（AI_AUTO）
- *   T390 發送唔 claim（assignee 不變）+ 病人回覆 → COMPLETED 唔 claim + followupRepliedAt badge
+ * 斷言（v3 員工提示層）：
+ *   T380 基建 + 冪等洗｜T381 A 類跑通（SUGGESTED）｜T382 B 預約提醒跑通（SUGGESTED）
+ *   T383 B 爽約跑通（SUGGESTED）｜T384 F 鏈已剷（template 冇 + rule 冇）｜T385 opt-out 零 task
+ *   T386 取消五項（OPT_OUT/REPLIED/BOOKED/ARRIVED/RESOLVED）
+ *   T387 窗口過咗：未審批 template 唔俾發（task 留 SUGGESTED）；審批後 → template 發
+ *   T388 窗口內 text（員工採用 AI_ADOPTED）｜T389 cron 零 outbound（L2 rule 只建 SUGGESTED，零發送）
+ *   T390 發送唔 claim + 病人回覆 → COMPLETED 唔 claim + followupRepliedAt badge
  *   T391 audit FOLLOWUP_SENT 零 PII + billingCategory UTILITY｜T392 hub 健康項（未審批紅 / 審批後綠）
- *   T393 API（login + task 列表 + 人撳發送 template + cancel）｜T394 偵測/渲染 unit｜T395 零殘留
+ *   T393 API（login + SUGGESTED 列表 + skip + send）｜T394 偵測/渲染 unit｜T395 零殘留
  *
  * e2e harness：playwright/prisma 動態 payload 型太繁 → 本檔局部 any（src/ 零 any）
  */
@@ -32,7 +32,6 @@ try {
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { PrismaClient, type FollowupStatus, type FollowupTrigger } from "@prisma/client";
 
@@ -64,20 +63,18 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const prisma = new PrismaClient();
 
-// ── 病人矩陣（固定 waId / cpId / 前綴 id — 冪等）────────────────────────────
+// ── 病人矩陣（固定 waId / cpId / 前綴 id — 冪等；v3：F 欠款 fixture 已剷）────────
 type Fix = { waId: string; cpId: string; contactId: string; convId: string; name: string };
 const FIX: Record<string, Fix> = {
   A: { waId: "91000001", cpId: "cp-p3-a01", contactId: "e2ep3c-a01", convId: "e2ep3v-a01", name: "E2E A 空窗" },
   A2: { waId: "91000007", cpId: "cp-p3-a02", contactId: "e2ep3c-a02", convId: "e2ep3v-a02", name: "E2E A2 未到期" },
   B: { waId: "91000002", cpId: "cp-p3-b01", contactId: "e2ep3c-b01", convId: "e2ep3v-b01", name: "E2E B 預約" },
   N: { waId: "91000003", cpId: "cp-p3-n01", contactId: "e2ep3c-n01", convId: "e2ep3v-n01", name: "E2E N 爽約" },
-  F: { waId: "91000004", cpId: "cp-p3-f01", contactId: "e2ep3c-f01", convId: "e2ep3v-f01", name: "E2E F 欠款600" },
-  F2: { waId: "91000012", cpId: "cp-p3-f21", contactId: "e2ep3c-f21", convId: "e2ep3v-f21", name: "E2E F2 零欠款" },
   O: { waId: "91000005", cpId: "cp-p3-o01", contactId: "e2ep3c-o01", convId: "e2ep3v-o01", name: "E2E O opt-out" },
   W: { waId: "91000006", cpId: "cp-p3-w01", contactId: "e2ep3c-w01", convId: "e2ep3v-w01", name: "E2E W 過窗" },
   W2: { waId: "91000008", cpId: "cp-p3-w21", contactId: "e2ep3c-w21", convId: "e2ep3v-w21", name: "E2E W2 template發" },
   W3: { waId: "91000009", cpId: "cp-p3-w31", contactId: "e2ep3c-w31", convId: "e2ep3v-w31", name: "E2E W3 窗內text" },
-  L2: { waId: "91000010", cpId: "cp-p3-l21", contactId: "e2ep3c-l21", convId: "e2ep3v-l21", name: "E2E L2 直發" },
+  L2: { waId: "91000010", cpId: "cp-p3-l21", contactId: "e2ep3c-l21", convId: "e2ep3v-l21", name: "E2E L2 零outbound" },
   W4: { waId: "91000011", cpId: "cp-p3-w41", contactId: "e2ep3c-w41", convId: "e2ep3v-w41", name: "E2E W4 API發" },
 };
 const ADMIN_EMAIL = "e2ep3-admin@e2e.local";
@@ -116,14 +113,13 @@ function writeMock() {
     appointments: [
       appt("apt-p3-b01", d.tomorrow, d.bTime, 0, FIX.B.cpId, FIX.B.waId),
       appt("apt-p3-n01", d.twoDaysAgo, "10:00", -3, FIX.N.cpId, FIX.N.waId),
-      appt("apt-p3-f01", d.yesterday, "11:00", 1, FIX.F.cpId, FIX.F.waId),
-      appt("apt-p3-f21", d.yesterday, "11:30", 1, FIX.F2.cpId, FIX.F2.waId),
       appt("apt-p3-o01", d.tomorrow, d.bTime, 0, FIX.O.cpId, FIX.O.waId),
       appt("apt-p3-w01", d.tomorrow, d.bTime, 0, FIX.W.cpId, FIX.W.waId),
       appt("apt-p3-w21", d.tomorrow, d.bTime, 0, FIX.W2.cpId, FIX.W2.waId),
       appt("apt-p3-w41", d.tomorrow, d.bTime, 0, FIX.W4.cpId, FIX.W4.waId),
     ],
-    balances: { [FIX.F.cpId]: { osAmt: 600 }, [FIX.F2.cpId]: { osAmt: 0 } },
+    // ★ v3：engine 唔再 call balance（F 整類剷走）— 保留空 balances 鍵令 mock 形態完整
+    balances: {},
   };
   fs.writeFileSync(MOCK_REAL, JSON.stringify(fixture, null, 2));
   // symlink → /tmp（避 Next dev watcher — P2 實錘 .dev/ 寫入觸發 recompile 風暴）
@@ -142,11 +138,6 @@ function rewriteAppt(apptId: string, patch: Record<string, unknown>) {
   if (a) Object.assign(a, patch);
   fs.writeFileSync(MOCK_REAL, JSON.stringify(raw, null, 2));
 }
-function setBalance(cpId: string, osAmt: number | null) {
-  const raw = JSON.parse(fs.readFileSync(MOCK_REAL, "utf8")) as any;
-  raw.balances[cpId] = { osAmt };
-  fs.writeFileSync(MOCK_REAL, JSON.stringify(raw, null, 2));
-}
 
 async function tasksOf(convId: string, status?: FollowupStatus) {
   return prisma.followupTask.findMany({ where: { conversationId: convId, ...(status ? { status } : {}) } });
@@ -156,11 +147,6 @@ async function taskOf(convId: string, trigger: FollowupTrigger): Promise<Awaited
   if (rules.length === 0) return undefined;
   const ts = await prisma.followupTask.findMany({ where: { conversationId: convId, ruleId: { in: rules.map((r) => r.id) } } });
   return ts[0];
-}
-async function tasksOfTrigger(convId: string, trigger: FollowupTrigger) {
-  const rules = await prisma.followupRule.findMany({ where: { trigger }, select: { id: true } });
-  if (rules.length === 0) return [];
-  return prisma.followupTask.findMany({ where: { conversationId: convId, ruleId: { in: rules.map((r) => r.id) } } });
 }
 function assertNoPii(obj: unknown, label: string) {
   const s = JSON.stringify(obj ?? "");
@@ -206,7 +192,7 @@ async function main(): Promise<void> {
   const clinic = await prisma.clinic.findFirst({ where: { code: CLINIC_CODE } });
   if (!clinic) fail(`clinic ${CLINIC_CODE} 搵唔到`);
 
-  // 一個真實 staff（W2/W3 claim 測試用 assignee）
+  // 一個真實 staff（W2 claim 測試用 assignee）
   const staff = await prisma.staffUser.findFirst({ where: { active: true }, orderBy: { id: "asc" } });
   if (!staff) fail("DB 無 active staff（claim 測試用）");
 
@@ -232,10 +218,10 @@ async function main(): Promise<void> {
           },
         });
       });
-  for (const k of ["A2", "B", "N", "F", "F2", "O", "W", "W2", "W4"]) await mkConv(k, 24 * 30); // 30 日（窗關）
+  for (const k of ["B", "N", "O", "W", "W2", "W4"]) await mkConv(k, 24 * 30); // 30 日（窗關）
   await mkConv("A", 24 * 8); // 8 日 → A 到期（due = 1 日前）
   await mkConv("A2", 24 * 3); // 3 日 → A2 未到期（due = 4 日後）
-  await mkConv("L2", 2); // 2 小時（窗開）
+  await mkConv("L2", 2); // 2 小時（窗開 + 1h L2 rule 候選）
   await mkConv("W3", 1); // 1 小時（窗開）
   // opt-out（手動標 — scan 唔建測試）
   await prisma.contact.update({ where: { id: FIX.O.contactId }, data: { followupOptOut: true, optOutAt: new Date(), optOutSource: "manual" } });
@@ -249,18 +235,18 @@ async function main(): Promise<void> {
   });
 
   const fixture = writeMock();
-  check("fixture 落（12 contact/conv + mock appointments/balances）", (fixture.appointments as unknown[]).length === 8);
+  check("fixture 落（10 contact/conv + mock appointments）", (fixture.appointments as unknown[]).length === 6);
 
   // ── T381–T385：第一次 scan 經 cron queue（worker 執行 — 證明掛接）──────────
   console.log("\n[T381-385] cron enqueue followup-scan → worker 掃");
   const { cronQueue } = await import("../src/lib/queue");
   await cronQueue.add("followup-scan", {}, { jobId: `e2e-followup-${Date.now()}` });
-  // poll：等 B/F task 出現（worker scan 完成标志）
+  // poll：等 B/N task 出現（worker scan 完成标志）
   let scanDone = false;
   for (let i = 0; i < 60; i++) {
     await sleep(1000);
-    const [bt, ft] = await Promise.all([tasksOf(FIX.B.convId), tasksOf(FIX.F.convId)]);
-    if (bt.length > 0 && ft.length > 0) {
+    const [bt, nt] = await Promise.all([tasksOf(FIX.B.convId), tasksOf(FIX.N.convId)]);
+    if (bt.length > 0 && nt.length > 0) {
       scanDone = true;
       break;
     }
@@ -268,7 +254,7 @@ async function main(): Promise<void> {
   if (!scanDone) {
     const wlog = fs.existsSync("/tmp/p3-worker.log") ? fs.readFileSync("/tmp/p3-worker.log", "utf8").split("\n").slice(-30).join("\n") : "(no log)";
     console.error("worker log tail:\n" + wlog);
-    fail("cron followup-scan 30 秒內無產 task（worker 未食 job？）");
+    fail("cron followup-scan 60 秒內無產 task（worker 未食 job？）");
   }
   await sleep(1500); // 等其餘規則掃完
 
@@ -276,13 +262,11 @@ async function main(): Promise<void> {
   const tA2 = await taskOf(FIX.A2.convId, "CONVERSATION_IDLE");
   const tB = await taskOf(FIX.B.convId, "BEFORE_APPOINTMENT");
   const tN = await taskOf(FIX.N.convId, "AFTER_NO_SHOW");
-  const tF = await taskOf(FIX.F.convId, "OUTSTANDING_BALANCE");
-  const tF2 = await tasksOfTrigger(FIX.F2.convId, "OUTSTANDING_BALANCE");
   const tO = await tasksOf(FIX.O.convId);
   const tW = await taskOf(FIX.W.convId, "BEFORE_APPOINTMENT");
 
   // T381 A 類
-  check("T381a A 空窗 8 日 → task DUE（L1 入隊列）", !!tA && tA.status === "DUE", tA);
+  check("T381a A 空窗 8 日 → task SUGGESTED（提示層 — 零發送）", !!tA && tA.status === "SUGGESTED", tA);
   check("T381b A 空窗 3 日（< 7 日門檻）→ 未建 task（到門檻先建）", tA2 === undefined, tA2);
   check("T381c A task 帶 idleDays context（零臨床）", !!tA && (tA.contextJson as any)?.idleDays === 8, tA?.contextJson);
 
@@ -290,28 +274,32 @@ async function main(): Promise<void> {
   const d = mockDates();
   const expDueB = new Date(`${d.today}T${d.bTime}:00+08:00`).getTime();
   check(
-    "T382 B 明日預約 → task（dueAt = 預約前 1 日 + 配对 patientApricotId）",
-    !!tB && ["SCHEDULED", "DUE"].includes(tB.status) && tB.dueAt.getTime() === expDueB && tB.patientApricotId === FIX.B.cpId,
+    "T382 B 明日預約 → task SUGGESTED（dueAt = 預約前 1 日 + 配對 patientApricotId）",
+    !!tB && tB.status === "SUGGESTED" && tB.dueAt.getTime() === expDueB && tB.patientApricotId === FIX.B.cpId,
     { tB: tB && { status: tB.status, dueAt: tB.dueAt.getTime(), cp: tB.patientApricotId }, expDueB }
   );
   check("T382b B contextJson 只顯示用（apptId/date/time/clinicCode）", !!tB && !JSON.stringify(tB.contextJson).includes("9110"), tB?.contextJson);
 
   // T383 B 爽約
-  check("T383 前日爽約 -3 → task DUE（爽約 +1 日後到期）", !!tN && tN.status === "DUE" && (tN.contextJson as any)?.noShow === true, tN);
+  check("T383 前日爽約 -3 → task SUGGESTED（爽約 +1 日後到期）", !!tN && tN.status === "SUGGESTED" && (tN.contextJson as any)?.noShow === true, tN);
 
-  // T384 F 欠款
-  check("T384a F osAmt=600 ≥ 500 → task DUE（dueAt=now 即發候選）", !!tF && tF.status === "DUE" && (tF.contextJson as any)?.osAmt === 600, tF);
-  check("T384b F osAmt=0 → 零 task（未過門檻）", tF2.length === 0, tF2);
+  // T384 ★ v3：F 欠款提醒整類已剷（template + rule 都唔存在）
+  const tplF = await prisma.followupTemplate.findUnique({ where: { key: "outstanding_balance" } });
+  const ruleFCount = await prisma.$queryRawUnsafe<{ n: number }[]>(
+    "SELECT count(*)::int AS n FROM \"FollowupRule\" WHERE \"trigger\"::text = 'OUTSTANDING_BALANCE'"
+  );
+  check("T384a F 鏈已剷：outstanding_balance template 唔存在", tplF === null, tplF);
+  check("T384b F 鏈已剷：OUTSTANDING_BALANCE rule 零條", ruleFCount[0]?.n === 0, ruleFCount);
 
   // T385 opt-out 零 task
   check("T385 opt-out 病人（有明日預約）→ scan 零 task", tO.length === 0, tO);
-  if (!tA || !tB || !tN || !tF || !tW) fail("scan 未建齊預期 task（tA/tB/tN/tF/tW 有缺）");
+  if (!tA || !tB || !tN || !tW) fail("scan 未建齊預期 task（tA/tB/tN/tW 有缺）");
 
-  // ── T386 取消六項（每次發送前重跑 — 直接調 sendFollowupTask）─────────────
-  console.log("\n[T386] 取消六項");
+  // ── T386 取消五項（每次發送前重跑 — 直接調 sendFollowupTask）─────────────
+  console.log("\n[T386] 取消五項");
   const { sendFollowupTask } = await import("../src/lib/followup/engine");
 
-  // ① OPT_OUT：O 手動建 DUE task → 發送前檢查命中
+  // ① OPT_OUT：O 手動建 SUGGESTED task → 發送前檢查命中
   const tOdirect = await prisma.followupTask.create({
     data: {
       clinicId: clinic.id,
@@ -319,45 +307,41 @@ async function main(): Promise<void> {
       patientApricotId: FIX.O.cpId,
       ruleId: tB.ruleId,
       dueAt: new Date(),
-      status: "DUE",
+      status: "SUGGESTED",
       templateName: "appt_reminder",
       contextJson: { apptId: "apt-p3-o01", apptDate: d.tomorrow, apptTime: d.bTime, clinicCode: CLINIC_CODE },
     },
   });
-  let r = await sendFollowupTask(tOdirect.id, { via: "AI_ADOPTED" });
+  let r = await sendFollowupTask(tOdirect.id, { staffId: staff.id });
   check("T386① OPT_OUT（永遠檢查）", r.status === "CANCELLED" && r.cancelReason === "OPT_OUT", r);
 
   // ② REPLIED：A task → 病人回覆（lastInbound=now）→ 發送前命中
   await prisma.conversation.update({ where: { id: FIX.A.convId }, data: { lastInboundAt: new Date() } });
-  r = await sendFollowupTask(tA.id, { via: "AI_ADOPTED" });
+  r = await sendFollowupTask(tA.id, { staffId: staff.id });
   check("T386② REPLIED（新 inbound）", r.status === "CANCELLED" && r.cancelReason === "REPLIED", r);
 
   // ③ BOOKED：N task → mock 改「重新約咗」(新 apptId, status 0, 明日) → 發送前命中
   rewriteAppt("apt-p3-n01", { bookingStatus: 0, date: d.tomorrow, apricotApptId: "apt-p3-n01b" });
-  r = await sendFollowupTask(tN.id, { via: "AI_ADOPTED" });
+  r = await sendFollowupTask(tN.id, { staffId: staff.id });
   check("T386③ BOOKED（期間新 booking）", r.status === "CANCELLED" && r.cancelReason === "BOOKED", r);
   rewriteAppt("apt-p3-n01b", { bookingStatus: -3, date: d.twoDaysAgo, apricotApptId: "apt-p3-n01" }); // 還原
 
   // ④ ARRIVED：B task → mock 改该預約 status=1（已到）→ 發送前命中
   rewriteAppt("apt-p3-b01", { bookingStatus: 1 });
-  r = await sendFollowupTask(tB.id, { via: "AI_ADOPTED" });
+  r = await sendFollowupTask(tB.id, { staffId: staff.id });
   check("T386④ ARRIVED（bookingStatus=1）", r.status === "CANCELLED" && r.cancelReason === "ARRIVED", r);
   rewriteAppt("apt-p3-b01", { bookingStatus: 0 }); // 還原
 
   // ⑤ RESOLVED：W task → 對話 RESOLVED → 發送前命中
   await prisma.conversation.update({ where: { id: FIX.W.convId }, data: { status: "RESOLVED" } });
-  r = await sendFollowupTask(tW.id, { via: "AI_ADOPTED" });
+  r = await sendFollowupTask(tW.id, { staffId: staff.id });
   check("T386⑤ RESOLVED（對話已解決）", r.status === "CANCELLED" && r.cancelReason === "RESOLVED", r);
 
-  // ⑥ PAID：F task → mock balance 歸零 → 發送前命中
-  setBalance(FIX.F.cpId, 0);
-  r = await sendFollowupTask(tF.id, { via: "AI_ADOPTED" });
-  check("T386⑥ PAID（欠款歸零）", r.status === "CANCELLED" && r.cancelReason === "PAID", r);
-  setBalance(FIX.F.cpId, 600); // 還原
+  // ★ v3：PAID 取消已隨 F 類剷走（斷言五項 = 無 PAID 路徑）
 
-  // ── T387 窗口過咗：未審批 template 唔發 free-form ───────────────────────
+  // ── T387 窗口過咗：未審批 template 唔俾發（task 留 SUGGESTED）─────────────
   console.log("\n[T387] 窗口規則");
-  // W2：窗關（30 日）+ 直接建 DUE task（B rule）
+  // W2：窗關（30 日）+ 直接建 SUGGESTED task（B rule）
   const tW2 = await prisma.followupTask.create({
     data: {
       clinicId: clinic.id,
@@ -365,14 +349,19 @@ async function main(): Promise<void> {
       patientApricotId: FIX.W2.cpId,
       ruleId: tB.ruleId,
       dueAt: new Date(),
-      status: "DUE",
+      status: "SUGGESTED",
       templateName: "appt_reminder",
       contextJson: { apptId: "apt-p3-w21", apptDate: d.tomorrow, apptTime: d.bTime, clinicCode: CLINIC_CODE },
     },
   });
-  r = await sendFollowupTask(tW2.id, { via: "AI_ADOPTED" });
+  r = await sendFollowupTask(tW2.id, { staffId: staff.id });
   const msgCount0 = await prisma.message.count({ where: { conversationId: FIX.W2.convId } });
-  check("T387a 窗口過 + template 未審批 → SKIPPED(NO_TEMPLATE) 零發送", r.status === "SKIPPED" && r.cancelReason === "NO_TEMPLATE" && msgCount0 === 0, { r, msgCount0 });
+  const tW2Still = await prisma.followupTask.findUnique({ where: { id: tW2.id }, select: { status: true } });
+  check(
+    "T387a 窗口過 + template 未審批 → 唔俾發（SKIPPED(NO_TEMPLATE) 回傳；task 留 SUGGESTED 等審批；零發送）",
+    r.status === "SKIPPED" && r.cancelReason === "NO_TEMPLATE" && msgCount0 === 0 && tW2Still?.status === "SUGGESTED",
+    { r, msgCount0, tW2Still }
+  );
 
   // 審批 appt_reminder（e2e 內審批 — 收結還原 approved=false）
   await prisma.followupTemplate.update({ where: { key: "appt_reminder" }, data: { approved: true, approvedAt: new Date(), approvedBy: "e2e" } });
@@ -383,7 +372,7 @@ async function main(): Promise<void> {
       patientApricotId: FIX.W2.cpId,
       ruleId: tB.ruleId,
       dueAt: new Date(),
-      status: "DUE",
+      status: "SUGGESTED",
       templateName: "appt_reminder",
       templateVars: { apptDate: d.tomorrow, apptTime: d.bTime, providerName: "Dr. P3" },
       contextJson: { apptId: "apt-p3-w21", apptDate: d.tomorrow, apptTime: d.bTime, clinicCode: CLINIC_CODE },
@@ -391,15 +380,16 @@ async function main(): Promise<void> {
   });
   // claim 測試：發送前 assign 一個 staff → 發送後唔變（鐵律 5）
   await prisma.conversation.update({ where: { id: FIX.W2.convId }, data: { assigneeId: staff.id } });
-  r = await sendFollowupTask(tW2b.id, { via: "AI_ADOPTED" });
+  r = await sendFollowupTask(tW2b.id, { staffId: staff.id });
   const msgT = r.messageId ? await prisma.message.findUnique({ where: { id: r.messageId } }) : null;
   const convW2After = await prisma.conversation.findUnique({ where: { id: FIX.W2.convId }, select: { assigneeId: true, followupRepliedAt: true } });
   check(
-    "T387b 審批後 → template 發送（type=template + templateMeta + UTILITY + AI_ADOPTED）",
+    "T387b 審批後 → template 發送（type=template + templateMeta + UTILITY + AI_ADOPTED + aiAutoSent=false）",
     r.status === "SENT" && !!msgT && msgT.type === "template" && (msgT.templateMeta as any)?.name !== undefined && msgT.billingCategory === "UTILITY" && msgT.sentVia === "AI_ADOPTED" && msgT.aiAutoSent === false,
     msgT && { type: msgT.type, sentVia: msgT.sentVia, cat: msgT.billingCategory }
   );
   check("T387c 發送 body 渲染咗變數（無 {{ 殘留 + 醫生名/日期入咗）", !!msgT && (msgT.body ?? "").includes("{{") === false && (msgT.body ?? "").includes("Dr. P3") && (msgT.body ?? "").includes(d.tomorrow), msgT?.body);
+  void convW2After;
 
   // ── T388 窗口內 → text（未審批 template 唔阻 free-form）──────────────────
   console.log("\n[T388] 窗內 text");
@@ -411,17 +401,17 @@ async function main(): Promise<void> {
       conversationId: FIX.W3.convId,
       ruleId: ruleA!.id,
       dueAt: new Date(),
-      status: "DUE",
+      status: "SUGGESTED",
       templateName: "conversation_followup",
       contextJson: { idleDays: 8 },
     },
   });
-  r = await sendFollowupTask(tW3.id, { via: "AI_ADOPTED" });
+  r = await sendFollowupTask(tW3.id, { staffId: staff.id });
   const msgT3 = r.messageId ? await prisma.message.findUnique({ where: { id: r.messageId } }) : null;
-  check("T388 窗口內 + template 未審批 → 照發 text（free-form）", r.status === "SENT" && !!msgT3 && msgT3.type === "text" && msgT3.sentVia === "AI_ADOPTED", msgT3 && { type: msgT3.type });
+  check("T388 窗口內 + template 未審批 → 照發 text（員工採用 AI_ADOPTED）", r.status === "SENT" && !!msgT3 && msgT3.type === "text" && msgT3.sentVia === "AI_ADOPTED" && msgT3.aiAutoSent === false, msgT3 && { type: msgT3.type });
 
-  // ── T389 L2 直發（AI_AUTO）──────────────────────────────────────────────
-  console.log("\n[T389] L2 自動");
+  // ── T389 ★ v3：cron 零 outbound（L2 rule 建 SUGGESTED 但零發送）────────────
+  console.log("\n[T389] cron 零 outbound");
   const ruleL2 = await prisma.followupRule.create({
     data: {
       clinicId: clinic.id,
@@ -432,7 +422,7 @@ async function main(): Promise<void> {
       delayUnit: "HOUR",
       reasonCodes: [],
       templateName: "conversation_followup",
-      level: "L2",
+      level: "L2", // v3：engine 忽略 level — 永遠建議
       maxSends: 1,
     },
   });
@@ -443,13 +433,15 @@ async function main(): Promise<void> {
     const { runFollowupScan } = await import("../src/lib/followup/engine");
     const scan = await runFollowupScan();
     const tL2 = (await prisma.followupTask.findMany({ where: { conversationId: FIX.L2.convId, ruleId: ruleL2.id } }))[0];
-    const msgL2 = tL2?.sentMessageId ? await prisma.message.findUnique({ where: { id: tL2.sentMessageId } }) : null;
+    const msgsL2 = await prisma.message.findMany({ where: { conversationId: FIX.L2.convId } });
+    const autoMsgs = await prisma.message.count({ where: { conversationId: { in: convIds }, OR: [{ sentVia: "AI_AUTO" }, { aiAutoSent: true }] } });
     check(
-      "T389 L2 到期 → cron 直發（AI_AUTO + aiAutoSent + text 窗內）",
-      tL2?.status === "SENT" && !!msgL2 && msgL2.sentVia === "AI_AUTO" && msgL2.aiAutoSent === true && msgL2.type === "text",
-      { tL2: tL2 && tL2.status, msgL2: msgL2 && { via: msgL2.sentVia, auto: msgL2.aiAutoSent } }
+      "T389 L2 rule 到期 → 只建 SUGGESTED，cron 零 outbound（零 message）",
+      !!tL2 && tL2.status === "SUGGESTED" && msgsL2.length === 0,
+      { tL2: tL2 && tL2.status, msgsL2: msgsL2.length }
     );
-    check("T389b scan 回傳計數（created/sent）", scan.created >= 1 && scan.sent >= 1, scan);
+    check("T389b scan 後全 e2e 對話零 AI_AUTO / aiAutoSent message（v3 鐵律）", autoMsgs === 0, autoMsgs);
+    check("T389c scan 回傳計數（created ≥ 1，無 sent 欄）", scan.created >= 1, scan);
   } finally {
     await prisma.followupRule.updateMany({ where: { id: { in: otherRules.map((x) => x.id) } }, data: { enabled: true } });
     await prisma.followupRule.delete({ where: { id: ruleL2.id } });
@@ -469,10 +461,10 @@ async function main(): Promise<void> {
   // ── T391 audit 零 PII + UTILITY ─────────────────────────────────────────
   console.log("\n[T391] audit");
   const audits = await prisma.auditLog.findMany({ where: { action: "FOLLOWUP_SENT" } });
-  check("T391a FOLLOWUP_SENT audit 存在（≥3 條）", audits.length >= 3, audits.length);
+  check("T391a FOLLOWUP_SENT audit 存在（≥2 條）", audits.length >= 2, audits.length);
   for (const a of audits.slice(0, 5)) assertNoPii(a.meta, `T391b audit ${a.entityId}`);
   const allMsgs = await prisma.message.findMany({ where: { conversationId: { in: convIds }, sentVia: { in: ["AI_AUTO", "AI_ADOPTED"] } } });
-  check("T391c 跟進 Message 全部 billingCategory=UTILITY", allMsgs.length > 0 && allMsgs.every((m) => m.billingCategory === "UTILITY"), allMsgs.map((m) => m.billingCategory));
+  check("T391c 跟進 Message 全部 billingCategory=UTILITY + 全部 AI_ADOPTED（無 AI_AUTO）", allMsgs.length > 0 && allMsgs.every((m) => m.billingCategory === "UTILITY" && m.sentVia === "AI_ADOPTED"), allMsgs.map((m) => ({ via: m.sentVia, cat: m.billingCategory })));
   assertNoPii(allMsgs.map((m) => ({ id: m.id })), "T391d Message 欄無 PII 洩露");
 
   // ── T392 hub 健康項 ─────────────────────────────────────────────────────
@@ -495,7 +487,7 @@ async function main(): Promise<void> {
     await prisma.followupTemplate.update({ where: { key: rr }, data: { approved: false, approvedAt: null, approvedBy: null } });
   }
 
-  // ── T393 API（login + 列表 + 人撳 + cancel）────────────────────────────
+  // ── T393 API（login + SUGGESTED 列表 + skip + send）─────────────────────
   console.log("\n[T393] API");
   const loginRes = await fetch(`${BASE}/api/auth/login`, {
     method: "POST",
@@ -508,14 +500,14 @@ async function main(): Promise<void> {
   const H = { "Content-Type": "application/json", Cookie: cookie };
   const listRes = await fetch(`${BASE}/api/followups/tasks?limit=50`, { headers: H });
   const listBody = (await listRes.json()) as { tasks: { id: string; status: string }[] };
-  check("T393b task 列表 API（200 + 有 e2e task）", listRes.ok && listBody.tasks.length > 0, listRes.status);
-  // 人撳 cancel（convF2 嘅 A task — 30 日空窗 DUE，未被其他測試動過）
-  const tAF2 = await taskOf(FIX.F2.convId, "CONVERSATION_IDLE");
-  const cancelRes = await fetch(`${BASE}/api/followups/tasks/${tAF2?.id ?? "none"}`, { method: "POST", headers: H, body: JSON.stringify({ action: "cancel" }) });
-  const cancelBody = (await cancelRes.json()) as { ok: boolean; result: { status: string } };
-  check("T393c API 人撳 cancel → CANCELLED(MANUAL)", !!tAF2 && cancelRes.ok && cancelBody.result?.status === "CANCELLED", cancelBody);
-  const tAF2After = tAF2 ? await prisma.followupTask.findUnique({ where: { id: tAF2.id }, select: { status: true, cancelReason: true } }) : null;
-  check("T393d cancel 落 DB（MANUAL）", tAF2After?.status === "CANCELLED" && tAF2After.cancelReason === "MANUAL", tAF2After);
+  check("T393b task 列表 API（200 + 預設 SUGGESTED 有 e2e task）", listRes.ok && listBody.tasks.length > 0 && listBody.tasks.every((t) => t.status === "SUGGESTED"), { status: listRes.status, n: listBody.tasks.length });
+  // 員工跳過（v3：action = skip → SKIPPED(MANUAL)）— W4 嘅 B task（scan 建，未被其他測試動過）
+  const tW4 = await taskOf(FIX.W4.convId, "BEFORE_APPOINTMENT");
+  const skipRes = await fetch(`${BASE}/api/followups/tasks/${tW4?.id ?? "none"}`, { method: "POST", headers: H, body: JSON.stringify({ action: "skip" }) });
+  const skipBody = (await skipRes.json()) as { ok: boolean; result: { status: string } };
+  check("T393c API 員工跳過 → SKIPPED(MANUAL)", !!tW4 && skipRes.ok && skipBody.result?.status === "SKIPPED", skipBody);
+  const tW4After = tW4 ? await prisma.followupTask.findUnique({ where: { id: tW4.id }, select: { status: true, cancelReason: true } }) : null;
+  check("T393d skip 落 DB（MANUAL）", tW4After?.status === "SKIPPED" && tW4After.cancelReason === "MANUAL", tW4After);
 
   // ── T394 偵測/渲染 unit ─────────────────────────────────────────────────
   console.log("\n[T394] unit");
@@ -540,8 +532,8 @@ async function main(): Promise<void> {
     await prisma.staffClinic.deleteMany({ where: { staffId: admin.id } });
     await prisma.staffUser.deleteMany({ where: { id: admin.id } });
   }
-  // template 還原（老細審批中 — approved=false）
-  const tplKeys = ["conversation_followup", "appt_reminder", "no_show", "outstanding_balance", "post_op_check", "recall_cleaning"];
+  // template 還原（老細審批中 — approved=false；outstanding_balance 已隨 v3 剷走）
+  const tplKeys = ["conversation_followup", "appt_reminder", "no_show", "post_op_check", "recall_cleaning"];
   await prisma.followupTemplate.updateMany({ where: { key: { in: tplKeys } }, data: { approved: false, approvedAt: null, approvedBy: null } });
   // mock flag 收
   try {

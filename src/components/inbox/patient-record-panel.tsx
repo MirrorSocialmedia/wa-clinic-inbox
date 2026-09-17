@@ -82,6 +82,9 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
   const [noteData, setNoteData] = useState<NoteText | null>(null);
   // §4.6 跟進通知 toggle（病人卡 — MD 手動 toggle；contact 級）
   const [optOutBusy, setOptOutBusy] = useState(false);
+  // ★ cwi-followup-v3 B-9：稱呼/locale 人手編輯（系統唔自動估 — AI 唔准由名估性別）
+  const [salutationDraft, setSalutationDraft] = useState<string | null>(null);
+  const [salBusy, setSalBusy] = useState(false);
   // 自動靜默刷新只一次（per conversation）— 防循環
   const autoRanFor = useRef<string | null>(null);
 
@@ -140,6 +143,31 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
       setOptOutBusy(false);
     }
   }, [data, optOutBusy]);
+
+  // ★ cwi-followup-v3 B-9：存稱呼 + locale（PATCH /api/contacts/:id — staff+）
+  const saveSalutation = useCallback(
+    async (salutation: string | null, locale: string | null) => {
+      const c = data?.contact;
+      if (!c || !c.canEdit || salBusy) return;
+      setSalBusy(true);
+      try {
+        const res = await fetch(`/api/contacts/${c.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ salutation: salutation?.trim() || null, locale }),
+        });
+        if (!res.ok) return;
+        const updated = (await res.json()) as { salutation: string | null; locale: string | null };
+        setData((prev) =>
+          prev && prev.contact ? { ...prev, contact: { ...prev.contact, salutation: updated.salutation, locale: updated.locale } } : prev
+        );
+        setSalutationDraft(null);
+      } finally {
+        setSalBusy(false);
+      }
+    },
+    [data, salBusy]
+  );
 
   // 對話切換 / resetKey → 全新載入（展開狀態清晒）
   useEffect(() => {
@@ -271,6 +299,45 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
         </div>
       ) : null}
 
+      {/* ★ cwi-followup-v3 B-9：稱呼（人手可改 — 系統唔自動估，AI 唔准由名估性別）+ 語言（決定 *_en template） */}
+      {data?.contact ? (
+        <div className="shrink-0 mx-2.5 mt-1.5 px-2 py-1.5 rounded-lg bg-panel-2 flex items-center justify-between gap-2 text-[11px]" data-e2e="b9-salutation-row">
+          <span className="text-t2 shrink-0">稱呼</span>
+          {data.contact.canEdit ? (
+            <div className="flex items-center gap-1.5 min-w-0">
+              <input
+                data-e2e="b9-salutation-input"
+                value={salutationDraft ?? data.contact.salutation ?? ""}
+                onChange={(e) => setSalutationDraft(e.target.value)}
+                placeholder="先生／小姐（空 = 您）"
+                maxLength={50}
+                className="w-28 min-w-0 text-[11px] px-2 py-0.5 rounded-md bg-panel border border-line text-t1 placeholder:text-t3"
+              />
+              <select
+                data-e2e="b9-locale-select"
+                value={data.contact.locale ?? "zh"}
+                onChange={(e) => void saveSalutation(salutationDraft ?? data.contact.salutation, e.target.value === "zh" ? null : "en")}
+                className="text-[11px] px-1 py-0.5 rounded-md bg-panel border border-line text-t1"
+                title="template 語言（en = 用 *_en 模板，如有）"
+              >
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </select>
+              <button
+                data-e2e="b9-salutation-save"
+                disabled={salBusy || (salutationDraft ?? data.contact.salutation ?? "") === (data.contact.salutation ?? "")}
+                onClick={() => void saveSalutation(salutationDraft ?? data.contact.salutation, data.contact.locale)}
+                className="shrink-0 text-[11px] px-2 py-0.5 rounded-md bg-brand text-panel font-medium disabled:opacity-40"
+              >
+                {salBusy ? "存緊…" : "存"}
+              </button>
+            </div>
+          ) : (
+            <span className="text-t1" data-e2e="b9-salutation-value">{data.contact.salutation ?? "您"}</span>
+          )}
+        </div>
+      ) : null}
+
       {data?.patient ? (
         <>
           {data.degraded ? (
@@ -355,13 +422,8 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
                     <span className="font-medium text-t1">{fmtAmt(data.balance.balance.ttlAmt)}</span>
                   </div>
                   <div className="flex items-center justify-between text-[12px] mt-1.5">
-                    <span className="text-t2">欠款</span>
-                    <span
-                      className={`font-semibold ${
-                        (data.balance.balance.osAmt ?? 0) > 0 ? "text-danger-text" : "text-ok-text"
-                      }`}
-                      data-e2e="p2-balance-os"
-                    >
+                    <span className="text-t2">未結餘額</span>
+                    <span className="font-semibold text-t1" data-e2e="p2-balance-os">
                       {fmtAmt(data.balance.balance.osAmt)}
                     </span>
                   </div>

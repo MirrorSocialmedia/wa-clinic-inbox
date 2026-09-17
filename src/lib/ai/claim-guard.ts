@@ -11,6 +11,8 @@
  *   CG-007 價格：沿用 price-guard（extractAmounts + PRICE doc 範圍）
  *   CG-008 杜撰時段：具體日期／時間但今輪冇 backend slot
  *   CG-009 每個引用產品嘅 avoidPhrases 逐句子字串比對
+ *   CG-010 ★ cwi-followup-v3 B-6：post-op care window（C 類建議發出後 72h）— AI 草稿零療程零報價
+ *      （context 規則：入參 postOpCareWindow=true 時，療程/報價詞 + 金額 token → block）
  *
  * **BLOCK 行為**：棄用草稿 → 出人手提示（CLAIM_HUMAN_TEXT）+ log `claim-guard: {code}` + 入 trace
  *（caller = worker 負責：log 一行 + audit CONSULT_LLM_TURN.meta.claimGuard + 草稿換 CLAIM_HUMAN_TEXT + needsHuman）。
@@ -41,6 +43,8 @@ export interface ClaimGuardInput {
   hasBackendSlot: boolean;
   /** PRICE doc（CG-007 — 沿用 price-guard 口徑；null = 零引用）。 */
   priceDoc: { priceMin: number | null; priceMax: number | null } | null;
+  /** ★ cwi-followup-v3 B-6：post-op care window（C 類跟進建議發出後 72h 內）— true 啟用 CG-010。 */
+  postOpCareWindow?: boolean;
 }
 
 export interface ClaimGuardResult {
@@ -177,6 +181,16 @@ function cg009(draft: string, referenced: ClaimGuardProductCtx[]): boolean {
   return false;
 }
 
+// ── CG-010 ★ cwi-followup-v3 B-6：post-op care window 零療程零報價 ────────
+// C 類（術後）跟進建議發出後 72h 內，病人回嘅係「術後狀態」唔係「銷售訊號」— AI 草稿唔准推療程/報價。
+const POSTOP_SALES_TERMS = ["療程", "報價", "推介", "優惠", "促銷", "方案", "推薦套餐", "再預約", "book 個位"];
+function cg010(draft: string, postOpCareWindow: boolean): boolean {
+  if (!postOpCareWindow) return false;
+  if (POSTOP_SALES_TERMS.some((t) => draft.includes(t))) return true;
+  // 金額 token = 報價意圖（沿用 price-guard extractAmounts）— 術後問候窗內一律唔准出
+  return extractAmounts(draft).length > 0;
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 /** 句子拆分（CG-002/009 用）— 中英文句號/問號/驚嘆號/分號/換行。 */
 export function splitSentences(draft: string): string[] {
@@ -189,10 +203,10 @@ export function splitSentences(draft: string): string[] {
 // ── 主入口 ────────────────────────────────────────────────────────────
 
 /**
- * Claim Guard（9 條，deterministic，MD §5 順序 CG-001→009；第一命中 = code，全部命中入 codes）。
+ * Claim Guard（deterministic，MD §5 順序 CG-001→009 + v3 CG-010；第一命中 = code，全部命中入 codes）。
  */
 export function runClaimGuard(input: ClaimGuardInput): ClaimGuardResult {
-  const { draft, products, hasBackendSlot, priceDoc } = input;
+  const { draft, products, hasBackendSlot, priceDoc, postOpCareWindow } = input;
   const result: ClaimGuardResult = { blocked: false, code: null, codes: [], draft };
   if (!draft) return result;
 
@@ -208,6 +222,8 @@ export function runClaimGuard(input: ClaimGuardInput): ClaimGuardResult {
     ["CG-007", cg007(draft, priceDoc)],
     ["CG-008", cg008(draft, hasBackendSlot)],
     ["CG-009", cg009(draft, referenced)],
+    // ★ cwi-followup-v3 B-6：術後關懷窗（72h）— 零療程零報價
+    ["CG-010", cg010(draft, postOpCareWindow ?? false)],
   ];
   for (const [code, hit] of checks) {
     if (hit) {

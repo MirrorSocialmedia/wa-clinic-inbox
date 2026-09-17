@@ -147,16 +147,34 @@ function profileNameOf(value: WaChange["value"], waId: string): string | null {
   return c?.profile?.name?.trim() || null;
 }
 
+// ★ cwi-followup-v3 B-9：gender default（M→先生，F→小姐）— 只 create 時填；之後員工可隨時手改（病人記錄面板）。
+//   目前 Apricot contract 無 sex 欄（參數預留）— 有數據來源時 caller 傳入即自動填；唔會由 AI/名猜。
+function salutationFromGender(gender: string | null): string | null {
+  const g = (gender ?? "").toLowerCase();
+  if (g === "m" || g === "male") return "先生";
+  if (g === "f" || g === "female") return "小姐";
+  return null;
+}
+
 async function upsertContact(
   db: Db,
   clinicId: string,
   waId: string,
-  profileName: string | null
+  profileName: string | null,
+  /** ★ cwi-followup-v3 B-9：gender（M/F）— 目前 Apricot 無此欄；有來源時傳入 → create 時填 salutation default */
+  gender?: string | null
 ): Promise<Contact> {
   return db.contact.upsert({
     where: { clinicId_waId: { clinicId, waId } },
     update: profileName ? { profileName } : {},
-    create: { clinicId, waId, profileName: profileName ?? null, labels: [] },
+    create: {
+      clinicId,
+      waId,
+      profileName: profileName ?? null,
+      labels: [],
+      // ★ B-9：gender default（update 唔覆蓋 — 人手改過嘅 salutation 永遠保留）
+      salutation: salutationFromGender(gender ?? null),
+    },
   });
 }
 

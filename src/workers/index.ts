@@ -17,6 +17,7 @@ import { cronQueue, getRedis } from "@/lib/queue";
 import { refreshAllClinics } from "@/lib/availability";
 import { CONTROL_CHANNEL, type ControlMessage } from "@/lib/notify";
 import { applyCacheBust } from "@/lib/cache-bust";
+import { retentionPolicyMismatches } from "@/lib/ops/retention-policy";
 import log from "@/lib/log";
 
 async function registerSchedulers() {
@@ -108,6 +109,15 @@ async function registerSchedulers() {
 }
 
 async function main() {
+  // ★ cwi-followup-v3（MD §6 A-2 + T432）：保留期 env 必須明確寫入且同政策一致，否則拒絕啟動
+  //   （retention purge 喺 cron worker — env 錯 = 政策頁同實際刪除期唔一致，屬資安事件）。
+  {
+    const mismatches = retentionPolicyMismatches();
+    if (mismatches.length > 0) {
+      log.fatal({ mismatches }, "worker: 保留期 env 同政策唔一致（MD §6 A-2）— 拒絕啟動");
+      process.exit(1);
+    }
+  }
   await startInboundWorker();
   await startOutboundWorker();
   await startAiWorker();

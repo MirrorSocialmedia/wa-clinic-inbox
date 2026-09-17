@@ -237,6 +237,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     lastOutboundAt: conv.lastOutboundAt,
     pinnedPatientApricotId: conv.pinnedPatientApricotId,
     routedRuleId: conv.routedRuleId,
+    // ★ cwi-followup-v3 B-6：術後關懷窗（C 類跟進建議發出後 72h）
+    postOpFollowupAt: conv.postOpFollowupAt,
   };
   const port = livePersistPort({
     jobAttemptsMade: job.attemptsMade,

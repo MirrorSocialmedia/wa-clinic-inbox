@@ -67,6 +67,9 @@ import {
 import { type ConsultStore } from "@/lib/sessions/consult-store";
 import { loadConsultSettings } from "@/lib/sessions/consult-settings";
 import { getWindowState, type WindowState } from "@/lib/wa/window";
+
+// ★ cwi-followup-v3 B-6：術後關懷窗 = 72 小時（C 類跟進建議發出後 — 痛症入 PAIN_TRIAGE + claim-guard CG-010 零療程零報價）
+export const POSTOP_CARE_WINDOW_MS = 72 * 3600 * 1000;
 import {
   AUTO_RESOLVE_NOTE_PREFIX,
   isReopenedFirstReply,
@@ -134,6 +137,8 @@ export interface InboundConvRef {
   lastOutboundAt: Date | null;
   pinnedPatientApricotId: string | null;
   routedRuleId: string | null;
+  /** ★ cwi-followup-v3 B-6：C 類（術後）跟進建議發出時間 — 72h 內 inbound 痛症 → 強制 PAIN_TRIAGE（唔入 CONSULT）+ claim-guard CG-010 */
+  postOpFollowupAt: Date | null;
 }
 
 /** draft row（worker = AiDraft row；沙盤 port 回 null）。 */
@@ -584,10 +589,23 @@ export async function runInboundAi(input: {
   // ── ★ consult v2.1 C1（§2.2 M-2）：consult session trigger 最終值 = FLOOR（deterministic）?? LLM 值 ──
   // FLOOR = code 常數（CONSULT_TRIGGER_FLOOR，UI 顯示但唔可刪）—「觸發唔靠 LLM」；
   // LLM 值（result.sessionTrigger）只喺 FLOOR 唔中時補充。floor 優先（MD §2.2）。
-  const consultTrigger =
+  let consultTrigger =
     msg.type === "text" && msg.body
       ? triggerFloor(msg.body, applyLexicon(msg.body, ptLex)) ?? result.sessionTrigger ?? null
       : null;
+
+  // ── ★ cwi-followup-v3 B-6：術後關懷窗（C 類跟進建議發出後 72h 內）──────────
+  // 紅旗詞 → URGENT 全套（上面 rf fast path 已處理）；
+  // 痛症訊號（intent=PAIN）→ 強制 PAIN_TRIAGE 路徑，唔准入 CONSULT 銷售 session（壓 consultTrigger）。
+  const postOpCareWindow =
+    !!conv.postOpFollowupAt && Date.now() - conv.postOpFollowupAt.getTime() <= POSTOP_CARE_WINDOW_MS;
+  if (postOpCareWindow && consultTrigger !== null && result.intent === "PAIN") {
+    log.info(
+      { clinic: clinic.code, wamid: msg.waMessageId, trigger: consultTrigger },
+      "B-6: post-op care window (72h) + PAIN intent → suppress consult (forced PAIN_TRIAGE, no sales session)"
+    );
+    consultTrigger = null;
+  }
 
   // ── ★ Part F（cwi-raggolden-20260904，F.4）：報價鏈 + price-guard（deterministic）──────────
   //   報價鏈：intent=QUESTION 且 lexicon normalize 後命中價錢意圖 → 檢索優先 PRICE 其次 SERVICE：
@@ -779,6 +797,8 @@ export async function runInboundAi(input: {
         products: llm.usableProducts.map((p) => ({ ...p })),
         hasBackendSlot: false, // free-form consult 路徑 — 只 booking flow 先有 backend slot
         priceDoc: citedPriceDoc ? { priceMin: citedPriceDoc.priceMin, priceMax: citedPriceDoc.priceMax } : null,
+        // ★ cwi-followup-v3 B-6：術後關懷窗（72h）— CG-010 零療程零報價
+        postOpCareWindow,
       });
       if (cg.blocked && cg.code) {
         await persist.auditClaimGuard({

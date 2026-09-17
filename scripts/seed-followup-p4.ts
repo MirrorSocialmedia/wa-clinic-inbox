@@ -13,8 +13,9 @@
  */
 import prisma from "../src/lib/prisma";
 
+// ★ cwi-followup-v3 紅線：E 類訊息**唔准重複報價金額** → 舊文本嘅 {{amount}} 已移除（只留項目名）
 const TEMPLATE_TEXT =
-  "{{salutation}}你好，呢度係{{clinicName}}。關於 {{quoteDate}} 同你討論嘅治療方案（{{item}}{{amount}}），想再跟你一下——如對價錢、療程或者分期有任何疑問，或者直接想預約覆診，隨時回覆呢條訊息，我哋會即刻為你安排。期待為你服務！";
+  "{{salutation}}你好，呢度係{{clinicName}}。關於 {{quoteDate}} 同你討論嘅治療方案（{{item}}），想再跟你一下——如對價錢、療程或者分期有任何疑問，或者直接想預約覆診，隨時回覆呢條訊息，我哋會即刻為你安排。期待為你服務！";
 
 const RULES: {
   trigger: string;
@@ -50,7 +51,7 @@ const DRAFT_TEMPLATES: { key: string; name: string; text: string }[] = [
 ];
 
 async function main() {
-  // 1) 3 條 draft template（全部 approved=false — 未審批 → SKIPPED(NO_TEMPLATE) 零發送）
+  // 1) 3 條 draft template（全部 approved=false — 未審批 → 過窗採用唔俾發；正常審批流管文本）
   for (const t of DRAFT_TEMPLATES) {
     await prisma.followupTemplate.upsert({
       where: { key: t.key },
@@ -64,6 +65,12 @@ async function main() {
       update: {}, // 文内容由審批流管（唔自動覆蓋）
     });
     console.log(`  ✓ template ${t.key} (approved=false)`);
+  }
+  // ★ v3 紅線修復：舊 DB 嘅 quote_followup 若仲含 {{amount}}（重複報價金額）→ 一次過清（冪等）
+  const qf = await prisma.followupTemplate.findUnique({ where: { key: "quote_followup" }, select: { text: true } });
+  if (qf && qf.text.includes("{{amount}}")) {
+    await prisma.followupTemplate.update({ where: { key: "quote_followup" }, data: { text: TEMPLATE_TEXT } });
+    console.log("  ✓ quote_followup 舊文本已清 {{amount}}（v3 紅線：唔重複報價金額）");
   }
 
   // 2) 3 條規則（trigger+templateName 冪等）

@@ -46,13 +46,13 @@ export default function PrivacyPage() {
         <p>我們只在以下情況分享你的資料，並不會出售你的個人資料：</p>
         <ul className="list-disc pl-6 space-y-1">
           <li><b>Meta Platforms（WhatsApp）</b>：訊息經 WhatsApp 傳送，受 Meta 的私隱政策規管。</li>
-          <li><b>診所管理系統供應商（Apricot Vita）</b>：用於預約及病歷管理。</li>
+          <li><b>診所管理系統服務供應商（受保密協議約束）</b>：用於預約及病歷管理。</li>
           <li><b>法律要求</b>：在法例要求或為保障生命安全的情況下。</li>
         </ul>
 
         <h2 className="text-lg font-semibold">5. 資料儲存及保留</h2>
         <p>
-          資料儲存於位於香港、設有存取控制及加密措施的伺服器。
+          我們自行營運嘅伺服器位於香港，設有存取控制及加密措施；第三方服務供應商可能於香港以外處理資料。
           WhatsApp 對話紀錄一般保留 24 個月；醫療相關紀錄按適用法例及專業指引保留。
           逾期資料會被刪除或永久去識別化。
         </p>
@@ -96,9 +96,11 @@ export default function PrivacyPage() {
         </p>
         <p>
           We share data only with Meta Platforms (as the WhatsApp service provider), our clinic
-          management system provider (Apricot Vita), and where required by law. We do not sell
+          management system service provider (bound by confidentiality obligations), and where required by law. We do not sell
           personal data. Conversation records are generally retained for 24 months; medical
-          records are retained as required by applicable law and professional guidelines.
+          records are retained as required by applicable law and professional guidelines. Our
+          own servers are located in Hong Kong, with access controls and encryption; third-party
+          service providers may process data outside Hong Kong.
         </p>
         <p>
           You may request access to, correction or deletion of your data, and may opt out of

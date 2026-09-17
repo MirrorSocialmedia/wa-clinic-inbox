@@ -15,11 +15,11 @@ interface Props {
   onActiveClinic: (id: string | "all") => void;
   statusFilter: ConvStatus | "ALL";
   onStatusFilter: (s: ConvStatus | "ALL") => void;
-  /** ★ cwi-inboxfix-20260905（MD I-1/I-2）：膠囊指派維度 — unassigned=公海 / mine=我負責（server 端 filter） */
-  assignedFilter: "all" | "unassigned" | "mine" | "routed";
-  onAssignedFilter: (f: "all" | "unassigned" | "mine" | "routed") => void;
+  /** ★ cwi-inboxfix-20260905（MD I-1/I-2）：膠囊指派維度 — unassigned=公海 / mine=我負責 / followup=待跟進（server 端 filter） */
+  assignedFilter: "all" | "unassigned" | "mine" | "routed" | "followup";
+  onAssignedFilter: (f: "all" | "unassigned" | "mine" | "routed" | "followup") => void;
   /** ★ cwi-inboxfix-20260905（MD §1.1）：計數（?counts=1；列表 refetch 順帶更新）— null = 未攞到 */
-  counts: { all: number; unassigned: number; mine: number; routed: number; pending: number; resolved: number } | null;
+  counts: { all: number; unassigned: number; mine: number; routed: number; pending: number; resolved: number; followup?: number } | null;
   conversations: ConversationItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
@@ -200,6 +200,7 @@ export function ConversationList(p: Props) {
     let list = p.conversations;
     // ★ cwi-inboxfix-20260905（MD I-1/I-2）：公海/我負責 膠囊 filter（client 端，
     //   與 server ?assigned= 語義等價 — 見 fetchConversations 註解）
+    // ★ cwi-followup-v3：待跟進 = 有 followupDueAt（未處理 SUGGESTED 建議）
     if (p.assignedFilter !== "all") {
       list = list.filter((c) =>
         p.assignedFilter === "unassigned"
@@ -208,11 +209,20 @@ export function ConversationList(p: Props) {
             // ★ cwi-routing-20260906（MD §4.3）：派俾我 = 未指派 且（routedStaffId=我 ∨ routedGroupId∈我組）
             ? c.assigneeId == null &&
               (c.routedStaffId === p.myStaffId || (c.routedGroupId != null && (p.myGroupIds ?? []).includes(c.routedGroupId)))
-            : c.assigneeId === p.myStaffId
+            : p.assignedFilter === "followup"
+              ? c.followupDueAt != null && c.status !== "RESOLVED"
+              : c.assigneeId === p.myStaffId
       );
     }
     if (p.statusFilter !== "ALL") list = list.filter((c) => c.status === p.statusFilter);
     return [...list].sort((a, b) => {
+      // ★ cwi-followup-v3（MD §2.1）：待跟進列表 = 建議日期最舊先（唔係最新）— 久咗未跟先最緊要
+      if (p.assignedFilter === "followup") {
+        const at = a.followupDueAt ? new Date(a.followupDueAt).getTime() : Infinity;
+        const bt = b.followupDueAt ? new Date(b.followupDueAt).getTime() : Infinity;
+        if (at !== bt) return at - bt;
+        if (Number(a.urgent) !== Number(b.urgent)) return Number(b.urgent) - Number(a.urgent);
+      }
       const rank = (c: ConversationItem) =>
         c.urgent && c.status !== "RESOLVED" ? 0 : c.status === "RESOLVED" ? 2 : 1;
       const ar = rank(a);
@@ -527,7 +537,8 @@ export function ConversationList(p: Props) {
           第一行（要做嘅嘢）= 五粒指派膠囊：全部 · 公海 N · 派俾我 N · 我負責 N · 待跟進 N
             - 公海 = 唯一有色（橙 bg-warn 系）；派俾我 = 重點色邊框（brand）
             - 處理中／等回覆 膠囊已剷（假分類 — 冇人手動改 ConvStatus）
-            - 待跟進：FollowupTask 未實作 → 計數恒 0（CEO 拍板）— no-op 膠囊（MD §3 歸 T2）
+            - ★ cwi-followup-v3（MD §2.1）：待跟進 = 有未處理 SUGGESTED 建議嘅對話（真 filter；
+              計數不變式 = server counts.followup 同 client filter 同一口徑；列表最舊建議先排）
             - 唔准橫向捲：計數 99+ cap；<400px 時待跟進併入 ⋯ 溢出選單
           第二行（已完成）= 右側狀態切換器，只兩選項：
             處理中(OPEN) / 睇已解決 →(RESOLVED) — PENDING 隱藏（MD §1.2；API 仍接受舊 link） */}
@@ -579,14 +590,20 @@ export function ConversationList(p: Props) {
               },
             ];
             if (!narrow && !overflowCollapsed) {
-              // 待跟進：FollowupTask 未實作 → 計數恒 0（no-op）；<400px 時移入 ⋯ 選單
+              // ★ cwi-followup-v3（MD §2.1）：待跟進 = 有未處理 SUGGESTED 建議嘅對話；<400px 時移入 ⋯ 選單
+              const fcount = p.counts?.followup ?? 0;
               defs.push({
                 key: "followup",
-                label: "待跟進 0",
-                active: false,
-                cls: "bg-transparent text-t3 border border-line",
-                onClick: () => {},
-                title: "跟進功能未啟用",
+                label: `待跟進 ${fmtCap(fcount)}`,
+                active: p.assignedFilter === "followup",
+                cls:
+                  p.assignedFilter === "followup"
+                    ? "bg-brand text-panel font-semibold border border-brand"
+                    : fcount > 0
+                      ? "bg-brand-soft/50 text-brand-text border border-brand/40"
+                      : "bg-transparent text-t3 border border-line",
+                onClick: () => p.onAssignedFilter(p.assignedFilter === "followup" ? "all" : "followup"),
+                title: "有跟進建議、未處理嘅對話",
               });
             }
             return { defs };
@@ -616,10 +633,16 @@ export function ConversationList(p: Props) {
                   <div className="fixed inset-0 z-30" onClick={() => setMoreOpen(false)} aria-hidden />
                   <div className="absolute right-0 top-7 z-40 rounded-lg border border-line bg-panel shadow-lg py-1 w-28">
                     <button
-                      title="跟進功能未啟用"
-                      className="block w-full text-left px-2.5 py-1.5 text-xs text-t3 whitespace-nowrap"
+                      onClick={() => {
+                        setMoreOpen(false);
+                        p.onAssignedFilter(p.assignedFilter === "followup" ? "all" : "followup");
+                      }}
+                      title="有跟進建議、未處理嘅對話"
+                      className={`block w-full text-left px-2.5 py-1.5 text-xs whitespace-nowrap ${
+                        p.assignedFilter === "followup" ? "text-brand font-semibold" : "text-t2 hover:bg-panel-2"
+                      }`}
                     >
-                      待跟進 0
+                      待跟進 {fmtCap(p.counts?.followup ?? 0)}
                     </button>
                   </div>
                 </>

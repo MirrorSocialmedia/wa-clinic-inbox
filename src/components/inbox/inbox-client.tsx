@@ -9,6 +9,7 @@ import type {
   ClinicLite,
   ConversationAssignedEvent,
   ConversationItem,
+  FollowupSuggestion,
   ConvStatus,
   ConvUpdatedEvent,
   DraftInfo,
@@ -156,7 +157,7 @@ export function InboxClient({
   // ★ cwi-inboxfix-20260905（MD I-10）：連線狀態（斷線時列表頂 banner — 避免「靜靜哋唔更新」）
   const [connOffline, setConnOffline] = useState(false);
   // ★ cwi-inboxfix-20260905（MD I-1/I-2）：公海膠囊指派維度 filter（server 端）+ 計數（?counts=1 順帶）
-  const [assignedFilter, setAssignedFilter] = useState<"all" | "unassigned" | "mine" | "routed">("all"); // ★ cwi-routing-20260906：+派俾我
+  const [assignedFilter, setAssignedFilter] = useState<"all" | "unassigned" | "mine" | "routed" | "followup">("all"); // ★ cwi-routing-20260906：+派俾我；cwi-followup-v3：+待跟進
   const [convCounts, setConvCounts] = useState<{
     all: number;
     unassigned: number;
@@ -165,7 +166,7 @@ export function InboxClient({
     pending: number;
     resolved: number;
   } | null>(null);
-  const assignedFilterRef = useRef<"all" | "unassigned" | "mine" | "routed">("all");
+  const assignedFilterRef = useRef<"all" | "unassigned" | "mine" | "routed" | "followup">("all");
   assignedFilterRef.current = assignedFilter;
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<ConversationItem[] | null>(null);
@@ -173,6 +174,9 @@ export function InboxClient({
 
   // Phase 2：pending AI 草稿（per conversationId）+ 急症 toast
   const [pendingDrafts, setPendingDrafts] = useState<Record<string, DraftInfo>>({});
+  // ★ cwi-followup-v3：選中對話嘅現行未處理跟進建議（SUGGESTED）；null = 無
+  const [suggestion, setSuggestion] = useState<FollowupSuggestion | null>(null);
+  const [suggestionBusy, setSuggestionBusy] = useState(false);
   const [draftBusy, setDraftBusy] = useState(false);
   const [urgentToast, setUrgentToast] = useState<{ conversationId: string; contactName: string | null } | null>(null);
 
@@ -1021,6 +1025,24 @@ export function InboxClient({
     }
   }, []);
 
+  // ── ★ cwi-followup-v3：跟進建議（對話內建議卡）─────────────────────────
+  const fetchSuggestion = useCallback(async (convId: string | null) => {
+    if (!convId) {
+      setSuggestion(null);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/followups/tasks?conversationId=${encodeURIComponent(convId)}&limit=1`);
+      if (!res.ok) return;
+      const data = (await res.json()) as { tasks: FollowupSuggestion[] };
+      // race 防：fetch 期間已換對話 → 舊結果丟
+      if (selectedIdRef.current !== convId) return;
+      setSuggestion(data.tasks.find((t) => t.conversationId === convId) ?? null);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   const adoptDraft = useCallback(async (draftId: string) => {
     const convId = selectedIdRef.current;
     if (!convId) return;
@@ -1071,6 +1093,7 @@ export function InboxClient({
             routed: number;
             pending: number;
             resolved: number;
+            followup?: number;
           } };
       const items = Array.isArray(data) ? data : data.items;
       if (!Array.isArray(data)) setConvCounts(data.counts ?? null);
@@ -1118,6 +1141,54 @@ export function InboxClient({
     // ★ 審計 B-3：補 'bumpCursor' 依賴（禁 eslint-disable）— 已實證 bumpCursor = useCallback([]) 只操作
     //   lastMsgTsRef（useRef Map）→ reference 恆 stable，加依賴 runtime 零 re-create，closure 版本永唔會錯
   }, [bumpCursor]);
+
+  // ── ★ cwi-followup-v3：建議卡操作（過窗 template 直發 / 跳過 / 窗口內採用發送回執）──
+  const suggestionAction = useCallback(
+    async (taskId: string, action: "send" | "skip"): Promise<{ ok: boolean; error?: string }> => {
+      setSuggestionBusy(true);
+      try {
+        const res = await fetch(`/api/followups/tasks/${taskId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        const d = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          error?: string;
+          result?: { status?: string; cancelReason?: string | null } | null;
+        } | null;
+        if (!res.ok || !d?.ok) {
+          const st = d?.result?.status;
+          const cr = d?.result?.cancelReason;
+          const msg =
+            st === "SKIPPED" && cr === "NO_TEMPLATE"
+              ? "template 未設/未審批 — 發唔出"
+              : st === "EXPIRED"
+                ? "建議已過期（EXPIRED）— 唔再跟進"
+                : st === "CANCELLED"
+                  ? `建議已取消（${cr ?? "原因未詳"}）`
+                  : d?.error ?? `操作失敗（${res.status}）`;
+          return { ok: false, error: msg };
+        }
+        const convId = selectedIdRef.current;
+        if (action === "send" && convId) void fetchMessagesLatest(convId); // 新 outbound 訊息入列表
+        void fetchSuggestion(convId); // 清/更新建議卡
+        void fetchConversations(activeClinicRef.current); // 膠囊計數對齊
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "網絡錯誤" };
+      } finally {
+        setSuggestionBusy(false);
+      }
+    },
+    [fetchMessagesLatest, fetchSuggestion, fetchConversations]
+  );
+
+  // 窗口內 free-form 採用發送成功（composer send 回執）→ 清卡 + 計數對齊
+  const onSuggestionSent = useCallback(() => {
+    setSuggestion(null);
+    void fetchConversations(activeClinicRef.current);
+  }, [fetchConversations]);
 
   const fetchMessagesAfter = useCallback(
     async (convId: string, afterMs: number): Promise<number> => {
@@ -1494,6 +1565,7 @@ export function InboxClient({
               holeFilledRef.current.clear(); // T3：換對話清補洞標記
               void fetchMessagesLatest(match.id);
               void fetchPendingDrafts(match.id);
+              void fetchSuggestion(match.id); // ★ cwi-followup-v3：跟進建議卡
               void fetchNoteReceipts(match.id);
               void markRead(match.id);
               setSearchResults(null);
@@ -1515,6 +1587,7 @@ export function InboxClient({
       setNotice(null);
       void fetchMessagesLatest(id);
       void fetchPendingDrafts(id);
+      void fetchSuggestion(id); // ★ cwi-followup-v3：跟進建議卡
       // ★ H2：開對話 → 拉已讀回執（tick）+ 清該對話未讀 mention（bell/黃點）
       void fetchNoteReceipts(id);
       setMentionUnread((prev) => {
@@ -1525,7 +1598,7 @@ export function InboxClient({
       });
       void markRead(id);
     },
-    [fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts]
+    [fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts, fetchSuggestion]
   );
   // ★ Part B：socket handler（[] deps）要最新 selectConversation — ref 避 stale closure
   const selectConvRef = useRef<(id: string) => void>(() => {});
@@ -1553,10 +1626,11 @@ export function InboxClient({
       holeFilledRef.current.clear(); // T3：補載入 = 重頭載 → 清補洞標記（防重載後洞唔補）
       void fetchMessagesLatest(selectedConvId);
       void fetchPendingDrafts(selectedConvId);
+      void fetchSuggestion(selectedConvId); // ★ cwi-followup-v3
       void fetchNoteReceipts(selectedConvId);
       void markRead(selectedConvId);
     }
-  }, [selectedConvId, fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts]);
+  }, [selectedConvId, fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts, fetchSuggestion]);
 
   // v2 Web Push：SW notificationclick → postMessage open-conversation → 選中該對話
   // （撳 push 通知：focus 本 tab 後由呢度補齊對話選中）
@@ -1585,7 +1659,7 @@ export function InboxClient({
 
   // ── composer ──────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    async (body: string, source?: "adopted" | "typed"): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; takenOverBy?: string | null }> => {
+    async (body: string, source?: "adopted" | "typed", followupTaskId?: string): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; takenOverBy?: string | null }> => {
       const convId = selectedIdRef.current;
       if (!convId) return { ok: false, error: "未選擇對話" };
       // ★ realtime-p0 R1：一次「邏輯發送」一個 UUID；網絡 retry 用同一 key（chat-pane 嘅
@@ -1600,7 +1674,8 @@ export function InboxClient({
               method: "POST",
               headers: { "Content-Type": "application/json" },
               // ★ consult v2.1 C5（MD §8.4）：source 標記（adopted/typed）— typed → server 置 humanTookOver
-              body: JSON.stringify({ conversationId: convId, body, clientMessageId, ...(source ? { source } : {}) }),
+              // ★ cwi-followup-v3：followupTaskId = 窗口內 free-form 採用（server fail-soft claim SUGGESTED→SENT）
+              body: JSON.stringify({ conversationId: convId, body, clientMessageId, ...(source ? { source } : {}), ...(followupTaskId ? { followupTaskId } : {}) }),
             });
           } catch (err) {
             lastErr = err;
@@ -2145,6 +2220,7 @@ export function InboxClient({
           setSelectedConvId(null);
           setPatientDrawerOpen(false); // P2：取消選中 → 收埋病人記錄抽屜
           setGapDividerAfterMs(null); // T2：取消選中清中間斷層分隔線
+          setSuggestion(null); // ★ cwi-followup-v3：取消選中清建議卡
         }}
         onOpenDetail={() => setDetailOpen(true)}
         conversation={selectedConv}
@@ -2156,6 +2232,12 @@ export function InboxClient({
         window={selectedConv?.window ?? null}
         onSend={sendMessage}
         onSendTemplate={sendTemplate}
+        // ★ cwi-followup-v3：對話內跟進建議卡（MD §2.2）
+        suggestion={selectedConv ? suggestion : null}
+        onSuggestionSend={(taskId) => suggestionAction(taskId, "send")}
+        onSuggestionSkip={(taskId) => suggestionAction(taskId, "skip")}
+        onSuggestionSent={onSuggestionSent}
+        suggestionBusy={suggestionBusy}
         // cwi-inboxfix-20260905（MD §5.3）：標記已作廢（§7：8s 撤回已作廢）
         onVoidMessage={voidMessage}
         userRole={user.role}

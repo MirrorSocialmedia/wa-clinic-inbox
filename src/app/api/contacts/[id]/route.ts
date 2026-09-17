@@ -15,6 +15,10 @@ type Ctx = { params: Promise<{ id: string }> };
 const patchSchema = z.object({
   profileName: z.string().min(0).max(200).nullable().optional(),
   labels: z.array(z.string().min(1).max(50)).max(20).optional(),
+  // ★ cwi-followup-v3 B-9：稱呼人手可改（系統唔自動估 — template {{salutation}} 顯示用；null = 回退「您」）
+  salutation: z.string().min(0).max(50).nullable().optional(),
+  // ★ cwi-followup-v3 B-9：locale — zh（default）| en（決定 *_en template）
+  locale: z.enum(["zh", "en"]).nullable().optional(),
 });
 
 export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
@@ -32,6 +36,8 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
     data: {
       ...(parsed.data.profileName !== undefined ? { profileName: parsed.data.profileName } : {}),
       ...(parsed.data.labels !== undefined ? { labels: parsed.data.labels } : {}),
+      ...(parsed.data.salutation !== undefined ? { salutation: parsed.data.salutation } : {}),
+      ...(parsed.data.locale !== undefined ? { locale: parsed.data.locale } : {}),
     },
   });
   return NextResponse.json(updated);

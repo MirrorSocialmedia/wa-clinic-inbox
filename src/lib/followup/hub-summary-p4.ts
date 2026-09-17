@@ -1,11 +1,12 @@
 /**
- * cwi-followup-p4-20260916 S6 — hub 第二 tab「主動跟進」server 摘要（MD §5.4）
+ * cwi-followup-p4-20260916 S6 + ★ cwi-followup-v3-20260916 — hub「主動跟進」server 摘要
  *
- * 三步：
- *  ① 幾時排   — trigger 規則列表（出廠 7 條 = P3 4 + P4 3）
- *  ② 取消條件 — 六項 checkbox（OPT_OUT 鐵律鎖定；每次發送前重跑 — §4.4）
- *  ③ 點發     — template 對應 · L1/L2 · 每日上限（唔設，靠 L1 — 老細拍板）
- * 健康警示 5 項：template 未審批 / 隊列積壓 > 30 / opt-out 詞未設 / 索引 job 昨晚失敗 / 電話正規化率 < 90%
+ * v3（員工提示層）：
+ *  ① 幾時排   — trigger 規則列表（出廠 6 條 = P3 3 + P4 3；F 欠款整類已剷）
+ *  ② 取消條件 — 五項 checkbox（OPT_OUT 鐵律鎖定；每次發送前重跑 — §4.4）
+ *  ③ 點發     — 建議卡（cron 零 outbound — 永遠由員工喺對話內建議卡撳）
+ * 健康警示 6 項：template 未審批 / 建議積壓 > 30 / opt-out 詞未設 / 索引 job 昨晚失敗 / 電話正規化率 < 90%
+ *              / ★ A-1 依賴斷線（某規則最近 3 次 scan 全 DEP_FAIL → 紅字）
  *
  * 零 client 端邏輯分支：全部數字 server 端即時算（fail-soft — workforce 斷唔會炸 hub）。
  */
@@ -25,9 +26,11 @@ export interface FollowupHubRule {
   templateKey: string;
   templateName: string; // 顯示名
   templateApproved: boolean | null;
-  level: string;
   maxSends: number;
   enabled: boolean;
+  // ★ v3：A-1 掃描留痕（hub 顯示用）
+  lastScanAt: string | null;
+  lastScanResult: string | null; // OK | DEP_FAIL | EMPTY
 }
 export interface CancelCondition {
   key: string;
@@ -43,15 +46,15 @@ export interface FollowupHubWarning {
 export interface FollowupHubSummary {
   rules: FollowupHubRule[];
   cancelConditions: CancelCondition[];
-  sendPolicy: { dailyCap: string; l1: string; l2: string };
+  sendPolicy: { note: string };
   health: FollowupHubWarning[];
-  queue: { due: number; scheduled: number };
+  queue: { suggested: number };
   generatedAt: string;
 }
 
 const UNIT_CN: Record<string, string> = { HOUR: "小時", DAY: "日", WEEK: "星期", MONTH: "個月" };
 
-function whenText(r: { trigger: string; delayValue: number; delayUnit: string; minAmount: number | null; reasonLabels: string[] }): string {
+function whenText(r: { trigger: string; delayValue: number; delayUnit: string; reasonLabels: string[] }): string {
   const u = UNIT_CN[r.delayUnit] ?? r.delayUnit;
   switch (r.trigger) {
     case "CONVERSATION_IDLE":
@@ -60,8 +63,6 @@ function whenText(r: { trigger: string; delayValue: number; delayUnit: string; m
       return `預約前 ${r.delayValue} ${u}`;
     case "AFTER_NO_SHOW":
       return `爽約後 ${r.delayValue} ${u}`;
-    case "OUTSTANDING_BALANCE":
-      return `欠款 ≥ $${r.minAmount ?? "—"}`;
     case "AFTER_TREATMENT":
       return `合格治療（有抗生素）後 ${r.delayValue} ${u}`;
     case "RECALL_NO_REPEAT":
@@ -73,17 +74,16 @@ function whenText(r: { trigger: string; delayValue: number; delayUnit: string; m
   }
 }
 
-/** 六項取消條件（MD §4.4 — 每次發送前重跑；OPT_OUT 鐵律鎖定唔可關）。 */
+/** 五項取消條件（v3 — 每次發送前重跑；OPT_OUT 鐵律鎖定唔可關；F 類 PAID 已隨欠款整類剷走）。 */
 const CANCEL_CONDITIONS: CancelCondition[] = [
   { key: "OPT_OUT", label: "病人 opt-out（唔好再跟進）", locked: true, note: "鐵律鎖定 — 永遠檢查，唔可關" },
   { key: "REPLIED", label: "task 建後病人已回覆", locked: false, note: "有新 inbound = 已對話" },
   { key: "BOOKED", label: "期間已有新 booking", locked: false, note: "已落單 = 唔使跟" },
   { key: "ARRIVED", label: "該預約已到店（bookingStatus 1/4）", locked: false, note: "已到店 = 唔使跟" },
   { key: "RESOLVED", label: "對話已解決（status=RESOLVED）", locked: false, note: "結咗 = 唔使跟" },
-  { key: "PAID", label: "F 類：欠款已歸零", locked: false, note: "付清 = 唔使跟" },
 ];
 
-const SEND_POLICY = { dailyCap: "唔設 — 靠 L1 人手隊列", l1: "入「待跟進」隊列等人撳（AI_ADOPTED）", l2: "cron 直接發（AI_AUTO；同樣行取消檢查）" };
+const SEND_POLICY = { note: "cron 零 outbound — 只建建議；一律由員工喺對話內建議卡撳採用（窗口內 free-form / 過窗 template）或跳過" };
 
 export async function buildFollowupHubSummary(): Promise<FollowupHubSummary> {
   const rules = await prisma.followupRule.findMany({ orderBy: [{ trigger: "asc" }] });
@@ -110,47 +110,44 @@ export async function buildFollowupHubSummary(): Promise<FollowupHubSummary> {
       trigger: r.trigger,
       delayValue: r.delayValue,
       delayUnit: r.delayUnit,
-      whenText: whenText({ trigger: r.trigger, delayValue: r.delayValue, delayUnit: r.delayUnit, minAmount: r.minAmount, reasonLabels }),
+      whenText: whenText({ trigger: r.trigger, delayValue: r.delayValue, delayUnit: r.delayUnit, reasonLabels }),
       reasonCodes,
       reasonLabels,
       templateKey: r.templateName,
       templateName: t?.name ?? r.templateName,
       templateApproved: t ? t.approved : null,
-      level: r.level,
       maxSends: r.maxSends,
       enabled: r.enabled,
+      lastScanAt: r.lastScanAt ? r.lastScanAt.toISOString() : null,
+      lastScanResult: r.lastScanResult,
     };
   });
 
-  // 隊列積壓
-  const [due, scheduled] = await Promise.all([
-    prisma.followupTask.count({ where: { status: "DUE" } }),
-    prisma.followupTask.count({ where: { status: "SCHEDULED" } }),
-  ]);
+  // 建議積壓（v3：SUGGESTED 等員工處理）
+  const suggested = await prisma.followupTask.count({ where: { status: "SUGGESTED" } });
 
   const finish = (health: FollowupHubWarning[]): FollowupHubSummary => ({
     rules: ruleRows,
     cancelConditions: CANCEL_CONDITIONS,
     sendPolicy: SEND_POLICY,
     health,
-    queue: { due, scheduled },
+    queue: { suggested },
     generatedAt: new Date().toISOString(),
   });
 
-  // ── 健康警示 5 項 ──
+  // ── 健康警示 6 項 ──
   const health: FollowupHubWarning[] = [];
   // 1) template 未審批
   const unapproved = ruleRows.filter((r) => r.enabled && r.templateApproved === false);
   health.push(
     unapproved.length
-      ? { id: "template_unapproved", ok: false, reason: `${unapproved.map((r) => `${r.name}（${r.templateKey}）`).join("、")} template 未審批 — 到期 task 會 SKIPPED(NO_TEMPLATE)，零發送（審批後自動恢復）` }
+      ? { id: "template_unapproved", ok: false, reason: `${unapproved.map((r) => `${r.name}（${r.templateKey}）`).join("、")} template 未審批 — 過窗採用唔會真發（等審批），窗口內 free-form 不受影響` }
       : { id: "template_unapproved", ok: true, reason: "" }
   );
-  // 2) 隊列積壓 > 30
-  const backlog = due + scheduled;
+  // 2) 建議積壓 > 30
   health.push(
-    backlog > 30
-      ? { id: "queue_backlog", ok: false, reason: `待跟進隊列積壓 ${backlog} 條（DUE ${due} + SCHEDULED ${scheduled}）> 30 — 請安排跟進` }
+    suggested > 30
+      ? { id: "queue_backlog", ok: false, reason: `待跟進建議積壓 ${suggested} 條（SUGGESTED）> 30 — 請安排跟進` }
       : { id: "queue_backlog", ok: true, reason: "" }
   );
   // 3) opt-out 詞未設
@@ -192,6 +189,28 @@ export async function buildFollowupHubSummary(): Promise<FollowupHubSummary> {
   } else {
     health.push({ id: "index_job", ok: true, reason: "" }); // fail-soft
     health.push({ id: "phone_normalize", ok: true, reason: "" });
+  }
+  // 6) ★ A-1 依賴斷線：某規則最近 3 次 FOLLOWUP_SCAN audit 全 DEP_FAIL → 紅字
+  try {
+    const depFails: string[] = [];
+    for (const r of rules) {
+      const last3 = await prisma.auditLog.findMany({
+        where: { action: "FOLLOWUP_SCAN", entityId: r.id },
+        orderBy: { createdAt: "desc" },
+        take: 3,
+        select: { meta: true },
+      });
+      if (last3.length === 3 && last3.every((a) => (a.meta as { result?: string } | null)?.result === "DEP_FAIL")) {
+        depFails.push(r.name);
+      }
+    }
+    health.push(
+      depFails.length
+        ? { id: "scan_dep_fail", ok: false, reason: `${depFails.join("、")} 最近 3 次掃描全部 workforce 依賴失敗（DEP_FAIL）— 該類建議會持續為零，請檢查 workforce 連線` }
+        : { id: "scan_dep_fail", ok: true, reason: "" }
+    );
+  } catch {
+    health.push({ id: "scan_dep_fail", ok: true, reason: "" }); // fail-soft
   }
   return finish(health);
 }

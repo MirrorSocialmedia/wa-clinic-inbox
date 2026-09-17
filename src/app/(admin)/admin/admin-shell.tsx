@@ -45,7 +45,7 @@ const SECTION_NAMES: Record<string, string> = {
   "/admin/staff": "員工帳號",
   "/admin/onboarding": "WhatsApp 接入",
   "/admin/templates": "訊息範本",
-  "/admin/followups": "主動跟進",
+  "/admin/followups": "跟進規則",
   "/admin/workflows": "Workflow",
   "/admin/skill-groups": "技能組",
   "/admin/routing-rules": "路由規則",
@@ -88,7 +88,7 @@ export function AdminShell({
       items: [
         { href: "/admin/clinics", label: "診所設定", icon: Building2 },
         { href: "/schedule", label: "醫生時間表", icon: CalendarDays },
-        { href: "/admin/followups", label: "主動跟進", icon: BellRing },
+        { href: "/admin/followups", label: "跟進規則", icon: BellRing },
         { href: "/admin/clinical-terms", label: "術語對照表", icon: BookOpenText },
         { href: "/admin/quotes", label: "報價確認", icon: BadgeDollarSign },
       ],
