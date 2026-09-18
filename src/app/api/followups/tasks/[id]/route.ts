@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, scopedClinicSet } from "@/lib/rbac";
+import { requireAuth, scopedClinicSet, assertCanWriteConversation, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { sendFollowupTask, skipFollowupTask } from "@/lib/followup/engine";
 
@@ -15,12 +15,16 @@ import { sendFollowupTask, skipFollowupTask } from "@/lib/followup/engine";
  *   （窗口內 free-form 採用 = 建議卡「採用並編輯」入 composer → /api/messages/send 帶
  *     followupTaskId — 發送後 claim 做 SENT；同 AI 草稿卡一模一樣嘅流程。）
  *   權限：staff+（clinic scope 內）；零 claim（assigneeId 唔改）。
+ *   ★ cwi-final S0-5（N-7）：SUPERVISOR 唯讀（send + skip 都擋 403）；
+ *     conversation 級 access 檢查；send 多一道 Send Lock — 對話有負責人且唔係自己 → 423
+ *     （skip 唔發訊息 — 任何有權限員工都可以跳過）。
  *   回：{ ok, result: { status, cancelReason?, messageId?, viaTemplate? } }
  */
 export const dynamic = "force-dynamic";
 
 export const POST = handle(async (req, { params }) => {
   const ctx = await requireAuth(req);
+  assertCanWriteConversation(ctx); // ★ cwi-final S0-5：SUPERVISOR 唯讀（send + skip 都擋）
   const { id } = await params;
   const body = (await req.json().catch(() => null)) as { action?: string } | null;
   const action = body?.action;
@@ -32,6 +36,18 @@ export const POST = handle(async (req, { params }) => {
   const clinicSet = scopedClinicSet(ctx);
   if (clinicSet && !clinicSet.includes(task.clinicId)) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
+  // ★ cwi-final S0-5：conversation 級 access + Send Lock（只 send 要 — skip 唔發訊息）
+  if (task.conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: task.conversationId },
+      select: { clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+    });
+    if (!conv) return NextResponse.json({ error: "conversation missing" }, { status: 404 });
+    await assertConversationAccess(ctx, conv);
+    if (action === "send" && conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
+      return NextResponse.json({ error: "SEND_LOCKED" }, { status: 423 });
+    }
   }
 
   if (action === "skip") {

@@ -1106,8 +1106,8 @@ export function ChatPane(p: Props) {
                           adoptedFollowupRef.current = s.id; // ★ free-form 採用 = adopted + followupTaskId
                           adoptedDraftRef.current = null;
                         }}
-                        disabled={p.suggestionBusy || locked || s.templatePreview == null}
-                        title={locked ? "先接手（become 負責人）先可以發 WhatsApp" : s.templatePreview == null ? "未設 template — 窗口內可以自己打字" : undefined}
+                        disabled={p.suggestionBusy || locked || readOnly || s.templatePreview == null}
+                        title={readOnly ? "主管唯讀" : locked ? "先接手（become 負責人）先可以發 WhatsApp" : s.templatePreview == null ? "未設 template — 窗口內可以自己打字" : undefined}
                         className="text-xs px-3 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-40"
                         data-e2e="fu-sugg-adopt"
                       >
@@ -1117,8 +1117,8 @@ export function ChatPane(p: Props) {
                     {!inWindow && (
                       <button
                         onClick={() => void suggestionSend()}
-                        disabled={p.suggestionBusy || locked || noTpl || unapproved}
-                        title={locked ? "先接手（become 負責人）先可以發 WhatsApp" : unapproved ? "等 template 審批中" : noTpl ? "未設 template" : undefined}
+                        disabled={p.suggestionBusy || locked || readOnly || noTpl || unapproved}
+                        title={readOnly ? "主管唯讀" : locked ? "先接手（become 負責人）先可以發 WhatsApp" : unapproved ? "等 template 審批中" : noTpl ? "未設 template" : undefined}
                         className="text-xs px-3 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-40"
                         data-e2e="fu-sugg-send-template"
                       >
@@ -1127,7 +1127,8 @@ export function ChatPane(p: Props) {
                     )}
                     <button
                       onClick={() => void suggestionSkip()}
-                      disabled={p.suggestionBusy}
+                      disabled={p.suggestionBusy || readOnly}
+                      title={readOnly ? "主管唯讀" : undefined}
                       className="text-xs px-3 py-1 rounded-full border border-line-strong text-t2 hover:bg-panel-2 disabled:opacity-40"
                       data-e2e="fu-sugg-skip"
                     >
