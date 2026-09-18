@@ -150,9 +150,9 @@ export function InboxClient({
   // D.4（cwi-schedv2-20260903）：舊當值卡管線（dutyMap/refreshDuty/15min）移除 —
   //   側欄改「今日可約迷你表」（MiniSchedule 自拉 /api/flows/slots）。
   const [conversations, setConversations] = useState<ConversationItem[]>(initialConversations);
-  const [activeClinicId, setActiveClinicId] = useState<string | "all">(
-    user.role === "STAFF" ? (user.clinicId ?? "all") : "all"
-  );
+  // ★ cwi-final S0-3（N-2）：STAFF 冇店選擇器 — 永遠 "all"（server 已按 scope 收窄）；
+  //   用主店會令 fetchConversations 帶 clinicId=主店 → 其他店未指派線 + 計數消失。
+  const [activeClinicId, setActiveClinicId] = useState<string | "all">("all");
   const [statusFilter, setStatusFilter] = useState<ConvStatus | "ALL">("ALL");
   // ★ cwi-inboxfix-20260905（MD I-10）：連線狀態（斷線時列表頂 banner — 避免「靜靜哋唔更新」）
   const [connOffline, setConnOffline] = useState(false);
@@ -760,6 +760,12 @@ export function InboxClient({
             : c
         )
       );
+      // ★ cwi-final S0-3（T600）：指派（含自指派）改變公海/我負責維度 → 對齊膠囊計數。
+      //   notify:assigned 喺自指派時被 suppress（assign.ts：assignee !== byStaff），
+      //   clinic-room 廣播係自指派情況唯一到得嘅 channel → 必須喺度 refetch。
+      //   非自指派被派者會同時收到 notify:assigned 嘅 fetch（跨店被派者冇 clinic room —
+      //   兩個都要留；同店被派者 2 個冪等 GET，可接受）。
+      void fetchConversations(activeClinicRef.current);
     });
 
     // ── ★ cwi-auditfix-20260908（M-1）：routing 事件 → patch 該 row + 重算 counts.routed ──
@@ -964,8 +970,12 @@ export function InboxClient({
       setConnOffline(false);
       takeRtSnapshot();
       if (firstConnect) {
-        // 首次 connect：數據由 SSR/initial fetch 提供 — 唔重複 refetch（避免 load 雙拉）
+        // 首次 connect：row 由 SSR 提供（避免 load 雙拉 row）；但 SSR 唔提供膠囊計數
+        // （convCounts=null → fmtCap(undefined)="0" → 「公海 0」假零）→ 輕 refetch 對齊計數。
+        // ★ cwi-final S0-3（T600）：舊註「數據由 SSR/initial fetch 提供」嘅假設未涵蓋 counts —
+        //   唔 fetch 嘅話膠囊會一直 0 到下一個 event（self-assign 又唔觸發 notify:assigned）。
         firstConnect = false;
+        void fetchConversations(activeClinicRef.current);
         return;
       }
       if (wasDisconnected) {
