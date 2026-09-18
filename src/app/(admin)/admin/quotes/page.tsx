@@ -12,5 +12,8 @@ export const metadata = { title: "報價確認 — WA Clinic Inbox" };
 export default async function QuotesPage() {
   const session = await getServerSession();
   if (!session) redirect("/login");
-  return <Quotes />;
+  // ★ cwi-final S0-7（D-5）：全局術語字典只限全集團 ADMIN（ADMIN + scopeType ALL）—
+  //   非全集團 ADMIN 隱藏「順手教字典」勾選（server 端 teachTerm 都會被撳掉，雙重防線）。
+  const canTeach = session.role === "ADMIN" && session.scopeType === "ALL";
+  return <Quotes canTeach={canTeach} />;
 }

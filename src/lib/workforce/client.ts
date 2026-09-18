@@ -766,7 +766,7 @@ export async function decideQuote(
   id: string,
   body: {
     action: "confirm" | "correct" | "discard";
-    fields?: { amountMin?: number; amountMax?: number; termShorthand?: string | null; nameCn?: string; text?: string };
+    fields?: { amountMin?: number; amountMax?: number; termShorthand?: string | null; nameCn?: string; text?: string; /** ★ cwi-final S0-7：workforce decision route 對 correct 讀 fields.correctionNote（兩口徑兼容） */ correctionNote?: string };
     teachTerm?: { shorthand: string; nameCn: string; nameEn?: string; usedFor?: string[] };
     correctionNote?: string;
     decidedBy?: string;

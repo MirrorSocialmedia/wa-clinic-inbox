@@ -52,7 +52,7 @@ function fmtAmount(q: Quote): string {
   return `$${base}${q.perUnit ? "@" : ""}`;
 }
 
-export default function Quotes() {
+export default function Quotes({ canTeach }: { canTeach: boolean }) {
   const [tab, setTab] = useState<Quote["status"] | "all">("pending");
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [terms, setTerms] = useState<Term[]>([]);
@@ -111,10 +111,11 @@ export default function Quotes() {
         const j = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(j?.error ?? `HTTP ${res.status}`);
       }
-      const j = (await res.json()) as { status: string; termMapUpserted?: boolean };
-      setMsg(
-        action === "discard" ? "已丟" : action === "confirm" ? "已收貨" : "已改" + (j.termMapUpserted ? "（已教字典）" : "")
-      );
+      const j = (await res.json()) as { status: string; termMapUpserted?: boolean; teachTermIgnored?: boolean };
+      const baseMsg =
+        action === "discard" ? "已丟" : action === "confirm" ? "已收貨" : "已改" + (j.termMapUpserted ? "（已教字典）" : "");
+      // ★ cwi-final S0-7（D-5）：非全集團 ADMIN 嘅 teachTerm 被 server 撳掉 — 決定本身成功，只記錄決定
+      setMsg(j.teachTermIgnored ? `${baseMsg} — 字典只可由集團管理員修改，今次只記錄報價決定` : baseMsg);
       await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "操作失敗");
@@ -141,7 +142,8 @@ export default function Quotes() {
     const mx = Number(editMax);
     if (editMin !== "" && Number.isFinite(mn)) fields.amountMin = mn;
     if (editMax !== "" && Number.isFinite(mx) && mx !== mn) fields.amountMax = mx;
-    if (teachNew) {
+    // ★ cwi-final S0-7（D-5）：非全集團 ADMIN 唔送 teachTerm（server 雙重防線會撳）
+    if (canTeach && teachNew) {
       if (!teachShorthand.trim() || !teachNameCn.trim()) {
         setErr("教字典：速記 + 標準名稱必填");
         return;
@@ -296,17 +298,19 @@ export default function Quotes() {
                       ))}
                     </select>
                   </div>
-                  <label className="flex items-center gap-1.5 text-[12px] text-t2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={teachNew}
-                      onChange={(e) => setTeachNew(e.target.checked)}
-                      className="accent-brand"
-                      data-e2e="q-teach-toggle"
-                    />
-                    呢個係新術語 — 順手教字典
-                  </label>
-                  {teachNew && (
+                  {canTeach && (
+                    <label className="flex items-center gap-1.5 text-[12px] text-t2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={teachNew}
+                        onChange={(e) => setTeachNew(e.target.checked)}
+                        className="accent-brand"
+                        data-e2e="q-teach-toggle"
+                      />
+                      呢個係新術語 — 順手教字典
+                    </label>
+                  )}
+                  {canTeach && teachNew && (
                     <div className="flex flex-wrap gap-2">
                       <input
                         className="bg-panel-2 border border-line rounded-lg px-2.5 py-1.5 text-[13px] text-t1 w-28 focus:outline-none focus:border-brand"
