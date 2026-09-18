@@ -77,8 +77,13 @@ run_notify_gate() {
   nn() { # nn <desc> <e2e:notify-ui args...>
     local desc="$1"; shift
     local out
-    out=$(pnpm -s e2e:notify-ui --base "$BASE" "$@" 2>&1 | tee /dev/stderr | grep -E "NOTIFY-UI-(OK|FAIL)" | head -1)
-    check "$desc" "$out" "NOTIFY-UI-OK"
+    # ★ cwi-final B1fix-harness：舊 `| tee /dev/stderr |` 喺「2>&1 重定向入普通檔案」時
+    #   open("/dev/stderr") 係 fresh open（offset 0、無 O_APPEND）→ 每次調用覆寫 log 檔頭，
+    #   script 自身 fd 續喺大 offset 寫 → NUL gap 吞走中段（run5/6/7 實測 log 頭 ~900 行全失）。
+    #   改：先捕獲，再經既有 fd2（與 fd1 共享 offset）寫返 — 零 re-open。
+    out=$(pnpm -s e2e:notify-ui --base "$BASE" "$@" 2>&1)
+    [ -n "$out" ] && printf '%s\n' "$out" >&2
+    check "$desc" "$(printf '%s\n' "$out" | grep -E "NOTIFY-UI-(OK|FAIL)" | head -1)" "NOTIFY-UI-OK"
   }
 
   # T160：未指派 → 全店 STAFF 響（A + B 都彈）
@@ -140,8 +145,10 @@ run_notify_gate() {
   pp() { # pp <desc> <e2e:push args...>
     local desc="$1"; shift
     local out
-    out=$(pnpm -s e2e:push --base "$BASE" "$@" 2>&1 | tee /dev/stderr | grep -oE "PUSH-(OK|FAIL)" | head -1)
-    check "$desc" "$out" "PUSH-OK"
+    # ★ cwi-final B1fix-harness：同款 tee /dev/stderr 修復（見 nn 註）。
+    out=$(pnpm -s e2e:push --base "$BASE" "$@" 2>&1)
+    [ -n "$out" ] && printf '%s\n' "$out" >&2
+    check "$desc" "$(printf '%s\n' "$out" | grep -oE "PUSH-(OK|FAIL)" | head -1)" "PUSH-OK"
   }
   pp "T190 push 零 PII（真 inbound → 解密 → 只有 kind/clinicShort/convId）" \
     --scenario t190 --cookie-b /tmp/e2e-cookie-notify-b.txt --staff-b "$N_STAFF_B" --clinic "$TKW_CLINIC_ID"
