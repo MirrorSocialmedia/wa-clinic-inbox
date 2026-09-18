@@ -4,7 +4,7 @@
  * Android Chrome 唔支援 `new Notification()` — 手機通知嘅硬前提。
  * - push：server Web Push（VAPID）入口 — tab 閂咗／鎖屏都收到
  * - notificationclick：撳通知 → focus 現有 /inbox tab + postMessage 選中對話；
- *   冇 window → 開新窗 /inbox?c=<id>
+ *   冇 window → 開新窗 /inbox?conv=<id>
  *
  * ★ PII 鐵律：push payload 只有 kind / clinicShort / conversationId，冇病人資料
  * （push 內容會經 Google/Apple 伺服器 — 見 src/lib/push.ts）。
@@ -15,7 +15,7 @@
 
 // ★ cwi-realtime-fix §8.3 (T279)：版本標記 — activate 時 console.info（console 可追溯 SW 更新）。
 //   SW 邏輯任何改動都要 bump 呢個值（byte 變 → 瀏覽器自動偵測新 version）。
-const SW_VERSION = "2026-09-07-a2";
+const SW_VERSION = "2026-09-18-s02";
 
 self.addEventListener("install", (e) => self.skipWaiting());
 self.addEventListener("activate", (e) => {
@@ -60,7 +60,7 @@ self.addEventListener("push", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const id = event.notification.data?.conversationId;
-  const url = id ? `/inbox?c=${id}` : "/inbox";
+  const url = id ? `/inbox?conv=${id}` : "/inbox"; // ★ cwi-final S0-2：page 讀 ?conv=（舊 ?c= 係死參數）
   event.waitUntil(
     (async () => {
       const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
