@@ -538,6 +538,7 @@ export function ChatPane(p: Props) {
   // ★ C5 §8.4：換對話 → 採用旗清掉（composer 狀態唔會跨對話沿用）
   useEffect(() => {
     adoptedDraftRef.current = null;
+    adoptedFollowupRef.current = null; // ★ cwi-final S0-4（N-10.3）：跟進採用旗同行清掉（主 reset effect 已清過，呢度跟 adoptedDraftRef 對齊）
   }, [p.conversation?.id]);
 
   // ★ P2（cwi-followup-p2）：對話切換 → 重拉 summary chip（fail-soft：404/403/離線/無病人 = 無 chip，唔阻 header）
@@ -667,7 +668,10 @@ export function ChatPane(p: Props) {
     setSendError(null);
     // ★ C5 §8.4：source 標記 — 由草稿採用嚟（auto-fill/採用並編輯，含改動）= adopted；
     //   自己由零打字 = typed（server 置 humanTookOver → 側欄「AI 已暫停」）。
-    const source: "adopted" | "typed" = adoptedDraftRef.current ? "adopted" : "typed";
+    // ★ cwi-final S0-4（N-6）：窗口內跟進建議「採用並編輯」（free-form）同样係 adopted —
+    //   採用時建議文案已填 composer，用戶只是細調 ≠ 由零自己打字（唔該置 humanTookOver）。
+    const source: "adopted" | "typed" =
+      adoptedDraftRef.current || adoptedFollowupRef.current ? "adopted" : "typed";
     // ★ cwi-followup-v3：窗口內 free-form 採用 → 帶 followupTaskId（server fail-soft claim SUGGESTED→SENT）
     const followupTaskId = adoptedFollowupRef.current;
     const r = await p.onSend(body, source, followupTaskId ?? undefined);
@@ -681,7 +685,9 @@ export function ChatPane(p: Props) {
       setDraft("");
       adoptedDraftRef.current = null;
       adoptedFollowupRef.current = null;
-      p.onSuggestionSent?.(); // ★ cwi-followup-v3：窗口內採用發送成功 → parent 清建議卡 + 重拉計數
+      // ★ cwi-final S0-4（N-10.2）：只喺今次有帶 followupTaskId（真係發送咗跟進採用）先清卡 —
+      //   自己打字發送唔應該清咗張未送嘅建議卡（T607）。
+      if (followupTaskId) p.onSuggestionSent?.();
     }
     setSending(false);
   }
@@ -1372,7 +1378,11 @@ export function ChatPane(p: Props) {
                 onChange={(e) => {
                   const v = e.target.value;
                   // ★ C5 §8.4：清空 / 手改 composer = 唔再係原稿採用 → 採用旗清（之後發送 = typed）
-                  if (v === "" && draft !== "") adoptedDraftRef.current = null;
+                  // ★ cwi-final S0-4（N-10.1）：清空（含空白）= 採用關係斷 — draft + followup 旗都清（T607）
+                  if (v.trim() === "") {
+                    adoptedDraftRef.current = null;
+                    adoptedFollowupRef.current = null;
+                  }
                   setDraft(v);
                 }}
                 onKeyDown={(e) => {
