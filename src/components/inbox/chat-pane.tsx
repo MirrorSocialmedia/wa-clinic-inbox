@@ -88,7 +88,7 @@ interface Props {
   loadingOlder: boolean;
   onScrollTop: () => void;
   window: { open: boolean; remainingMs: number; tone: string } | null;
-  onSend: (body: string, source?: "adopted" | "typed", /** ★ cwi-followup-v3：窗口內 free-form 採用 — 帶跟進建議 task id（server fail-soft claim SUGGESTED→SENT） */ followupTaskId?: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null }>;
+  onSend: (body: string, source?: "adopted" | "typed", /** ★ cwi-followup-v3：窗口內 free-form 採用 — 帶跟進建議 task id（server fail-soft claim SUGGESTED→SENT） */ followupTaskId?: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null; /** ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE 失效原因 */ notSendableReason?: string }>;
   staffName: string;
   /** Phase 2：該對話最新嘅 pending AI 草稿（PROPOSED）；null = 無 */
   pendingDraft: DraftInfo | null;
@@ -676,11 +676,19 @@ export function ChatPane(p: Props) {
     const followupTaskId = adoptedFollowupRef.current;
     const r = await p.onSend(body, source, followupTaskId ?? undefined);
     if (!r.ok) {
-      // cwi-multiclinic-20260903（MD A.6.2）：423 打字保護 — 文字保留（setDraft 唔郁）；
-      // toast「{name} 已接手呢個對話」由 parent（inbox-client）發出；header 負責人名 optimistic 更新。
-      setSendError(r.takenOverBy ? "對話已被接手 — 你而家只可發內部備註" : r.error ?? "發送失敗");
-      // Phase B：過窗 422 帶 templates 名單 → 出 template 揀選
-      if (r.templates && r.templates.length > 0) setTemplateOptions(r.templates);
+      // ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE — 建議已失效（task 已同步轉態）→
+      //   清採用旗 + 刷新建議卡；**文字保留喺 composer**（員工再撳發送 = 普通訊息）。
+      if (r.error === "FOLLOWUP_NOT_SENDABLE") {
+        adoptedFollowupRef.current = null;
+        setSendError(`呢條跟進建議已失效（${r.notSendableReason ?? "未知"}）`);
+        p.onSuggestionSent?.();
+      } else {
+        // cwi-multiclinic-20260903（MD A.6.2）：423 打字保護 — 文字保留（setDraft 唔郁）；
+        // toast「{name} 已接手呢個對話」由 parent（inbox-client）發出；header 負責人名 optimistic 更新。
+        setSendError(r.takenOverBy ? "對話已被接手 — 你而家只可發內部備註" : r.error ?? "發送失敗");
+        // Phase B：過窗 422 帶 templates 名單 → 出 template 揀選
+        if (r.templates && r.templates.length > 0) setTemplateOptions(r.templates);
+      }
     } else {
       setDraft("");
       adoptedDraftRef.current = null;

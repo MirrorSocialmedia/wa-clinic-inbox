@@ -9,6 +9,7 @@ import { enqueueOutboundSend } from "@/lib/queue";
 import { getWindowState } from "@/lib/wa/window";
 import { billingCategoryForTemplate, BILLING_SERVICE } from "@/lib/wa/billing";
 import { assignConversation } from "@/lib/assign";
+import { precheckAdoptedTask } from "@/lib/followup/engine";
 import {
   listMessageTemplates,
   waMock,
@@ -255,6 +256,20 @@ export const POST = handle(async (req: NextRequest) => {
     }
   }
 
+  // ★ cwi-final S0-6：composer 路徑 claim 前守門（同 sendFollowupTask 同一套檢查，但唔建訊息）。
+  //   位置：Send Lock／窗口檢查之後、建 Message 之前；放喺 replay 檢查之後 —
+  //   冪等 replay（同 clientMessageId 重送）必須短路返 200，唔該被「task 已 SENT」誤 409。
+  if (parsed.data.followupTaskId) {
+    const why = await precheckAdoptedTask(parsed.data.followupTaskId, conv.id);
+    if (why === "WRONG_CONVERSATION" || why === "NOT_FOUND") {
+      return NextResponse.json({ error: "invalid followupTaskId" }, { status: 400 });
+    }
+    if (why !== null) {
+      // opt-out / 已覆 / 已約 / 已過期 → 唔發，叫 UI 刷新建議卡
+      return NextResponse.json({ error: "FOLLOWUP_NOT_SENDABLE", reason: why }, { status: 409 });
+    }
+  }
+
   const now = new Date();
   let msg;
   try {
@@ -309,22 +324,6 @@ export const POST = handle(async (req: NextRequest) => {
   //   非負責人（ADMIN 豁免路徑）唔觸 — 呢個欄只反映現任負責人嘅活動。
   if (conv.assigneeId && conv.assigneeId === ctx.staff.id) {
     await prisma.$executeRaw`UPDATE "Conversation" SET "assigneeLastActionAt" = ${now} WHERE "id" = ${conv.id}`;
-  }
-
-  // ★ cwi-followup-v3：窗口內 free-form 採用跟進建議 → claim SUGGESTED task 做 SENT（記 sentMessageId）。
-  //   併發冪等：updateMany where status=SUGGESTED 搶佔；後到者 count=0 靜默跳（fail-soft 唔阻發送）。
-  if (parsed.data.followupTaskId) {
-    try {
-      await prisma.followupTask.updateMany({
-        where: { id: parsed.data.followupTaskId, status: "SUGGESTED" },
-        data: { status: "SENT", sentMessageId: msg.id, handledAt: now, handledBy: ctx.staff.id },
-      });
-    } catch (err) {
-      log.warn(
-        { followupTaskId: parsed.data.followupTaskId, err: err instanceof Error ? err.message : String(err) },
-        "send: followup task claim failed（fail-soft — 發送照做）"
-      );
-    }
   }
 
   await prisma.$executeRaw`
@@ -418,5 +417,29 @@ export const POST = handle(async (req: NextRequest) => {
     },
     "send: queued"
   );
+
+  // ★ cwi-final S0-6：claim 搬到 enqueue 成功之後（舊位置喺建 Message 後即 claim —
+  //   enqueue fail 503 時 task 已 SENT 但訊息 FAILED，task/訊息狀態撕裂）。
+  //   條件 updateMany（SUGGESTED + 同 conversation）併發冪等；count=1 先寫 postOpFollowupAt（C 類）+ audit。
+  if (parsed.data.followupTaskId) {
+    const c = await prisma.followupTask.updateMany({
+      where: { id: parsed.data.followupTaskId, status: "SUGGESTED", conversationId: conv.id },
+      data: { status: "SENT", sentMessageId: msg.id, handledAt: now, handledBy: ctx.staff.id },
+    });
+    if (c.count === 1) {
+      const t = await prisma.followupTask.findUnique({ where: { id: parsed.data.followupTaskId }, select: { ruleId: true } });
+      const r = t?.ruleId ? await prisma.followupRule.findUnique({ where: { id: t.ruleId }, select: { trigger: true } }) : null;
+      if (r?.trigger === "AFTER_TREATMENT") {
+        await prisma.conversation.updateMany({ where: { id: conv.id }, data: { postOpFollowupAt: now } });
+      }
+      await prisma.auditLog.create({
+        data: {
+          staffId: ctx.staff.id, action: "FOLLOWUP_SENT", entity: "FollowupTask", entityId: parsed.data.followupTaskId,
+          meta: { conversationId: conv.id, clinicId: conv.clinicId, trigger: r?.trigger ?? null, sentVia: "AI_ADOPTED", viaTemplate: false, messageId: msg.id } as object,
+        },
+      }).catch(() => undefined);
+    }
+  }
+
   return NextResponse.json({ ok: true, messageId: msg.id, status: "QUEUED" }, { status: 202 });
 });

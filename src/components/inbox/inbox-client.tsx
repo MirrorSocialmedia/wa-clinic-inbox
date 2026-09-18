@@ -1197,8 +1197,10 @@ export function InboxClient({
   // 窗口內 free-form 採用發送成功（composer send 回執）→ 清卡 + 計數對齊
   const onSuggestionSent = useCallback(() => {
     setSuggestion(null);
+    // ★ cwi-final S0-6：真正刷新 — 重拉當前對話建議（task 已轉態 → 下一張卡或 null）
+    void fetchSuggestion(selectedIdRef.current);
     void fetchConversations(activeClinicRef.current);
-  }, [fetchConversations]);
+  }, [fetchConversations, fetchSuggestion]);
 
   const fetchMessagesAfter = useCallback(
     async (convId: string, afterMs: number): Promise<number> => {
@@ -1669,7 +1671,7 @@ export function InboxClient({
 
   // ── composer ──────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    async (body: string, source?: "adopted" | "typed", followupTaskId?: string): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; takenOverBy?: string | null }> => {
+    async (body: string, source?: "adopted" | "typed", followupTaskId?: string): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; takenOverBy?: string | null; notSendableReason?: string }> => {
       const convId = selectedIdRef.current;
       if (!convId) return { ok: false, error: "未選擇對話" };
       // ★ realtime-p0 R1：一次「邏輯發送」一個 UUID；網絡 retry 用同一 key（chat-pane 嘅
@@ -1707,6 +1709,8 @@ export function InboxClient({
           templates?: { name: string; language: string }[];
           // cwi-multiclinic-20260903（A.6.2）：423 SEND_LOCKED 帶新負責人 id（header 即時更新）
           assigneeId?: string | null;
+          // ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE 帶失效原因（UI 提示用）
+          reason?: string | null;
         } | null;
         if (res.status === 422) {
           return { ok: false, error: data?.message ?? "窗口已過，只可發 template", templates: data?.templates };
@@ -1731,6 +1735,15 @@ export function InboxClient({
           return { ok: false, error: data?.message ?? "此對話已有負責人", takenOverBy: newAssigneeId };
         }
         if (!res.ok) {
+          // ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE — task 已失效（opt-out/已覆/已約/已過期，
+          //   server 已同步轉態）→ 原因傳上層（chat-pane 提示 + 文字保留 + 刷新建議卡）
+          if (res.status === 409 && data?.error === "FOLLOWUP_NOT_SENDABLE") {
+            return {
+              ok: false,
+              error: "FOLLOWUP_NOT_SENDABLE",
+              notSendableReason: typeof data?.reason === "string" ? data.reason : undefined,
+            };
+          }
           return { ok: false, error: data?.error ?? `發送失敗（${res.status}）` };
         }
         // 樂觀更新：QUEUED 氣泡（worker 發完會 push message:new 帶真 wamid）。

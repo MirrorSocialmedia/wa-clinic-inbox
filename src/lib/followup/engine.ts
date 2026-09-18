@@ -1053,6 +1053,33 @@ export async function checkCancellations(
   return null;
 }
 
+/**
+ * ★ cwi-final S0-6：composer 路徑 claim 前嘅守門（同 sendFollowupTask 同一套檢查，但唔建訊息）。
+ * 回 null = 可以 claim；否則回原因（task 已同步轉態）。
+ */
+export async function precheckAdoptedTask(
+  taskId: string,
+  conversationId: string,
+  now = new Date()
+): Promise<null | "NOT_FOUND" | "WRONG_CONVERSATION" | "NOT_SUGGESTED" | "EXPIRED" | string> {
+  const task = await prisma.followupTask.findUnique({ where: { id: taskId } });
+  if (!task) return "NOT_FOUND";
+  if (task.conversationId !== conversationId) return "WRONG_CONVERSATION";
+  if (task.status !== "SUGGESTED") return "NOT_SUGGESTED";
+  const rule = task.ruleId ? ((await prisma.followupRule.findUnique({ where: { id: task.ruleId } })) as unknown as FollowupRuleRow | null) : null;
+  if (suggestionExpiryAt({ dueAt: task.dueAt, contextJson: task.contextJson, rule }).getTime() <= now.getTime()) {
+    await prisma.followupTask.updateMany({ where: { id: taskId, status: "SUGGESTED" }, data: { status: "EXPIRED", handledAt: now } });
+    return "EXPIRED";
+  }
+  const clinic = await prisma.clinic.findUnique({ where: { id: task.clinicId }, select: { id: true, code: true, name: true } });
+  const reason = await checkCancellations(task, rule, clinic, now);
+  if (reason) {
+    await prisma.followupTask.updateMany({ where: { id: taskId, status: "SUGGESTED" }, data: { status: "CANCELLED", cancelReason: reason, handledAt: now } });
+    return reason;
+  }
+  return null;
+}
+
 // ── S4：發送（v3：只由 UI 觸發 — 員工撳「採用」；cron 永不入呢度）──────────────
 
 export interface SendResult {
