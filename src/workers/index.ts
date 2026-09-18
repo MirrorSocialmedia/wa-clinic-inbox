@@ -18,6 +18,7 @@ import { refreshAllClinics } from "@/lib/availability";
 import { CONTROL_CHANNEL, type ControlMessage } from "@/lib/notify";
 import { applyCacheBust } from "@/lib/cache-bust";
 import { retentionPolicyMismatches } from "@/lib/ops/retention-policy";
+import { bootMockGuard } from "@/lib/boot-key-paths";
 import log from "@/lib/log";
 
 async function registerSchedulers() {
@@ -109,6 +110,9 @@ async function registerSchedulers() {
 }
 
 async function main() {
+  // ★ cwi-final S0-1：production 開 mock flag → 拒絕啟動（fail-closed；ALLOW_MOCK_IN_PROD=1 放行 sandbox）
+  bootMockGuard();
+
   // ★ cwi-followup-v3（MD §6 A-2 + T432）：保留期 env 必須明確寫入且同政策一致，否則拒絕啟動
   //   （retention purge 喺 cron worker — env 錯 = 政策頁同實際刪除期唔一致，屬資安事件）。
   {

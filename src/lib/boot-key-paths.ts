@@ -44,3 +44,15 @@ export function bootKeyPathCheck(): void {
     }
   }
 }
+
+/** ★ cwi-final S0-1：production 禁止 mock（ALLOW_MOCK_IN_PROD=1 先放行 — sandbox 用） */
+export function bootMockGuard(): void {
+  if (process.env.NODE_ENV !== "production") return;
+  if (process.env.ALLOW_MOCK_IN_PROD === "1") return;
+  const on = ["AI_MOCK", "WA_MOCK", "DUTY_MOCK", "WORKFORCE_MOCK", "AI_MOCK_FAIL", "WA_GRAPH_MOCK_FAIL"]
+    .filter((k) => process.env[k] === "1");
+  if (on.length > 0) {
+    log.fatal({ on }, "boot: production 開咗 mock flag — 拒絕啟動");
+    process.exit(1);
+  }
+}

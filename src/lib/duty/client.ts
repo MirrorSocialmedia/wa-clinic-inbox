@@ -111,7 +111,8 @@ export async function fetchDutyRoster(
   //   flag 存在/內容變 → 先清 cache 再入 mock 分支 — 否則 5 分鐘 TTL cache hit 會
   //   瞓過 override（§B2 e2e「mock duty 變更 → 卡刷新」決定性要求）。
   let override: DutyEntry[] | null = null;
-  if ((process.env.DUTY_MOCK ?? "1") === "1") {
+  // ★ cwi-final S0-1（audit3 P1-19）：fail-closed — env 漏設 = 走真 client（唔再預設 mock）
+  if (process.env.DUTY_MOCK === "1") {
     const o = readDutyMockOverride();
     if (o) {
       if (o.hash !== lastOverrideHash) {
@@ -131,7 +132,8 @@ export async function fetchDutyRoster(
 
   let entries: DutyEntry[] | null;
 
-  if ((process.env.DUTY_MOCK ?? "1") === "1") {
+  // ★ cwi-final S0-1（audit3 P1-19）：fail-closed — env 漏設 = 走真 client（唔再預設 mock）
+  if (process.env.DUTY_MOCK === "1") {
     // sandbox 預設 mock — 決定性 fixture（E2E T38 斷言用）；flag override 可換名單（§B2 e2e）
     if (override) {
       entries = override.map((e) => ({ ...e }));
