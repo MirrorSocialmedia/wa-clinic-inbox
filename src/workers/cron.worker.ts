@@ -157,6 +157,13 @@ export async function startCronWorker(): Promise<Worker | null> {
           return { ok: true, ...r };
         }
         case "reminder-scan": {
+          // ★ cwi-final S0-8：v3 原則「cron 唔發訊息」— legacy 自動提醒永久關（D-1／D-9）。
+          //   預約提醒改用 follow-up B1 建議規則（員工撳先發）；開 B1 要等 S2-1 上線先。
+          //   重開需明確 env REMINDER_AUTO_SEND=1（預設/未設 = 關）。
+          if (process.env.REMINDER_AUTO_SEND !== "1") {
+            log.info({}, "cron: reminder-scan skipped — REMINDER_AUTO_SEND off（D-1）"); // 零產出分支要 log
+            return { ok: true, skipped: "REMINDER_AUTO_SEND off" };
+          }
           // Phase B（cwi-tmpl-20260824-b1）：T-24h 預約提醒；E2E 可手動 enqueue（pnpm e2e:cron reminder-scan）
           const r = await runReminderScan();
           return { ok: true, ...r };

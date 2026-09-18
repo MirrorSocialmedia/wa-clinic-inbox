@@ -83,7 +83,7 @@
 #   T49b (L-2) search ILIKE escape：q=% 同 q=_ 當字面（0 hit）；control 正常 query 照中
 #
 # App Review 三件套（2026-08-20）：
-#   T52 (App Review §1) privacy 公開頁：無 cookie 200 + `id="deletion"` anchor + 保留期 24/12 月 + 占位符 + 0 PII
+#   T52 (App Review §1) privacy 公開頁：無 cookie 200 + data-deletion link + 保留期 24 月 + 保密協議句式 + 公司名定稿 + 0 PII（★ cwi-legal-20260915 後更新：舊模板 id="deletion"/12月/[公司名稱] 已改定稿內容）
 #   T53 (App Review §2/§2A) onboarding/templates gating：STAFF 403 / unauth 307→/login / ADMIN 200 + mock 3 色 template
 #   T54 (App Review §2.3) exchange mock flow：401/403/400(input)/404(db_update) + 完整 mock flow 寫入 clinic + AuditLog
 #       + hermetic 還原 + token/code/PIN 零入 log（grep 自證）
@@ -1653,15 +1653,15 @@ fi
 [ "$T51" = 0 ] && pass "T51 M-4 change-password 踢全 session（C-3 重用）+ TTL 邊界" \
   || fail "T51 change-password（見上 ❌）"
 
-# ── T52. App Review §1：privacy 公開頁 ───────────────────────────────────────
+# ── T52. App Review §1：privacy 公開頁（★ cwi-legal-20260915 定稿後更新 — 舊模板 id="deletion"/12 月/[公司名稱] 已改）──
 echo "[AR-1] T52: privacy page..."
 curl -s -o /tmp/e2e-privacy.html "$BASE/privacy"   # 無 cookie（公開頁）
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/privacy")
 check "T52 privacy 無 cookie → 200" "$CODE" "200"
-grep -q 'id="deletion"' /tmp/e2e-privacy.html && pass "T52 第 9 條 id=\"deletion\" anchor 喺 HTML" || fail "T52 缺 id=\"deletion\" anchor"
+grep -q 'href="/data-deletion"' /tmp/e2e-privacy.html && pass "T52 刪除資料指引 link（/data-deletion）喺 HTML" || fail "T52 缺 /data-deletion link"
 grep -q '24 個月' /tmp/e2e-privacy.html && pass "T52 保留期：對話 24 個月" || fail "T52 保留期對話 24 個月缺"
-grep -q '12 個月' /tmp/e2e-privacy.html && pass "T52 保留期：媒體 12 個月" || fail "T52 保留期媒體 12 個月缺"
-grep -q '\[公司名稱\]' /tmp/e2e-privacy.html && pass "T52 占位符保留（[公司名稱]）" || fail "T52 占位符缺"
+grep -q '受保密協議約束' /tmp/e2e-privacy.html && pass "T52 診所管理系統服務供應商（受保密協議約束）句式" || fail "T52 保密協議句式缺"
+grep -q 'BACCARAT YL LIMITED' /tmp/e2e-privacy.html && pass "T52 公司名定稿（BACCARAT YL LIMITED）" || fail "T52 公司名缺（定稿未落？）"
 if grep -qF "$ADMIN_EMAIL" /tmp/e2e-privacy.html || grep -qF "$PATIENT_TKW" /tmp/e2e-privacy.html; then
   fail "T52 PII：privacy 頁含 admin email / patient number"
 else
@@ -2955,6 +2955,15 @@ echo "$T81_DL" | awk '{exit !($1 < 2)}' && pass "T81 delta refetch 回應 <2s（
 
 # ── T88-T92. Phase B：template 發送鏈 + T-24h 預約提醒（cwi-tmpl-20260824-b1）──
 echo "[12/12] T88-T92: Phase B template + T-24h reminder..."
+# ★ cwi-final S0-8（D-1）：legacy reminder-scan 由 REMINDER_AUTO_SEND gate（預設關）。
+#   本節驗證「gate 開」嘅 legacy 鏈（T88 SENT/冪等、T89 skip、T90 graph fail、T91 回覆 triage）
+#   → export REMINDER_AUTO_SEND=1 + 重起 dedicated worker（段內 T90 兩次重啟都會 inherit）；
+#   「預設關」路徑另由 T602 / v3 T430d 覆蓋。段末 unset + 重起 worker 還原預設。
+export REMINDER_AUTO_SEND=1
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+REMINDER_AUTO_SEND=1 nohup pnpm worker >/tmp/e2e-worker-t88.log 2>&1 &
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t88.log 2>/dev/null && break; sleep 1; done
 T88=0
 # 窗口 fixture 時刻：now+24h（HK）— 確保落入 23–25h 提醒窗口（單位测试已證邊界）
 REM_D=$(TZ=Asia/Hong_Kong date -d '+24 hours' +%F)
@@ -3101,6 +3110,13 @@ if [ "$T92" = 0 ]; then
   h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"body\":\"x\",\"templateName\":\"appt_reminder_zh\"}"
   check "T92 body+templateName 同傳 → 400" "$H1_CODE" "400"
 fi
+
+# ── S0-8 收口：unset REMINDER_AUTO_SEND + 重起預設 worker（後續段 worker 回 gate 預設關）──
+unset REMINDER_AUTO_SEND
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-t88r.log 2>&1 &
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t88r.log 2>/dev/null && break; sleep 1; done
 
 # ── R10 summary ─────────────────────────────────────────────────────────────
 [ "$T88" = 0 ] && [ "$T89" = 0 ] && [ "$T90" = 0 ] && [ "$T91" = 0 ] && [ "$T92" = 0 ] \

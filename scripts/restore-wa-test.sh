@@ -101,6 +101,14 @@ case "$MAGIC" in
       tail -5 /tmp/wa-restore-migrate.log >&2
       fail "migrate deploy 失敗（scratch）"
     fi
+    # ★ cwi-final S0-8 期修復（預存 bug）：migrations 含 seed 數據（20260914230000 cwi_hub_a_company
+    #   喺 migration 入面 INSERT Company 行）— fresh scratch migrate deploy 後已有 seed 行，
+    #   dump CSV（同源 DB dump，含同一 id 嘅 Company 行）COPY 時 PK 撞 → 「COPY Company 失敗」。
+    #   TRUNCATE 全表（CASCADE 冪等）→ COPY 純數據落位。
+    while IFS= read -r T; do
+      [ -n "$T" ] || continue
+      psql -d "$SCRATCH_DB" -c "TRUNCATE TABLE \"$T\" CASCADE;" >/dev/null 2>&1
+    done < "$STAGE_DIR/tables.list"
     # 逐表 COPY（FK 順序：先 DISABLE TRIGGER ALL）
     DISABLED=()
     while IFS= read -r T; do

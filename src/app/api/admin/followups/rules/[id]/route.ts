@@ -12,7 +12,9 @@ import { handle } from "@/lib/api-error";
  *                    cancelOnReply?, cancelOnBooking?, cancelOnArrival?, cancelOnResolved? }
  *   驗證：delayValue 1–365；delayUnit HOUR/DAY/WEEK/MONTH；level 只收 L1（v3 全部硬性 L1 — 建議層）；
  *   dedupWindowDays 1–30（B-4② 同病人同 trigger 終態抑制窗）；
- *   firstUseConfirmedAt = B1 首啟用確認（ISO 串；BEFORE_APPOINTMENT 規則啟用時 UI 彈確認後帶上）。
+ *   firstUseConfirmedAt = B1 首啟用確認（ISO 串；BEFORE_APPOINTMENT 規則啟用時 UI 彈確認後帶上）；
+ *   ★ cwi-final S0-8（N-11）：firstUseConfirmed（boolean）= 同一確認嘅簡化口徑（server 寫 firstUseConfirmedAt=now）。
+ *   BEFORE_APPOINTMENT 規則首啟用（firstUseConfirmedAt 為 null）未帶確認 → 409 FIRST_USE_CONFIRM_REQUIRED。
  *   改動即時生效（下一次掃描用新值）。（v3 已剔 minAmount/cancelOnPaid — F 類整類剷走。）
  */
 export const dynamic = "force-dynamic";
@@ -28,6 +30,17 @@ export const PATCH = handle(async (req, { params }) => {
   }
   const rule = await prisma.followupRule.findUnique({ where: { id } });
   if (!rule) return NextResponse.json({ error: "rule not found" }, { status: 404 });
+
+  // ★ cwi-final S0-8（N-11）：B1 首啟用確認 — BEFORE_APPOINTMENT 規則第一次啟用（firstUseConfirmedAt
+  //   為 null）必須帶確認（「確認診所冇其他渠道發預約提醒？」）→ 409；確認過一次以後唔再問。
+  //   兼容兩口徑：v3 UI 帶 firstUseConfirmedAt（ISO 串）；新 spec 帶 firstUseConfirmed（boolean）。
+  const hasFreshConfirm = body.firstUseConfirmed === true || typeof body.firstUseConfirmedAt === "string";
+  if (body.enabled === true && rule.trigger === "BEFORE_APPOINTMENT" && !rule.firstUseConfirmedAt && !hasFreshConfirm) {
+    return NextResponse.json(
+      { error: "FIRST_USE_CONFIRM_REQUIRED", message: "確認診所冇其他渠道發預約提醒？" },
+      { status: 409 }
+    );
+  }
 
   const data: Record<string, unknown> = {};
   if (typeof body.enabled === "boolean") data.enabled = body.enabled;
@@ -64,6 +77,8 @@ export const PATCH = handle(async (req, { params }) => {
     if (Number.isNaN(d.getTime())) return NextResponse.json({ error: "bad firstUseConfirmedAt" }, { status: 400 });
     data.firstUseConfirmedAt = d;
   }
+  // ★ cwi-final S0-8（N-11）：boolean 口徑 — server 用自己時鐘寫（唔信 client 時鐘）
+  if (body.firstUseConfirmed === true) data.firstUseConfirmedAt = new Date();
   for (const k of ["cancelOnReply", "cancelOnBooking", "cancelOnArrival", "cancelOnResolved"] as const) {
     if (typeof body[k] === "boolean") data[k] = body[k];
   }

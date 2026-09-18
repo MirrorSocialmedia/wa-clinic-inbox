@@ -87,7 +87,8 @@ async function registerSchedulers() {
     data: {},
   });
   // Phase B（cwi-tmpl-20260824-b1）：T-24h 預約提醒 — 每 15 分鐘掃（窗口 23–25h 內每 15 分鐘掃一次；
-  // remindedAt 冪等 transaction 保證重覆掃描唔會重發）
+  // remindedAt 冪等 transaction 保證重覆掃描唔會重發）。
+  // ★ cwi-final S0-8（D-1）：scan 本身常駐，但 cron.worker 入面 REMINDER_AUTO_SEND 未 =1 會 skip（零產出有 log）。
   await cronQueue.upsertJobScheduler("sched-reminder-scan", { pattern: "*/15 * * * *" }, {
     name: "reminder-scan",
     data: {},

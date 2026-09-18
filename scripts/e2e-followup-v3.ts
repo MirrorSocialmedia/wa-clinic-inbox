@@ -2,7 +2,8 @@
  * e2e-followup-v3.ts — cwi-followup-v3-20260916 驗收（MD §7 T420–T433；T434 迴歸另跑 P2/P3/P4 + unit）
  *
  * 前置：dev server 127.0.0.1:3100（WA_MOCK=1 / AI_MOCK=1 / WORKFORCE_MOCK=1）；Postgres 15432；redis 6379。
- *   worker 唔強制（scan 直接調 engine；T432 spawn 自己個 worker 測 startup 拒啟）。
+ *   worker 唔強制（scan 直接調 engine；T432 spawn 自己個 worker 測 startup 拒啟；
+ *   T430d S0-8 擴充例外 — 要打運行中 worker 驗證 reminder-scan gate）。
  * 跑法：pnpm -s tsx scripts/e2e-followup-v3.ts
  *
  * 決定性：
@@ -43,6 +44,7 @@ import { PrismaClient } from "@prisma/client";
 
 const argon2 = createRequire(path.join(process.cwd(), "package.json"))("argon2");
 import { phoneHashes } from "../src/lib/phone-hash";
+import { cronQueue } from "../src/lib/queue";
 
 const BASE = "http://127.0.0.1:3100";
 const PASS = "V3-E2E-Pass-789!";
@@ -540,6 +542,68 @@ async function main(): Promise<void> {
   const msgCreates = engineSrc.split("prisma.message.create").length - 1;
   const lazyEnq = engineSrc.split("await lazyEnqueue(").length - 1;
   check("T430c engine 靜態：prisma.message.create ×1 + await lazyEnqueue( ×1（全部喺 sendFollowupTask）", msgCreates === 1 && lazyEnq === 1, { msgCreates, lazyEnq });
+  // T430d（★ cwi-final S0-8）：legacy reminder-scan gate — 窗口內 CONFIRMED 單都唔發（REMINDER_AUTO_SEND off → skipped）
+  {
+    const BR_ID = "e2ev3t430br000000001";
+    // now+24h 嘅 HK wall-clock（同 reminder.ts dayStrs 口徑：UTC+8）— 必落 23–25h 窗口
+    const hk = new Date(Date.now() + 24 * 3_600_000 + 8 * 3_600_000);
+    const reqDate = hk.toISOString().slice(0, 10);
+    const reqTime = `${String(hk.getUTCHours()).padStart(2, "0")}:${String(hk.getUTCMinutes()).padStart(2, "0")}`;
+    await prisma.bookingRequest.deleteMany({ where: { id: BR_ID } });
+    await prisma.bookingRequest.create({
+      data: {
+        id: BR_ID,
+        conversationId: FIX.W1.convId,
+        clinicId: CLINIC_ID,
+        flowToken: "e2ev3-t430d-flow",
+        providerApricotId: "mock-pract-E2EV3-1",
+        providerName: "V3 E2E 醫生",
+        requestedDate: reqDate,
+        requestedTime: reqTime,
+        status: "CONFIRMED",
+        apricotApptId: "e2ev3-t430d-appt",
+      },
+    });
+    const workerUp = spawnSync("pgrep", ["-f", "[w]orkers/index.ts"], { encoding: "utf8" }).stdout.trim() !== "";
+    check("T430d worker 運行中（S0-8 gate 驗證需要）", workerUp);
+    if (workerUp) {
+      const logPath = "/tmp/wa-worker-dev.log";
+      const logSizeBefore = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
+      const outBefore = await prisma.message.count({ where: { conversationId: { in: convIds }, direction: "OUT" } });
+      // 直接 enqueue 同 shared cron queue — job return value 做主斷言（log flush 可延遲，只做輔助）
+      const t430dJob = await cronQueue.add("reminder-scan", {});
+      let t430dState = "waiting";
+      let t430dRet: unknown = null;
+      for (let i = 0; i < 60; i++) {
+        await sleep(1000);
+        t430dState = await t430dJob.getState();
+        if (t430dState === "completed" || t430dState === "failed") {
+          const fresh = await cronQueue.getJob(t430dJob.id as string); // 重讀 — job 例上嘅 returnvalue 未必已同步
+          t430dRet = fresh?.returnvalue ?? t430dJob.returnvalue;
+          break;
+        }
+      }
+      let t430dSkipLog = false;
+      for (let i = 0; i < 30; i++) {
+        await sleep(1000);
+        try {
+          if (fs.readFileSync(logPath).subarray(logSizeBefore).toString("utf8").includes("reminder-scan skipped")) {
+            t430dSkipLog = true;
+            break;
+          }
+        } catch {
+          /* log 未寫到 */
+        }
+      }
+      const outAfter = await prisma.message.count({ where: { conversationId: { in: convIds }, direction: "OUT" } });
+      const brAfter = await prisma.bookingRequest.findUnique({ where: { id: BR_ID }, select: { remindedAt: true } });
+      check("T430d job 回 skipped（REMINDER_AUTO_SEND off — D-1）", t430dState === "completed" && (t430dRet as any)?.skipped === "REMINDER_AUTO_SEND off", { t430dState, t430dRet });
+      check("T430d gate log：worker 回 skipped（零產出必 log）", t430dSkipLog);
+      check("T430d outbound 數不變（窗口內 CONFIRMED 單都唔發）", outAfter === outBefore, { outBefore, outAfter });
+      check("T430d remindedAt 仍 null（零提醒）", brAfter?.remindedAt === null, brAfter);
+    }
+    await prisma.bookingRequest.deleteMany({ where: { id: BR_ID } });
+  }
   // A-1 留痕
   const ruleAfter = await prisma.followupRule.findUnique({ where: { id: ruleIds["AFTER_TREATMENT"] }, select: { lastScanAt: true, lastScanResult: true } });
   check("T431 prep A-1 留痕：rule.lastScanAt/lastScanResult 已寫", !!ruleAfter?.lastScanAt && ["OK", "EMPTY", "DEP_FAIL"].includes(ruleAfter?.lastScanResult ?? ""), ruleAfter);
