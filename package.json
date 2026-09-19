@@ -30,7 +30,7 @@
     "e2e:t601": "tsx scripts/e2e-t601-t607-followup-adopt.ts",
     "e2e:t601b": "tsx scripts/e2e-t601-t607-adopt-edit.ts",
     "e2e:t602": "tsx scripts/e2e-t602-reminder-gate.ts",
-    "e2e:t605": "tsx test/t605-duty-mock-fail-closed.ts",
+    "e2e:t605": "NODE_ENV=production DUTY_MOCK= WORKFORCE_MOCK=0 WORKFORCE_API_URL=http://mock.invalid:9999 tsx test/t605-duty-mock-fail-closed.ts",
     "e2e:t606": "tsx scripts/e2e-t606-sw-deeplink.ts",
     "e2e:t608": "tsx scripts/e2e-t608-followup-perms.ts",
     "e2e:t609": "tsx scripts/e2e-t609-claim-gate.ts",
