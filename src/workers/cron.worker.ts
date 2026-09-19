@@ -47,6 +47,7 @@ import { runFollowupScan } from "@/lib/followup/engine";
 import { refreshAllClinics } from "@/lib/availability";
 import { runExpiry } from "@/lib/booking/expiry";
 import { runHealthCheck, type HealthOverrides } from "@/lib/health/check";
+import { runStuckSweep } from "@/lib/ops/stuck-sweep";
 import { runQualityCheck } from "@/lib/quality/check";
 import { runWeeklyReport } from "@/lib/ops/report";
 import { runRetentionPurge } from "@/lib/ops/retention-purge";
@@ -156,6 +157,12 @@ export async function startCronWorker(): Promise<Worker | null> {
           const r = await runRetentionPurge();
           if (r.skipped) log.error({ skipped: r.skipped }, "cron: retention-purge skipped"); // cwi-final S0-11
           return { ok: !r.skipped, ...r };
+        }
+        case "stuck-sweep": {
+          // ★ cwi-final S1-1b（C-1②）：commit 後副作用丟失兜底（media PENDING>10min / IN text 無 AiDraft）。
+          // light cron lane */5；冪等（jobId + 前置存在性檢查）；E2E 可手動 enqueue（pnpm e2e:cron stuck-sweep）
+          const r = await runStuckSweep();
+          return { ok: true, ...r };
         }
         case "reminder-scan": {
           // ★ cwi-final S0-8：v3 原則「cron 唔發訊息」— legacy 自動提醒永久關（D-1／D-9）。

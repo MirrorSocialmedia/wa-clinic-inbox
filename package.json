@@ -24,6 +24,7 @@
     "e2e:cron": "tsx scripts/e2e-cron.ts",
     "e2e:t723": "tsx scripts/e2e-t723-upsert-alert.ts",
     "e2e:t610": "tsx scripts/e2e-t610-dlq-replay.ts",
+    "e2e:t713": "tsx scripts/e2e-t713-side-effects.ts",
     "replay:dlq": "tsx scripts/replay-dead-letters.ts",
     "e2e:quality": "tsx scripts/e2e-quality.ts",
     "e2e:weekly": "tsx scripts/e2e-weekly-fixtures.ts",

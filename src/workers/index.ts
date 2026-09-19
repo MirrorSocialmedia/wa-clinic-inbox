@@ -104,9 +104,13 @@ async function registerSchedulers() {
     name: "followup-scan",
     data: {},
   });
+  await cronQueue.upsertJobScheduler("sched-stuck-sweep", { pattern: "*/5 * * * *" }, {
+    name: "stuck-sweep",
+    data: {},
+  });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00, company-sync daily 03:00, followup-scan */10m)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00, company-sync daily 03:00, followup-scan */10m, stuck-sweep */5m)"
   );
 }
 

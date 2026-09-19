@@ -25,9 +25,11 @@ import { MEDIA_CONCURRENCY } from "./concurrency";
 
 interface MediaJobData {
   messageId: string;
-  mediaId: string;
-  wamid: string;
-  clinicId: string;
+  // ★ cwi-final S1-1b：mediaId/wamid/clinicId 可缺 — stuck-sweep 兜底重入隊（無 payload）只帶 messageId
+  // + clinicId；DB 唔存 WA mediaId（本單 zero schema change），無 mediaId = 無法 download → SKIPPED。
+  mediaId?: string;
+  wamid?: string;
+  clinicId?: string;
 }
 
 async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
@@ -50,6 +52,15 @@ async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
   // 冪等：已處理過（重入 / 重複 enqueue）→ skip
   if (msg.mediaPath || msg.mediaStatus !== "PENDING") {
     log.info({ messageId, wamid, mediaStatus: msg.mediaStatus }, "media: already resolved — skipped");
+    return;
+  }
+  // ★ cwi-final S1-1b：stuck-sweep 兜底重入隊（無 payload）只帶 messageId（+ clinicId）— DB 唔存 WA
+  //   mediaId（本單 zero schema change）→ 無 mediaId = 下載唔到。誠實終態 = SKIPPED（訊息正文保留，
+  //   staff 見「無附件」）；唔重試（重試都係冇 mediaId）。原 job 仲喺 queue 時此路徑唔觸發（上面
+  //   idempotent skip）；只係「原 job 已徹底丟失」場景。
+  if (!mediaId || !wamid || !clinicId) {
+    await prisma.message.update({ where: { id: messageId }, data: { mediaStatus: "SKIPPED" } });
+    log.info({ messageId, hasMediaId: Boolean(mediaId) }, "media: job data incomplete（sweep 兜底無 payload）— SKIPPED");
     return;
   }
 

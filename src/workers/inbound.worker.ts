@@ -1,4 +1,5 @@
 import { Worker, type Job } from "bullmq";
+import { unlink } from "node:fs/promises";
 import { inboundQueue, aiQueue, mediaQueue, getRedis, QUEUE_PREFIX, INBOUND_ATTEMPTS } from "@/lib/queue";
 import { publishNotify, publishStaffNotify } from "@/lib/notify";
 import { pushEvent } from "@/lib/push";
@@ -289,6 +290,19 @@ async function touchConversation(
 }
 
 async function notifyNewMessage(clinicId: string, conv: Conversation, msg: Message) {
+  // ★ cwi-final S1-1b（T713 dev test hook）：模擬 notify 鏈路瞬時失敗（一次）— 驗證 try/catch
+  //   containment（job 唔 fail）+ skipped 分支補做。dev-only（NODE_ENV 雙保險，同 media chaos hook 同風格）；
+  //   觸發 = touch .dev/notify-chaos-fail（或 env NOTIFY_CHAOS_FAIL_FILE 指定路徑）→ 首次調用刪檔 + throw。
+  const chaosFile = (process.env.NOTIFY_CHAOS_FAIL_FILE ?? (process.env.NODE_ENV !== "production" ? ".dev/notify-chaos-fail" : "")).trim();
+  if (chaosFile) {
+    try {
+      await unlink(chaosFile);
+      throw new Error("chaos: notifyNewMessage fail-once（T713 dev test hook）");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+
   const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
   const payload = {
     conversationId: conv.id,
@@ -317,6 +331,59 @@ async function notifyNewMessage(clinicId: string, conv: Conversation, msg: Messa
 
 // ── 各 field 處理 ────────────────────────────────────────────────────────
 
+/**
+ * ★ cwi-final S1-1b（C-1②）：skipped 分支（claim 已存在 / 併發 race）補做 commit 後副作用。
+ *
+ * 語義：crash 喺「tx commit」同「media/AI enqueue」之間 → 重試時 claim 已存在 → 呢度補回。
+ * 冪等：BullMQ 同 jobId 仲喺 queue → 自動忽略；已完成被清走 → 會重跑，但 AI 側有
+ * AiDraft unique（inReplyToMessageId）+ hasDraft 前置檢查 + S4-2 發送閘保護。
+ *
+ * 偏離記錄（CTO 判斷）：spec 字面 media job data 只帶 `{ messageId }` — 但 DB 唔存 WA mediaId
+ *（本單 zero schema change），media worker 真 download 要 mediaId+wamid。skipped 分支有當前 payload，
+ * 所以補齊傳 `media`；stuck-sweep 兜底（無 payload）只帶 `{ messageId, clinicId }` → media worker
+ * 見唔到 mediaId → 標 SKIPPED（誠實終態，訊息正文保留；原 job 仲喺 queue 時重入係 no-op）。
+ * 正常路徑（非 skipped）維持原樣（S0-11 零回退）。
+ *
+ * TODO(cwi-final S1-14)：urgentIntake 上線後，呢度亦要 call（重試時補做急症判斷）。
+ */
+async function ensureSideEffects(
+  msg: Message,
+  conv: Conversation,
+  clinic: Clinic,
+  media?: { mediaId: string; wamid: string }
+): Promise<void> {
+  if (msg.mediaStatus === "PENDING") {
+    try {
+      await mediaQueue.add(
+        "download",
+        media
+          ? { messageId: msg.id, mediaId: media.mediaId, wamid: media.wamid, clinicId: clinic.id }
+          : { messageId: msg.id, clinicId: clinic.id },
+        { jobId: `media-${msg.id}` }
+      );
+    } catch (err) {
+      // enqueue 失敗（Redis 瞬時）→ best-effort log；stuck-sweep 每 5 分鐘兜底
+      log.warn(
+        { messageId: msg.id, err: err instanceof Error ? err.message : String(err) },
+        "inbound: skipped-branch media re-enqueue failed（stuck-sweep 兜底）"
+      );
+    }
+  }
+  if (msg.direction === "IN" && msg.channel === "API" && msg.type === "text") {
+    const hasDraft = await prisma.aiDraft.findFirst({ where: { inReplyToMessageId: msg.id }, select: { id: true } });
+    if (!hasDraft) {
+      try {
+        await aiQueue.add("classify", { conversationId: conv.id, messageId: msg.id, clinicId: clinic.id }, { jobId: `ai-${msg.id}` });
+      } catch (err) {
+        log.warn(
+          { messageId: msg.id, err: err instanceof Error ? err.message : String(err) },
+          "inbound: skipped-branch ai re-enqueue failed（stuck-sweep 兜底）"
+        );
+      }
+    }
+  }
+}
+
 async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value"]>): Promise<void> {
   for (const m of value.messages ?? []) {
     if (!m?.id) continue;
@@ -343,7 +410,7 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
       const claimed = await claimInTx(tx, `messages:${wamid}`, "messages");
       if (!claimed) {
         const existing = await tx.message.findUnique({ where: { waMessageId: wamid } });
-        if (existing) return { skipped: true as const };
+        if (existing) return { skipped: true as const, msg: existing };
         log.info({ wamid }, "inbound: claim orphan detected (claim 存在但無 Message) — 重跑補回");
         // fall through → 照處理落去（孤兒恢復）
       }
@@ -379,8 +446,10 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
           },
         });
       } catch (err) {
-        // 併發 race：另一個相同 event 嘅 transaction 先 commit 咗 → 當真處理過 skip（本 tx 全部回滾）
-        if (isUniqueViolation(err)) return { skipped: true as const };
+        // 併發 race：另一個相同 event 嘅 transaction 先 commit 咗 → 當真處理過 skip（本 tx 全部回滾）。
+        // ★ cwi-final S1-1b：unique violation 後 tx 已 aborted，唔可以喺同一 tx 再 query —
+        //   msg 傳 null，skipped 分支喺 tx 外再 fetch（競爭者已 commit）。
+        if (isUniqueViolation(err)) return { skipped: true as const, msg: null };
         throw err;
       }
       const convUpdated = await touchConversation(tx, conv.id, waTs, {
@@ -436,7 +505,15 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
     });
 
     if (result.skipped) {
-      log.debug({ wamid }, "inbound: message already processed (idempotent skip)");
+      log.debug({ wamid }, "inbound: message already processed (idempotent skip) — ensure side effects");
+      // ★ cwi-final S1-1b（C-1②）：skipped 唔再直接 return — 補做 commit 後副作用
+      //   （crash 喺 commit 同 enqueue 之間 = media/AI 永無；重試時補回，冪等 jobId）。
+      let skipMsg = result.msg;
+      if (!skipMsg) skipMsg = await prisma.message.findUnique({ where: { waMessageId: wamid } });
+      if (skipMsg) {
+        const skipConv = await prisma.conversation.findUnique({ where: { id: skipMsg.conversationId } });
+        if (skipConv) await ensureSideEffects(skipMsg, skipConv, clinic, mid ? { mediaId: mid, wamid } : undefined);
+      }
       continue;
     }
 
@@ -462,8 +539,14 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
       }
     }
 
+    // ★ cwi-final S1-1b：notify 係 best-effort bypass — 失敗唔准 job fail（訊息已安全落 DB；
+    //   舊 code 呢度 throw = 整 job fail → 重試 → 冪等 skip，但 DB 短暫不可用時會耗盡 attempts 進 DLQ）
     if (result.convUpdated) {
-      await notifyNewMessage(clinic.id, result.convUpdated, result.msg);
+      try {
+        await notifyNewMessage(clinic.id, result.convUpdated, result.msg);
+      } catch (err) {
+        log.warn({ wamid, err: err instanceof Error ? err.message : String(err) }, "inbound: notifyNewMessage failed（best-effort — 唔 fail job）");
+      }
     }
 
     // ★ cwi-followup-p3-20260916（followup-v2 MD §4.6 + 鐵律 5）：follow-up inbound hook（best-effort —
@@ -566,7 +649,7 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
       const claimed = await claimInTx(tx, `echo:${wamid}`, "smb_message_echoes");
       if (!claimed) {
         const existing = await tx.message.findUnique({ where: { waMessageId: wamid } });
-        if (existing) return { skipped: true as const };
+        if (existing) return { skipped: true as const, msg: existing };
         log.info({ wamid }, "inbound: claim orphan detected (echo) — 重跑補回");
       }
 
@@ -591,7 +674,8 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
           },
         });
       } catch (err) {
-        if (isUniqueViolation(err)) return { skipped: true as const }; // 併發 race
+        // ★ cwi-final S1-1b：unique violation 後 tx aborted — msg 傳 null，skipped 分支 tx 外再 fetch
+        if (isUniqueViolation(err)) return { skipped: true as const, msg: null }; // 併發 race
         throw err;
       }
       const convUpdated = await touchConversation(tx, conv.id, waTs, {
@@ -602,7 +686,16 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
       return { skipped: false as const, msg, conv, convUpdated };
     });
 
-    if (result.skipped) continue;
+    if (result.skipped) {
+      // ★ cwi-final S1-1b：skipped 分支補做副作用（同 handleMessages — echo 無 AI，media 分支適用）
+      let skipMsg = result.msg;
+      if (!skipMsg) skipMsg = await prisma.message.findUnique({ where: { waMessageId: wamid } });
+      if (skipMsg) {
+        const skipConv = await prisma.conversation.findUnique({ where: { id: skipMsg.conversationId } });
+        if (skipConv) await ensureSideEffects(skipMsg, skipConv, clinic, mid ? { mediaId: mid, wamid } : undefined);
+      }
+      continue;
+    }
 
     // ★ Realtime P0 (R4)：echo media 一樣走獨立 media queue（見 handleMessages 註釋）
     if (mid) {
@@ -623,7 +716,14 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
       }
     }
 
-    if (result.convUpdated) await notifyNewMessage(clinic.id, result.convUpdated, result.msg);
+    // ★ cwi-final S1-1b：notify 係 best-effort bypass — 失敗唔准 job fail（訊息已安全落 DB）
+    if (result.convUpdated) {
+      try {
+        await notifyNewMessage(clinic.id, result.convUpdated, result.msg);
+      } catch (err) {
+        log.warn({ wamid, err: err instanceof Error ? err.message : String(err) }, "inbound: notifyNewMessage failed（best-effort — 唔 fail job）");
+      }
+    }
 
     log.info({ clinic: clinic.code, wamid, type: msgTypeOf(m) }, "inbound: echo processed");
   }
