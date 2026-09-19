@@ -334,8 +334,17 @@ async function main(): Promise<void> {
     check("T607f task 仍 SUGGESTED（清空後發送唔 claim）", taskB?.status === "SUGGESTED" && taskB?.sentMessageId == null, taskB);
     check("T607g humanTookOver = true（typed 照 takeover — adopted/typed 口徑對照）", convB?.humanTookOver === true, convB);
     // 建議卡仍顯示（onSuggestionSent 唔該被 call）
-    await sleep(1000);
-    check("T607h 建議卡仍顯示", (await sel("fu-sugg-card").count()) === 1);
+    // ★ cwi-final F-3 環境加固：suite 連跑時卡重渲染可能 transient 慢（2026-09-19 一輪 suite flake 一次）
+    //   → 10s 有界等，斷言語義不變
+    let suggShown = false;
+    const tSugg = Date.now();
+    for (;;) {
+      suggShown = (await sel("fu-sugg-card").count()) === 1;
+      if (suggShown) break;
+      if (Date.now() - tSugg > 10_000) break;
+      await sleep(500);
+    }
+    check("T607h 建議卡仍顯示", suggShown, true);
   } finally {
     await B.close().catch(() => {});
   }

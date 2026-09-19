@@ -294,7 +294,9 @@ async function main(): Promise<void> {
       nAfter = await readPoolCount(P);
       aGone = (await P.getByText(NAME_A, { exact: false }).count()) === 0;
       if (nAfter === n0 - 1 && aGone) break;
-      if (Date.now() - t0 > 25_000) break;
+      // ★ cwi-final F-3 環境加固：suite 連跑時 chromium render 可能 transient 慢（2026-09-19 兩輪 suite 各 flake 一次，
+      //   均喺舊有行文字斷言；T755 GET 計數斷言兩輪全綠）— 窗口 25s→45s，斷言語義不變
+      if (Date.now() - t0 > 45_000) break;
       await sleep(750);
     }
     check("refetch 後公海計數 = N0-1（A 離隊）", nAfter, n0 - 1);
