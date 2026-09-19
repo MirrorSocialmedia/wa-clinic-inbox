@@ -6,7 +6,11 @@ fail=0; warn=0
 ok()  { echo "  ✓ $1"; }
 bad() { echo "  ✗ $1"; fail=1; }
 wrn() { echo "  ⚠ $1"; warn=1; }
-envv() { grep -E "^$1=" .env | tail -1 | cut -d= -f2- | tr -d '"'"'"; }
+# ★ cwi-final F-8：去行尾註釋 + 去前後空白 + 去引號（.env 好多行係 `KEY=value   # 註釋`）
+envv() {
+  grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" .env | tail -1 \
+    | sed -E "s/^[[:space:]]*(export[[:space:]]+)?$1=//; s/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/^[\"']//; s/[\"']$//"
+}
 
 echo "== .env =="
 [ "$(envv RETENTION_CONV_MONTHS)" = "24" ] && ok "RETENTION_CONV_MONTHS=24" || bad "RETENTION_CONV_MONTHS 必須 = 24（政策）"
