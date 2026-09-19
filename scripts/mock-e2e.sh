@@ -3036,6 +3036,17 @@ echo "[12/12] T88-T92: Phase B template + T-24h reminder..."
 #   本節驗證「gate 開」嘅 legacy 鏈（T88 SENT/冪等、T89 skip、T90 graph fail、T91 回覆 triage）
 #   → export REMINDER_AUTO_SEND=1 + 重起 dedicated worker（段內 T90 兩次重啟都會 inherit）；
 #   「預設關」路徑另由 T602 / v3 T430d 覆蓋。段末 unset + 重起 worker 還原預設。
+# ★ cwi-final F-6：無論點退出都還原 gate 預設關（中途 fail / Ctrl-C 都唔會留低開住嘅 worker）
+_restore_reminder_worker() {
+  unset REMINDER_AUTO_SEND
+  pkill -f "src/workers/index.ts" 2>/dev/null || true
+  sleep 1
+  nohup pnpm worker >/tmp/e2e-worker-restore.log 2>&1 &
+}
+# ★ 同全局 trap cleanup EXIT（檔頭）鏈接 — 直接 `trap _restore_reminder_worker EXIT INT TERM`
+#   會蓋走主 cleanup → e2e server/worker 漏 + /tmp/e2e.lock 留低（下次 mock-e2e 等 lock 卡死）
+trap '_restore_reminder_worker; cleanup' EXIT
+trap '_restore_reminder_worker; exit 130' INT TERM
 export REMINDER_AUTO_SEND=1
 pkill -f "src/workers/index.ts" 2>/dev/null || true
 sleep 1
