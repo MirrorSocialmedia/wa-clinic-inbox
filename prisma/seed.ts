@@ -373,7 +373,8 @@ async function main(): Promise<void> {
       data: {
         clinicId: null,
         name: r.name,
-        enabled: true,
+        // ★ cwi-final F-2（D-9）：B1 預約提醒預設關 — S2-1（只取 status 0）上線 + 前台確認之後先由 UI 開
+        enabled: r.trigger === "BEFORE_APPOINTMENT" ? false : true,
         trigger: r.trigger,
         delayValue: r.delayValue,
         delayUnit: r.delayUnit,
