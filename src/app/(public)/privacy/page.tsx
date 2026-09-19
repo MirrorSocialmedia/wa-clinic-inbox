@@ -1,6 +1,7 @@
 // 私隱政策 — 公開頁（Meta App Review 硬性要求）。cwi-legal-20260915。
-// 內容 = Kenneth 模板 §① 逐字（iron rule §4 唔准改寫）；保留期 24 個月、伺服器地區「香港」（同 retention-purge default 一致）；
+// 內容 = Kenneth 模板 §① 逐字（iron rule §4 唔准改寫）；保留期 = retention-policy 單一來源（cwi-final S0-10）、伺服器地區「香港」；
 // 公司 4 值 + 生效日期 = PENDING 佔位，S5 老細提供後填。
+import { POLICY_RETENTION_MONTHS } from "@/lib/ops/retention-policy";
 export const metadata = {
   title: "私隱政策 Privacy Policy | BACCARAT YL LIMITED",
   description: "BACCARAT YL LIMITED WhatsApp 客戶服務系統之個人資料收集及使用聲明",
@@ -53,7 +54,7 @@ export default function PrivacyPage() {
         <h2 className="text-lg font-semibold">5. 資料儲存及保留</h2>
         <p>
           我們自行營運嘅伺服器位於香港，設有存取控制及加密措施；第三方服務供應商可能於香港以外處理資料。
-          WhatsApp 對話紀錄一般保留 24 個月；醫療相關紀錄按適用法例及專業指引保留。
+          WhatsApp 對話紀錄一般保留 {POLICY_RETENTION_MONTHS} 個月；醫療相關紀錄按適用法例及專業指引保留。
           逾期資料會被刪除或永久去識別化。
         </p>
 

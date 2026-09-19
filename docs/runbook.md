@@ -75,7 +75,7 @@ redis-cli ping                          # → PONG
 # 2. 等 worker：
 #    - 多數情況 BullMQ 自動重連（等 ~10s，log 見 "redis connected"）
 #    - 如 worker 已退出（log "exiting for PM2 restart"）→ 重啟 worker：
-#      pm2 restart wa-inbox-worker      # 生產
+#      pm2 restart wa-worker      # 生產
 #      pnpm worker                      # sandbox
 
 # 3. 查 backlog：queue depth（reconnect 後 waiting 數）
@@ -103,7 +103,7 @@ _（見下方演習記錄 D2）_
 ### 恢復程序
 ```bash
 # PM2 部署（生產）：
-pm2 restart wa-inbox-worker          # 或 pm2 resurrect（boot 時間）
+pm2 restart wa-worker          # 或 pm2 resurrect（boot 時間）
 pm2 logs wa-inbox-worker --lines 50  # 睇 "all workers started"
 
 # sandbox/dev：

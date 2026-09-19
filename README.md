@@ -44,6 +44,14 @@ MF STAFF:  staff-mf@wa-clinic.local  / <隨機>
 | `pnpm prisma:validate` | 校驗 schema 語法 |
 | `pm2 start ecosystem.config.cjs` | production 兩 process |
 
+## 部署（生產）
+
+```bash
+pnpm predeploy && pnpm build && pm2 restart wa-inbox wa-worker
+```
+
+`pnpm predeploy` = 部署前檢查（`scripts/predeploy-check.sh`）— env/Redis/DB/備份任何一項 ✗ 都唔准 build／restart（cwi-final S0-10）。
+
 ## 端點
 
 - `GET /healthz` — 健康檢查（DB/Redis/AI；AI down = degraded 唔算 fail，DB/Redis down = 503）

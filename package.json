@@ -10,6 +10,7 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke-test.ts",
+    "predeploy": "bash scripts/predeploy-check.sh",
     "prisma:validate": "prisma validate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
