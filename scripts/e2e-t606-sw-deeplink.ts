@@ -90,11 +90,14 @@ async function msgIdOf(convId: string, wamid: string, timeoutMs = 30_000): Promi
 }
 
 function mockInbound(phone: string, name: string, text: string, wamid: string): boolean {
+  // ★ cwi-final F-3 環境適配：直用 tsx（worktree symlink node_modules → pnpm 會撞
+  //   ERR_PNPM_UNSAFE_MODULES_DIR）+ PORT 跟 BASE（webhook 打自己個 server）
+  const port = new URL(BASE).port || "80";
   for (let i = 1; i <= 3; i++) {
     try {
       execSync(
-        `pnpm -s mock-inbound message --clinic TKW --from ${phone} --name "${name}" --text "${text}" --wamid ${wamid}`,
-        { cwd: REPO, stdio: "pipe", timeout: 60_000 }
+        `./node_modules/.bin/tsx scripts/mock-inbound.ts message --clinic TKW --from ${phone} --name "${name}" --text "${text}" --wamid ${wamid}`,
+        { cwd: REPO, stdio: "pipe", timeout: 60_000, env: { ...process.env, PORT: port } }
       );
       return true;
     } catch {

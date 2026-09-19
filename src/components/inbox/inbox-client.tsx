@@ -768,7 +768,8 @@ export function InboxClient({
       //   clinic-room 廣播係自指派情況唯一到得嘅 channel → 必須喺度 refetch。
       //   非自指派被派者會同時收到 notify:assigned 嘅 fetch（跨店被派者冇 clinic room —
       //   兩個都要留；同店被派者 2 個冪等 GET，可接受）。
-      void fetchConversations(activeClinicRef.current);
+      // ★ cwi-final F-3：高频列表刷新合併（1.2s 窗口只 fetch 一次；見 scheduleListRefresh）
+      scheduleListRefresh();
     });
 
     // ── ★ cwi-auditfix-20260908（M-1）：routing 事件 → patch 該 row + 重算 counts.routed ──
@@ -913,7 +914,8 @@ export function InboxClient({
         });
       }
       // 列表即時更新（新指派線要即刻見到）+ bell 重拉（StaffNotice row）
-      void fetchConversations(activeClinicRef.current);
+      // ★ cwi-final F-3：高频列表刷新合併（1.2s 窗口只 fetch 一次；見 scheduleListRefresh）
+      scheduleListRefresh();
       fetch("/api/notices", { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
@@ -1119,6 +1121,24 @@ export function InboxClient({
       /* UI 會喺下次 action 補齊 */
     }
   }, []);
+
+  // ★ cwi-final F-3：高频列表刷新合併（assign/route/socket 廣播）— 1.2s 窗口只 fetch 一次。
+  //   只用於 conversation:assigned / notify:assigned 兩個 handler；首次 connect / 重連補漏 /
+  //   手動 action（suggestion 採用/發送）照舊即時 fetch（補丁單明列禁改）。
+  const listRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleListRefresh = useCallback(() => {
+    if (listRefreshTimerRef.current) return;
+    listRefreshTimerRef.current = setTimeout(() => {
+      listRefreshTimerRef.current = null;
+      void fetchConversations(activeClinicRef.current);
+    }, 1200);
+  }, [fetchConversations]);
+  useEffect(
+    () => () => {
+      if (listRefreshTimerRef.current) clearTimeout(listRefreshTimerRef.current);
+    },
+    []
+  );
 
   const fetchMessagesLatest = useCallback(async (convId: string): Promise<number> => {
     try {
