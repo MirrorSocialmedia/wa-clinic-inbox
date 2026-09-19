@@ -4,6 +4,7 @@ import { getServerSession } from "@/lib/session-server";
 import { relTime } from "@/components/inbox/time";
 import { AccountCard } from "@/components/inbox/account-card";
 import { AlertsPanel, type AlertItem } from "./alerts-panel";
+import { DeadLetterCard } from "./dead-letter-card";
 import { HeldAlertsPanel } from "./held-alerts-panel";
 import { TotpCard } from "./totp-card";
 import { CompanySyncCard } from "./company-sync-card";
@@ -72,7 +73,7 @@ export default async function AdminOverviewPage() {
   // KPI 四格數據（Organic P2）：今日訊息（實時）/ 未處理急症（HIGH 未解決）/ 最新週報（FRT+採用率，同 /ops 同源）
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
-  const [ai, alerts, clinics, msgToday, urgentCount, urgentOldest, latestReport] = await Promise.all([
+  const [ai, alerts, clinics, msgToday, urgentCount, urgentOldest, latestReport, dlqPending] = await Promise.all([
     getAiStatusSnapshot(),
     prisma.alert.findMany({ where: { resolvedAt: null }, orderBy: { createdAt: "desc" }, take: 50 }),
     prisma.clinic.findMany({
@@ -93,6 +94,8 @@ export default async function AdminOverviewPage() {
       orderBy: { createdAt: "asc" },
     }),
     prisma.opsReport.findFirst({ where: { clinicId: "" }, orderBy: { periodEnd: "desc" } }),
+    // ★ cwi-final S1-1a：DLQ 未重放計數（健康卡）
+    prisma.deadLetter.count({ where: { replayedAt: null } }),
   ]);
   const reportMetrics = latestReport?.metrics as
     | { frt?: { medianSec?: number }; draftAdoption?: { rate?: number } }
@@ -291,6 +294,15 @@ export default async function AdminOverviewPage() {
           <span className="text-xs text-t2">health-check 每 5 分鐘 · quality-check 每日 · 恢復自動 resolve</span>
         </div>
         <AlertsPanel alerts={alertItems} />
+      </section>
+
+      {/* ── ★ cwi-final S1-1a：DLQ（inbound 最終失敗 dead-letter）— 重放掣 global admin only ── */}
+      <section className="bg-panel rounded-[26px] border border-line p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-[18px] font-normal text-t1">Dead-letter（DLQ）</h2>
+          <span className="text-xs text-t2">inbound 最終失敗入 DLQ · 重放冪等 · 30 日 retention</span>
+        </div>
+        <DeadLetterCard pending={dlqPending} />
       </section>
 
       {/* ── providerslot-20260830 T3：線上已佔（HELD）監看 — HELD >12h MEDIUM / >24h HIGH（MD §六）──

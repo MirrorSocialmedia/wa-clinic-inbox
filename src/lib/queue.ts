@@ -54,7 +54,12 @@ export async function closeRedis(): Promise<void> {
 
 export const QUEUE_PREFIX = "wa-inbox";
 
-function queueOptions(): QueueOptions {
+// ★ cwi-final S1-1a：inbound queue 獨立 retry 口徑 — attempts 8 + exponential 2000（最長 ~4.2 分鐘：
+//   2+4+8+16+32+64+128s）— 覆蓋 DB 短暫重啟；最終失敗 → DLQ（見 inbound.worker failed handler）。
+//   其他 queue（outbound/ai/cron/media）零改動 — 保持 attempts 3。
+export const INBOUND_ATTEMPTS = 8;
+
+function queueOptions(defaultJobOptions?: Record<string, unknown>): QueueOptions {
   return {
     connection: getRedis(),
     prefix: QUEUE_PREFIX,
@@ -68,11 +73,12 @@ function queueOptions(): QueueOptions {
       //   完成 job 留 20 條、失敗 job 留 24h / 上限 200 條（debug 夠用）。
       removeOnComplete: { count: 20 },
       removeOnFail: { age: 86400, count: 200 },
+      ...defaultJobOptions,
     },
   };
 }
 
-export const inboundQueue = new Queue("inbound", queueOptions());
+export const inboundQueue = new Queue("inbound", queueOptions({ attempts: INBOUND_ATTEMPTS }));
 export const outboundQueue = new Queue("outbound", queueOptions());
 export const aiQueue = new Queue("ai", queueOptions());
 export const cronQueue = new Queue("cron", queueOptions());

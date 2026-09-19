@@ -1,10 +1,13 @@
 import { Worker, type Job } from "bullmq";
-import { inboundQueue, aiQueue, mediaQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { inboundQueue, aiQueue, mediaQueue, getRedis, QUEUE_PREFIX, INBOUND_ATTEMPTS } from "@/lib/queue";
 import { publishNotify, publishStaffNotify } from "@/lib/notify";
 import { pushEvent } from "@/lib/push";
 import prisma from "@/lib/prisma";
 import log, { redactDeep } from "@/lib/log";
 import { notifyAlert } from "@/lib/health/notify";
+import { upsertAlert } from "@/lib/health/alerts";
+import { writeDeadLetter } from "@/lib/ops/dead-letter";
+import { encryptMedia, getMediaKey } from "@/lib/wa/media";
 import { Prisma, type Clinic, type Contact, type Conversation, type Message } from "@prisma/client";
 import { INBOUND_CONCURRENCY } from "./concurrency";
 // ★ cwi-followup-p3-20260916：follow-up inbound hook（opt-out 偵測 + 回覆標記）
@@ -959,7 +962,30 @@ export function startInboundWorker(): Worker {
     log.info({ jobId: job.id }, "inbound job completed");
   });
   worker.on("failed", (job, err) => {
-    log.error({ jobId: job?.id, err: err.message }, "inbound job failed");
+    log.error({ jobId: job?.id, attemptsMade: job?.attemptsMade, err: err.message }, "inbound job failed");
+    // ★ cwi-final S1-1a（spec line 657–663）：只係最終失敗（attemptsMade 達上限）先寫 DLQ —
+    //   WebhookEvent payload 24h 後清走，唔入 DLQ = 永久丟。重放 = replay-dead-letters.ts / admin 掣
+    //   （WebhookEvent claim 冪等 → 重放安全）。
+    //   ★ D-2：payloadEnc AES-256-GCM 加密落庫；log 只 jobId/error 碼 — 零病人原文。
+    if (!job || job.attemptsMade < (job.opts.attempts ?? INBOUND_ATTEMPTS)) return;
+    void (async () => {
+      try {
+        const key = getMediaKey();
+        if (!key) {
+          // dev 無 MEDIA_ENC_KEY：加密唔到 → 唔可以明文落庫（D-2）→ 只 log（WebhookEvent metadata 仍存）
+          log.error({ jobId: job.id }, "inbound DLQ: MEDIA_ENC_KEY 未設 — 無法加密 payload，DLQ 寫入跳過（dev only 情境）");
+          return;
+        }
+        const payloadEnc = encryptMedia(Buffer.from(JSON.stringify(job.data)), key).toString("base64");
+        const ok = await writeDeadLetter({ queue: "inbound", jobId: String(job.id), payloadEnc, error: err.message.slice(0, 500) });
+        // inbound_failed alert（HIGH）— 只准人手 resolve（R-28：唔喺 HEALTH_OWNED_TYPES）。
+        // DLQ write 失敗（DB 死）唔阻 alert（兩者同命運，唔重複 retry）。
+        if (ok) await upsertAlert({ type: "inbound_failed", severity: "HIGH", detail: { jobId: String(job.id) } });
+      } catch (e) {
+        // DLQ 路徑任何錯誤都唔准炸 worker（BullMQ 事件 handler reject = unhandled rejection）
+        log.error({ jobId: job?.id, e: String(e) }, "inbound DLQ handler failed");
+      }
+    })();
   });
   worker.on("error", (err) => {
     log.error(

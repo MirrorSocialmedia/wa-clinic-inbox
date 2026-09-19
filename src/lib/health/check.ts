@@ -29,7 +29,8 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { getBreakerState } from "@/lib/ai/vllm";
 import { retentionPolicyMismatches } from "@/lib/ops/retention-policy";
-import { notifyAlert, type AlertForNotify } from "./notify";
+import { HEALTH_OWNED_TYPES, upsertAlert } from "./alerts";
+import type { AlertForNotify } from "./notify";
 
 const pExecFile = promisify(execFile);
 
@@ -39,7 +40,8 @@ export const QUEUE_DEPTH_LIMIT = 100;     // waiting + failed
 export const WORKFORCE_DEGRADED_MIN = 15; // 上次成功 workforce sync > 15 分鐘（持續降級 → alert）
 export const DISK_FREE_PCT_LIMIT = 10;    // 剩餘 < 10%
 
-const CHECKED_QUEUES = ["ai", "outbound"] as const;
+// ★ cwi-final S1-1a：inbound / media queue 納入健康自檢（深度 > 100 → queue_depth MEDIUM）。
+const CHECKED_QUEUES = ["ai", "outbound", "inbound", "media"] as const;
 type CheckedQueue = (typeof CHECKED_QUEUES)[number];
 
 export interface HealthOverrides {
@@ -238,34 +240,26 @@ export async function runHealthCheck(
   }
 
   // ── 冪等開 alert + 自動 resolve ────────────────────────────────────────
+  // ★ cwi-final S1-1a：開 alert 抽入 upsertAlert（alerts.ts）— 同 (type, clinicId) 未解決只一條，新開先通知。
   const created: AlertForNotify[] = [];
   let resolved = 0;
 
   for (const b of breaches) {
-    const existing = await prisma.alert.findFirst({
-      where: { type: b.type, clinicId: b.clinicId, resolvedAt: null },
-      select: { id: true },
-    });
-    if (!existing) {
-      await prisma.alert.create({
-        data: {
-          type: b.type,
-          severity: b.severity,
-          clinicId: b.clinicId,
-          clinicCode: b.clinicCode,
-          detail: b.detail as unknown as object,
-        },
-      });
+    if (await upsertAlert({ type: b.type, severity: b.severity as "MEDIUM" | "HIGH", clinicId: b.clinicId, clinicCode: b.clinicCode, detail: b.detail })) {
       created.push({ type: b.type, severity: b.severity, clinicCode: b.clinicCode, detail: b.detail });
-      await notifyAlert({ type: b.type, severity: b.severity, clinicCode: b.clinicCode, detail: b.detail });
     }
   }
 
   // 恢復中：未解決 alert 但 (type, clinicId) 唔再 breach → resolve
   // （queue_depth 嘅 detail.queue 唔入 key — 恢復判定用「呢個 type+clinic 冇任何 breach」，
   //   同一 type 多個 breach 全部清先 resolve，保守冪等）
+  // ★ cwi-final S1-1a（R-28）：自動 resolve 只限 health-check 自己擁有嘅 type（HEALTH_OWNED_TYPES）—
+  //   inbound_failed / outbound_unknown / hold_expired_unhandled 等「需要人跟」嘅 alert 只准人手 resolve。
   const breachKeys = new Set(breaches.map((b) => `${b.type}|${b.clinicId ?? ""}`));
-  const openAlerts = await prisma.alert.findMany({ where: { resolvedAt: null }, select: { id: true, type: true, clinicId: true } });
+  const openAlerts = await prisma.alert.findMany({
+    where: { resolvedAt: null, type: { in: [...HEALTH_OWNED_TYPES] } },
+    select: { id: true, type: true, clinicId: true },
+  });
   for (const a of openAlerts) {
     if (!breachKeys.has(`${a.type}|${a.clinicId ?? ""}`)) {
       const r = await prisma.alert.updateMany({

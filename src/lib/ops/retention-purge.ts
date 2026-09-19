@@ -33,6 +33,8 @@ import { retentionPolicyMismatches } from "./retention-policy";
 const BATCH = 500;
 /** §6.0：StaffNotice 已讀保留 90 日（spec 固定值；三個 env 保留期之外）。 */
 const STAFF_NOTICE_READ_DAYS = 90;
+/** ★ cwi-final S1-1a：DeadLetter 30 日清（spec 固定值 — 重放窗口夠長，過期 = 接受丟）。 */
+const DEAD_LETTER_DAYS = 30;
 
 function monthsAgo(months: number): Date {
   const d = new Date();
@@ -74,6 +76,7 @@ export interface RetentionPurgeResult {
   patientFactsDeleted: number;
   aiDraftsDeleted: number;
   staffNoticesDeleted: number;
+  deadLettersDeleted: number;
   batches: number;
   reportId: string;
   // ★ cwi-final S0-11：env 同政策唔一致 → 整單跳過（寧願遲刪，唔可以錯刪）
@@ -86,12 +89,13 @@ export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
   if (mismatches.length > 0) {
     // ★ cwi-final S0-11：env 同政策唔一致 → 一行都唔刪（寧願遲刪，唔可以錯刪）
     log.error({ mismatches }, "retention-purge: SKIPPED — env 同政策唔一致");
-    return { mediaFilesDeleted: 0, mediaPathsCleared: 0, messagesDeleted: 0, noteReceiptsDeleted: 0, patientFactsDeleted: 0, aiDraftsDeleted: 0, staffNoticesDeleted: 0, batches: 0, reportId: "", skipped: "RETENTION_ENV_MISMATCH", mismatches };
+    return { mediaFilesDeleted: 0, mediaPathsCleared: 0, messagesDeleted: 0, noteReceiptsDeleted: 0, patientFactsDeleted: 0, aiDraftsDeleted: 0, staffNoticesDeleted: 0, deadLettersDeleted: 0, batches: 0, reportId: "", skipped: "RETENTION_ENV_MISMATCH", mismatches };
   }
   const convCutoff = monthsAgo(envInt("RETENTION_CONV_MONTHS", 24));
   const mediaCutoff = monthsAgo(envInt("RETENTION_MEDIA_MONTHS", 12));
   const draftCutoff = daysAgo(envInt("RETENTION_DRAFT_DAYS", 90));
   const noticeCutoff = daysAgo(STAFF_NOTICE_READ_DAYS);
+  const dlCutoff = daysAgo(DEAD_LETTER_DAYS);
 
   let mediaFilesDeleted = 0;
   let mediaPathsCleared = 0;
@@ -100,6 +104,7 @@ export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
   let patientFactsDeleted = 0;
   let aiDraftsDeleted = 0;
   let staffNoticesDeleted = 0;
+  let deadLettersDeleted = 0;
   let batches = 0;
 
   // ── 1. media 檔（12 月）：刪檔 + mediaPath=null（訊息殼留到 24 月） ─────
@@ -190,6 +195,21 @@ export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
     if (rows.length < BATCH) break;
   }
 
+  // ── 5. DeadLetter（★ cwi-final S1-1a：30 日清；重放窗口夠長，過期 = 接受丟） ──
+  // 純 delete — 重跑安全；payload 已加密，刪咗就真係冇（無檔要清）。
+  for (;;) {
+    const rows = await prisma.deadLetter.findMany({
+      where: { createdAt: { lt: dlCutoff } },
+      select: { id: true },
+      take: BATCH,
+    });
+    if (rows.length === 0) break;
+    batches += 1;
+    const res = await prisma.deadLetter.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+    deadLettersDeleted += res.count;
+    if (rows.length < BATCH) break;
+  }
+
   // ── OpsReport（upsert 冪等：同日重跑覆蓋） ──────────────────────────────
   const now = new Date();
   const dayStart = new Date(now);
@@ -202,14 +222,15 @@ export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
     patientFactsDeleted,
     aiDraftsDeleted,
     staffNoticesDeleted,
+    deadLettersDeleted,
     batches,
-    cutoffs: { conv: convCutoff.toISOString(), media: mediaCutoff.toISOString(), draft: draftCutoff.toISOString() },
+    cutoffs: { conv: convCutoff.toISOString(), media: mediaCutoff.toISOString(), draft: draftCutoff.toISOString(), deadLetter: dlCutoff.toISOString() },
   };
   const text =
     `retention-purge ${now.toISOString().slice(0, 10)}：` +
     `media 檔 ${mediaFilesDeleted} / mediaPath 清 ${mediaPathsCleared} / ` +
     `Message ${messagesDeleted}（連 NoteReadReceipt ${noteReceiptsDeleted} + PatientFact ${patientFactsDeleted}）/ ` +
-    `AiDraft ${aiDraftsDeleted} / StaffNotice(已讀) ${staffNoticesDeleted}`;
+    `AiDraft ${aiDraftsDeleted} / StaffNotice(已讀) ${staffNoticesDeleted} / DeadLetter ${deadLettersDeleted}`;
   const report = await prisma.opsReport.upsert({
     where: { periodStart_clinicId: { periodStart: dayStart, clinicId: "" } },
     update: { periodEnd: now, metrics: metrics as unknown as object, text },

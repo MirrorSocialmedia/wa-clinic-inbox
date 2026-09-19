@@ -800,6 +800,21 @@ model Alert {
   @@index([resolvedAt, createdAt])
 }
 
+// ★ cwi-final S1-1a：inbound job 最終失敗 dead-letter（DLQ）— WebhookEvent payload 24h 後清走，
+// 最終失敗如果只 log = 訊息永久丟。入 DLQ（AES-256-GCM 加密 payload，同 media key）→
+// scripts/replay-dead-letters.ts / admin 重放掣 → inboundQueue 重入（WebhookEvent claim 冪等 → 重放安全）。
+// retention：30 日清（retention-purge step 5；守 S0-11 skipped gate）。
+model DeadLetter {
+  id         String    @id @default(cuid())
+  queue      String    // 現在只 "inbound"；schema 通用（將來 outbound/ai 都用得）
+  jobId      String?   // BullMQ job id（debug 用）
+  payloadEnc String    @db.Text   // AES-256-GCM（同 media key：MEDIA_ENC_KEY）
+  error      String    // 最終失敗 error message（前 500 字；log 零病人原文）
+  createdAt  DateTime  @default(now()) @db.Timestamptz
+  replayedAt DateTime? @db.Timestamptz
+  @@index([queue, replayedAt])
+}
+
 // Phase 4：週一自動營運報表（MD §9.3：訊息量/店、FRT 中位數、草稿採用率、Flow 完成率、
 // 預約卡→確認轉化率 + 中位處理時間）。
 // - 每星期一 07:00 cron 對「上一週（Mon 00:00 → Sun 24:00，本地時區）」生成。
