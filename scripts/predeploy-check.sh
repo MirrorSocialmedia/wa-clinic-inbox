@@ -33,9 +33,15 @@ fi
 [ "$(envv ALLOW_SCOPED_ADMIN)" = "1" ] && { [ -f docs/fixplan/G3-signed-off ] || bad "ALLOW_SCOPED_ADMIN=1 但 S3-1 未簽"; }
 
 echo "== Redis =="
-RU="$(envv REDIS_URL)"
-[ "$(redis-cli -u "$RU" CONFIG GET appendonly | tail -1)" = "yes" ] && ok "appendonly yes" || bad "Redis appendonly 唔係 yes"
-[ "$(redis-cli -u "$RU" CONFIG GET maxmemory-policy | tail -1)" = "noeviction" ] && ok "noeviction" || bad "Redis maxmemory-policy 唔係 noeviction"
+RU="$(envv REDIS_URL)"; RU="${RU:-redis://127.0.0.1:6379}"
+if ! command -v redis-cli >/dev/null 2>&1; then
+  wrn "redis-cli 唔喺 PATH — 跳過 Redis 檢查（人手確認 appendonly/noeviction）"
+else
+  AOF="$(redis-cli -u "$RU" CONFIG GET appendonly 2>/dev/null | tail -1)"
+  [ "$AOF" = "yes" ] && ok "appendonly yes" || bad "Redis appendonly 唔係 yes（實際：${AOF:-連唔到}）"
+  POL="$(redis-cli -u "$RU" CONFIG GET maxmemory-policy 2>/dev/null | tail -1)"
+  [ "$POL" = "noeviction" ] && ok "noeviction" || bad "Redis maxmemory-policy 唔係 noeviction（實際：${POL:-連唔到}）"
+fi
 
 echo "== DB =="
 pnpm -s tsx scripts/predeploy-db-check.ts || fail=1
