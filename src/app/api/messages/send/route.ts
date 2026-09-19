@@ -256,11 +256,27 @@ export const POST = handle(async (req: NextRequest) => {
     }
   }
 
-  // ★ cwi-final S0-6：composer 路徑 claim 前守門（同 sendFollowupTask 同一套檢查，但唔建訊息）。
-  //   位置：Send Lock／窗口檢查之後、建 Message 之前；放喺 replay 檢查之後 —
-  //   冪等 replay（同 clientMessageId 重送）必須短路返 200，唔該被「task 已 SENT」誤 409。
+  // ★ cwi-final S0-6 + F-1：composer 路徑 claim 前守門。
+  //   位置：Send Lock／窗口檢查之後、replay 之後、建 Message 之前。
+  //   ★ F-1：precheck 依賴 workforce（checkCancellations 會打 appointments feed）—
+  //   只有 404/503/網絡錯喺 engine 內部 fail-soft，其餘會 throw。呢度一定要 fail-open：
+  //   訊息係員工自己寫嘅，唔可以因為 workforce 500/429 而發唔出（寧願漏咗一次取消檢查）。
   if (parsed.data.followupTaskId) {
-    const why = await precheckAdoptedTask(parsed.data.followupTaskId, conv.id);
+    let why: string | null = null;
+    try {
+      why = await precheckAdoptedTask(parsed.data.followupTaskId, conv.id);
+    } catch (err) {
+      log.warn(
+        {
+          clinicId: conv.clinicId,
+          conversationId: conv.id,
+          followupTaskId: parsed.data.followupTaskId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "send: followup precheck 依賴失敗 — fail-open 照發（F-1）"
+      );
+      why = null; // 零產出分支已 log（鐵律 5）
+    }
     if (why === "WRONG_CONVERSATION" || why === "NOT_FOUND") {
       return NextResponse.json({ error: "invalid followupTaskId" }, { status: 400 });
     }
