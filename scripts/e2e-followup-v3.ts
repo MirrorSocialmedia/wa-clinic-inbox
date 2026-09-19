@@ -2,7 +2,7 @@
  * e2e-followup-v3.ts — cwi-followup-v3-20260916 驗收（MD §7 T420–T433；T434 迴歸另跑 P2/P3/P4 + unit）
  *
  * 前置：dev server 127.0.0.1:3100（WA_MOCK=1 / AI_MOCK=1 / WORKFORCE_MOCK=1）；Postgres 15432；redis 6379。
- *   worker 唔強制（scan 直接調 engine；T432 spawn 自己個 worker 測 startup 拒啟；
+ *   worker 唔強制（scan 直接調 engine；T432 spawn 自己個 worker 測 startup 照起；
  *   T430d S0-8 擴充例外 — 要打運行中 worker 驗證 reminder-scan gate）。
  * 跑法：pnpm -s tsx scripts/e2e-followup-v3.ts
  *
@@ -26,7 +26,7 @@
  *   T429 C 類 72h 痛症 → 壓 consult（PAIN_TRIAGE 口徑）+ CG-010 零療程零報價
  *   T430 cron 零 outbound（scan 前後零新 OUT Message；SUGGESTED 唔會自動發）
  *   T431 workforce fail → per-rule DEP_FAIL ×3 + hub 紅字
- *   T432 retention env 唔一致 → worker startup 拒啟（+ 對照：一致照起）
+ *   T432 retention env 唔一致 → 站照開 + purge skipped + Alert HIGH（cwi-final S0-11）
  *   T433 privacy 頁改字（regex：零 Apricot Vita + 新句式）
  *   鐵律：零原始電話（API/DB 掃描）
  */
@@ -668,37 +668,57 @@ async function main(): Promise<void> {
     check("T431b hub 紅字：scan_dep_fail ok=false（C 類規則名入 reason）", dep?.ok === false && typeof dep?.reason === "string" && dep.reason.includes("術後關懷"), dep);
   }
 
-  // ── T432：retention env 唔一致 → startup 拒啟 ─────────────────────────────
-  console.log("\n[T432] retention env 一致性 startup gate");
+  // ── T432：retention env 唔一致 → 站照開 + purge skipped + Alert HIGH（cwi-final S0-11）────────
+  console.log("\n[T432] retention env 一致性（S0-11：唔准停站）");
   {
     const runWorker = (env: NodeJS.ProcessEnv, waitMs: number): Promise<{ code: number | null; out: string; okString: boolean }> =>
       new Promise((resolve) => {
         const child = spawn("npx", ["tsx", "src/workers/index.ts"], { cwd: process.cwd(), env, stdio: ["ignore", "pipe", "pipe"] });
         let out = "";
         const t = setTimeout(() => child.kill("SIGKILL"), waitMs);
-        child.stdout.on("data", (b) => {
+        const watch = (b: Buffer) => {
           out += b.toString();
-          if (out.includes("all workers running") || out.includes("拒絕啟動")) {
+          if (out.includes("all workers running")) {
             clearTimeout(t);
             child.kill("SIGTERM");
           }
-        });
-        child.stderr.on("data", (b) => {
-          out += b.toString();
-          if (out.includes("all workers running") || out.includes("拒絕啟動")) {
-            clearTimeout(t);
-            child.kill("SIGTERM");
-          }
-        });
+        };
+        child.stdout.on("data", watch);
+        child.stderr.on("data", watch);
         child.on("exit", (code) => {
           clearTimeout(t);
           resolve({ code, out, okString: out.includes("all workers running") });
         });
       });
+    const { runRetentionPurge } = await import("../src/lib/ops/retention-purge");
+    const { runHealthCheck } = await import("../src/lib/health/check");
+    const origMedia = process.env.RETENTION_MEDIA_MONTHS;
+    // a) env 唔一致 → worker 照起（唔再 exit）+ log 標記跳過
     const bad = await runWorker({ ...process.env, RETENTION_MEDIA_MONTHS: "11" }, 60_000);
-    check("T432a env 唔一致（MEDIA 11≠12）→ worker 拒啟（exit≠0 + 訊息）", bad.code !== 0 && /保留期|拒絕啟動/.test(bad.out), { code: bad.code, tail: bad.out.slice(-200) });
+    check("T432a env 唔一致（MEDIA 11≠12）→ worker 照起（S0-11 唔停站）+ 跳過標記", bad.okString && bad.out.includes("跳過直至修正"), { code: bad.code, tail: bad.out.slice(-200) });
+    // b) 對照：env 一致 → 照起
     const good = await runWorker({ ...process.env }, 60_000);
     check("T432b 對照：env 一致 → worker 照起（all workers running）", good.okString, { code: good.code, tail: good.out.slice(-200) });
+    // c) purge 守門：唔一致 → skipped + Message 行數不變
+    process.env.RETENTION_MEDIA_MONTHS = "11";
+    const msgBefore = await prisma.message.count();
+    const skipped = await runRetentionPurge();
+    const msgAfter = await prisma.message.count();
+    check("T432c purge skipped=RETENTION_ENV_MISMATCH + Message 行數不變", skipped.skipped === "RETENTION_ENV_MISMATCH" && (skipped.mismatches?.length ?? 0) > 0 && msgBefore === msgAfter, { skipped: skipped.skipped, mismatches: skipped.mismatches, msgBefore, msgAfter });
+    // d) health-check → Alert(type=retention_env_mismatch, severity=HIGH, resolvedAt=null)
+    await prisma.alert.deleteMany({ where: { type: "retention_env_mismatch" } }); // 清舊 residue 防 dedup 誤判
+    const alertIdsBefore = (await prisma.alert.findMany({ select: { id: true } })).map((a) => a.id);
+    const hc1 = await runHealthCheck();
+    const openM = await prisma.alert.findFirst({ where: { type: "retention_env_mismatch", resolvedAt: null }, orderBy: { createdAt: "desc" } });
+    check("T432d health-check → Alert retention_env_mismatch HIGH 未解決", hc1.created.some((c) => c.type === "retention_env_mismatch" && c.severity === "HIGH") && openM?.severity === "HIGH" && openM.resolvedAt === null, { created: hc1.created.map((c) => c.type), alert: openM?.id });
+    // e) 補返 env → 下一次 health-check 自動 resolve
+    process.env.RETENTION_MEDIA_MONTHS = origMedia;
+    await runHealthCheck();
+    const openM2 = await prisma.alert.findMany({ where: { type: "retention_env_mismatch", resolvedAt: null } });
+    check("T432e env 補返 → 下次 health-check 自動 resolve", openM2.length === 0, { stillOpen: openM2.length });
+    // cleanup：刪本段新建嘅 alert（防 dev DB 噪音 — 包括其他 type 嘅 live breach）
+    const newAlerts = (await prisma.alert.findMany({ select: { id: true } })).filter((a) => !alertIdsBefore.includes(a.id));
+    if (newAlerts.length) await prisma.alert.deleteMany({ where: { id: { in: newAlerts.map((a) => a.id) } } });
   }
 
   // ── T433：privacy 頁改字 ──────────────────────────────────────────────────

@@ -31,10 +31,11 @@ app.prepare().then(() => {
   // ★ cwi-followup-v3（MD §6 A-2 + T432）：保留期 env 必須明確寫入且同政策一致，否則拒絕啟動。
   //   政策 = 對話 24 個月 / 媒體 12 個月（docs/decisions/retention.md；privacy 頁同源）。
   {
+    // ★ cwi-final S0-11（D-3）：唔再 exit — 站照開；retention-purge 會自己跳過（見 retention-purge.ts），
+    //   health-check 開 HIGH alert `retention_env_mismatch` 直至修好 env。
     const mismatches = retentionPolicyMismatches();
     if (mismatches.length > 0) {
-      log.error({ mismatches }, "boot: 保留期 env 同政策唔一致（MD §6 A-2）— 拒絕啟動；修正 env 或改政策後重啟");
-      process.exit(1);
+      log.error({ mismatches }, "boot: 保留期 env 同政策唔一致 — 站照開，但 retention-purge 會跳過直至修正（S0-11）");
     }
   }
 

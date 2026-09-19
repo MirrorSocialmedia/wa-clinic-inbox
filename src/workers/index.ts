@@ -114,13 +114,12 @@ async function main() {
   // ★ cwi-final S0-1：production 開 mock flag → 拒絕啟動（fail-closed；ALLOW_MOCK_IN_PROD=1 放行 sandbox）
   bootMockGuard();
 
-  // ★ cwi-followup-v3（MD §6 A-2 + T432）：保留期 env 必須明確寫入且同政策一致，否則拒絕啟動
-  //   （retention purge 喺 cron worker — env 錯 = 政策頁同實際刪除期唔一致，屬資安事件）。
+  // ★ cwi-final S0-11（D-3）：唔再 exit — worker 照開；retention-purge 會自己跳過（見 retention-purge.ts），
+  //   health-check 開 HIGH alert `retention_env_mismatch` 直至修好 env。
   {
     const mismatches = retentionPolicyMismatches();
     if (mismatches.length > 0) {
-      log.fatal({ mismatches }, "worker: 保留期 env 同政策唔一致（MD §6 A-2）— 拒絕啟動");
-      process.exit(1);
+      log.error({ mismatches }, "worker: 保留期 env 同政策唔一致 — worker 照開，但 retention-purge 會跳過直至修正（S0-11）");
     }
   }
   await startInboundWorker();

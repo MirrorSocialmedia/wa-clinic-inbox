@@ -28,6 +28,7 @@ import { promisify } from "node:util";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { getBreakerState } from "@/lib/ai/vllm";
+import { retentionPolicyMismatches } from "@/lib/ops/retention-policy";
 import { notifyAlert, type AlertForNotify } from "./notify";
 
 const pExecFile = promisify(execFile);
@@ -228,6 +229,12 @@ export async function runHealthCheck(
       clinicCode: null,
       detail: { reason: backupReason },
     });
+  }
+
+  // ── retention env（S0-11）──
+  const retentionMismatch = retentionPolicyMismatches();
+  if (retentionMismatch.length > 0) {
+    breaches.push({ type: "retention_env_mismatch", severity: "HIGH", clinicId: null, clinicCode: null, detail: { mismatches: retentionMismatch.join("; ").slice(0, 200) } }); // array 會被 sanitizeAlertDetail drop
   }
 
   // ── 冪等開 alert + 自動 resolve ────────────────────────────────────────

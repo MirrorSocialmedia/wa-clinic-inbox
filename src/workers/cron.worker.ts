@@ -154,7 +154,8 @@ export async function startCronWorker(): Promise<Worker | null> {
         case "retention-purge": {
           // P0（§6.0）：每日 04:00 HK；E2E 可手動 enqueue（pnpm e2e:cron retention-purge）
           const r = await runRetentionPurge();
-          return { ok: true, ...r };
+          if (r.skipped) log.error({ skipped: r.skipped }, "cron: retention-purge skipped"); // cwi-final S0-11
+          return { ok: !r.skipped, ...r };
         }
         case "reminder-scan": {
           // ★ cwi-final S0-8：v3 原則「cron 唔發訊息」— legacy 自動提醒永久關（D-1／D-9）。

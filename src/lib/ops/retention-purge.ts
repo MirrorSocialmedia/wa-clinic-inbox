@@ -28,6 +28,7 @@ import { unlink } from "node:fs/promises";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { mediaDirPreferred } from "@/lib/wa/media";
+import { retentionPolicyMismatches } from "./retention-policy";
 
 const BATCH = 500;
 /** §6.0：StaffNotice 已讀保留 90 日（spec 固定值；三個 env 保留期之外）。 */
@@ -75,9 +76,18 @@ export interface RetentionPurgeResult {
   staffNoticesDeleted: number;
   batches: number;
   reportId: string;
+  // ★ cwi-final S0-11：env 同政策唔一致 → 整單跳過（寧願遲刪，唔可以錯刪）
+  skipped?: "RETENTION_ENV_MISMATCH";
+  mismatches?: string[];
 }
 
 export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
+  const mismatches = retentionPolicyMismatches();
+  if (mismatches.length > 0) {
+    // ★ cwi-final S0-11：env 同政策唔一致 → 一行都唔刪（寧願遲刪，唔可以錯刪）
+    log.error({ mismatches }, "retention-purge: SKIPPED — env 同政策唔一致");
+    return { mediaFilesDeleted: 0, mediaPathsCleared: 0, messagesDeleted: 0, noteReceiptsDeleted: 0, patientFactsDeleted: 0, aiDraftsDeleted: 0, staffNoticesDeleted: 0, batches: 0, reportId: "", skipped: "RETENTION_ENV_MISMATCH", mismatches };
+  }
   const convCutoff = monthsAgo(envInt("RETENTION_CONV_MONTHS", 24));
   const mediaCutoff = monthsAgo(envInt("RETENTION_MEDIA_MONTHS", 12));
   const draftCutoff = daysAgo(envInt("RETENTION_DRAFT_DAYS", 90));
