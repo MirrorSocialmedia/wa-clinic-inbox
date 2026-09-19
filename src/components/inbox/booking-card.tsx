@@ -30,6 +30,8 @@ interface Props {
   myStaffId: string;
   /** 寫動作完成（create/confirm/reschedule/rollback）→ parent 重拉對話 + 側欄 */
   onActionDone: () => void;
+  /** ★ cwi-final S0-12：G2 閘 — false → 隱藏〔重發 Flow〕 */
+  slotClaimEnabled?: boolean;
 }
 
 const ROLLBACK_WINDOW_MS = 5 * 60 * 1000;
@@ -62,7 +64,7 @@ export function fmtRequestDay(dateStr: string): { main: string; weekday: string 
   return { main, weekday };
 }
 
-export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDone }: Props) {
+export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDone, slotClaimEnabled }: Props) {
   const pinned = !!c.pinnedPatient?.patientApricotId;
   const locked = !!c.assigneeId && c.assigneeId !== myStaffId;
 
@@ -319,13 +321,15 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
                 <span className="text-danger-text font-medium inline-flex items-center gap-1">
                   <AlertTriangle size={12} strokeWidth={2.75} /> {createError?.message ?? "時段啱啱滿咗"}
                 </span>
-                <button
-                  onClick={() => void doResendFlow()}
-                  disabled={resendBusy}
-                  className="inline-flex items-center gap-1 rounded-full border border-danger-text text-danger-text px-2.5 py-1 hover:bg-danger-soft disabled:opacity-40"
-                >
-                  <RotateCcw size={11} strokeWidth={2.75} /> {resendBusy ? "發送中…" : "重發 Flow"}
-                </button>
+                {slotClaimEnabled !== false && (
+                  <button
+                    onClick={() => void doResendFlow()}
+                    disabled={resendBusy}
+                    className="inline-flex items-center gap-1 rounded-full border border-danger-text text-danger-text px-2.5 py-1 hover:bg-danger-soft disabled:opacity-40"
+                  >
+                    <RotateCcw size={11} strokeWidth={2.75} /> {resendBusy ? "發送中…" : "重發 Flow"}
+                  </button>
+                )}
               </div>
               <p className="text-[10.5px] leading-relaxed text-danger-text">
                 目標時段已唔再可落單 — 可重發 Flow 俾病人重新揾時間，或者直接開對話跟進。
@@ -379,13 +383,15 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
                 >
                   {confirmBusy ? "處理中…" : "已人手落單"}
                 </button>
-                <button
-                  onClick={() => void doResendFlow()}
-                  disabled={resendBusy || creating}
-                  className="flex-1 rounded-full border border-line bg-panel text-t1 text-xs px-3 py-2 hover:bg-panel-2 disabled:opacity-40"
-                >
-                  {resendBusy ? "發送中…" : "改期 · 重發 Flow"}
-                </button>
+                {slotClaimEnabled !== false && (
+                  <button
+                    onClick={() => void doResendFlow()}
+                    disabled={resendBusy || creating}
+                    className="flex-1 rounded-full border border-line bg-panel text-t1 text-xs px-3 py-2 hover:bg-panel-2 disabled:opacity-40"
+                  >
+                    {resendBusy ? "發送中…" : "改期 · 重發 Flow"}
+                  </button>
+                )}
               </div>
             </>
           )}

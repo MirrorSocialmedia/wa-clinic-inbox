@@ -31,7 +31,7 @@ import {
   verifyFlowToken,
   flowJwtSecret,
 } from "@/lib/flows/crypto";
-import { sendBookingFlow } from "@/lib/flows/send";
+import { sendBookingFlow, FlowsDisabledError } from "@/lib/flows/send";
 import { publishNotify } from "@/lib/notify";
 import { enqueueOutboundSend } from "@/lib/queue";
 import { syncWindow, getSlots, hkDateOffset, slotAvailable } from "@/lib/availability";
@@ -569,6 +569,11 @@ async function autoReplyAndResend(conv: { id: string; clinicId: string }, reason
   try {
     await sendBookingFlow({ conversationId: conv.id, staffId: null });
   } catch (e) {
+    if (e instanceof FlowsDisabledError) {
+      // ★ cwi-final S0-12：G2 閘未開 — 預期分支，log.info 原因碼（唔再 log.error）
+      log.info({ conversationId: conv.id, reason, code: "SLOT_CLAIM_DISABLED" }, "flow-reply: 重出 Flow skipped — SLOT_CLAIM_DISABLED");
+      return;
+    }
     log.error(
       { conversationId: conv.id, reason, err: e instanceof Error ? e.message : String(e) },
       "flow-reply: 重出 Flow 失敗（staff 可撳 📅 掣手動補）"

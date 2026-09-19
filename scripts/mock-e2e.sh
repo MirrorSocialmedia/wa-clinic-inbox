@@ -326,6 +326,9 @@ rm -rf .next
 if [ -f /tmp/e2e-push-tls/ca.pem ]; then
   export NODE_EXTRA_CA_CERTS=/tmp/e2e-push-tls/ca.pem
 fi
+# ★ S0-12：第一程（T1–T27 + S12 flag-OFF case）必須閘 OFF — 即使外层 shell export 咗 ALLOW_SLOT_CLAIM 都強制 off
+#   （S12 段會 export =1 重起 server 食到 gate-ON）
+unset ALLOW_SLOT_CLAIM
 nohup pnpm dev >/tmp/e2e-server.log 2>&1 &
 SERVER_PID=$!
 nohup pnpm worker >/tmp/e2e-worker.log 2>&1 &
@@ -797,6 +800,80 @@ if ! wait_for "SELECT (count(*) > 0)::text c FROM \"AvailabilitySlot\"" '[{"c":"
 fi
 SSESYNC=$(q "SELECT (\"lastOkAt\" IS NOT NULL)::text s FROM \"WorkforceSyncState\" WHERE \"clinicId\"='$TKW_CLINIC_ID'" | jf s)
 [ "$SSESYNC" = "true" ] || { echo "    ❌ T27 WorkforceSyncState.lastOkAt 冇 heartbeat"; T27=1; }
+
+# ── S0-12: G2 閘 flag-OFF case（T604 ②③④ — 呢輪 server 起機時 ALLOW_SLOT_CLAIM 未設 = 閘 OFF）──
+S12=0
+rm -f .dev/workforce-mock-claims.json   # hermetic：S12c 斷言 claim 次數 = 0 — 唔計上一 run 殘留檔
+PATIENT_S12="8526091${EPOCH}"
+WAMID_S12="wamid.E2E_S12_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_S12" --text "你好，我想預約下週" --wamid "$WAMID_S12" --name "E2E-S12-GATE" >/dev/null || S12=1
+CONV_S12=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_S12'" | jf id)
+# S12a (T604③): staff 發 Flow → 409 SLOT_CLAIM_DISABLED
+CODE=$(curl -s -o /tmp/e2e-s12-flow.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST \
+  "$BASE/api/conversations/$CONV_S12/flows" -H 'Content-Type: application/json' 2>/dev/null)
+if [ "$CODE" = "409" ] && grep -q "SLOT_CLAIM_DISABLED" /tmp/e2e-s12-flow.json; then :; else echo "    ❌ S12a 發 Flow gate-OFF 唔係 409 SLOT_CLAIM_DISABLED（HTTP=$CODE）"; S12=1; fi
+check "S12a gate OFF → POST /conversations/[id]/flows = 409 SLOT_CLAIM_DISABLED" "$S12" "0"
+# S12b (T604②): hold commit → 403（seed 一張 HELD hold）
+HOLD_S12="e2es12hold${EPOCH}"
+q "INSERT INTO \"FlowHoldEvent\" (id, \"flowToken\", \"clinicCode\", \"clinicId\", \"providerName\", \"date\", \"startMin\", \"endMin\", \"patientPhone\", status, \"updatedAt\") VALUES ('$HOLD_S12', 'e2e-s12-token-${EPOCH}', 'TKW', '$TKW_CLINIC_ID', 'Dr S12', '2099-01-01', 540, 570, '$PATIENT_S12', 'HELD', now())" >/dev/null 2>&1
+CODE=$(curl -s -o /tmp/e2e-s12-commit.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/flows/holds/$HOLD_S12/commit")
+[ "$CODE" = "403" ] || { echo "    ❌ S12b hold commit gate-OFF 唔係 403（HTTP=$CODE）"; S12=1; }
+check "S12b gate OFF → POST /flows/holds/[id]/commit = 403" "$CODE" "403"
+# S12c (T604④): Flow endpoint submit_confirm → HTTP 200（R-4 唔准 403）+ 解密後暫停字句 + workforce mock claim 次數 = 0
+#   gate OFF 發唔到 Flow 訊息 → 手 seed FlowSession + 簽 flow_token（HS256，同 signFlowToken 同格式）
+#   slot = T98 同款 deterministic bookable fixture（client.ts mock 規則：TKW 09:00–13:00；djb2(c|day)%7==3 = 閉診）
+#   flow_token signing secret：server 起機食 .env；bash 要由 .env 抽出先簽（空 secret 簽出 → verify 401 假紅）
+FLOW_JWT_SECRET=$(awk -F= '/^FLOW_JWT_SECRET=/{print $2}' .env 2>/dev/null | head -1)
+[ ${#FLOW_JWT_SECRET} -ge 32 ] || { echo "FATAL: S0-12 FLOW_JWT_SECRET 由 .env 讀唔到（<32 bytes）"; exit 1; }
+TOKEN_S12=$(node -e '
+const c = require("node:crypto");
+const b64url = (b) => Buffer.from(b).toString("base64url");
+const h = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+const p = b64url(JSON.stringify({ convId: process.argv[1], clinicId: process.argv[2] }));
+const s = c.createHmac("sha256", process.argv[3]).update(h + "." + p).digest("base64url");
+console.log(h + "." + p + "." + s);
+' "$CONV_S12" "$TKW_CLINIC_ID" "$FLOW_JWT_SECRET")
+q "INSERT INTO \"FlowSession\" (id, \"conversationId\", \"clinicId\", \"flowToken\", status) VALUES ('e2es12session${EPOCH}', '$CONV_S12', '$TKW_CLINIC_ID', '$TOKEN_S12', 'SENT')" >/dev/null 2>&1
+S12_DATE=$(node -e 'function djb2(s){let h=5381;for(let i=0;i<s.length;i++){h=((h<<5)+h+s.charCodeAt(i))>>>0}return h}const c="TKW";const d0=new Date(Date.now()+8*3600e3).toISOString().slice(0,10);for(let i=0;i<31;i++){const day=new Date(Date.parse(d0+"T00:00:00Z")+i*86400e3).toISOString().slice(0,10);if(djb2(c+"|"+day)%7!==3){console.log(day);break}}')
+[ -n "$S12_DATE" ] || { echo "    ❌ S12c 30 日內冇 bookable 開診日"; S12=1; }
+OUT_S12=$(pnpm -s flow-client stepx --clinic TKW --token "$TOKEN_S12" --action data_exchange --screen SCR_CONFIRM \
+  --data "{\"user_action\":\"submit_confirm\",\"date\":\"$S12_DATE\",\"provider_id\":\"mock-pract-TKW-0\",\"time\":\"09:00\",\"name\":\"E2E S12\"}" 2>&1 || true)
+HTTP_S12=$(printf '%s' "$OUT_S12" | grep -oE 'HTTP=[0-9]+' | head -1 | cut -d= -f2)
+if [ "$HTTP_S12" = "200" ] && grep -q "網上預約暫停中" <<<"$OUT_S12"; then :; else echo "    ❌ S12c submit_confirm gate-OFF 唔係 HTTP 200 + 暫停字句（HTTP=$HTTP_S12 out=${OUT_S12:0:200}）"; S12=1; fi
+check "S12c gate OFF → Flow endpoint submit_confirm = HTTP 200（加密暫停畫面，R-4）" "$S12" "0"
+CLAIMS_S12=0
+[ -f .dev/workforce-mock-claims.json ] && CLAIMS_S12=$(grep -c '"holdId"' .dev/workforce-mock-claims.json 2>/dev/null || echo 0)
+[ "$CLAIMS_S12" = "0" ] || { echo "    ❌ S12c gate-OFF 但 workforce mock 收到 claim（=$CLAIMS_S12 次）"; S12=1; }
+check "S12c gate OFF → workforce mock claim 次數 = 0" "$CLAIMS_S12" "0"
+# S12 cleanup
+q "DELETE FROM \"FlowSession\" WHERE id='e2es12session${EPOCH}'" >/dev/null 2>&1
+q "DELETE FROM \"FlowHoldEvent\" WHERE id='$HOLD_S12'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_S12'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$CONV_S12'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$PATIENT_S12'" >/dev/null 2>&1
+check "S12 G2 閘 flag-OFF case（T604 ②③④）" "$S12" "0"
+# S0-12：以下 Flow 段用 gate-ON — export + 重起 server（呢輪 server 起機時未設 = 閘 OFF；重起先食到）
+export ALLOW_SLOT_CLAIM=1
+kill "$SERVER_PID" 2>/dev/null || true
+sleep 1
+lsof -ti:"$PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+sleep 1
+nohup pnpm dev >/tmp/e2e-server.log 2>&1 &
+SERVER_PID=$!
+UP=0
+for i in $(seq 1 90); do
+  if curl -sf "$BASE/healthz" >/dev/null 2>&1; then UP=1; break; fi
+  sleep 1
+done
+[ "$UP" = 1 ] || { echo "FATAL: S0-12 server 重起失敗（ALLOW_SLOT_CLAIM=1）"; exit 1; }
+echo "  server 重起完成（ALLOW_SLOT_CLAIM=1，pid $SERVER_PID）"
+# S0-12：worker 都要重起 — 段前起嘅 worker process env 冇 ALLOW_SLOT_CLAIM，
+#   flow-reply 重出 Flow（sendBookingFlow）會被 gate 誤擋 → T30 輸家無重出（實測 flake 源）
+if [ -f /tmp/e2e-push-tls/ca.pem ]; then export NODE_EXTRA_CA_CERTS=/tmp/e2e-push-tls/ca.pem; fi
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker.log 2>&1 &
+WORKER_PID=$!
 
 # 1) 新病人（BOOKING_REQUEST intent — 真實 flow 起點）+ staff 發 Flow
 PATIENT_P3="8526031${EPOCH}"

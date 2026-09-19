@@ -17,7 +17,7 @@ import { requireAuth, assertConversationAccess, assertCanWriteConversation } fro
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { assignConversation } from "@/lib/assign";
-import { sendBookingFlow, WindowClosedError } from "@/lib/flows/send";
+import { sendBookingFlow, WindowClosedError, FlowsDisabledError } from "@/lib/flows/send";
 
 export const dynamic = "force-dynamic";
 
@@ -103,6 +103,14 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
       status: "QUEUED",
     });
   } catch (err) {
+    if (err instanceof FlowsDisabledError) {
+      // ★ cwi-final S0-12：G2 閘未開 — 唔發 Flow（staff 撳時即知）
+      log.info({ conversationId: conv.id, staffId: ctx.staff.id }, "flows: SLOT_CLAIM_DISABLED（G2 閘）");
+      return NextResponse.json(
+        { error: "SLOT_CLAIM_DISABLED", message: "網上預約（Flow）暫停中 — 請直接同病人約時間" },
+        { status: 409 }
+      );
+    }
     if (err instanceof WindowClosedError) {
       log.info({ conversationId: conv.id, staffId: ctx.staff.id }, "flows: window closed — template required");
       return NextResponse.json(

@@ -102,6 +102,8 @@ interface Props {
   onSendFlow: () => Promise<{ ok: boolean; error?: string }>;
   /** Phase 3：發 Flow 進行中 */
   flowBusy: boolean;
+  /** ★ cwi-final S0-12：G2 閘（SSR 注入）— false → 隱藏 📅 掣 */
+  slotClaimEnabled?: boolean;
   /** Phase B：過窗 template 發送（422 後 composer 出揀選 → 撳掣帶 templateName 發）；唔傳 = 功能唔啟用 */
   onSendTemplate?: (name: string) => Promise<{ ok: boolean; error?: string }>;
   /** ★ cwi-inboxfix-20260905（MD §5.3）：標記已作廢 — POST /api/messages/[id]/void（純內部） */
@@ -1056,10 +1058,12 @@ export function ChatPane(p: Props) {
             booking={c.pendingBooking}
             myStaffId={p.myStaffId}
             onActionDone={() => p.onBookingActionDone?.()}
+            slotClaimEnabled={p.slotClaimEnabled}
           />
         ) : (
           c.intent === "BOOKING_REQUEST" &&
-          c.window.open && (
+          c.window.open &&
+          p.slotClaimEnabled !== false && (
             <div className="mb-2 rounded-2xl border border-brand/30 bg-brand-soft p-2 flex items-center gap-2">
               <span className="text-xs text-brand-text">
                 病人想預約 — 發預約 Flow 俾病人揀醫生/日期/時間：

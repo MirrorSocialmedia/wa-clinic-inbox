@@ -19,7 +19,7 @@ import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { hkDateOffset } from "@/lib/availability";
 import { phoneHash } from "@/lib/phone-hash";
-import { sendBookingFlow, WindowClosedError } from "@/lib/flows/send";
+import { sendBookingFlow, WindowClosedError, FlowsDisabledError } from "@/lib/flows/send";
 import { WorkforceApiError, fetchAppointments } from "@/lib/workforce/client";
 
 export const dynamic = "force-dynamic";
@@ -110,6 +110,13 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   } catch (err) {
     // Flow 發唔出 → 清旗標（唔留死狀態）
     await prisma.conversation.update({ where: { id: conv.id }, data: { reschedulingApptId: null } });
+    if (err instanceof FlowsDisabledError) {
+      // ★ cwi-final S0-12：G2 閘未開 — 清咗旗標先回 409
+      return NextResponse.json(
+        { error: "SLOT_CLAIM_DISABLED", message: "網上預約（Flow）暫停中 — 請直接同病人約時間" },
+        { status: 409 }
+      );
+    }
     if (err instanceof WindowClosedError) {
       return NextResponse.json({ error: "window_closed" }, { status: 422 });
     }

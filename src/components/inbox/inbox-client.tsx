@@ -98,6 +98,7 @@ export function InboxClient({
   initialConversations,
   initialStaff,
   initialSelectedConvId,
+  slotClaimEnabled,
 }: {
   user: UserCtx;
   initialClinics: ClinicInfo[];
@@ -105,6 +106,8 @@ export function InboxClient({
   initialStaff: StaffInfo[];
   /** Phase 3：?conv=<id> 深連結（/bookings 卡「開對話」） */
   initialSelectedConvId?: string | null;
+  /** ★ cwi-final S0-12：G2 閘（SSR 注入 env）— false → 隱藏 📅／重發 Flow */
+  slotClaimEnabled?: boolean;
 }) {
   const clinics = initialClinics;
   const staff = initialStaff;
@@ -2271,6 +2274,7 @@ export function InboxClient({
         draftBusy={draftBusy}
         onSendFlow={sendFlow}
         flowBusy={flowBusy}
+        slotClaimEnabled={slotClaimEnabled}
         myStaffId={user.staffId}
         onSendNote={sendNote}
         onTakeover={takeover}

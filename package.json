@@ -40,6 +40,7 @@
     "test:unit-rbac": "tsx scripts/unit-rbac.ts",
     "test:unit-auto-release": "tsx scripts/unit-auto-release.ts",
     "test:unit-session-engine": "tsx scripts/unit-session-engine.ts",
+    "test:g2-gate": "tsx scripts/unit-g2-gate.ts",
     "test:unit-workflow-definitions": "tsx scripts/unit-workflow-definitions.ts",
     "test:unit-workflow-store": "tsx scripts/unit-workflow-store.ts",
     "test:unit-cache-bust": "tsx scripts/unit-cache-bust.ts",

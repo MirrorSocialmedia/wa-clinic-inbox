@@ -60,7 +60,7 @@ import {
   type ProviderOption,
 } from "@/lib/flows/screens";
 import { syncWindow, getSlots, hkTodayStr, hkDateOffset } from "@/lib/availability";
-import { getBookableSlots, claimSlot, filterBookableSlots, WorkforceApiError, refreshAvailability, type BookableDay, type BookableSlot } from "@/lib/workforce/client";
+import { getBookableSlots, claimSlot, filterBookableSlots, WorkforceApiError, refreshAvailability, slotClaimEnabled, type BookableDay, type BookableSlot } from "@/lib/workforce/client";
 import { getSlotFreshness, invalidateAvailabilityDay } from "@/lib/availability";
 
 export const runtime = "nodejs";
@@ -350,6 +350,12 @@ export async function POST(req: NextRequest) {
           // slot 已冇（中途被人佔走）→ 409 等價 → 重拉最新列表重導 SCR_SLOT
           log.info({ clinic: clinic.code, date, providerId, time, convId: conv.id }, "flow endpoint: submit_confirm → slot missing → SCR_SLOT 重導");
           return bookableSlotErrorResp(key16, reqIvB64, date, await refetchBookableDays(clinic.code, dateMin, dateMax), dateMin, dateMax, "呢個時段啱啱被人預約咗，請揀其他時間");
+        }
+        if (!slotClaimEnabled()) {
+          // ★ cwi-final S0-12（R-4）：Meta Flows 一定要 200 + 加密畫面 — 唔可以回 403
+          log.warn({ clinic: clinic.code, convId: conv.id }, "flow endpoint: submit_confirm → SLOT_CLAIM_DISABLED");
+          return confirmErrorRespBookable(key16, reqIvB64, bookableDays, date, providerId, time, profileName,
+            "網上預約暫停中，請直接喺 WhatsApp 話我哋想約嘅時間，同事會幫你安排🙏");
         }
         let claim;
         try {

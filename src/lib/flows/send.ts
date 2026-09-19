@@ -16,11 +16,17 @@ import { getWindowState } from "@/lib/wa/window";
 import { defaultFlowConfig, requirementFlowConfig, type FlowMessageConfig } from "@/lib/wa/graph";
 import { signFlowToken, flowJwtSecret } from "@/lib/flows/crypto";
 import { getSlots } from "@/lib/availability";
+import { slotClaimEnabled } from "@/lib/workforce/client";
 
 export class WindowClosedError extends Error {
   constructor() {
     super("window_closed");
   }
+}
+
+/** ★ cwi-final S0-12：G2 閘 — 未開 ALLOW_SLOT_CLAIM 時發 Flow 唔出 HTTP（409 俾 caller） */
+export class FlowsDisabledError extends Error {
+  constructor() { super("SLOT_CLAIM_DISABLED"); this.name = "FlowsDisabledError"; }
 }
 
 const ENQUEUE_TIMEOUT_MS = 1500;
@@ -43,6 +49,7 @@ export async function sendBookingFlow(opts: {
    */
   prefill?: { date: string; providerId: string; start: string };
 }): Promise<SendFlowResult> {
+  if (!slotClaimEnabled()) throw new FlowsDisabledError(); // ★ cwi-final S0-12：G2 閘
   const conv = await prisma.conversation.findUnique({ where: { id: opts.conversationId } });
   if (!conv) throw new Error("conversation not found");
 

@@ -54,7 +54,7 @@ export default function PrivacyPage() {
         <h2 className="text-lg font-semibold">5. 資料儲存及保留</h2>
         <p>
           我們自行營運嘅伺服器位於香港，設有存取控制及加密措施；第三方服務供應商可能於香港以外處理資料。
-          WhatsApp 對話紀錄一般保留 {POLICY_RETENTION_MONTHS} 個月；醫療相關紀錄按適用法例及專業指引保留。
+          WhatsApp 對話紀錄一般保留 {`${POLICY_RETENTION_MONTHS} 個月`}；醫療相關紀錄按適用法例及專業指引保留。
           逾期資料會被刪除或永久去識別化。
         </p>
 

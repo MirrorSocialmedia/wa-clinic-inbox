@@ -167,6 +167,7 @@ export default async function InboxPage({
 
   return (
     <InboxClient
+      slotClaimEnabled={process.env.ALLOW_SLOT_CLAIM === "1"} // ★ cwi-final S0-12：G2 閘（SSR 注入）
       user={{
         staffId: session.staffId,
         name: session.name,

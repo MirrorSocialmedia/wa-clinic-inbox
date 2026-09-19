@@ -439,6 +439,14 @@ export class WorkforceApiError extends Error {
   }
 }
 
+/** ★ cwi-final S0-12：G2 閘（預設關）— 關閉時 claim／commit／發 Flow 都唔出 HTTP */
+export function slotClaimEnabled(): boolean {
+  return process.env.ALLOW_SLOT_CLAIM === "1";
+}
+export class SlotClaimDisabledError extends WorkforceApiError {
+  constructor(path: string) { super(403, path, "SLOT_CLAIM_DISABLED"); }
+}
+
 const WORKFORCE_TIMEOUT_MS = 3000;
 
 // ── HTTP（real mode）─────────────────────────────────────────────────────
@@ -865,6 +873,7 @@ export async function getHeld(clinicCode: string): Promise<HeldResult> {
 
 /** commit（MD 3.3）— 前台已入 Apricot：workforce HELD → IN_APRICOT（冪等）。 */
 export async function commitHold(holdId: string, apricotRef?: string): Promise<HoldCommitResult> {
+  if (!slotClaimEnabled()) throw new SlotClaimDisabledError("/api/external/v1/bookable-slots/claim/:holdId/commit"); // S0-12
   return HoldCommitResponse.parse(
     await wfSend("POST", `/api/external/v1/bookable-slots/claim/${encodeURIComponent(holdId)}/commit`, {}, apricotRef ? { apricotRef } : undefined)
   );
@@ -885,6 +894,7 @@ export async function claimSlot(p: {
   flowToken: string;
 }): Promise<ClaimResult> {
   const path = "/api/external/v1/bookable-slots/claim";
+  if (!slotClaimEnabled()) throw new SlotClaimDisabledError(path); // S0-12
   const claimToken = deriveClaimToken(p.flowToken);
   const raw = await wfSend(
     "POST",

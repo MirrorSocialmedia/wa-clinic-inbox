@@ -11,7 +11,7 @@ import log from "@/lib/log";
 import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
-import { sendBookingFlow, WindowClosedError } from "@/lib/flows/send";
+import { sendBookingFlow, WindowClosedError, FlowsDisabledError } from "@/lib/flows/send";
 
 export const dynamic = "force-dynamic";
 
@@ -58,6 +58,13 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     log.info({ bookingId: booking.id, conversationId: conv.id, reused: r.reused }, "bookings: reschedule — flow re-sent");
     return NextResponse.json({ ok: true, flowToken: r.flowToken, messageId: r.messageId, reused: r.reused });
   } catch (err) {
+    if (err instanceof FlowsDisabledError) {
+      // ★ cwi-final S0-12：G2 閘未開
+      return NextResponse.json(
+        { error: "SLOT_CLAIM_DISABLED", message: "網上預約（Flow）暫停中 — 請直接同病人約時間" },
+        { status: 409 }
+      );
+    }
     if (err instanceof WindowClosedError) {
       return NextResponse.json({ error: "window_closed" }, { status: 422 });
     }

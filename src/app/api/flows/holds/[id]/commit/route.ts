@@ -14,7 +14,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { commitHold, WorkforceApiError } from "@/lib/workforce/client";
+import { commitHold, WorkforceApiError, slotClaimEnabled } from "@/lib/workforce/client";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +27,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   if (hold.clinicId) assertClinicAccess(ctx, hold.clinicId);
   else if (ctx.staff.role !== "ADMIN") return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
+  if (!slotClaimEnabled()) return NextResponse.json({ error: "SLOT_CLAIM_DISABLED" }, { status: 403 }); // ★ cwi-final S0-12：G2 閘
 
   if (hold.status !== "HELD") {
     return NextResponse.json({ error: `hold already ${hold.status}`, status: hold.status }, { status: 409 });

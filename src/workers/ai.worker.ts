@@ -42,7 +42,7 @@ import { painStep, parsePainState, PAIN_SESSION_TTL_MS } from "@/lib/sessions/pa
 import { phoneHash } from "@/lib/phone-hash";
 import { hkDateOffset } from "@/lib/availability";
 import { lookupPatient, fetchAppointments } from "@/lib/workforce/client";
-import { sendBookingFlow, WindowClosedError } from "@/lib/flows/send";
+import { sendBookingFlow, WindowClosedError, FlowsDisabledError } from "@/lib/flows/send";
 
 // ★ Part F（cwi-raggolden-20260904，F.7）：lexicon 命中詞（trace 用 — 只記 raw term，零 PII 風險：詞表係 staff 配置）
 function lexiconHits(lex: { term: string; canonical: string }[], text: string | null): string[] {
@@ -799,7 +799,11 @@ async function handleSessionTurn(
         try {
           await sendBookingFlow({ conversationId: conv.id, staffId: null });
         } catch (err) {
-          if (err instanceof WindowClosedError) {
+          if (err instanceof FlowsDisabledError) {
+            // ★ cwi-final S0-12：G2 閘未開 — 零 Flow 訊息；session 轉 HANDOFF（員工接手約時間）
+            log.info({ sessionId, conversationId: conv.id }, "session: SEND_FLOW skipped — SLOT_CLAIM_DISABLED");
+            await prisma.bookingSession.update({ where: { id: sessionId }, data: { status: "HANDOFF" } }).catch(() => undefined);
+          } else if (err instanceof WindowClosedError) {
             log.info({ sessionId, conversationId: conv.id }, "session: SEND_FLOW window closed — staff 手動發");
           } else {
             log.error(
