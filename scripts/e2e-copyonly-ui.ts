@@ -99,7 +99,10 @@ async function main(): Promise<void> {
     await P.waitForTimeout(5000); // hydration 等待（對齊 e2e-schedule-ui 慣例）
 
     // 1. 草稿卡標題（COPY_ONLY 變體）
-    const title = P.getByText("AI 草稿（只可複製）", { exact: true });
+    // ★ cwi-final B1fix-harness（2026-09-19）：舊 exact 斷言喺 2026-08-29 P3 加 latency 後綴（` · X.Xs`）
+    //   後已永恆 mismatch（span 全文 = "AI 草稿（只可複製） · 3.2s"）— run2/4/5/8/9 每 run 必紅、
+    //   同 B1 零關係（35a4fb7 基線同款 + B1 diff 零觸及）。改 regex 子串（斷言語義唔變：COPY_ONLY 變體標題存在）。
+    const title = P.getByText(/AI 草稿（只可複製）/);
     // a2（run7 定性）：T172 同頁同 cookie 斷言 SSR DOM 文字（hydration 前已喺）故全 run 綠；
     //   呢張卡 = client-state（hydration + /drafts round-trip 先出現）— 全量負載下 /inbox dev bundle
     //   hydration 實測 >90s（T186 同類 client-state 60s 壓線綠）。90s → 150s（斷言條件零改動）。
@@ -115,7 +118,7 @@ async function main(): Promise<void> {
         const body = (await Pg.textContent("body")) ?? "";
         const hasLogin = /登入|log ?in/i.test(body.slice(0, 2000));
         const hasWinBanner = body.includes("24 小時窗口已過");
-        const hasConvName = body.includes("E2E W171");
+        const hasConvName = body.includes("E2E-A-WINDOW"); // ★ B1fix-harness：舊 "E2E W171" 係錯名（e2e-ai-job old-inbound profileName = E2E-A-WINDOW）
         const draftFetch = await Pg.evaluate(async (cid: string) => {
           try {
             const r = await fetch(`/api/conversations/${cid}/drafts`, { credentials: "include" });
