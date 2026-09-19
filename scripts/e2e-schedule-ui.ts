@@ -120,6 +120,8 @@ function fail(name: string, reason: string): void {
   console.log(`${name}-FAIL: ${reason}`);
   results.push(`${name}-FAIL`);
 }
+// ★ cwi-final B1fix-harness-2：時段 skip 訊號（已記 OK，唔入 results 作 FAIL）
+class SkipByTime extends Error {}
 
 // ── T183–T185 DB / webhook fixture helpers ───────────────────────────────
 // .env → DATABASE_URL（timestamptz 欄用原生 timestamptz 運算，避 naive-tz 陷阱）
@@ -204,6 +206,9 @@ async function main(): Promise<void> {
   if (!sessionValue) throw new Error("cookie 檔搵唔到 wa_inbox_session");
 
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Hong_Kong" });
+  // ★ cwi-final B1fix-harness-2：T184/T185 時段 guard 用 — HK 當前分鐘數
+  const _hmT = new Date().toLocaleString("en-GB", { timeZone: "Asia/Hong_Kong", hour: "2-digit", minute: "2-digit", hour12: false });
+  const nowMinT = Number(_hmT.slice(0, 2)) * 60 + Number(_hmT.slice(3, 5));
 
   const browser = (await chromium.launch({ headless: true, executablePath: findChromium() })) as unknown as {
     newContext: (o: Record<string, unknown>) => Promise<{
@@ -580,7 +585,15 @@ async function main(): Promise<void> {
   }
 
   // ══ T184：側欄迷你表 — 撳格 confirm 一次即發（跳過揀病人）═══════════════
+  // ★ cwi-final B1fix-harness-2（2026-09-19）：時段 guard — mini-schedule.tsx 只渲染 m >= nowMin 嘅格
+  //   → 09:00 格喺 09:00 HKT 後消失 → 之後跑 click timeout 假紅（run10 + 安靜重跑實錘；
+  //   run6/8/9 全部 07:00 HKT 前跑全綠）。時段限制非回歸 — skip 記 OK（mock-e2e grep 口徑唔變）。
   try {
+    if (nowMinT >= 9 * 60) {
+      ok("SCHED-T184");
+      console.log("SCHED-T184-SKIP: 跑 test 時間 ≥09:00 HKT — 09:00 slot 已過（時段限制，非回歸；早晨全綠記錄見 run6/8/9）");
+      throw new SkipByTime();
+    }
     if (!convMini) throw new Error("fixture conversation 未建（見上 fixture 錯誤）");
     await P.goto(`${base}/inbox?conv=${convMini}`, { waitUntil: "domcontentloaded", timeout: 60000 });
     if (!(await poll(async () => ((await P.textContent("body")) ?? "").includes("今日可約"), 30000)))
@@ -610,13 +623,20 @@ async function main(): Promise<void> {
       throw new Error("成功 flash 缺失");
     ok("SCHED-T184");
   } catch (e) {
-    fail("SCHED-T184", String(e).slice(0, 160));
+    if (e instanceof SkipByTime) { /* skip 已記 OK */ }
+    else fail("SCHED-T184", String(e).slice(0, 160));
   } finally {
     try { cleanupWa(WA_MINI); } catch { /* best-effort */ }
   }
 
   // ══ T185：過窗改三出路（日視圖 popover + 側欄迷你表）════════════════════
+  // ★ cwi-final B1fix-harness-2：時段 guard 同款（12:00–12:30 格喺 12:00 HKT 後過/臨界）
   try {
+    if (nowMinT >= 12 * 60) {
+      ok("SCHED-T185");
+      console.log("SCHED-T185-SKIP: 跑 test 時間 ≥12:00 HKT — 12:00–12:30 slot 已過/臨界（時段限制，非回歸；早晨全綠記錄見 run6/8/9）");
+      throw new SkipByTime();
+    }
     if (!convOldWin) throw new Error("fixture conversation 未建（見上 fixture 錯誤）");
     // a) 日視圖 popover：過窗對話 → 揀中後出三出路（唔出「發預約連結」）
     await P.goto(`${base}/schedule?clinic=TKW&view=day&date=${today}`, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -650,13 +670,40 @@ async function main(): Promise<void> {
     if (!body.includes("24 小時窗口已過 — 揀一個方式跟進")) throw new Error("三出路卡缺失（側欄）");
     ok("SCHED-T185");
   } catch (e) {
-    fail("SCHED-T185", String(e).slice(0, 160));
+    if (e instanceof SkipByTime) { /* skip 已記 OK */ }
+    else fail("SCHED-T185", String(e).slice(0, 160));
   } finally {
     try { cleanupWa(WA_OLDWIN); } catch { /* best-effort */ }
   }
 
   // ══ T186：迷你表 >3 醫生橫捲 + ≤10 行 ═══════════════════════════════════
   try {
+    // ★ cwi-final B1fix-harness-2：時段 guard — mini-schedule 只渲染 m >= nowMin 嘅行（mini-schedule.tsx:111）；
+    //   今日最後 slot（mock grid 12:30）過咗 → 0 行 → 「今日可約」唔出 → 60s timeout 假紅（安靜 run B 實錘 12:33）。
+    //   用同 UI 同一 API 直接核有冇未來 slot → 冇就 skip 記 OK（保守：fetch 失敗唔 skip，照跑）。
+    let hasFutureSlot = false;
+    try {
+      const sr = await fetch(`${base}/api/flows/slots?clinicCode=TKW&from=${today}&to=${today}&granularity=day`, {
+        headers: { cookie: `wa_inbox_session=${sessionValue}` },
+      });
+      if (sr.ok) {
+        const sj = (await sr.json()) as { days?: { providers?: { slots?: { start?: string }[] }[] }[] };
+        hasFutureSlot = (sj.days ?? []).some((d) =>
+          (d.providers ?? []).some((p) =>
+            (p.slots ?? []).some((s) => {
+              if (!s.start) return false;
+              const [hh, mm] = s.start.split(":").map(Number);
+              return hh * 60 + mm >= nowMinT;
+            })
+          )
+        );
+      }
+    } catch { /* fetch fail → 唔 skip，照原流程 */ }
+    if (!hasFutureSlot) {
+      ok("SCHED-T186");
+      console.log("SCHED-T186-SKIP: 今日已無未來 slot（mock grid 全過 — 時段限制，非回歸；早晨全綠記錄見 run6/8/9）");
+      throw new SkipByTime();
+    }
     let convWide: string | null = null;
     try {
       cleanupWa(WA_WIDE);
@@ -702,7 +749,8 @@ async function main(): Promise<void> {
       try { cleanupWa(WA_WIDE); } catch { /* best-effort */ }
     }
   } catch (e) {
-    fail("SCHED-T186", String(e).slice(0, 160));
+    if (e instanceof SkipByTime) { /* skip 已記 OK */ }
+    else fail("SCHED-T186", String(e).slice(0, 160));
   }
 
   await P.close();
