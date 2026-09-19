@@ -228,8 +228,19 @@ async function main(): Promise<void> {
     // 列表 row 有 profileName；撳佢
     const row = P.getByText(name, { exact: true }).first();
     await row.waitFor({ state: "visible", timeout: 30_000 });
-    await row.click();
-    await sel("fu-sugg-card").waitFor({ state: "visible", timeout: 30_000 });
+    // ★ cwi-final B1fix-harness-3（2026-09-19）：hydration 防 — 首載 click 可 no-op（dev JS 未 hydration，
+    //   SSR row 先出；probe 實錘：+6s settle 後 click 全鏈綠）。CTO3 script 同款 3 輪 retry 口徑。
+    for (let round = 1; round <= 3; round++) {
+      await row.click();
+      try {
+        await sel("fu-sugg-card").waitFor({ state: "visible", timeout: 10_000 });
+        return;
+      } catch {
+        console.log(`  [hydration flake] 建議卡 10s 未出現 — 重撳（round ${round}/3）`);
+        await sleep(1500);
+      }
+    }
+    await sel("fu-sugg-card").waitFor({ state: "visible", timeout: 10_000 });
   }
 
   try {
