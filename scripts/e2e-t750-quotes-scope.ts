@@ -5,6 +5,8 @@
  *                 SUPERVISOR POST → 403；COMPANY ADMIN 帶 teachTerm → 200 + teachTermIgnored:true
  * 附加正例：GROUP ADMIN（ALL）帶 teachTerm → 200 + teachTermIgnored:false + mock 真係教到字典；
  *           SUPERVISOR GET → 全店（唯讀語義）。
+ * F-4 新格（2026-09-19）：舊格式 session（iron-session payload 無 scopeType）嘅 ALL ADMIN
+ *           → 報價頁見到 data-e2e="q-teach-toggle"（page 同 API 同一個 sessionScopeType fallback 口徑）。
  *
  * 背景：舊 route 只 requireAuth — 任何 staff 睇全集團報價 + 決定任何店報價；
  * SUPERVISOR（唯讀角色）可決定；任何角色 teachTerm 都直送 CWM 字典。
@@ -17,12 +19,16 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { PrismaClient } from "@prisma/client";
 
 const require = createRequire(path.join(process.cwd(), "package.json"));
 const argon2 = require("argon2");
+const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
+  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
+};
 
 try {
   process.loadEnvFile(path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", ".env"));
@@ -61,6 +67,37 @@ function check(name: string, cond: boolean, detail?: unknown): void {
   if (cond) ok(name);
   else fail(`${name}${detail !== undefined ? "（" + JSON.stringify(detail).slice(0, 300) + "）" : ""}`);
 }
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** playwright-core 搵 chromium binary（同 e2e-t600 慣例；S6-1 收埋入 scripts/_pw.ts） */
+function findChromium(): string {
+  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
+  const dirs = fs.readdirSync(baseDir)
+    .filter((d) => d.startsWith("chromium-"))
+    .sort()
+    .reverse();
+  for (const d of dirs) {
+    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
+    try {
+      fs.readFileSync(exe);
+      return exe;
+    } catch {
+      /* next */
+    }
+  }
+  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
+}
+interface PageLike {
+  goto: (url: string, o: Record<string, unknown>) => Promise<unknown>;
+  locator: (sel: string) => { count: () => Promise<number>; click: (o?: Record<string, unknown>) => Promise<void> };
+  close: () => Promise<void>;
+}
+interface CtxLike {
+  newPage: () => Promise<PageLike>;
+  addCookies: (c: Array<Record<string, unknown>>) => Promise<void>;
+  close: () => Promise<void>;
+}
+type Browser = { newContext: (o: Record<string, unknown>) => Promise<CtxLike>; close: () => Promise<void> };
 
 const prisma = new PrismaClient();
 
@@ -215,6 +252,68 @@ async function main(): Promise<void> {
     );
     const grTerms = JSON.parse(fs.readFileSync(MOCK_REAL, "utf8")).terms ?? [];
     check("T750e mock 字典真係新增（t750gr）", grTerms.some((t: any) => t.shorthand === "t750gr" && t.nameCn === "集團級術語"), grTerms.map((t: any) => t.shorthand));
+
+    // ── f) 舊格式 session（無 scopeType）ALL ADMIN → 頁面見到 q-teach-toggle（F-4）──
+    const { sealData } = require("iron-session") as { sealData: (d: unknown, o: Record<string, unknown>) => Promise<string> };
+    const secret = process.env.SESSION_SECRET ?? "";
+    if (secret.length < 32) throw new Error("SESSION_SECRET 未設或 < 32 chars");
+    // 舊格式 = iron-session payload 無 scopeType/clinicIds/scopeCompanyId（hub-a 之前登入嘅 session）
+    const oldCookie = await sealData(
+      { staffId: U_GR, email: E_GR, name: "E2E T750 舊格式 ADMIN", role: "ADMIN", clinicId: null, loginAt: Date.now() },
+      { password: secret, ttl: 24 * 3600 }
+    );
+    const exe = findChromium();
+    const B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<Browser> }).launch({
+      headless: true,
+      executablePath: exe,
+    })) as Browser;
+    const C = await B.newContext({ viewport: { width: 1440, height: 900 } });
+    await C.addCookies([{ name: "wa_inbox_session", value: oldCookie, domain: "127.0.0.1", path: "/" }]);
+    const P = await C.newPage();
+    try {
+      await P.goto(`${BASE}/admin/quotes`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+      const row = P.locator(`[data-e2e="q-row-${Q_YMT_0}"]`); // pending tab（default）
+      let rowOk = false;
+      const t0f = Date.now();
+      for (;;) {
+        try {
+          if ((await row.count()) === 1) {
+            rowOk = true;
+            break;
+          }
+        } catch {
+          /* dev 重編譯 */
+        }
+        if (Date.now() - t0f > 90_000) break;
+        await sleep(500);
+      }
+      check("T750f 舊 session（無 scopeType）ALL ADMIN → 報價頁 200 + pending 行見到", rowOk, { row: await row.count().catch(() => -1) });
+      // 開編輯面板 → 「順手教字典」勾選要出現（page 同 API 同一個 fallback 口徑：ADMIN 無 scopeType → ALL）
+      if (rowOk) {
+        await P.locator(`[data-e2e="q-correct-${Q_YMT_0}"]`).click({ timeout: 15_000 });
+        const toggle = P.locator('[data-e2e="q-teach-toggle"]');
+        let toggleOk = false;
+        const t1f = Date.now();
+        for (;;) {
+          try {
+            if ((await toggle.count()) >= 1) {
+              toggleOk = true;
+              break;
+            }
+          } catch {
+            /* dev 重編譯 */
+          }
+          if (Date.now() - t1f > 20_000) break;
+          await sleep(300);
+        }
+        check('T750f 頁面見到 data-e2e="q-teach-toggle"（F-4 scopeType fallback）', toggleOk, { toggle: await toggle.count().catch(() => -1) });
+      } else {
+        fail('T750f 頁面見到 data-e2e="q-teach-toggle"（F-4 scopeType fallback）— pending 行未見到，跳過');
+      }
+    } finally {
+      await C.close().catch(() => {});
+      await B.close().catch(() => {});
+    }
   } finally {
     // ── restore mock symlink + cleanup DB（setup 失敗都行呢度）────
     try {
