@@ -26,11 +26,7 @@ import path from "node:path";
 import os from "node:os";
 import { execSync } from "node:child_process";
 import { PrismaClient } from "@prisma/client";
-
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
+import { chromium } from "./_pw"; // ★ cwi-final F-5：playwright-core 單一入口（PW_CORE 可覆蓋）
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:3100";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");

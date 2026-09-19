@@ -23,12 +23,10 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { PrismaClient } from "@prisma/client";
+import { chromium } from "./_pw"; // ★ cwi-final F-5：playwright-core 單一入口（PW_CORE 可覆蓋）
 
 const require = createRequire(path.join(process.cwd(), "package.json"));
 const argon2 = require("argon2");
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 try {
   process.loadEnvFile(path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", ".env"));
