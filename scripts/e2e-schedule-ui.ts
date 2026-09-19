@@ -546,7 +546,26 @@ async function main(): Promise<void> {
     if (!convPrefill) throw new Error("fixture conversation 未建（見上 fixture 錯誤）");
     await P.goto(`${base}/schedule?clinic=TKW&view=day&date=${today}`, { waitUntil: "domcontentloaded", timeout: 60000 });
     await P.waitForTimeout(4000);
-    // 撳 12:00 ONLINE 格（default chip = 第一有席 = mock-pract-TKW-0）
+    // ★ cwi-final B3-harness（2026-09-20）：mock bookable grid 嘅 seatsFree 係 djb2(clinic|date|slot|provider)
+    //   派生 → 每日個數不同 → flow-slots.ts:219 按 onlineSeats 降序排 provider 嘅「第一位」每日可變
+    //   （實錘：2026-09-19 TKW-0=24>TKW-1=8 → TKW-0 首位；2026-09-20/21 TKW-1=24>TKW-0=16 → TKW-1 首位）。
+    //   舊版硬編碼 mock-pract-TKW-0 → 09-20 起 T183 恒紅（harness 日期依賴，非產品回歸）。
+    //   修：動態攞 API 排序第一、12:00 ONLINE 嘅 provider 做預期（同 UI 同一 API 同一排序）。
+    let expectedProviderId: string | null = null;
+    {
+      const sr = await fetch(`${base}/api/flows/slots?clinicCode=TKW&from=${today}&to=${today}&granularity=day`, {
+        headers: { cookie: `wa_inbox_session=${sessionValue}` },
+      });
+      if (sr.ok) {
+        const sj = (await sr.json()) as { days?: { providers?: { providerId?: string; slots?: { start?: string; state?: string }[] }[] }[] };
+        const first = (sj.days?.[0]?.providers ?? []).find((p) =>
+          (p.slots ?? []).some((s) => s.start === "12:00" && s.state === "ONLINE")
+        );
+        if (first?.providerId) expectedProviderId = first.providerId;
+      }
+    }
+    if (!expectedProviderId) throw new Error("12:00 ONLINE 格唔存在（bookable grid 變化？）");
+    // 撳 12:00 ONLINE 格（default chip = 第一位有席 provider — 動態，見上）
     await L(P.getByTitle(/12:00–12:30/)).first().click();
     if (!(await poll(async () => ((await P.textContent("body")) ?? "").includes("幫病人約"), 5000)))
       throw new Error("popover 未開（幫病人約）");
@@ -562,7 +581,7 @@ async function main(): Promise<void> {
     if (!(await poll(async () => flowsReqs.length > reqBefore, 10000))) throw new Error("Flow POST 未發出");
     const req = flowsReqs[flowsReqs.length - 1];
     if (!req.body.includes(`"date":"${today}"`)) throw new Error(`prefill.date 錯：${req.body.slice(0, 120)}`);
-    if (!req.body.includes('"providerId":"mock-pract-TKW-0"')) throw new Error("prefill.providerId 錯");
+    if (!req.body.includes(`"providerId":"${expectedProviderId}"`)) throw new Error(`prefill.providerId 錯（預期 ${expectedProviderId}）：${req.body.slice(0, 160)}`);
     if (!req.body.includes('"start":"12:00"')) throw new Error("prefill.start 錯（12:00）");
     if (!(await poll(async () => flowsResps.length > respBefore, 10000))) throw new Error("Flow POST 無 response");
     const resp = flowsResps[flowsResps.length - 1];
