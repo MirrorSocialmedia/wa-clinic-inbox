@@ -3,6 +3,8 @@ import { outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { OUTBOUND_CONCURRENCY } from "./concurrency";
 import { publishNotify, publishStaffNotify } from "@/lib/notify";
 import { sendTextMessage, sendFlowMessage, sendTemplateMessage, type FlowMessageConfig, type TemplateComponent } from "@/lib/wa/graph";
+// ★ cwi-final S1-1c：waMessageId 寫入後 drain 早過訊息嘅 status（PendingStatus）
+import { drainPendingStatuses } from "@/lib/wa/status-apply";
 import { acquireToken } from "@/lib/rate-limit";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -154,6 +156,10 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       where: { id: msg.id },
       data: { waMessageId: wamid, status: "SENT" },
     });
+    // ★ cwi-final S1-1c：status 可能早過呢次 wamid 寫入（webhook 已 parked 入 PendingStatus）
+    //   → 寫入成功後即刻 drain。（S1-15 之後會改條件式 update — 排水放佢之後，註記俾 B7）
+    //   drain 失敗唔 throw（內部 catch + log.warn）→ 唔會重試主 job；sweep */2 兜底。
+    await drainPendingStatuses(wamid);
     await touchConv(clinic.id, conv.id, msg.waTimestamp);
     const payload = {
       conversationId: conv.id,

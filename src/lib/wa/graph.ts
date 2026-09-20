@@ -49,9 +49,13 @@ export async function sendTextMessage(opts: {
     if (process.env.WA_GRAPH_MOCK_FAIL === "1") {
       throw new Error("MOCK_GRAPH_TIMEOUT: simulated Graph API failure (WA_GRAPH_MOCK_FAIL=1)");
     }
-    // 模擬輕微網絡延遲（let queue retry/backoff 行為真實啲）
-    await new Promise((r) => setTimeout(r, 10));
-    const wamid = `mock-wamid-${randomBytes(10).toString("hex")}`;
+    // 模擬輕微網絡延遲（let queue retry/backoff 行為真實啲）。
+    // ★ cwi-final S1-1c test hook：WA_GRAPH_MOCK_DELAY_MS 拉長「Graph 回應 ↔ waMessageId 寫入」窗口
+    //   （e2e T714 case 2/3 用：status webhook 喺窗口內搶入 → PendingStatus parked → drain）；
+    //   WA_GRAPH_MOCK_WAMID 固定 wamid（e2e 需要事先知道 wamid 先發 webhook）。只影響 mock 分支。
+    const delayMs = Math.max(0, parseInt(process.env.WA_GRAPH_MOCK_DELAY_MS ?? "10", 10) || 0);
+    await new Promise((r) => setTimeout(r, delayMs));
+    const wamid = process.env.WA_GRAPH_MOCK_WAMID || `mock-wamid-${randomBytes(10).toString("hex")}`;
     log.info(
       { phoneNumberId, to, wamid, bodyLen: body.length, mock: true },
       "graph: send text (MOCK)"

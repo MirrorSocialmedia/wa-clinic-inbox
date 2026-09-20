@@ -504,6 +504,23 @@ model Message {
   @@index([conversationId, waTimestamp])
 }
 
+// ★ cwi-final S1-1c（C-1③ / audit3 P1-06）：status 早過訊息暫存表。
+// outbound worker Graph 已回 wamid 但 message.update({ waMessageId }) 未寫入前，
+// sent/delivered/read/failed webhook 已到 → 舊 code claim 留低 + Message 搵唔到 → status 永久丟。
+// 而家：同 tx 落 PendingStatus（parked）→ 三個排水點（outbound 寫入後 / APP_ECHO 後 / 2min sweep）配對時 apply + 刪行。
+// 零 PII 鐵律：只有 wamid/status/errorCode/clinicId — 禁加 contact/phone/name 任何欄。
+model PendingStatus {
+  id         String   @id @default(cuid())
+  wamid      String
+  status     String   // SENT | DELIVERED | READ | FAILED（STATUS_MAP 之後）
+  errorCode  String?
+  clinicId   String
+  receivedAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([wamid, status])
+  @@index([receivedAt])
+}
+
 // ★ H2：內部備註已讀回執（確認 ② — tick 顯示 @人 已讀）。
 // 前端 IntersectionObserver 入 viewport → POST /api/notes/[id]/read upsert（冪等）。
 model NoteReadReceipt {

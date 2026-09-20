@@ -43,6 +43,8 @@ import {
   unlockAudio,
   type NotifyPrefs,
 } from "@/lib/notify-client";
+// ★ cwi-final S1-1c：client 同 server 共用同一套 monotonic status 規則（只升唔降）
+import { nextStatus } from "@/lib/wa/status-rank";
 import { ConversationList } from "./conversation-list";
 import { ChatPane } from "./chat-pane";
 import { DetailPane } from "./detail-pane";
@@ -578,17 +580,20 @@ export function InboxClient({
     socket.on("message:status", (e: MessageStatusEvent) => {
       if (selectedIdRef.current !== e.conversationId) return;
       setMessages((prev) =>
-        prev.map((m) =>
-          m.waMessageId === e.waMessageId || m.id === e.waMessageId
-            ? {
-                ...m,
-                status: e.status,
-                errorCode: e.errorCode,
-                // ★ cwi-inboxfix-20260905（MD §5.3）：void 事件帶 voidedAt → 氣泡即時加「已作廢」tag
-                ...(e.voidedAt ? { voidedAt: e.voidedAt } : {}),
-              }
-            : m
-        )
+        prev.map((m) => {
+          if (m.waMessageId !== e.waMessageId && m.id !== e.waMessageId) return m;
+          // ★ cwi-final S1-1c：只升唔降喺 client 都生效（同 server status-rank.ts 同一套規則）
+          //   — read 之後到嘅 delivered 唔會再倒退。void 事件 status 唔變（nextStatus 回 null → 保留原狀）。
+          const next = nextStatus(m.status, e.status);
+          return {
+            ...m,
+            status: next ?? m.status,
+            // errorCode 只喺 FAILED 時更新（其他狀態唔郁呢欄 — 同 server applyStatusInTx 口徑）
+            ...(e.status === "FAILED" && e.errorCode ? { errorCode: e.errorCode } : {}),
+            // ★ cwi-inboxfix-20260905（MD §5.3）：void 事件帶 voidedAt → 氣泡即時加「已作廢」tag
+            ...(e.voidedAt ? { voidedAt: e.voidedAt } : {}),
+          };
+        })
       );
     });
 

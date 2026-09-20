@@ -9,6 +9,8 @@ import { notifyAlert } from "@/lib/health/notify";
 import { upsertAlert } from "@/lib/health/alerts";
 import { writeDeadLetter } from "@/lib/ops/dead-letter";
 import { encryptMedia, getMediaKey } from "@/lib/wa/media";
+// ★ cwi-final S1-1c：status monotonic apply + PendingStatus 排水
+import { applyStatusInTx, drainPendingStatuses } from "@/lib/wa/status-apply";
 import { Prisma, type Clinic, type Contact, type Conversation, type Message } from "@prisma/client";
 import { INBOUND_CONCURRENCY } from "./concurrency";
 // ★ cwi-followup-p3-20260916：follow-up inbound hook（opt-out 偵測 + 回覆標記）
@@ -697,6 +699,11 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
       continue;
     }
 
+    // ★ cwi-final S1-1c：APP_ECHO Message 落庫（wamid 寫入）後 → drain 早到嘅 status
+    //   （例如病人手機 App 發咗訊息但系統未見 wamid 時嘅 sent/delivered webhook）。
+    //   drain 失敗唔 throw（內部 catch）；sweep */2 兜底。
+    await drainPendingStatuses(wamid);
+
     // ★ Realtime P0 (R4)：echo media 一樣走獨立 media queue（見 handleMessages 註釋）
     if (mid) {
       try {
@@ -946,24 +953,38 @@ async function handleStatuses(clinic: Clinic, value: NonNullable<WaChange["value
         : null;
 
     // ★ P0-1 同一 pattern：claim + update 同一個 $transaction。
-    //   P2002 時分三況：
-    //     • 無 Message → skip（同舊行為）
+    //   P2002 時分四況：
+    //     • 無 Message + claimed（新）→ ★ cwi-final S1-1c：status 早過訊息 → 同 tx parked 入 PendingStatus
+    //     • 無 Message + 舊 claim（重發）→ createMany skipDuplicates no-op → 一樣 parked（冪等）
     //     • status 已 = target → 真處理過 → 靜默 skip（唔重複 notify，同舊行為）
-    //     • claim 存在但 status 未更新（claim 孤兒）→ 補 apply + notify
+    //     • claim 存在但 status 未更新（claim 孤兒）→ 補 apply + notify（同現行 P0-1 口徑）
     const result = await prisma.$transaction(async (tx) => {
       const claimed = await claimInTx(tx, `status:${wamid}:${s.status}`, "statuses");
       const msg = await tx.message.findUnique({ where: { waMessageId: wamid } });
-      if (!msg) return { missing: true as const, changed: false, convId: null as string | null };
+      if (!msg) {
+        // ★ cwi-final S1-1c（C-1③）：舊 code 呢度直接 return → claim 留低 + Meta 唔重送 → status 永久丟。
+        //   而家 parked 入 PendingStatus（同 tx commit — 要嘛全有要嘛全冇，唔會兩頭唔到岸）。
+        //   零 PII：只有 wamid/status/errorCode/clinicId。排水：outbound 寫入後 / APP_ECHO 後 / sweep */2。
+        await tx.pendingStatus.createMany({
+          data: [{ wamid, status: target, errorCode, clinicId: clinic.id }],
+          skipDuplicates: true,
+        });
+        return { parked: true as const, changed: false, convId: null as string | null };
+      }
       const alreadyApplied = !claimed && msg.status === target;
+      let changed = false;
       if (!alreadyApplied) {
-        await tx.message.update({ where: { id: msg.id }, data: { status: target, errorCode } });
+        // ★ cwi-final S1-1c：monotonic apply（取代舊直接 update — read 之後到 delivered 唔再倒退）。
+        //   claimed===false 而 status≠target（claim 孤兒）都照 apply（同現行 P0-1 口徑）。
+        const applied = await applyStatusInTx(tx, msg, target, errorCode);
+        changed = applied !== null;
       }
       const conv = await tx.conversation.findUnique({ where: { id: msg.conversationId }, select: { id: true } });
-      return { missing: false as const, changed: !alreadyApplied, convId: conv?.id ?? null };
+      return { parked: false as const, changed, convId: conv?.id ?? null };
     });
 
-    if (result.missing) {
-      log.warn({ wamid, status: s.status }, "inbound: status for unknown message, skipped");
+    if (result.parked) {
+      log.info({ wamid, status: target }, "inbound: status 早過訊息 — 已暫存 PendingStatus");
       continue;
     }
     if (result.changed && result.convId) {

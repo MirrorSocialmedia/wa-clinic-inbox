@@ -108,9 +108,15 @@ async function registerSchedulers() {
     name: "stuck-sweep",
     data: {},
   });
+  // ★ cwi-final S1-1c（C-1③）：PendingStatus 排水兜底 — 每 2 分鐘（同 stuck-sweep 一條 light cron lane）
+  //   （drain 配對到 Message 嘅 wamid + 24h 仍配對唔到 → 丟棄）
+  await cronQueue.upsertJobScheduler("sched-pending-status-sweep", { pattern: "*/2 * * * *" }, {
+    name: "pending-status-sweep",
+    data: {},
+  });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00, company-sync daily 03:00, followup-scan */10m, stuck-sweep */5m)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00, company-sync daily 03:00, followup-scan */10m, stuck-sweep */5m, pending-status-sweep */2m)"
   );
 }
 

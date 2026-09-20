@@ -35,6 +35,9 @@
  * - company-sync       每日 03:00 → cwi-followup-p0-20260915（MD §1.1）：公司主資料同步（workforce →
  *                                       wa-inbox 快取）— name-match 填 sourceId + upsert + Clinic.companyId；
  *                                       結果落 CompanySyncRun（hub 健康列；冪等，重跑安全）
+ * - pending-status-sweep 每 2 分鐘 → cwi-final S1-1c（C-1③）：status 早過訊息 parked 行兜底 —
+ *                                       drain 配對到 Message 嘅 wamid（LIMIT 500）+ 24h 仍配對唔到 → 丟棄
+ *                                       （同 stuck-sweep 同一條 light cron lane）
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
  */
@@ -48,6 +51,7 @@ import { refreshAllClinics } from "@/lib/availability";
 import { runExpiry } from "@/lib/booking/expiry";
 import { runHealthCheck, type HealthOverrides } from "@/lib/health/check";
 import { runStuckSweep } from "@/lib/ops/stuck-sweep";
+import { runPendingStatusSweep } from "@/lib/ops/pending-status-sweep";
 import { runQualityCheck } from "@/lib/quality/check";
 import { runWeeklyReport } from "@/lib/ops/report";
 import { runRetentionPurge } from "@/lib/ops/retention-purge";
@@ -162,6 +166,13 @@ export async function startCronWorker(): Promise<Worker | null> {
           // ★ cwi-final S1-1b（C-1②）：commit 後副作用丟失兜底（media PENDING>10min / IN text 無 AiDraft）。
           // light cron lane */5；冪等（jobId + 前置存在性檢查）；E2E 可手動 enqueue（pnpm e2e:cron stuck-sweep）
           const r = await runStuckSweep();
+          return { ok: true, ...r };
+        }
+        case "pending-status-sweep": {
+          // ★ cwi-final S1-1c（C-1③）：status 早過訊息 parked 行兜底（drain 配對到嘅 + 24h 丟棄）。
+          // 同 stuck-sweep 同一條 light cron lane（每 2 分鐘）；冪等（monotonic apply + 行刪除）；
+          // E2E 可手動 enqueue（pnpm e2e:cron pending-status-sweep）
+          const r = await runPendingStatusSweep();
           return { ok: true, ...r };
         }
         case "reminder-scan": {

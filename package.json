@@ -25,6 +25,8 @@
     "e2e:t723": "tsx scripts/e2e-t723-upsert-alert.ts",
     "e2e:t610": "tsx scripts/e2e-t610-dlq-replay.ts",
     "e2e:t713": "tsx scripts/e2e-t713-side-effects.ts",
+    "e2e:t714": "tsx scripts/e2e-s11c-t714.ts",
+    "e2e:t724": "tsx scripts/unit-t724-status-rank.ts",
     "replay:dlq": "tsx scripts/replay-dead-letters.ts",
     "e2e:t600": "tsx scripts/e2e-t600-multiclinic-staff.ts",
     "e2e:t601": "tsx scripts/e2e-t601-t607-followup-adopt.ts",
@@ -94,7 +96,9 @@
     "e2e:push": "tsx scripts/e2e-push.ts",
     "e2e:multiclinic-ui": "tsx scripts/e2e-multiclinic-ui.ts",
     "e2e:manual-booking": "tsx scripts/e2e-manual-booking.ts",
-    "test:unit-followup": "tsx scripts/unit-followup.ts"
+    "test:unit-followup": "tsx scripts/unit-followup.ts",
+    "test:unit-t724": "tsx scripts/unit-t724-status-rank.ts",
+    "e2e:s11c-t714": "tsx scripts/e2e-s11c-t714.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
