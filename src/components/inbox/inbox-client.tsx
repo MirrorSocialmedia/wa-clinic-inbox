@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import type {
   AiClassifiedEvent,
+  BookingChangedEvent,
   BookingEvent,
   ClinicInfo,
   ClinicLite,
@@ -16,12 +17,15 @@ import type {
   DraftReadyEvent,
   MessageItem,
   MessageStatusEvent,
+  MediaReadyEvent,
   MentionNotifyEvent,
   NewMessageEvent,
   NoteNewEvent,
   NoteReadEvent,
   NoteReceipt,
   NoticeNewEvent,
+  NotifyTakeoverEvent,
+  PatientPinnedEvent,
   RoutingAssignedEvent,
   RoutingEscalationEvent,
   StaffInfo,
@@ -255,6 +259,12 @@ export function InboxClient({
   const [urgentToast, setUrgentToast] = useState<{ conversationId: string; contactName: string | null } | null>(null);
 
   const [selectedConvId, setSelectedConvId] = useState<string | null>(initialSelectedConvId ?? null);
+  // ★ cwi-final S1-3（N-3）：選中對話嘅 row 係否正經 ensureConversationLoaded 補載中（深連結 / push / bell
+  //   指向唔喺列表嘅對話）— true 期間手機顯示 skeleton + 返回掣（唔好空白 / 唔好「揀一個對話開始」）。
+  //   只係「正進行」先 true：guard 完結（成功寫入 row / 失敗出 notice）即清 — 避免列表 full refetch
+  //   後 row 被 merge 走嘅「卡死 skeleton」形態。
+  const [selConvLoading, setSelConvLoading] = useState(false);
+  const selLoadGenRef = useRef(0); // 防 stale：連續快撳 → 舊 ensure 完結唔會誤清新一次嘅 loading 旗
   // ★ booking-ui（C）：側欄 patient-context 重載訊號（socket booking:changed / 側欄寫入後 bump）
   const [ctxRefreshKey, setCtxRefreshKey] = useState(0);
   // ★ cwi-h6 §4：內部備註卡重拉訊號（socket note:new → 選中對話）
@@ -320,6 +330,19 @@ export function InboxClient({
         if (oldest != null) seenMsgIdsRef.current.delete(oldest);
       }
     }
+    return true;
+  };
+  // ★ cwi-final S1-4：eventId 去重（spec 代碼）— publishConvEvent 注入 eventId；
+  //   同店成員經 clinic room + staff room 雙投 → 只處理首次。定向 send（無 eventId）自然 passthrough。
+  const seenEventIdsRef = useRef<string[]>([]);
+  const seenEventSet = useRef(new Set<string>());
+  const firstTime = (e: { eventId?: string }): boolean => {
+    if (!e.eventId) return true;
+    if (seenEventSet.current.has(e.eventId)) return false;
+    seenEventSet.current.add(e.eventId);
+    seenEventIdsRef.current.push(e.eventId);
+    if (seenEventIdsRef.current.length > 1000)
+      seenEventSet.current.delete(seenEventIdsRef.current.shift()!);
     return true;
   };
   // §1.1：推進 per-conversation 游標（只進唔退；null/非法 ts 無動作）
@@ -537,7 +560,21 @@ export function InboxClient({
       scheduleRtSnapshot();
     });
 
+    // ★ cwi-final S1-7：message:new ids-only degrade（無 message.id）→ 重拉該 row 對齊，唔插假 bubble。
+    //   無 per-conv row API → 全列表（degrade 路徑低頻）；F-3 coalesce 窗口只限兩個 handler，唔用喺度。
+    const reconcileConversationRow = (convId: string) => {
+      if (!convId) return;
+      void fetchConversations(activeClinicRef.current);
+    };
+
     socket.on("message:new", (e: NewMessageEvent) => {
+      // ★ cwi-final S1-4：eventId 去重（雙保險第一道；第二道 = 下面 rememberMsgId）
+      if (!firstTime(e)) return;
+      // ★ cwi-final S1-7：ids-only degrade emit（無 message.id）→ 重拉該 row 對齊，唔插假 bubble
+      if (!e?.message?.id) {
+        void reconcileConversationRow(e.conversationId);
+        return;
+      }
       // ★ cwi-realtime-v2 §1：去重 — 同店 assignee 經 clinic room + staff room 收同一條兩次；
       //   唔去重會雙彈 OS 通知 / 雙更新列表。
       if (!rememberMsgId(e.message.id)) return;
@@ -649,6 +686,7 @@ export function InboxClient({
     });
 
     socket.on("message:status", (e: MessageStatusEvent) => {
+      if (!firstTime(e)) return;
       if (selectedIdRef.current !== e.conversationId) return;
       setMessages((prev) =>
         prev.map((m) => {
@@ -669,22 +707,27 @@ export function InboxClient({
     });
 
     socket.on("conv:updated", (e: ConvUpdatedEvent) => {
+      if (!firstTime(e)) return;
+      // ★ cwi-final S1-7：patch-only — ids-only emit 合法（T707）：只 patch 有定義欄位，唔好 undefined 洗走 row
       setConversations((prev) =>
         prev.map((c) =>
           c.id === e.conversationId
             ? {
                 ...c,
-                status: e.status,
-                assigneeId: e.assigneeId,
-                // cwi-multiclinic-20260903：全店 staff 先查（跨店負責人）→ fallback 本店
-                assigneeName: e.assigneeId
-                  ? allStaffRef.current.find((s) => s.id === e.assigneeId)?.name ??
-                    staffRef.current.find((s) => s.id === e.assigneeId)?.name ??
-                    null
-                  : null,
-                // ★ Realtime P0 (R5)：version 同步（PATCH assignee 變動 → server 已 +1）
-                assignVersion: e.assignVersion,
-                unreadCount: e.unreadCount,
+                ...(e.status !== undefined ? { status: e.status } : {}),
+                ...(e.assigneeId !== undefined
+                  ? {
+                      assigneeId: e.assigneeId,
+                      // cwi-multiclinic-20260903：全店 staff 先查（跨店負責人）→ fallback 本店
+                      assigneeName: e.assigneeId
+                        ? allStaffRef.current.find((s) => s.id === e.assigneeId)?.name ??
+                          staffRef.current.find((s) => s.id === e.assigneeId)?.name ??
+                          null
+                        : null,
+                    }
+                  : {}),
+                ...(typeof e.assignVersion === "number" ? { assignVersion: e.assignVersion } : {}),
+                ...(typeof e.unreadCount === "number" ? { unreadCount: e.unreadCount } : {}),
                 // RESOLVED 自動清急症紅標（同 API PATCH 語義一致）
                 urgent: e.status === "RESOLVED" ? false : c.urgent,
               }
@@ -697,6 +740,7 @@ export function InboxClient({
 
     // 分類成功 → 更新 intent/urgency/urgent/summary（metadata + summary 係聊天內容）
     socket.on("ai:classified", (e: AiClassifiedEvent) => {
+      if (!firstTime(e)) return;
       setConversations((prev) =>
         prev.map((c) =>
           c.id === e.conversationId
@@ -708,6 +752,7 @@ export function InboxClient({
 
     // 新 pending draft → 入 card（對話欄上方）
     socket.on("draft:ready", (e: DraftReadyEvent) => {
+      if (!firstTime(e)) return;
       setPendingDrafts((prev) => ({
         ...prev,
         [e.conversationId]: {
@@ -730,13 +775,18 @@ export function InboxClient({
     // 急症升級 → 隊列頂紅標 + toast（12s 自動消）
     // ★ AI Workflow T1 (A2)：內部通知即時 +1（ref — 避 stale closure / deps warning）
     socket.on("notice:new", (e: NoticeNewEvent) => {
+      if (!firstTime(e)) return;
       void fetchNoticesRef.current();
+      // ★ cwi-final S1-7：conversationId=null = clinic 級通知（unassigned-sla）：
+      //   無 conv row 可補 clinicId → 用 payload 嘅 e.clinicId；shouldNotify 對 null 直接放行（N-5 唔適用）。
+      const convIdN = e.conversationId;
+      const convN = convIdN ? (conversationsRef.current.find((c) => c.id === convIdN) ?? null) : null;
+      const clinicIdN = e.clinicId ?? convN?.clinicId ?? "";
       // ★ Part B（N-1）：輕音（接手/放手/auto-release 等）— clinicId/assigneeId 由 state 補（payload 只 conversationId+kind）
-      const convN = conversationsRef.current.find((c) => c.id === e.conversationId) ?? null;
       if (
         shouldNotify({
           kind: "notice",
-          clinicId: convN?.clinicId ?? "",
+          clinicId: clinicIdN,
           conversationId: e.conversationId,
           assigneeId: convN?.assigneeId ?? null,
           myStaffId: user.staffId,
@@ -750,14 +800,16 @@ export function InboxClient({
         console.debug("notify:", "socket:notice:new"); // F-7：通知來源留痕（只准 socket/push 觸發）
         void fireNotify({
           kind: "notice",
-          clinicShort: clinicShortOf(convN?.clinicId),
-          conversationId: e.conversationId,
-          onClick: () => selectConvRef.current(e.conversationId),
+          clinicShort: clinicShortOf(clinicIdN),
+          conversationId: convIdN ?? "", // clinic 級 → tag ""（同店 SLA 通知互相取代，唔疊爆）
+          // clinic 級（null）→ 撳通知唔 select（無 row 可跳）
+          onClick: convIdN ? () => selectConvRef.current(convIdN) : undefined,
           prefs: prefsRef.current,
         });
       }
     });
     socket.on("urgent:escalation", (e: UrgentEscalationEvent) => {
+      if (!firstTime(e)) return;
       setConversations((prev) =>
         prev.map((c) => (c.id === e.conversationId ? { ...c, urgent: true, intent: e.intent, urgency: e.urgency } : c))
       );
@@ -793,11 +845,13 @@ export function InboxClient({
     // ── Phase 3：預約卡事件（綠色卡） ─────────────────────
     // booking:new（病人 Complete 過 precheck）/ booking:updated（confirm/expire）
     socket.on("booking:new", (e: BookingEvent) => {
+      if (!firstTime(e)) return;
       setConversations((prev) =>
         prev.map((c) => (c.id === e.conversationId ? { ...c, pendingBooking: e.booking } : c))
       );
     });
     socket.on("booking:updated", (e: BookingEvent) => {
+      if (!firstTime(e)) return;
       setConversations((prev) =>
         prev.map((c) => (c.id === e.conversationId ? { ...c, pendingBooking: e.booking } : c))
       );
@@ -805,7 +859,8 @@ export function InboxClient({
 
     // ★ booking-ui（C）：代落單/rollback/改期/取消 寫入後 → 列表重拉（對話卡狀態）+ 側欄 patient-context 重拉
     // payload（conversationId/clinicId/date/kind）保留喺 contract（types.ts BookingChangedEvent）；重拉係全列表，故唔 binding
-    socket.on("booking:changed", () => {
+    socket.on("booking:changed", (e: BookingChangedEvent) => {
+      if (!firstTime(e)) return;
       void fetchConversations(activeClinicRef.current);
       setCtxRefreshKey((k) => k + 1);
     });
@@ -821,6 +876,7 @@ export function InboxClient({
 
     // 轉交/接手/放返隊列/auto-claim → 負責人 chip 即時更新（payload 零內文）
     socket.on("conversation:assigned", (e: ConversationAssignedEvent) => {
+      if (!firstTime(e)) return;
       setConversations((prev) =>
         prev.map((c) =>
           c.id === e.conversationId
@@ -875,6 +931,7 @@ export function InboxClient({
 
     // routing:assigned — 路由引擎寫咗 routed* 標記（組 ∨ R-9 當值單人；R-2：唔掂 assignee）
     socket.on("routing:assigned", (e: RoutingAssignedEvent) => {
+      if (!firstTime(e)) return;
       const before = conversationsRef.current.find((c) => c.id === e.conversationId);
       patchRoutingRow(
         e.conversationId,
@@ -891,6 +948,7 @@ export function InboxClient({
 
     // routing:escalation — 升級計時器 claim 咗對話（routed → 升級組；routedStaffId 清 null）
     socket.on("routing:escalation", (e: RoutingEscalationEvent) => {
+      if (!firstTime(e)) return;
       const before = conversationsRef.current.find((c) => c.id === e.conversationId);
       patchRoutingRow(
         e.conversationId,
@@ -906,6 +964,7 @@ export function InboxClient({
 
     // 新內部備註（零內文）→ 選中對話拉最新訊息；列表 preview/lastMessageAt 先本地更新
     socket.on("note:new", (e: NoteNewEvent) => {
+      if (!firstTime(e)) return;
       const now = new Date().toISOString();
       setConversations((prev) =>
         prev.map((c) =>
@@ -921,6 +980,7 @@ export function InboxClient({
 
     // ★ H2：已讀回執（零內文）→ 選中對話 tick 即時重算（去重：同 messageId+staffId 只留首條）
     socket.on("note:read", (e: NoteReadEvent) => {
+      if (!firstTime(e)) return;
       if (selectedIdRef.current !== e.conversationId) return;
       setReceipts((prev) =>
         prev.some((r) => r.messageId === e.messageId && r.staffId === e.staffId)
@@ -934,6 +994,7 @@ export function InboxClient({
     // ★ Part B：改用 fireNotify 統一節流（N-6）/開關（N-8）— bell/黃點邏輯照舊，
     //   行為不變（chime + 彈屏 + 撳跳；mention 係定向推送，唔走 N-2 assignee 邏輯）
     socket.on("notify:mention", (e: MentionNotifyEvent) => {
+      if (!firstTime(e)) return;
       setMentionUnread((prev) => ({ ...prev, [e.conversationId]: (prev[e.conversationId] ?? 0) + 1 }));
       lastMentionRef.current = { conversationId: e.conversationId, messageId: e.messageId };
       const fromName = staffRef.current.find((s) => s.id === e.fromStaffId)?.name ?? "同事";
@@ -965,7 +1026,8 @@ export function InboxClient({
 
     // ★ cwi-inboxfix-20260905（MD I-4）：指派 → 定向 push（title「新指派 · {店簡稱}」/「有一條對話指派咗俾你」）。
     //   跨店被派者唔喺店 room — server 用 staff:{id} 定向 send 保證到；bell（StaffNotice row）順帶重拉。
-    socket.on("notify:assigned", (e: { conversationId: string; clinicId: string; clinicCode?: string | null }) => {
+    socket.on("notify:assigned", (e: { conversationId: string; clinicId: string; clinicCode?: string | null; eventId?: string }) => {
+      if (!firstTime(e)) return;
       if (
         shouldNotify({
           kind: "assigned",
@@ -1001,45 +1063,38 @@ export function InboxClient({
         .catch(() => {});
     });
 
-    // ★ cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA — 未指派超過 N 分鐘 → 全店 active STAFF 定向 push
-    //   （server 已 filter；body 零病人資料：店 code + 數目 + N）。bell（StaffNotice row）順帶重拉。
-    socket.on(
-      "notify:sla",
-      (e: { clinicId: string; clinicCode?: string | null; conversationId?: string | null; count?: number; n?: number }) => {
-        if (
-          shouldNotify({
-            kind: "sla",
-            clinicId: e.clinicId,
-            conversationId: e.conversationId ?? "",
-            assigneeId: null,
-            myStaffId: user.staffId,
-            myRole: user.role,
-            activeConversationId: selectedIdRef.current,
-            mutedClinics: prefsRef.current.mutedClinics,
-            adminMsgClinics: prefsRef.current.adminMsgClinics,
-          })
-        ) {
-          // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
-          console.debug("notify:", "socket:notify:sla"); // F-7：通知來源留痕（只准 socket/push 觸發）
-          void fireNotify({
-            kind: "sla",
-            clinicShort: e.clinicCode || clinicShortOf(e.clinicId),
-            conversationId: e.conversationId ?? "",
-            body: `有 ${e.count ?? 1} 條對話未有人跟（超過 ${e.n ?? 10} 分鐘）`,
-            onClick: () => e.conversationId && void selectConversation(e.conversationId),
-            prefs: prefsRef.current,
-          });
-        }
-        // 公海計數可能變（新入公海嘅線要即刻見到）+ bell 重拉（StaffNotice row）
-        void fetchConversations(activeClinicRef.current);
-        fetch("/api/notices", { cache: "no-store" })
-          .then((r) => (r.ok ? r.json() : null))
-          .then((d) => {
-            if (d?.notices) setNotices(d.notices);
-          })
-          .catch(() => {});
-      }
-    );
+    // ★ cwi-final S1-7：notify:sla handler 已刪 — SLA 通知改經 notice:new（conversationId=null，
+    //   clinic 級）：bell refetch + shouldNotify 放行 + fireNotify tag "" 全喺上面 notice:new handler。
+    // ★ cwi-h6：takeover → 原負責人定向（跨店原負責人收唔到 clinic room 嘅 conversation:assigned）。
+    //   toast + 重拉該 row（列表負責人/公海對齊）。
+    socket.on("notify:takeover", (e: NotifyTakeoverEvent) => {
+      if (!firstTime(e)) return;
+      const actorName = e.actorStaffId
+        ? (allStaffRef.current.find((s) => s.id === e.actorStaffId)?.name ?? "同事")
+        : "同事";
+      setNotice(`${actorName} 已接手呢個對話`);
+      // 即時 fetch（人手行動低頻；F-3 coalesce 窗口只限兩個 handler，唔用喺度）
+      void fetchConversations(activeClinicRef.current);
+    });
+
+    // ★ cwi-final S1-7：media worker 下載完 → patch 訊息 bubble 附件（mediaStatus/mediaPath）
+    socket.on("media:ready", (e: MediaReadyEvent) => {
+      if (!firstTime(e)) return;
+      if (selectedIdRef.current !== e.conversationId) return; // 未選中 conv 冇本地 bubble — 開時 fetch 補
+      setMessages((prev) =>
+        prev.map((m) => (m.id === e.messageId ? { ...m, mediaStatus: "READY", mediaPath: e.mediaPath } : m))
+      );
+    });
+
+    // ★ cwi-final S1-7：釘/取消釘病人獨立事件（只 patch pinnedPatientApricotId，唔郁其他 row 欄）
+    socket.on("patient:pinned", (e: PatientPinnedEvent) => {
+      if (!firstTime(e)) return;
+      setConversations((prev) =>
+        prev.map((c) => (c.id === e.conversationId ? { ...c, pinnedPatientApricotId: e.pinnedPatientApricotId } : c))
+      );
+      // 側欄 patient-context（跟 pinned id fetch）同步重拉
+      setCtxRefreshKey((k) => k + 1);
+    });
 
     socket.on("disconnect", () => {
       wasDisconnected = true;
@@ -1757,60 +1812,91 @@ export function InboxClient({
     })();
   }, []);
 
+  // ── ★ cwi-final S1-3（N-3）：單條補載 — 深連結 / push / bell / search 指向唔喺列表嘅對話 ────
+  //   舊行為：selectedConvId 已設但 row 唔喺 state → selectedConv 永遠 null → 空白畫面（mobile 尤甚）。
+  //   而家：?ids= 單條補載（route 已支援 — B6 object API 回 { items }）寫入 state；
+  //   403/404（冇權限 / 唔存在）或空 items → false（caller 出 notice，唔扮成功）。
+  const ensureConversationLoaded = useCallback(async (id: string): Promise<boolean> => {
+    if (conversationsRef.current.some((c) => c.id === id)) return true;
+    try {
+      const res = await fetch(`/api/conversations?ids=${encodeURIComponent(id)}`);
+      if (!res.ok) return false; // 403/404 → 冇權限或者唔存在
+      const body = (await res.json()) as { items?: ConversationItem[] };
+      const rows = body.items ?? []; // ★ B6：object 回應 — 讀 .items
+      if (rows.length === 0) return false;
+      setConversations((prev) => (prev.some((c) => c.id === id) ? prev : [...prev, rows[0]]));
+      return true;
+    } catch {
+      return false; // 網絡抖動 → 當載入失敗（notice 好過空白）
+    }
+  }, []);
+
   // ── select conversation（markRead + 載入最新訊息） ───────────────────
+  // ★ cwi-final S1-3（N-3）：所有入口（列表 / 深連結 ?conv= / push SW open-conversation /
+  //   bell notice / search）统一經呢度：先 ensureConversationLoaded 補載 row，失敗 → notice + return（唔設 selectedConvId）。
   const selectConversation = useCallback(
     async (id: string) => {
+      let convId = id;
+      const prevId = selectedIdRef.current; // === 當前 selectedConvId（onBack / 防呆 effect 都同步）— guard 失敗時回滾用
       if (id.startsWith("contact:")) {
         // search 結果 stub：呢個 contact 未確定有冇對話 → 查返
         const contactId = id.slice("contact:".length);
+        let matchId: string | null = null;
         try {
-          const res = await fetch("/api/conversations");
+          // ★ cwi-final S1-3：改 ?contactId= 定點查（唔再拉全表）— B6 object 回應 .items
+          const res = await fetch(`/api/conversations?contactId=${encodeURIComponent(contactId)}`);
           if (res.ok) {
-            // ★ cwi-final S1-2：object 回應 — .items（暂留 full list；S1-3 先改 contactId 參數）
-            const all = (await res.json()) as { items: ConversationItem[] };
-            const match = all.items.find((c) => c.contactId === contactId);
-            if (match) {
-              setSelectedConvId(match.id);
-              selectedIdRef.current = match.id; // F-8：ref 同步（fetch guard 要即時准）
-              setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge）
-              setGapDividerAfterMs(null); // T2：換對話清中間斷層分隔線
-              holeFilledRef.current.clear(); // T3：換對話清補洞標記
-              void fetchMessagesLatest(match.id);
-              void fetchPendingDrafts(match.id);
-              void fetchSuggestion(match.id); // ★ cwi-followup-v3：跟進建議卡
-              void fetchNoteReceipts(match.id);
-              void markRead(match.id);
-              setSearchResults(null);
-              setSearch("");
-              return;
-            }
+            const all = (await res.json()) as { items?: ConversationItem[] };
+            matchId = (all.items ?? []).find((c) => c.contactId === contactId)?.id ?? null;
           }
         } catch {
           /* fallthrough */
         }
-        setNotice("呢個聯絡人仲未有任何對話記錄");
+        if (!matchId) {
+          setNotice("呢個聯絡人仲未有任何對話記錄");
+          return;
+        }
+        setSearchResults(null);
+        setSearch("");
+        convId = matchId;
+      }
+      // ★ S1-3：ref 先同步（喺 guard await 之前）→ 防呆 effect 見唔到 mismatch（深連結 mount 零 double load / 零偽 warn）；
+      //   guard 失敗時回滾 ref 到 prevId（state 未動 → ref 要同一個值）。
+      selectedIdRef.current = convId;
+      // loading 旗：只係要真補載先亮起（row 已喺列表 → 無 async 空洞）；gen 防 stale 快撳互踩
+      const needFetch = !conversationsRef.current.some((c) => c.id === convId);
+      const gen = ++selLoadGenRef.current;
+      if (needFetch) setSelConvLoading(true);
+      const loaded = await ensureConversationLoaded(convId);
+      if (needFetch && gen === selLoadGenRef.current) setSelConvLoading(false);
+      if (!loaded) {
+        selectedIdRef.current = prevId;
+        // 深連結 case：mount 時 state 直接由 ?conv= 設值而 ref 仍 null → id 無效（冇權限 / 唔存在）→
+        //   清掉（mobile 返返列表 + notice，唔係空白）；之前已選咗對話（prevId 非 null）→ 保留原選中。
+        if (prevId === null) setSelectedConvId(null);
+        setNotice("呢個對話你冇權限睇或者已經唔存在");
         return;
       }
-      setSelectedConvId(id);
-      selectedIdRef.current = id; // F-8：ref 同步（fetch guard 要即時准）
+      setSelectedConvId(convId);
+      selectedIdRef.current = convId; // F-8：ref 同步（fetch guard 要即時准）
       setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge — 唔清會混兩對話）
       setGapDividerAfterMs(null); // T2：換對話清中間斷層分隔線
       holeFilledRef.current.clear(); // T3：換對話清補洞標記
       setNotice(null);
-      void fetchMessagesLatest(id);
-      void fetchPendingDrafts(id);
-      void fetchSuggestion(id); // ★ cwi-followup-v3：跟進建議卡
+      void fetchMessagesLatest(convId);
+      void fetchPendingDrafts(convId);
+      void fetchSuggestion(convId); // ★ cwi-followup-v3：跟進建議卡
       // ★ H2：開對話 → 拉已讀回執（tick）+ 清該對話未讀 mention（bell/黃點）
-      void fetchNoteReceipts(id);
+      void fetchNoteReceipts(convId);
       setMentionUnread((prev) => {
-        if (!prev[id]) return prev;
+        if (!prev[convId]) return prev;
         const next = { ...prev };
-        delete next[id];
+        delete next[convId];
         return next;
       });
-      void markRead(id);
+      void markRead(convId);
     },
-    [fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts, fetchSuggestion]
+    [ensureConversationLoaded, fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts, fetchSuggestion]
   );
   // ★ Part B：socket handler（[] deps）要最新 selectConversation — ref 避 stale closure
   const selectConvRef = useRef<(id: string) => void>(() => {});
@@ -2475,6 +2561,7 @@ export function InboxClient({
         }}
         onOpenDetail={() => setDetailOpen(true)}
         conversation={selectedConv}
+        conversationLoading={selectedConvId !== null && selectedConv === null && selConvLoading} // ★ cwi-final S1-3（N-3）
         messages={messages}
         hasMore={hasMore}
         gapDividerAfterMs={gapDividerAfterMs}
@@ -2575,7 +2662,7 @@ export function InboxClient({
       )}
 
       {notice && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-t1 text-canvas text-sm px-4 py-2 rounded-xl shadow-lg z-50">
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-t1 text-canvas text-sm px-4 py-2 rounded-xl shadow-lg z-50" data-testid="inbox-notice">
           {notice}
           <button onClick={() => setNotice(null)} className="ml-3 text-t3 hover:text-canvas">
             ✕

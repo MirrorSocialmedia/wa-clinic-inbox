@@ -14,7 +14,7 @@
  */
 import type { Prisma, PrismaClient, ConsultSession } from "@prisma/client";
 import log from "@/lib/log";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import type { ConsultSessionState } from "./consult-engine";
 
 // ── 接口 ───────────────────────────────────────────────────────────────
@@ -160,7 +160,12 @@ async function handoffNotice(
         meta,
       },
     });
-    publishNotify(ref.clinicId, "notice:new", { conversationId: ref.id, kind: "HANDOFF_REQUEST" });
+    // ★ cwi-final S1-4：ref 只有 id+clinicId → 補五欄
+    const convRow = await prisma.conversation.findUnique({
+      where: { id: ref.id },
+      select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+    });
+    if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: ref.id, kind: "HANDOFF_REQUEST" });
   } catch (err) {
     log.warn({ err: String(err) }, "consult-engine: handoff notice failed（fail-soft）");
   }

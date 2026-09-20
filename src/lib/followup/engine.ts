@@ -60,9 +60,15 @@ async function lazyEnqueue(messageId: string): Promise<void> {
   const { enqueueOutboundSend } = await import("@/lib/queue");
   await enqueueOutboundSend(messageId);
 }
-async function lazyNotify(clinicId: string, event: string, payload: unknown): Promise<void> {
-  const { publishNotify } = await import("@/lib/notify");
-  publishNotify(clinicId, event, payload);
+// ★ cwi-final S1-4/S1-7：message:new 完整 payload 單一來源 + publishConvEvent（跨店 targeting + eventId 去重）
+async function lazyNotifyMessageNew(
+  messageId: string,
+  conv: { id: string; clinicId: string; assigneeId: string | null; routedStaffId: string | null; routedGroupId: string | null }
+): Promise<void> {
+  const { publishConvEvent, convRef } = await import("@/lib/notify");
+  const { buildMessageNewPayload } = await import("@/lib/realtime-payload");
+  const payload = await buildMessageNewPayload(messageId);
+  await publishConvEvent(convRef(conv), "message:new", payload);
 }
 
 const DAY_MS = 86_400_000;
@@ -1144,7 +1150,11 @@ export async function sendFollowupTask(
   }
 
   const conv = task.conversationId
-    ? await prisma.conversation.findUnique({ where: { id: task.conversationId }, select: { contactId: true, lastInboundAt: true } })
+    ? await prisma.conversation.findUnique({
+        // ★ cwi-final S1-4：ConvRef 五欄齊（publishConvEvent targeting 用）
+        where: { id: task.conversationId },
+        select: { id: true, clinicId: true, contactId: true, lastInboundAt: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+      })
     : null;
   const convId = task.conversationId;
   if (!conv || !convId) {
@@ -1238,7 +1248,7 @@ export async function sendFollowupTask(
   }
   await prisma.$executeRaw`
     UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${convId}`;
-  await lazyNotify(task.clinicId, "message:new", { conversationId: task.conversationId, clinicId: task.clinicId });
+  await lazyNotifyMessageNew(msg.id, conv);
   // ★ audit FOLLOWUP_SENT 零 PII（只 id/metadata — 病人姓名/電話/內容全部唔入）
   await prisma.auditLog.create({
     data: {

@@ -4,7 +4,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { phoneHash } from "@/lib/phone-hash";
 import { lookupPatient, WorkforceApiError } from "@/lib/workforce/client";
 
@@ -34,10 +34,6 @@ async function loadConvAndContact(id: string) {
   if (!conv) return null;
   const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
   return { conv, contact };
-}
-
-function pinUpdatedPayload(clinicId: string, conversationId: string) {
-  return { conversationId, clinicId, reason: "patient-pin" };
 }
 
 export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
@@ -89,7 +85,12 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
     })
     .catch(() => undefined);
 
-  publishNotify(conv.clinicId, "conv:updated", pinUpdatedPayload(conv.clinicId, conv.id));
+  // ★ cwi-final S1-7：獨立事件 patient:pinned（client 只 patch pinnedPatientApricotId，唔郁其他 row 欄）
+  await publishConvEvent(convRef(conv), "patient:pinned", {
+    conversationId: conv.id,
+    clinicId: conv.clinicId,
+    pinnedPatientApricotId: match.patientApricotId,
+  });
   return NextResponse.json({ ok: true });
 });
 
@@ -117,7 +118,12 @@ export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
         },
       })
       .catch(() => undefined);
-    publishNotify(conv.clinicId, "conv:updated", pinUpdatedPayload(conv.clinicId, conv.id));
+    // ★ cwi-final S1-7：取消釘住 = 同一事件，pinnedPatientApricotId: null
+    await publishConvEvent(convRef(conv), "patient:pinned", {
+      conversationId: conv.id,
+      clinicId: conv.clinicId,
+      pinnedPatientApricotId: null,
+    });
   }
   return NextResponse.json({ ok: true });
 });

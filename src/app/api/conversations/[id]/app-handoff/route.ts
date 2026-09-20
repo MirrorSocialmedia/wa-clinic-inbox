@@ -3,7 +3,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { publishNotify, publishStaffNotify } from "@/lib/notify";
+import { publishConvEvent, convRef, publishStaffNotify } from "@/lib/notify";
 import { pushToStaff } from "@/lib/push";
 
 /**
@@ -64,7 +64,8 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   await prisma.$executeRaw`UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
 
   // socket：同店 note:new（client 重拉訊息 — 備註即時見）+ 被 mention 者定向通知
-  publishNotify(conv.clinicId, "note:new", {
+  // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（conv 有齊五欄）
+  await publishConvEvent(convRef(conv), "note:new", {
     conversationId: conv.id,
     clinicId: conv.clinicId,
     messageId: msg.id,

@@ -19,7 +19,7 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { Prisma } from "@prisma/client";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { pushRoutingEvent } from "@/lib/push";
 
 export interface EscalateSweepResult {
@@ -115,14 +115,21 @@ export async function runRoutingEscalateSweep(): Promise<EscalateSweepResult> {
       });
       // commit-then-emit（鐵律 — 通知 commit 咗先 publish）
       // ★ cwi-auditfix-20260908（M-1）：payload 補 escalatedAt — client patch 行用（零 PII metadata）
-      publishNotify(c.clinicId, "routing:escalation", {
-        conversationId: c.id,
-        ruleId,
-        fromGroupId,
-        toGroupId: group.id,
-        groupName: group.name,
-        escalatedAt: now.toISOString(),
+      // ★ cwi-final S1-4：c 缺 assignee/routedStaffId 且係 updateMany 前 stale row → 重取五欄
+      const convRow = await prisma.conversation.findUnique({
+        where: { id: c.id },
+        select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
       });
+      if (convRow) {
+        await publishConvEvent(convRef(convRow), "routing:escalation", {
+          conversationId: c.id,
+          ruleId,
+          fromGroupId,
+          toGroupId: group.id,
+          groupName: group.name,
+          escalatedAt: now.toISOString(),
+        });
+      }
       pushRoutingEvent({ clinicId: c.clinicId, conversationId: c.id, staffIds: members.map((m) => m.id), escalated: true });
 
       // 5b. INTERNAL 備註（系統 — 零 PII metadata only；接手人睇到升級原因）

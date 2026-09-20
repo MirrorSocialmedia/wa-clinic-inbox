@@ -183,6 +183,8 @@ export interface PatientContext {
 
 /** ★ booking-ui（C）：socket booking:changed — 寫動作後廣播，三位訂閱重拉 */
 export interface BookingChangedEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   clinicId: string;
   date: string; // YYYY-MM-DD（受影響日 — L2 invalidate 範圍）
@@ -236,6 +238,8 @@ export interface UserCtx {
 
 /** socket message:new payload（同 worker notify 對齊） */
 export interface NewMessageEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重）— 定向 send（無 eventId）= undefined */
+  eventId?: string;
   conversationId: string;
   clinicId: string;
   contact: ContactInfo | null;
@@ -251,6 +255,8 @@ export interface NewMessageEvent {
 }
 
 export interface MessageStatusEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   clinicId: string;
   waMessageId: string;
@@ -261,13 +267,16 @@ export interface MessageStatusEvent {
 }
 
 export interface ConvUpdatedEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   clinicId: string;
-  status: ConvStatus;
-  assigneeId: string | null;
+  // ★ cwi-final S1-7：ids-only emit 合法（T707）— 所有欄可缺，handler 只 patch 有定義嘅欄位
+  status?: ConvStatus;
+  assigneeId?: string | null;
   /** ★ Realtime P0 (R5)：新 version（PATCH assigneeId 變動 → +1） */
-  assignVersion: number;
-  unreadCount: number;
+  assignVersion?: number;
+  unreadCount?: number;
 }
 
 /** Phase 2：AI triage 相關 type（同 ai.worker notify payload 對齊） */
@@ -315,6 +324,8 @@ export interface DraftTrace {
 
 /** socket ai:classified — 每次 AI 分類成功（metadata only，summary 係聊天內容） */
 export interface AiClassifiedEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   intent: AiIntent;
   urgency: AiUrgency;
@@ -326,6 +337,8 @@ export interface AiClassifiedEvent {
 
 /** socket draft:ready — 有新 pending draft（含 draftText：自己 VPS 內傳，staff 要睇） */
 export interface DraftReadyEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   draftId: string;
   inReplyToMessageId: string;
@@ -340,6 +353,8 @@ export interface DraftReadyEvent {
 
 /** socket urgent:escalation — 急症實時升級（toast + 隊列頂紅） */
 export interface UrgentEscalationEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   intent: AiIntent;
   urgency: AiUrgency;
@@ -350,6 +365,8 @@ export interface UrgentEscalationEvent {
 
 /** Phase 3：socket booking:new / booking:updated — 預約卡狀態變（綠色卡 + /bookings 隊列） */
 export interface BookingEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   clinicId: string;
   booking: BookingInfo | null; // null = 已處理/失效（卡消失）
@@ -357,6 +374,8 @@ export interface BookingEvent {
 
 /** ★ H1：socket conversation:assigned — 轉交/接手/放返隊列/auto-claim（payload 零內文） */
 export interface ConversationAssignedEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   clinicId: string;
   assigneeId: string | null;
@@ -371,6 +390,8 @@ export interface ConversationAssignedEvent {
  * （舊狀況：只有 push/notice，inbox 列表要手動 reload 先見到「派俾我」新行）
  */
 export interface RoutingAssignedEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   ruleId: string;
   groupId: string | null;
@@ -381,6 +402,8 @@ export interface RoutingAssignedEvent {
 
 /** ★ cwi-auditfix-20260908（M-1）：socket routing:escalation — 升級計時器 claim 咗對話。 */
 export interface RoutingEscalationEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   ruleId: string;
   fromGroupId: string | null;
@@ -391,6 +414,8 @@ export interface RoutingEscalationEvent {
 
 /** ★ H1：socket note:new — 有新內部備註（零內文 — 內容由 client 拉） */
 export interface NoteNewEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   clinicId: string;
   messageId: string;
@@ -398,6 +423,8 @@ export interface NoteNewEvent {
 
 /** ★ H2：socket note:read — 有人讀咗內部備註（零內文 — tick 即時重算） */
 export interface NoteReadEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   clinicId: string;
   messageId: string;
@@ -407,6 +434,8 @@ export interface NoteReadEvent {
 
 /** ★ H2：socket notify:mention — 定向發畀被 @ 者（零內文；bell badge / 黃點 / Notification） */
 export interface MentionNotifyEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
   conversationId: string;
   clinicId: string;
   messageId: string;
@@ -420,12 +449,6 @@ export interface NoteReceipt {
   readAt: string;
 }
 
-/** ★ Part B：socket notice:new — 內部通知推送（接手/放手/auto-release 等；零內文 — 只有 conversationId + kind） */
-export interface NoticeNewEvent {
-  conversationId: string;
-  kind: string;
-}
-
 /** ★ AI Workflow T1 (A2)：內部通知（staff notice）— 媒體/急症升級，同客戶 unread 完全分開 */
 export interface StaffNoticeItem {  id: string;
   clinicId: string;
@@ -437,8 +460,41 @@ export interface StaffNoticeItem {  id: string;
 
 /** ★ AI Workflow T1 (A2)：notice:new socket 事件（worker 落庫後推；client 收到就重拉 GET /api/notices） */
 export interface NoticeNewEvent {
-  conversationId: string;
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重）— 定向 send（如 SLA）= undefined */
+  eventId?: string;
+  /** ★ cwi-final S1-7：clinic 級通知（如 unassigned-sla）conversationId = null */
+  conversationId: string | null;
+  /** ★ cwi-final S1-7：conversation 級 emitter 可唔帶（client 由 state 補）；clinic 級（conversationId=null）必須帶 */
+  clinicId?: string;
   kind: string;
+}
+
+/** ★ cwi-final S1-7：media worker 下載完 → client 補附件（patch mediaStatus/mediaPath） */
+export interface MediaReadyEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
+  conversationId: string;
+  clinicId: string;
+  messageId: string;
+  mediaPath: string;
+}
+
+/** ★ cwi-final S1-7：patient-pin 獨立事件（client 只 patch pinnedPatientApricotId） */
+export interface PatientPinnedEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
+  conversationId: string;
+  clinicId: string;
+  pinnedPatientApricotId: string | null;
+}
+
+/** ★ cwi-h6：takeover → 原負責人定向（client toast + 重拉 row） */
+export interface NotifyTakeoverEvent {
+  /** ★ cwi-final S1-4：定向 send（publishStaffNotify）無 eventId；預留欄位保 firstTime 統一 */
+  eventId?: string;
+  conversationId: string;
+  clinicId: string;
+  actorStaffId: string | null;
 }
 
 /** ★ H2：INTERNAL note tick 語義（似 WhatsApp）：

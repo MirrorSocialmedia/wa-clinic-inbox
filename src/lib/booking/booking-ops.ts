@@ -1,6 +1,6 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 
 /**
  * booking 寫入後嘅即時刷新三步（booking-ui MD §2）：
@@ -16,7 +16,7 @@ import { publishNotify } from "@/lib/notify";
 /** booking:changed 事件 kind（MD §2 原文） */
 export type BookingChangedKind = "CREATED" | "ROLLED_BACK" | "RESCHEDULED" | "CANCELLED";
 
-export interface BookingChangedPayload {
+export interface BookingChangedPayload extends Record<string, unknown> {
   conversationId: string;
   clinicId: string;
   /** 受影響日期（L2 invalidate 範圍；RESCHEDULED = 新日期 — 舊日期由 caller 另行 invalidate） */
@@ -51,9 +51,14 @@ export function dayInvalidateWhere(clinicId: string, date: string): { clinicId: 
   return { clinicId, date };
 }
 
-/** socket 廣播（fire-and-forget — Redis 故障唔阻斷寫入路徑；UI 經 reconnect backlog 補漏） */
-export function publishBookingChanged(payload: BookingChangedPayload): void {
-  publishNotify(payload.clinicId, "booking:changed", payload);
+/** socket 廣播（Redis 故障唔阻斷寫入路徑；UI 經 reconnect backlog 補漏） */
+export async function publishBookingChanged(payload: BookingChangedPayload): Promise<void> {
+  // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent — payload 只有 conversationId → 補五欄
+  const convRow = await prisma.conversation.findUnique({
+    where: { id: payload.conversationId },
+    select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+  });
+  if (convRow) await publishConvEvent(convRef(convRow), "booking:changed", payload);
 }
 
 /**
@@ -71,5 +76,5 @@ export async function afterBookingWrite(
   for (const date of [...new Set(dates)]) {
     await invalidateDayCache(clinicId, date);
   }
-  publishBookingChanged({ conversationId, clinicId, date: broadcastDate, kind });
+  await publishBookingChanged({ conversationId, clinicId, date: broadcastDate, kind });
 }

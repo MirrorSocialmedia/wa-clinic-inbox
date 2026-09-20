@@ -3,7 +3,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 
 /**
  * POST /api/messages/[id]/void — 「標記為已作廢」（cwi-inboxfix-20260905，MD §5.3）。
@@ -63,7 +63,8 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
     }),
   ]);
 
-  publishNotify(conv.clinicId, "message:status", {
+  // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（conv 有齊五欄）
+  await publishConvEvent(convRef(conv), "message:status", {
     conversationId: conv.id,
     clinicId: conv.clinicId,
     waMessageId: msg.id,

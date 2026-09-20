@@ -4,7 +4,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { assertCanAssign } from "@/lib/assign";
 
 /**
@@ -98,7 +98,8 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
     "conversation updated"
   );
 
-  publishNotify(conv.clinicId, "conv:updated", {
+  // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent — updated = update 後完整 row（五欄齊 + 最新值）
+  await publishConvEvent(convRef(updated), "conv:updated", {
     conversationId: updated.id,
     clinicId: conv.clinicId,
     status: updated.status,

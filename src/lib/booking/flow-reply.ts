@@ -32,7 +32,7 @@ import {
   flowJwtSecret,
 } from "@/lib/flows/crypto";
 import { sendBookingFlow, FlowsDisabledError } from "@/lib/flows/send";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { enqueueOutboundSend } from "@/lib/queue";
 import { syncWindow, getSlots, hkDateOffset, slotAvailable } from "@/lib/availability";
 import { phoneHash } from "@/lib/phone-hash";
@@ -350,20 +350,27 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
 
   // 6) 過 → 綠色卡 + /bookings 隊列
   const bookingId = txResult.bookingId!;
-  publishNotify(clinicId, "booking:new", {
-    conversationId,
-    clinicId,
-    booking: {
-      id: bookingId,
-      providerName: String(providerName ?? provider.name),
-      requestedDate: date,
-      requestedTime: isRequirementVariant ? null : time,
-      timeOfDay: isRequirementVariant ? String(timeOfDay) : null,
-      precheckPassed: isRequirementVariant ? null : true,
-      status: "PENDING",
-      createdAt: now,
-    },
+  // ★ cwi-final S1-4：此處只有 clinicId + conversationId → 補五欄
+  const convRow = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
   });
+  if (convRow) {
+    await publishConvEvent(convRef(convRow), "booking:new", {
+      conversationId,
+      clinicId,
+      booking: {
+        id: bookingId,
+        providerName: String(providerName ?? provider.name),
+        requestedDate: date,
+        requestedTime: isRequirementVariant ? null : time,
+        timeOfDay: isRequirementVariant ? String(timeOfDay) : null,
+        precheckPassed: isRequirementVariant ? null : true,
+        status: "PENDING",
+        createdAt: now,
+      },
+    });
+  }
   log.info(
     { clinic: clinicCode, bookingId, providerApricotId: provider.apricotId, date, time: isRequirementVariant ? null : time, timeOfDay: isRequirementVariant ? String(timeOfDay) : null },
     isRequirementVariant

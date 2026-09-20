@@ -4,7 +4,7 @@
  * 由 POST /api/bookings/[id]/create route 原封搬以下段落（route 剩返 auth/RBAC/423 Send Lock/HTTP 映射）：
  * visit reason 解析（連 dictionaries 回查）+ createBooking call + WorkforceApiError 分類
  * + 成功後 bookingRequest.update（CONFIRMED + apricotApptId + visitReasonCode + handledBy/At + autoBooked）
- * → AuditLog → afterBookingWrite → publishNotify("booking:updated") → 窗口內自動確認訊息（outbound enqueue）。
+ * → AuditLog → afterBookingWrite → publishConvEvent(convRef(convRow), "booking:updated") → 窗口內自動確認訊息（outbound enqueue）。
  *
  * actor 差異（core 內 switch）：
  * | | STAFF | AI |
@@ -26,7 +26,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { getWindowState } from "@/lib/wa/window";
 import { enqueueOutboundSend } from "@/lib/queue";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { afterBookingWrite } from "./booking-ops";
 import { buildRemarks, confirmMessageText } from "./booking-text";
 import { WorkforceApiError, createBooking, defaultVisitReasonCode, fetchDictionaries } from "@/lib/workforce/client";
@@ -196,24 +196,31 @@ export async function confirmBookingCore(
     ? ((await prisma.staffUser.findUnique({ where: { id: actor.staffId }, select: { name: true } }))?.name ?? null)
     : null;
 
-  publishNotify(booking.clinicId, "booking:updated", {
-    conversationId: booking.conversationId,
-    clinicId: booking.clinicId,
-    booking: {
-      id: booking.id,
-      providerName: booking.providerName,
-      requestedDate: booking.requestedDate,
-      requestedTime: booking.requestedTime,
-      timeOfDay: booking.timeOfDay,
-      precheckPassed: booking.precheckPassed,
-      status: "CONFIRMED",
-      createdAt: booking.createdAt,
-      apricotApptId,
-      visitReasonCode,
-      handledByStaffName: staffName,
-      handledAt: now.toISOString(),
-    },
+  // ★ cwi-final S1-4：booking 無 assignee/routed 欄 → 補五欄
+  const convRow = await prisma.conversation.findUnique({
+    where: { id: booking.conversationId },
+    select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
   });
+  if (convRow) {
+    await publishConvEvent(convRef(convRow), "booking:updated", {
+      conversationId: booking.conversationId,
+      clinicId: booking.clinicId,
+      booking: {
+        id: booking.id,
+        providerName: booking.providerName,
+        requestedDate: booking.requestedDate,
+        requestedTime: booking.requestedTime,
+        timeOfDay: booking.timeOfDay,
+        precheckPassed: booking.precheckPassed,
+        status: "CONFIRMED",
+        createdAt: booking.createdAt,
+        apricotApptId,
+        visitReasonCode,
+        handledByStaffName: staffName,
+        handledAt: now.toISOString(),
+      },
+    });
+  }
 
   // ── 自動確認訊息（同 confirm route 語義）──────────────────────────
   const win = getWindowState(conv.lastInboundAt);

@@ -1,7 +1,8 @@
 import { Worker, type Job } from "bullmq";
 import { unlink } from "node:fs/promises";
 import { inboundQueue, aiQueue, mediaQueue, getRedis, QUEUE_PREFIX, INBOUND_ATTEMPTS } from "@/lib/queue";
-import { publishNotify, publishStaffNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
+import { buildMessageNewPayload } from "@/lib/realtime-payload";
 import { pushEvent } from "@/lib/push";
 import prisma from "@/lib/prisma";
 import log, { redactDeep } from "@/lib/log";
@@ -218,28 +219,6 @@ function msgTypeOf(m: WaTimestampedMessage): string {
   return m.type ?? "unknown";
 }
 
-/** 公共 message payload（socket 推 + API 回傳共用 shape；body 係 chat 內容，屬正常業務數據） */
-function publicMessage(msg: Message) {
-  return {
-    id: msg.id,
-    conversationId: msg.conversationId,
-    waMessageId: msg.waMessageId,
-    direction: msg.direction,
-    channel: msg.channel,
-    type: msg.type,
-    body: msg.body,
-    mediaPath: msg.mediaPath,
-    mediaStatus: msg.mediaStatus,
-    // ★ Realtime P0 (R1)：client 冪等 key（inbound 永遠 null）— UI 用以對消 optimistic bubble
-    clientMessageId: msg.clientMessageId,
-    status: msg.status,
-    errorCode: msg.errorCode,
-    sentByStaffId: msg.sentByStaffId,
-    waTimestamp: msg.waTimestamp,
-    createdAt: msg.createdAt,
-  };
-}
-
 /** 原子更新對話時間戳 + unread（raw SQL：GREATEST 容忍亂序 + increment 原子） */
 async function touchConversation(
   db: Db,
@@ -305,28 +284,10 @@ async function notifyNewMessage(clinicId: string, conv: Conversation, msg: Messa
     }
   }
 
-  const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
-  const payload = {
-    conversationId: conv.id,
-    clinicId,
-    contact: contact
-      ? { id: contact.id, waId: contact.waId, profileName: contact.profileName, labels: contact.labels }
-      : null,
-    message: publicMessage(msg),
-    conversation: {
-      status: conv.status,
-      unreadCount: conv.unreadCount,
-      lastMessageAt: conv.lastMessageAt,
-      lastInboundAt: conv.lastInboundAt,
-      // ★ cwi-statusrole2-20260910（MD §3）：翻開事件帶返 reopenedAt（badge「↻ 重新開啟」24h 即時顯示）
-      reopenedAt: conv.reopenedAt,
-    },
-  };
-  publishNotify(clinicId, "message:new", payload);
-  // ★ cwi-realtime-v2 §1：跨店 assignee 唔喺呢間店嘅 clinic room（staff 只 join 自己綁定店）
-  //   → 補推 staff:{assigneeId} room（room 已存在，零新基建）。同店 assignee 會收兩次
-  //   （clinic + staff room）— client handler 頂有 seenEventIds 去重。
-  if (conv.assigneeId) publishStaffNotify(conv.assigneeId, clinicId, "message:new", payload);
+  // ★ cwi-final S1-4/S1-7：完整 payload 單一來源（realtime-payload）+ publishConvEvent
+  //   （跨店 targeting：assignee/路由單人/路由組 active 成員 + eventId 去重 — 取代舊 assignee 補推）
+  const payload = await buildMessageNewPayload(msg.id);
+  await publishConvEvent(convRef(conv), "message:new", payload);
   // v2 Web Push（cwi-notify-v2）：tab 閂咗/鎖屏都收到 — payload 零 PII（kind/clinicShort/conversationId）
   pushEvent({ kind: "message", clinicId, conversationId: conv.id });
 }
@@ -988,13 +949,20 @@ async function handleStatuses(clinic: Clinic, value: NonNullable<WaChange["value
       continue;
     }
     if (result.changed && result.convId) {
-      publishNotify(clinic.id, "message:status", {
-        conversationId: result.convId,
-        clinicId: clinic.id,
-        waMessageId: wamid,
-        status: target,
-        errorCode,
+      // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（clinic room + 跨店目標）— tx 內只有 convId，此處補五欄
+      const conv = await prisma.conversation.findUnique({
+        where: { id: result.convId },
+        select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
       });
+      if (conv) {
+        await publishConvEvent(convRef(conv), "message:status", {
+          conversationId: result.convId,
+          clinicId: clinic.id,
+          waMessageId: wamid,
+          status: target,
+          errorCode,
+        });
+      }
     }
     log.info(
       { clinic: clinic.code, wamid, status: target, errorCode, applied: result.changed },

@@ -18,7 +18,7 @@
 import { Prisma, type MsgStatus } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { nextStatus, STATUS_RANK } from "./status-rank";
 
 /** interactive transaction 嘅 tx client type（top-level prisma 都用同一套 model API）。 */
@@ -95,13 +95,20 @@ export async function drainPendingStatuses(wamid: string): Promise<void> {
 
     if (emit) {
       // 現有 message:status emit pattern（同 inbound.worker handleStatuses）
-      publishNotify(emit.clinicId, "message:status", {
-        conversationId: emit.conversationId,
-        clinicId: emit.clinicId,
-        waMessageId: wamid,
-        status: emit.status,
-        errorCode: emit.errorCode,
+      // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent — emit 只有 conversationId+clinicId → 補五欄
+      const convRow = await prisma.conversation.findUnique({
+        where: { id: emit.conversationId },
+        select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
       });
+      if (convRow) {
+        await publishConvEvent(convRef(convRow), "message:status", {
+          conversationId: emit.conversationId,
+          clinicId: emit.clinicId,
+          waMessageId: wamid,
+          status: emit.status,
+          errorCode: emit.errorCode,
+        });
+      }
       log.info(
         { wamid, status: emit.status, errorCode: emit.errorCode },
         "pending-status: drained + applied"

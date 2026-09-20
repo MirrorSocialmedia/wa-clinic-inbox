@@ -17,7 +17,7 @@
  */
 import { Worker, type Job } from "bullmq";
 import { mediaQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { downloadWaMedia } from "@/lib/wa/media";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -73,12 +73,19 @@ async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
     });
     log.info({ messageId, wamid, path: dl.mediaPath }, "media: download complete");
     // ★ R2：commit 之後先 emit（上面 update 已 commit；publish 唔喺任何 $transaction 入面）
-    publishNotify(clinicId, "media:ready", {
-      conversationId: msg.conversationId,
-      clinicId,
-      messageId,
-      mediaPath: dl.mediaPath,
+    // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（clinic room + 跨店目標）— 此處只有 clinicId，補五欄
+    const conv = await prisma.conversation.findUnique({
+      where: { id: msg.conversationId },
+      select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
     });
+    if (conv) {
+      await publishConvEvent(convRef(conv), "media:ready", {
+        conversationId: msg.conversationId,
+        clinicId,
+        messageId,
+        mediaPath: dl.mediaPath,
+      });
+    }
   } else {
     // mock mode / http 錯誤 / too-large → SKIPPED（訊息保留，冇附件）
     await prisma.message.update({

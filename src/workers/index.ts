@@ -15,7 +15,7 @@ import { startCronWorker } from "./cron.worker";
 import { startMediaWorker } from "./media.worker";
 import { cronQueue, getRedis } from "@/lib/queue";
 import { refreshAllClinics } from "@/lib/availability";
-import { CONTROL_CHANNEL, type ControlMessage } from "@/lib/notify";
+import { CONTROL_CHANNEL, type ControlMessage, bustScopeCache } from "@/lib/notify";
 import { applyCacheBust } from "@/lib/cache-bust";
 import { retentionPolicyMismatches } from "@/lib/ops/retention-policy";
 import { bootMockGuard } from "@/lib/boot-key-paths";
@@ -152,6 +152,8 @@ async function main() {
     try {
       const data = JSON.parse(raw) as ControlMessage;
       if (data.cmd === "cache:bust") applyCacheBust(data.scope);
+      // ★ cwi-final S1-4：staff 範圍/技能組改動 → 清本 process 嘅 publishConvEvent scope cache
+      else if (data.cmd === "scope:changed") bustScopeCache();
       // staff:* cmd 係 web/socket 事 — worker 唔理
     } catch {
       /* bad message ignored（同 hub 語義）*/

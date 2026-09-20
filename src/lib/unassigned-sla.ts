@@ -109,6 +109,8 @@ export async function runUnassignedSlaSweep(
       // payload 零病人資料；conversationId=null = clinic 級通知（client bell 照 refetch）
       publishNotify(clinicId, "notice:new", {
         conversationId: null,
+        // ★ cwi-final S1-7：conversationId=null → client 無 conv row 可補 clinicId → payload 必帶（零 PII 營運元數據）
+        clinicId,
         kind: "SYSTEM",
         reason: "unassigned-sla",
         title,

@@ -1,5 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { getRedis } from "@/lib/queue";
 import log from "@/lib/log";
+import prisma from "@/lib/prisma";
+import { resolveClinicIds, type ScopeType } from "@/lib/rbac";
+import { EVENT_SCHEMAS } from "@/lib/realtime-events";
 
 /**
  * ★ Realtime P0 (R2, cwi-rt-20260823-a1) — commit-then-emit 鐵律（MD §2 R2）：
@@ -66,7 +70,9 @@ export type ControlMessage =
   | { cmd: "cache:bust"; scope: "automation" | "workflow" | "knowledge" }
   // ★ cwi-refresh-20260831 §3：availability L2 該日已 bust + 重填 → web 側 socket emit 俾 UI 即時重繪
   //   （payload 零 PII：clinicCode/clinicId/date 都係營運元數據）
-  | { cmd: "availability:busted"; clinicCode: string; clinicId: string; date: string };
+  | { cmd: "availability:busted"; clinicCode: string; clinicId: string; date: string }
+  // ★ cwi-final S1-4：staff 範圍/技能組改動 → 清各 process 嘅 publishConvEvent scope cache（60s → 即刻）
+  | { cmd: "scope:changed" };
 
 /**
  * 發控制指令（fire-and-forget）：Redis 故障時 log — API 側嘅 cache 失效已經做咗，
@@ -115,4 +121,160 @@ export function publishStaffNotify(staffId: string, clinicId: string, event: str
         "notify: staff publish failed (UI 會經 reconnect 補漏)"
       );
     });
+}
+
+// ── ★ cwi-final S1-4：對話級事件統一出口（跨店 realtime）────────────────────
+//
+// 現況：clinic room 只覆蓋「綁咗呢間店」嘅人 — 跨店 assignee 同跨店路由組員收唔到
+// 對話級事件（message:new 只補推 assignee，其他事件完全冇補）。
+//
+// 設計（spec S1-4）：
+// - clinic room（店內所有人）＋「覆蓋唔到呢間店」嘅相關員工 staff room：
+//   assignee 有 → 只 assignee；assignee null → routedStaffId + routedGroupId active 組員
+//   （兩個 if — routedStaffId 同 routedGroupId 可以同時有值：組得一個當值人）
+// - 已經喺 clinic room 嘅人唔再推 staff room；payload 帶 eventId 俾 client 去重（雙保險）
+// - 60s in-memory cache（worker / web 兩 process 各一份）；`admin/staff/[id]` PUT 成功 →
+//   control 橋 `scope:changed` 即刻清（bustScopeCache）
+
+export interface ConvRef {
+  id: string;
+  clinicId: string;
+  assigneeId: string | null;
+  routedStaffId: string | null;
+  routedGroupId: string | null;
+}
+
+/** Prisma Conversation（或任何帶齊五欄嘅 row）→ ConvRef（structural typing）。 */
+export function convRef(c: Pick<ConvRef, "id" | "clinicId" | "assigneeId" | "routedStaffId" | "routedGroupId">): ConvRef {
+  return {
+    id: c.id,
+    clinicId: c.clinicId,
+    assigneeId: c.assigneeId,
+    routedStaffId: c.routedStaffId,
+    routedGroupId: c.routedGroupId,
+  };
+}
+
+const SCOPE_CACHE_TTL_MS = 60_000;
+
+interface ScopeCacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+const groupMembersCache = new Map<string, ScopeCacheEntry<string[]>>();
+const staffCoversClinicCache = new Map<string, ScopeCacheEntry<boolean>>();
+
+/** `scope:changed` control cmd → 清本 process 嘅 scope cache（staff 範圍/組改動即刻生效）。 */
+export function bustScopeCache(): void {
+  groupMembersCache.clear();
+  staffCoversClinicCache.clear();
+}
+
+/** 技能組 active 成員（60s cache）。 */
+async function groupMembersCached(groupId: string): Promise<string[]> {
+  const now = Date.now();
+  const hit = groupMembersCache.get(groupId);
+  if (hit && hit.expiresAt > now) return hit.value;
+  const rows = await prisma.skillGroupMember.findMany({ where: { groupId }, select: { staffId: true } });
+  const staffIds = [...new Set(rows.map((r) => r.staffId))];
+  let value: string[] = [];
+  if (staffIds.length > 0) {
+    const active = await prisma.staffUser.findMany({
+      where: { id: { in: staffIds }, active: true },
+      select: { id: true },
+    });
+    const activeSet = new Set(active.map((s) => s.id));
+    value = staffIds.filter((sid) => activeSet.has(sid));
+  }
+  groupMembersCache.set(groupId, { value, expiresAt: now + SCOPE_CACHE_TTL_MS });
+  return value;
+}
+
+/**
+ * 該 staff 有冇覆蓋（能見到）呢間店？true = 已經喺 clinic room（唔使再推 staff room）。
+ * SUPERVISOR / scopeType ALL = true；inactive = true（當已覆蓋 = 唔推 — 避免推畀登入唔到嘅帳號）；
+ * staff 行唔存在（已刪）= true（冇接收對象）；60s cache。
+ */
+async function staffCoversClinicCached(staffId: string, clinicId: string): Promise<boolean> {
+  const key = `${staffId}|${clinicId}`;
+  const now = Date.now();
+  const hit = staffCoversClinicCache.get(key);
+  if (hit && hit.expiresAt > now) return hit.value;
+  let value = true;
+  const staff = await prisma.staffUser.findUnique({
+    where: { id: staffId },
+    select: {
+      role: true,
+      scopeType: true,
+      scopeCompanyId: true,
+      active: true,
+      clinics: { select: { clinicId: true } },
+    },
+  });
+  if (staff && staff.active && staff.role !== "SUPERVISOR" && staff.scopeType !== "ALL") {
+    // fail-safe：scopeType 意外值 → 當 CLINICS（最窄範圍）— 錯推多過錯漏（client eventId 去重兜底）
+    const scopeType: ScopeType = staff.scopeType === "COMPANY" ? "COMPANY" : "CLINICS";
+    const ids = await resolveClinicIds({
+      scopeType,
+      scopeCompanyId: staff.scopeCompanyId,
+      staffClinicIds: staff.clinics.map((c) => c.clinicId),
+    });
+    value = ids.includes(clinicId);
+  }
+  staffCoversClinicCache.set(key, { value, expiresAt: now + SCOPE_CACHE_TTL_MS });
+  return value;
+}
+
+/**
+ * ★ S1-4 對話級事件唯一出口：clinic room（店內所有人）+ 跨店相關員工 staff room。
+ * payload 注入 eventId（client 去重）；S1-7 契約驗證（dev/test parse throw；prod safeParse log 唔 throw）。
+ */
+export async function publishConvEvent(conv: ConvRef, event: string, payload: Record<string, unknown>): Promise<void> {
+  const p: Record<string, unknown> = {
+    ...payload,
+    eventId: (payload.eventId as string | undefined) ?? randomUUID(),
+  };
+
+  // ★ S1-7 事件契約：dev/test fail-fast；prod log-only（realtime 通知唔准拖累主業務）
+  const schema = EVENT_SCHEMAS[event];
+  if (schema) {
+    if (process.env.NODE_ENV === "production") {
+      const r = schema.safeParse(p);
+      if (!r.success) {
+        log.error(
+          { event, clinicId: conv.clinicId, issues: r.error.issues },
+          "publishConvEvent: payload 唔過 schema（prod — log only，唔 throw）"
+        );
+      }
+    } else {
+      schema.parse(p);
+    }
+  } else {
+    log.warn({ event, clinicId: conv.clinicId }, "publishConvEvent: 事件無註冊 schema（契約缺口 — 補 realtime-events.ts）");
+  }
+
+  publishNotify(conv.clinicId, event, p);
+  for (const staffId of await crossClinicTargets(conv)) {
+    publishStaffNotify(staffId, conv.clinicId, event, p);
+  }
+}
+
+/** 跨店補推目標：assignee 有 → 只 assignee；assignee null → routedStaffId + 組員；再過濾「已覆蓋呢間店」嘅人。 */
+async function crossClinicTargets(conv: ConvRef): Promise<string[]> {
+  const ids = new Set<string>();
+  if (conv.assigneeId) {
+    ids.add(conv.assigneeId);
+  } else {
+    // ★ 兩個 if（唔好 else if 掉 group）：routedStaffId 同 routedGroupId 可以同時有值
+    if (conv.routedStaffId) ids.add(conv.routedStaffId);
+    if (conv.routedGroupId) {
+      for (const m of await groupMembersCached(conv.routedGroupId)) ids.add(m);
+    }
+  }
+  const out: string[] = [];
+  for (const id of ids) {
+    if (!(await staffCoversClinicCached(id, conv.clinicId))) out.push(id);
+  }
+  return out;
 }

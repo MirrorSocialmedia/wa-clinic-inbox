@@ -4,7 +4,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
-import { publishNotify, publishStaffNotify } from "@/lib/notify";
+import { publishConvEvent, convRef, publishStaffNotify } from "@/lib/notify";
 import { pushToStaff } from "@/lib/push";
 
 /**
@@ -83,7 +83,8 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   }
 
   // socket：同店全員收 note:new（零內文 — 內容由 client 拉；payload 只係 id + 元數據）
-  publishNotify(conv.clinicId, "note:new", {
+  // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（conv 有齊五欄）
+  await publishConvEvent(convRef(conv), "note:new", {
     conversationId: conv.id,
     clinicId: conv.clinicId,
     messageId: msg.id,

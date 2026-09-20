@@ -16,7 +16,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { afterBookingWrite, rollbackWindowOpen } from "@/lib/booking/booking-ops";
 import { WorkforceApiError, removeBooking } from "@/lib/workforce/client";
 import { bumpStat } from "@/lib/ops/automation-stats";
@@ -133,24 +133,31 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   await afterBookingWrite(booking.clinicId, [booking.requestedDate], booking.conversationId, "ROLLED_BACK", booking.requestedDate);
 
-  publishNotify(booking.clinicId, "booking:updated", {
-    conversationId: booking.conversationId,
-    clinicId: booking.clinicId,
-    booking: {
-      id: booking.id,
-      providerName: booking.providerName,
-      requestedDate: booking.requestedDate,
-      requestedTime: booking.requestedTime,
-      timeOfDay: booking.timeOfDay,
-      precheckPassed: booking.precheckPassed,
-      status: "PENDING",
-      createdAt: booking.createdAt,
-      apricotApptId: null,
-      visitReasonCode: null,
-      handledByStaffName: null,
-      handledAt: null,
-    },
+  // ★ cwi-final S1-4：booking 無 assignee/routed 欄 → 補五欄
+  const convRow = await prisma.conversation.findUnique({
+    where: { id: booking.conversationId },
+    select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
   });
+  if (convRow) {
+    await publishConvEvent(convRef(convRow), "booking:updated", {
+      conversationId: booking.conversationId,
+      clinicId: booking.clinicId,
+      booking: {
+        id: booking.id,
+        providerName: booking.providerName,
+        requestedDate: booking.requestedDate,
+        requestedTime: booking.requestedTime,
+        timeOfDay: booking.timeOfDay,
+        precheckPassed: booking.precheckPassed,
+        status: "PENDING",
+        createdAt: booking.createdAt,
+        apricotApptId: null,
+        visitReasonCode: null,
+        handledByStaffName: null,
+        handledAt: null,
+      },
+    });
+  }
 
   log.info(
     { bookingId: booking.id, clinicId: booking.clinicId, staffId: ctx.staff.id },

@@ -31,9 +31,15 @@ async function lazyEnqueue(messageId: string) {
   ]);
 }
 
-async function lazyNotify(clinicId: string, conversationId: string) {
-  const { publishNotify } = await import("@/lib/notify");
-  publishNotify(clinicId, "message:new", { conversationId, clinicId }); // 輕量提示；完整 payload 由 outbound sent 事件補
+// ★ cwi-final S1-4/S1-7：完整 payload（buildMessageNewPayload 單一來源）+ publishConvEvent（跨店 targeting + eventId 去重）
+async function lazyNotifyMessageNew(
+  messageId: string,
+  conv: { id: string; clinicId: string; assigneeId: string | null; routedStaffId: string | null; routedGroupId: string | null }
+): Promise<void> {
+  const { publishConvEvent, convRef } = await import("@/lib/notify");
+  const { buildMessageNewPayload } = await import("@/lib/realtime-payload");
+  const payload = await buildMessageNewPayload(messageId);
+  await publishConvEvent(convRef(conv), "message:new", payload);
 }
 
 const ENQUEUE_TIMEOUT_MS = 1500;
@@ -131,7 +137,7 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
       await lazyEnqueue(msg.id);
       await prisma.$executeRaw`
         UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${msg.waTimestamp}) WHERE "id" = ${conv.id}`;
-      await lazyNotify(b.clinicId, conv.id);
+      await lazyNotifyMessageNew(msg.id, conv);
       sent++;
       log.info(
         { bookingId: b.id, clinicId: b.clinicId, date: b.requestedDate },

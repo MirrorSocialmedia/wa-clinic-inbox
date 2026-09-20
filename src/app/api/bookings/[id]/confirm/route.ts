@@ -16,7 +16,7 @@ import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/l
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { enqueueOutboundSend } from "@/lib/queue";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 
 export const dynamic = "force-dynamic";
 
@@ -71,18 +71,25 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     })
     .catch(() => undefined);
 
-  publishNotify(booking.clinicId, "booking:updated", {
-    conversationId: booking.conversationId,
-    clinicId: booking.clinicId,
-    booking: {
-      id: booking.id,
-      providerName: booking.providerName,
-      requestedDate: booking.requestedDate,
-      requestedTime: booking.requestedTime,
-      status: "CONFIRMED",
-      createdAt: booking.createdAt,
-    },
+  // ★ cwi-final S1-4：booking 無 assignee/routed 欄 → 補五欄
+  const convRow = await prisma.conversation.findUnique({
+    where: { id: booking.conversationId },
+    select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
   });
+  if (convRow) {
+    await publishConvEvent(convRef(convRow), "booking:updated", {
+      conversationId: booking.conversationId,
+      clinicId: booking.clinicId,
+      booking: {
+        id: booking.id,
+        providerName: booking.providerName,
+        requestedDate: booking.requestedDate,
+        requestedTime: booking.requestedTime,
+        status: "CONFIRMED",
+        createdAt: booking.createdAt,
+      },
+    });
+  }
 
   // 2) 自動確認訊息（窗口內 free-form）
   const win = getWindowState(conv.lastInboundAt);

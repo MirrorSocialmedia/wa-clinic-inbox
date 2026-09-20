@@ -161,7 +161,8 @@ export async function ensurePermission(): Promise<NotificationPermission> {
 export interface ShouldNotifyArgs {
   kind: NotifyKind;
   clinicId: string;
-  conversationId: string;
+  /** ★ cwi-final S1-7：clinic 級通知（SLA 等）= null */
+  conversationId: string | null;
   /** 對畫而家嘅 assigneeId（client state — message:new payload 唔帶） */
   assigneeId: string | null;
   myStaffId: string;
@@ -183,6 +184,9 @@ export interface ShouldNotifyArgs {
  * - STAFF：未指派 → 全店響；已指派 → 只負責人響（N-2）
  */
 export function shouldNotify(a: ShouldNotifyArgs): boolean {
+  // ★ cwi-final S1-7：clinic 級通知（conversationId == null，如 unassigned-sla）直接放行 —
+  //   server 已定向/過濾（clinic room / 定向 send）；N-5 對話級靜音不適用。
+  if (a.conversationId == null) return true;
   if (a.activeConversationId === a.conversationId) return false; // N-5
   if (a.mutedClinics.includes(a.clinicId)) return false; // N-3
   if (a.kind === "mention") return true; // 定向推送（server 已 filter）

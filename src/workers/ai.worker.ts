@@ -4,7 +4,7 @@ import { AI_CONCURRENCY } from "./concurrency";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { pushEvent } from "@/lib/push";
 import { getWindowState } from "@/lib/wa/window";
 import {
@@ -152,7 +152,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
         meta: { wamid: msg.waMessageId, msgType: msg.type },
       },
     });
-    publishNotify(conv.clinicId, "notice:new", { conversationId: conv.id, kind: "MEDIA_RECEIVED" });
+    // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（conv 有齊五欄）
+    await publishConvEvent(convRef(conv), "notice:new", { conversationId: conv.id, kind: "MEDIA_RECEIVED" });
   }
 
   // ── C6：session 分流（Phase C）────────────────────────────
@@ -222,7 +223,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   //   → 規則路由 → consult engine turn → consult LLM turn（+price/claim guard）→ canDraft → AUTO level+blocks
   //   全部共用；持久化/發送點全經 `PersistPort`（唯一 mode 分岔點 — livePersistPort 每段 = 原本檔對應
   //   段落逐字搬入，鐵律 1 行為零改動；沙盤 = noopPersistPort 零副作用）。
-  const convRef: InboundConvRef = {
+  const inboundConvRef: InboundConvRef = {
     id: conv.id,
     clinicId: conv.clinicId,
     contactId: conv.contactId,
@@ -250,7 +251,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   const outcome = await runInboundAi({
     clinic,
     msg: { id: msg.id, type: msg.type, body: msg.body, waMessageId: msg.waMessageId, aiDraftId: msg.aiDraftId },
-    conv: convRef,
+    conv: inboundConvRef,
     contact,
     ctxMessages,
     isMedia,
@@ -421,7 +422,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     }
   }
   if (draft && draft.status === "PROPOSED" && !autoSent) {
-    publishNotify(conv.clinicId, "draft:ready", {
+    // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（conv 有齊五欄）
+    await publishConvEvent(convRef(conv), "draft:ready", {
       conversationId: conv.id,
       draftId: draft.id,
       inReplyToMessageId: msg.id,
@@ -437,7 +439,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   const draftId = draft?.id ?? null;
 
   // ── 5. Socket 推 ─────────────────────────────────────────────────────
-  publishNotify(conv.clinicId, "ai:classified", {
+  // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（conv 有齊五欄）
+  await publishConvEvent(convRef(conv), "ai:classified", {
     conversationId: conv.id,
     intent: result.intent,
     urgency: result.urgency,
@@ -461,7 +464,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       },
     });
     // 鐵律：急症 = 實時升級通知（staff 側 toast + 隊列頂部紅標）
-    publishNotify(conv.clinicId, "urgent:escalation", {
+    // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（conv 有齊五欄）
+    await publishConvEvent(convRef(conv), "urgent:escalation", {
       conversationId: conv.id,
       intent: result.intent,
       urgency: result.urgency,
@@ -766,7 +770,12 @@ async function handleSessionTurn(
             meta: { sessionId },
           },
         });
-        publishNotify(conv.clinicId, "notice:new", { conversationId: conv.id, kind: eff.noticeKind });
+        // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+        const convRow = await prisma.conversation.findUnique({
+          where: { id: conv.id },
+          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+        });
+        if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: conv.id, kind: eff.noticeKind });
         break;
       }
       case "URGENT_ESCALATE": {
@@ -782,14 +791,21 @@ async function handleSessionTurn(
             meta: { wamid: msg.waMessageId, sessionId },
           },
         });
-        publishNotify(conv.clinicId, "urgent:escalation", {
-          conversationId: conv.id,
-          intent: "URGENT_PAIN",
-          urgency: "HIGH",
-          contactId: conv.contactId,
-          contactName: contact?.profileName ?? null,
-          waMessageId: msg.waMessageId,
+        // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+        const convRow = await prisma.conversation.findUnique({
+          where: { id: conv.id },
+          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
         });
+        if (convRow) {
+          await publishConvEvent(convRef(convRow), "urgent:escalation", {
+            conversationId: conv.id,
+            intent: "URGENT_PAIN",
+            urgency: "HIGH",
+            contactId: conv.contactId,
+            contactName: contact?.profileName ?? null,
+            waMessageId: msg.waMessageId,
+          });
+        }
         // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
         pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
         break;
@@ -842,20 +858,27 @@ async function handleSessionTurn(
         }
         if (eff.kind === "CREATE_CARD") {
           // 同 flow-reply 建卡後語義一致 — commit-then-emit
-          publishNotify(conv.clinicId, "booking:new", {
-            conversationId: conv.id,
-            clinicId: conv.clinicId,
-            booking: {
-              id: booking.id,
-              providerName: booking.providerName,
-              requestedDate: booking.requestedDate,
-              requestedTime: booking.requestedTime,
-              timeOfDay: booking.timeOfDay,
-              precheckPassed: booking.precheckPassed,
-              status: booking.status,
-              createdAt: booking.createdAt,
-            },
+          // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+          const convRow = await prisma.conversation.findUnique({
+            where: { id: conv.id },
+            select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
           });
+          if (convRow) {
+            await publishConvEvent(convRef(convRow), "booking:new", {
+              conversationId: conv.id,
+              clinicId: conv.clinicId,
+              booking: {
+                id: booking.id,
+                providerName: booking.providerName,
+                requestedDate: booking.requestedDate,
+                requestedTime: booking.requestedTime,
+                timeOfDay: booking.timeOfDay,
+                precheckPassed: booking.precheckPassed,
+                status: booking.status,
+                createdAt: booking.createdAt,
+              },
+            });
+          }
           break;
         }
         // AUTO_BOOK：confirm-core（失敗永不自動重試 — 鐵律）
@@ -876,7 +899,12 @@ async function handleSessionTurn(
               meta: { sessionId, bookingId: booking.id },
             },
           });
-          publishNotify(conv.clinicId, "notice:new", { conversationId: conv.id, kind: "BOOKING_AUTO" });
+          // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+          const convRow = await prisma.conversation.findUnique({
+            where: { id: conv.id },
+            select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+          });
+          if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: conv.id, kind: "BOOKING_AUTO" });
         } else {
           // 失敗：booking 保持 PENDING 卡 + 人手接手通知 + 病人中性感（唔講失敗原因）
           await prisma.staffNotice.create({
@@ -888,7 +916,12 @@ async function handleSessionTurn(
               meta: { sessionId, bookingId: booking.id },
             },
           });
-          publishNotify(conv.clinicId, "notice:new", { conversationId: conv.id, kind: "HANDOFF_REQUEST" });
+          // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+          const convRow = await prisma.conversation.findUnique({
+            where: { id: conv.id },
+            select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+          });
+          if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: conv.id, kind: "HANDOFF_REQUEST" });
           if (reply === null) reply = "收到！職員會好快幫你確認 🙂";
         }
         break;
@@ -1189,14 +1222,21 @@ async function handlePainTriageTurn(
             meta: { wamid: msg.waMessageId, painSessionId: sessionId, categories: eff.categories },
           },
         });
-        publishNotify(conv.clinicId, "urgent:escalation", {
-          conversationId: conv.id,
-          intent: "URGENT_PAIN",
-          urgency: "HIGH",
-          contactId: conv.contactId,
-          contactName: c?.profileName ?? null,
-          waMessageId: msg.waMessageId,
+        // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+        const convRow = await prisma.conversation.findUnique({
+          where: { id: conv.id },
+          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
         });
+        if (convRow) {
+          await publishConvEvent(convRef(convRow), "urgent:escalation", {
+            conversationId: conv.id,
+            intent: "URGENT_PAIN",
+            urgency: "HIGH",
+            contactId: conv.contactId,
+            contactName: c?.profileName ?? null,
+            waMessageId: msg.waMessageId,
+          });
+        }
         // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
         pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
         break;
@@ -1211,7 +1251,12 @@ async function handlePainTriageTurn(
             meta: { painSessionId: sessionId },
           },
         });
-        publishNotify(conv.clinicId, "notice:new", { conversationId: conv.id, kind: "HANDOFF_REQUEST" });
+        // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+        const convRow = await prisma.conversation.findUnique({
+          where: { id: conv.id },
+          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+        });
+        if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: conv.id, kind: "HANDOFF_REQUEST" });
         break;
       }
       case "CREATE_DRAFT": {

@@ -1,7 +1,8 @@
 import { Worker, type Job } from "bullmq";
 import { outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { OUTBOUND_CONCURRENCY } from "./concurrency";
-import { publishNotify, publishStaffNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
+import { buildMessageNewPayload } from "@/lib/realtime-payload";
 import { sendTextMessage, sendFlowMessage, sendTemplateMessage, type FlowMessageConfig, type TemplateComponent } from "@/lib/wa/graph";
 // ★ cwi-final S1-1c：waMessageId 寫入後 drain 早過訊息嘅 status（PendingStatus）
 import { drainPendingStatuses } from "@/lib/wa/status-apply";
@@ -100,7 +101,8 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       where: { id: msg.id },
       data: { status: "FAILED", errorCode: "EMPTY_BODY" },
     });
-    publishNotify(clinic.id, "message:status", {
+    // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（clinic room + 跨店目標）— conv 有齊五欄
+    await publishConvEvent(convRef(conv), "message:status", {
       conversationId: conv.id,
       clinicId: clinic.id,
       waMessageId: msg.waMessageId ?? msg.id,
@@ -152,7 +154,7 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       wamid = r.wamid;
     }
 
-    const updated = await prisma.message.update({
+    await prisma.message.update({
       where: { id: msg.id },
       data: { waMessageId: wamid, status: "SENT" },
     });
@@ -161,27 +163,10 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     //   drain 失敗唔 throw（內部 catch + log.warn）→ 唔會重試主 job；sweep */2 兜底。
     await drainPendingStatuses(wamid);
     await touchConv(clinic.id, conv.id, msg.waTimestamp);
-    const payload = {
-      conversationId: conv.id,
-      clinicId: clinic.id,
-      contact: {
-        id: contactRow.id,
-        waId: contactRow.waId,
-        profileName: contactRow.profileName,
-        labels: contactRow.labels,
-      },
-      message: publicMsg(updated),
-      conversation: {
-        status: conv.status,
-        unreadCount: conv.unreadCount,
-        lastMessageAt: conv.lastMessageAt,
-        lastInboundAt: conv.lastInboundAt,
-      },
-    };
-    publishNotify(clinic.id, "message:new", payload);
-    // ★ cwi-realtime-v2 §1：跨店 assignee 補推 staff:{assigneeId} room（同店 assignee
-    //   clinic + staff room 收兩次 — client seenEventIds 去重）
-    if (conv.assigneeId) publishStaffNotify(conv.assigneeId, clinic.id, "message:new", payload);
+    // ★ cwi-final S1-4/S1-7：完整 payload 單一來源 + publishConvEvent（跨店 targeting + eventId 去重
+    //   — 取代舊 assignee 補推；同店 assignee 收兩次 = clinic + staff room，client eventId 去重）
+    const payload = await buildMessageNewPayload(msg.id);
+    await publishConvEvent(convRef(conv), "message:new", payload);
     log.info(
       { clinic: clinic.code, messageId, wamid, to: contactRow.waId },
       "outbound: sent OK"
@@ -210,7 +195,8 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
           })
           .catch(() => undefined);
       }
-      publishNotify(clinic.id, "message:status", {
+      // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（clinic room + 跨店目標）— conv 有齊五欄
+      await publishConvEvent(convRef(conv), "message:status", {
         conversationId: conv.id,
         clinicId: clinic.id,
         waMessageId: msg.waMessageId ?? msg.id,
@@ -244,45 +230,6 @@ async function touchConv(clinicId: string, convId: string, ts: Date): Promise<vo
   void clinicId;
 }
 
-function publicMsg(msg: {
-  id: string;
-  conversationId: string;
-  waMessageId: string | null;
-  direction: "IN" | "OUT";
-  channel: "API" | "APP_ECHO" | "HISTORY" | "INTERNAL"; // INTERNAL 物理上唔會經呢度（唔入 outbound queue）— union 跟齊 Prisma enum
-  type: string;
-  body: string | null;
-  mediaPath: string | null;
-  mediaStatus: string;
-  // ★ Realtime P0 (R1)：client 冪等 key（UI 對消 optimistic bubble；inbound 側永遠 null）
-  clientMessageId: string | null;
-  status: string;
-  errorCode: string | null;
-  sentByStaffId: string | null;
-  aiAutoSent: boolean;
-  waTimestamp: Date;
-  createdAt: Date;
-}) {
-  return {
-    id: msg.id,
-    conversationId: msg.conversationId,
-    waMessageId: msg.waMessageId,
-    direction: msg.direction,
-    channel: msg.channel,
-    type: msg.type,
-    body: msg.body,
-    mediaPath: msg.mediaPath,
-    mediaStatus: msg.mediaStatus,
-    clientMessageId: msg.clientMessageId,
-    status: msg.status,
-    errorCode: msg.errorCode,
-    sentByStaffId: msg.sentByStaffId,
-    // Phase 2b：UI 用呢個顯示「AI 自動覆」標記（staff 可審計）
-    aiAutoSent: msg.aiAutoSent,
-    waTimestamp: msg.waTimestamp,
-    createdAt: msg.createdAt,
-  };
-}
 
 export function startOutboundWorker(): Worker {
   const worker = new Worker<OutboundJobData>(

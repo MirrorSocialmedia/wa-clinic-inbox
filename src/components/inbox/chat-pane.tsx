@@ -76,6 +76,9 @@ import { WindowExits } from "./window-exits";
 
 interface Props {
   conversation: ConversationItem | null;
+  /** ★ cwi-final S1-3（N-3）：selectedConvId 有值但 row 正經補載（ensureConversationLoaded 進行中）
+   *  → skeleton + 返回掣（手機唔好空白 / 唔好「揀一個對話開始」） */
+  conversationLoading?: boolean;
   /** 手機返回列表（md 以下顯示 back 掣） */
   onBack: () => void;
   /** 手機撳 header 開詳情 sheet */
@@ -588,6 +591,26 @@ export function ChatPane(p: Props) {
   }, [p.conversation?.id]);
 
   if (!p.conversation) {
+    // ★ cwi-final S1-3（N-3）：對話 row 補載中（深連結 / push / bell 指向唔喺列表嘅對話）— skeleton + 返回掣。
+    //   只係「正補載」先入呢度（flag 由 caller 控制）：失敗出 notice 後 flag 即清 → 落返下面空狀態，唔會卡死 spinner。
+    if (p.conversationLoading) {
+      return (
+        <section className="flex-1 min-w-0 flex flex-col min-h-0 bg-canvas" data-testid="s13-conv-loading">
+          <div className="h-[52px] shrink-0 bg-panel border-b border-line flex items-center px-2 md:px-4">
+            <button onClick={p.onBack} aria-label="返回列表" className="md:hidden p-1 -ml-1 text-brand-text">
+              <ChevronLeft size={20} />
+            </button>
+            <div className="h-5 w-40 rounded bg-panel-2 animate-pulse" />
+          </div>
+          <div className="flex-1 space-y-4 p-4 overflow-hidden">
+            <div className="h-10 w-1/2 self-start rounded-xl bg-panel-2 animate-pulse" />
+            <div className="h-10 w-3/5 self-end rounded-xl bg-panel-2 animate-pulse" />
+            <div className="h-5 w-1/3 self-start rounded bg-panel-2 animate-pulse" />
+            <div className="h-10 w-2/3 self-start rounded-xl bg-panel-2 animate-pulse" />
+          </div>
+        </section>
+      );
+    }
     return (
       <section className="flex-1 min-w-0 hidden md:flex items-center justify-center bg-canvas">
         <div className="text-center text-t3 text-sm flex flex-col items-center gap-2">

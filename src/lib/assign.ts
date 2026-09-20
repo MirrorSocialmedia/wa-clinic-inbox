@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { RbacError, scopedClinicSet, type AuthContext } from "@/lib/rbac";
-import { publishNotify, publishStaffNotify } from "@/lib/notify";
+import { publishConvEvent, convRef, publishStaffNotify } from "@/lib/notify";
 import { pushToStaff } from "@/lib/push";
 
 /**
@@ -330,14 +330,21 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
   });
 
   // 5b) socket：clinic room 全店 UI 更新負責人 chip（transaction 提交之後先 emit）
-  publishNotify(result.clinicId, "conversation:assigned", {
-    conversationId: result.conversationId,
-    clinicId: result.clinicId,
-    assigneeId: result.assigneeId,
-    byStaffId,
-    // ★ R5：新版本號 — 其他 client 即時同步（之後嘅 assign 用呢個 version 先唔會 409）
-    assignVersion: result.assignVersion,
+  // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent — result 無 routed 欄，補五欄（commit 後 = 最新 assignee）
+  const convRow = await prisma.conversation.findUnique({
+    where: { id: result.conversationId },
+    select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
   });
+  if (convRow) {
+    await publishConvEvent(convRef(convRow), "conversation:assigned", {
+      conversationId: result.conversationId,
+      clinicId: result.clinicId,
+      assigneeId: result.assigneeId,
+      byStaffId,
+      // ★ R5：新版本號 — 其他 client 即時同步（之後嘅 assign 用呢個 version 先唔會 409）
+      assignVersion: result.assignVersion,
+    });
+  }
 
   // ★ H2：mention 通知 — 被派者（唔係自己）收 notify:mention（bell badge / 黃點；MD §5：轉交 = 必有通知）
   const clinicCode = (await prisma.clinic.findUnique({ where: { id: result.clinicId }, select: { code: true } }))?.code ?? null;
@@ -357,7 +364,7 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
   //   定向 send  guarantee：跨店被派者唔喺 conv.clinicId 嘅 room，店級 notice:new 未必到佢；
   //   StaffNotice row 已喺 tx 內落（bell 持久化視角）。
   if (result.assigneeId && result.assigneeId !== byStaffId) {
-    publishNotify(result.clinicId, "notice:new", { conversationId: result.conversationId, kind: "SYSTEM", reason: "assigned" });
+    if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: result.conversationId, kind: "SYSTEM", reason: "assigned" });
     publishStaffNotify(result.assigneeId, result.clinicId, "notify:assigned", {
       conversationId: result.conversationId,
       clinicId: result.clinicId,
@@ -372,7 +379,7 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
   //   原負責人可能完全唔喺 conv.clinicId 嘅 room（外店單線授權）— 定向 send 保證佢收到。
   if (result.fromStaffId && result.fromStaffId !== result.assigneeId && result.assigneeId) {
     // notice:new 畀店 room（ StaffNotice row 已喺 tx 內落 — 店鐘聲）
-    publishNotify(result.clinicId, "notice:new", { conversationId: result.conversationId, kind: "SYSTEM" });
+    if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: result.conversationId, kind: "SYSTEM" });
     publishStaffNotify(result.fromStaffId, result.clinicId, "notify:takeover", {
       conversationId: result.conversationId,
       clinicId: result.clinicId,

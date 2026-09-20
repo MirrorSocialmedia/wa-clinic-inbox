@@ -3,7 +3,7 @@ import { z } from "zod";
 import argon2 from "argon2";
 import prisma from "@/lib/prisma";
 import { requireAdmin, invalidateActiveCache, invalidateStaffSessions } from "@/lib/rbac";
-import { publishControl, publishNotify } from "@/lib/notify";
+import { publishControl, publishConvEvent, convRef } from "@/lib/notify";
 import log from "@/lib/log";
 import { handle, toResponse } from "@/lib/api-error";
 
@@ -151,6 +151,10 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
     }
   }
 
+  // ★ cwi-final S1-4：staff 範圍/帳號改動 → 清各 process 嘅 publishConvEvent scope cache（60s → 即刻）。
+  //   PUT 成功（update + StaffClinic sync 已 commit）即發；名改動都發 = 無害（cache 清 = 下次重查）。
+  publishControl({ cmd: "scope:changed" });
+
   // ★ P0-3：active 任何改動都即時生效（60s cache 唔准令停用/重啟遲到）：
   //   1) 本 instance（API route 世界）嘅 requireAuth cache 即時失效 → 下一個 API request 即刻 401
   //   2) 經 Redis control channel 通知「持 io 嗰份 hub instance」→ 強制斷已連 socket
@@ -175,14 +179,21 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
             assigneeLastActionAt: null,
           },
         });
-        publishNotify(h.clinicId, "conv:updated", {
-          conversationId: h.id,
-          clinicId: h.clinicId,
-          status: h.status,
-          assigneeId: null,
-          assignVersion: h.assignVersion + 1,
-          unreadCount: h.unreadCount,
+        // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent — h 係 update 前 stale row，重取五欄
+        const hRow = await prisma.conversation.findUnique({
+          where: { id: h.id },
+          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
         });
+        if (hRow) {
+          await publishConvEvent(convRef(hRow), "conv:updated", {
+            conversationId: h.id,
+            clinicId: h.clinicId,
+            status: h.status,
+            assigneeId: null,
+            assignVersion: h.assignVersion + 1,
+            unreadCount: h.unreadCount,
+          });
+        }
       }
       log.info({ staffId: id, released: held.length }, "staff: account disabled — active cache invalidated + control broadcast + assigned conversations released to public pool");
     } else {

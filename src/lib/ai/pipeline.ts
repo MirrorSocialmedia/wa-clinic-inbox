@@ -24,7 +24,7 @@ import { Prisma } from "@prisma/client";
 import type { Clinic } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import {
   classifyAndDraft,
   getAiConfig,
@@ -290,7 +290,12 @@ export function livePersistPort(deps: LivePersistDeps): PersistPort {
           meta: { wamid, intent },
         },
       });
-      publishNotify(clinicId, "notice:new", { conversationId, kind: "HANDOFF_REQUEST" });
+      // ★ cwi-final S1-4：此處只有 clinicId + conversationId → 補五欄
+      const convRow = await prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+      });
+      if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId, kind: "HANDOFF_REQUEST" });
     },
 
     async applyClassification({ conv, intent, confidence, urgency, aiSummary, urgent, sessionTrigger, consultGateAction }) {

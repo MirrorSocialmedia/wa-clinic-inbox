@@ -20,7 +20,7 @@ import { applyLexicon, type LexiconEntry } from "@/lib/sessions/lexicon";
 import { fetchDutyRoster, hkToday } from "@/lib/duty/client";
 import { phoneHash } from "@/lib/phone-hash";
 import { lookupPatient } from "@/lib/workforce/client";
-import { publishNotify } from "@/lib/notify";
+import { publishConvEvent, convRef } from "@/lib/notify";
 import { pushRoutingEvent } from "@/lib/push";
 
 export interface RouteRule {
@@ -379,13 +379,20 @@ export async function applyRouting(input: RoutingInput): Promise<RoutingResult> 
         },
       });
       // commit-then-emit（commit 咗先 publish — 鐵律）
-      publishNotify(input.conv.clinicId, "routing:assigned", {
-        conversationId: input.conv.id,
-        ruleId: rule.id,
-        groupId,
-        groupName,
-        staffId: routedStaffId,
+      // ★ cwi-final S1-4：input.conv 缺 routedStaffId/routedGroupId → 補五欄
+      const convRow = await prisma.conversation.findUnique({
+        where: { id: input.conv.id },
+        select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
       });
+      if (convRow) {
+        await publishConvEvent(convRef(convRow), "routing:assigned", {
+          conversationId: input.conv.id,
+          ruleId: rule.id,
+          groupId,
+          groupName,
+          staffId: routedStaffId,
+        });
+      }
       // Web push → 全組 active 成員（per-store 靜音偏好照舊生效）
       pushRoutingEvent({ clinicId: input.conv.clinicId, conversationId: input.conv.id, staffIds: members.map((m) => m.id), escalated: false });
     }
