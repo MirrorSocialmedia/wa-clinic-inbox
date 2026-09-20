@@ -13,6 +13,7 @@
  *   sanitizeAlertDetail 會 drop array/object（第二層白名單 hard-gate）。
  */
 import prisma from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import log from "@/lib/log";
 import { notifyAlert } from "./notify";
 
@@ -67,6 +68,12 @@ export async function upsertAlert(a: UpsertAlertInput): Promise<boolean> {
     await notifyAlert({ type: a.type, severity: a.severity, clinicCode: a.clinicCode ?? null, detail: a.detail });
     return true;
   } catch (err) {
+    // ★ B3 fix（T610 實錘 alertOpen=3）：check-then-insert 非原子 — 並行 caller 都睇到 0 條未解決 →
+    //   雙 create。migration 20260920070000 加 partial unique index（type, coalesce(clinicId,'') WHERE
+    //   resolvedAt IS NULL）→ 輸家撞 P2002：視為「已有人新開」，返 false（唔重複 notifyAlert）。
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return false;
+    }
     log.error({ type: a.type, err: err instanceof Error ? err.message : String(err) }, "upsertAlert failed");
     return false;
   }
