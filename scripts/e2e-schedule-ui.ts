@@ -84,7 +84,7 @@ interface P {
   [k: string]: unknown;
 }
 interface PageLike {
-  goto: (url: string, o?: Record<string, unknown>) => Promise<void>;
+  goto: (url: string, o?: Record<string, unknown>) => Promise<{ status: () => number } | null>;
   waitForTimeout: (ms: number) => Promise<void>;
   selectOption: (sel: string, v: string) => Promise<void>;
   getByRole: (role: string, o?: Record<string, unknown>) => P;
@@ -651,9 +651,12 @@ async function main(): Promise<void> {
   // ══ T185：過窗改三出路（日視圖 popover + 側欄迷你表）════════════════════
   // ★ cwi-final B1fix-harness-2：時段 guard 同款（12:00–12:30 格喺 12:00 HKT 後過/臨界）
   try {
-    if (nowMinT >= 12 * 60) {
+    // ★ B3 harness fix（standalone7 實錘 02:36）：09:00 格喺 09:00 HKT 後已過 → 迷你表只渲染 m >= nowMin
+    //   → 09:00 格永遠唔出 → section b click 30s timeout 假紅（早晨全綠記錄見 run6）。≥9:00 整 test skip 記 OK。
+    //   （舊 12*60 guard 只罩 section a 嘅 12:00–12:30 格；section b 嘅 09:00 格限制更嚴。）
+    if (nowMinT >= 9 * 60) {
       ok("SCHED-T185");
-      console.log("SCHED-T185-SKIP: 跑 test 時間 ≥12:00 HKT — 12:00–12:30 slot 已過/臨界（時段限制，非回歸；早晨全綠記錄見 run6/8/9）");
+      console.log("SCHED-T185-SKIP: 跑 test 時間 ≥09:00 HKT — 09:00 slot 已過（時段限制，非回歸；早晨全綠記錄見 run6）");
       throw new SkipByTime();
     }
     if (!convOldWin) throw new Error("fixture conversation 未建（見上 fixture 錯誤）");
@@ -735,7 +738,13 @@ async function main(): Promise<void> {
     // extra:4 → 2 + 4 = 6 醫生（48px + 6×62px = 420px → 側欄必橫捲）
     writeFileSync(FLAG_EXTRA, JSON.stringify([{ clinicCode: "TKW", extra: 4 }]), "utf8");
     try {
-      await P.goto(`${base}/inbox?conv=${convWide}`, { waitUntil: "domcontentloaded", timeout: 60000 });
+      // ★ B3 harness fix（standalone7 實錘）：dev server 重編譯 race → SSR 一過 500（.next 寫入中 module 暫缺）
+      //   → 60s poll 全空假紅。500 即等 5s retry 一次（斷言條件零改動）。
+      let resp = (await P.goto(`${base}/inbox?conv=${convWide}`, { waitUntil: "domcontentloaded", timeout: 60000 })) as { status: () => number } | null;
+      if (resp && resp.status() === 500) {
+        await P.waitForTimeout(5000);
+        resp = (await P.goto(`${base}/inbox?conv=${convWide}`, { waitUntil: "domcontentloaded", timeout: 60000 })) as { status: () => number } | null;
+      }
       // a2 修正（cwi-reopenreply-20260910）：30s → 60s + grid 15s → 30s（全量負載下冷 browser /inbox render 超 budget，run6 假紅；斷言條件零改動）
       if (!(await poll(async () => ((await P.textContent("body")) ?? "").includes("今日可約"), 60000)))
         throw new Error("側欄迷你表未出現");
