@@ -5116,7 +5116,7 @@ check "H6-T93 防呆 C：負責人冇齋夠 N → 唔放手" "$STILL_C" "true"
 # ── H6-T94. 多店員工：TKW+MF 睇晒覆晒；WTC 403；default = isPrimary ──────
 echo "[H6] T94: multi-clinic staff scope..."
 curl -s -b "$COOKIE_H6M" -o /tmp/e2e-h6-t94.json "$BASE/api/conversations"
-H6M_SCOPE=$(node -e 'try{const a=JSON.parse(require("fs").readFileSync("/tmp/e2e-h6-t94.json","utf8"));const s=new Set(a.map(x=>x.clinicId));console.log((s.has(process.argv[1])&&s.has(process.argv[2])?"ok":"missing:"+s.size))}catch{console.log("badjson")}' "$TKW_CLINIC_ID" "$MF_CLINIC_ID")
+H6M_SCOPE=$(node -e 'try{const a=(JSON.parse(require("fs").readFileSync("/tmp/e2e-h6-t94.json","utf8")).items??[]);const s=new Set(a.map(x=>x.clinicId));console.log((s.has(process.argv[1])&&s.has(process.argv[2])?"ok":"missing:"+s.size))}catch{console.log("badjson")}' "$TKW_CLINIC_ID" "$MF_CLINIC_ID")
 check "H6-T94 多店列表：TKW + MF 對話都見到" "$H6M_SCOPE" "ok"
 # 覆兩店：TKW 用 T92 conv（unassigned），MF 用 T10 conv
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_H6M" -X POST -H 'Content-Type: application/json' -d "{\"conversationId\":\"$CV92\",\"body\":\"e2e h6 t94 tkw reply\"}" "$BASE/api/messages/send")
@@ -5205,7 +5205,7 @@ OLDSEAL=$(node -e "const{sealData}=require('iron-session');const fs=require('fs'
 COOKIE_OLD=/tmp/e2e-cookie-h6old.txt
 printf '#HttpOnly_127.0.0.1\tFALSE\t/\tFALSE\t%s\twa_inbox_session\t%s\n' "$(( $(date +%s) + 86400 ))" "$OLDSEAL" > "$COOKIE_OLD"
 curl -s -b "$COOKIE_OLD" -o /tmp/e2e-h6-t98.json "$BASE/api/conversations"
-H6T98=$(node -e 'try{const a=JSON.parse(require("fs").readFileSync("/tmp/e2e-h6-t98.json","utf8"));console.log(Array.isArray(a)&&a.some(x=>x.id===process.argv[1])&&!a.some(x=>x.id===process.argv[2])?"ok":"bad")}catch{console.log("badjson")}' "$CV91" "$MF_CONV_ID")
+H6T98=$(node -e 'try{const a=(JSON.parse(require("fs").readFileSync("/tmp/e2e-h6-t98.json","utf8")).items??[]);console.log(Array.isArray(a)&&a.some(x=>x.id===process.argv[1])&&!a.some(x=>x.id===process.argv[2])?"ok":"bad")}catch{console.log("badjson")}' "$CV91" "$MF_CONV_ID")
 check "H6-T98 舊 session 列表：TKW 見到 + MF 唔見（fallback 單店）" "$H6T98" "ok"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_OLD" "$BASE/api/conversations/$MF_CONV_ID")
 check "H6-T98 舊 session GET MF 對話 → 403（行為同舊單店一致）" "$CODE" "403"
@@ -5292,11 +5292,11 @@ check "H6-MC fixture：7 conv 入庫（靜默失敗防線）" "$MC_NCONV" "7"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/conversations/$CV_MC_W/assign" -H 'Content-Type: application/json' -d "{\"toStaffId\":\"$H6M_ID\",\"assignVersion\":0}")
 check "H6-MC-1 setup: ADMIN 指派 WTC 線 → H6M（外店 staff）→ 200" "$CODE" "200"
 curl -s -b "$COOKIE_H6M" -o /tmp/e2e-mc-list.json "$BASE/api/conversations"
-MC_LIST=$(node -e 'try{const a=JSON.parse(require("fs").readFileSync("/tmp/e2e-mc-list.json","utf8"));const w=a.find(x=>x.id===process.argv[1]);const x=a.find(x=>x.id===process.argv[2]);const r=a.find(x=>x.id===process.argv[3]);console.log(w&&w.clinicName===process.argv[4]&&!x&&r&&r.clinicName===process.argv[5]?"ok":"bad:"+JSON.stringify({w:w&&{cn:w.clinicName},x:!!x,r:r&&{cn:r.clinicName}}))}catch{console.log("badjson")}' "$CV_MC_W" "$CV_MC_W2" "$CV_MC_R" "$WTC_CLINIC_NAME" "$TKW_CLINIC_NAME")
+MC_LIST=$(node -e 'try{const a=(JSON.parse(require("fs").readFileSync("/tmp/e2e-mc-list.json","utf8")).items??[]);const w=a.find(x=>x.id===process.argv[1]);const x=a.find(x=>x.id===process.argv[2]);const r=a.find(x=>x.id===process.argv[3]);console.log(w&&w.clinicName===process.argv[4]&&!x&&r&&r.clinicName===process.argv[5]?"ok":"bad:"+JSON.stringify({w:w&&{cn:w.clinicName},x:!!x,r:r&&{cn:r.clinicName}}))}catch{console.log("badjson")}' "$CV_MC_W" "$CV_MC_W2" "$CV_MC_R" "$WTC_CLINIC_NAME" "$TKW_CLINIC_NAME")
 check "H6-MC-1 H6M list：WTC 指派線可見（OR path）+ clinicName=店名 + 外店未指派線唔見" "$MC_LIST" "ok"
 # MD A.3 clinic-tab 語義：STAFF 睇自己店 tab（?clinicId=）時，跨店指派自己嘅線仍要可見；外店未指派線依然唔見
 curl -s -b "$COOKIE_H6M" -o /tmp/e2e-mc-list-para.json "$BASE/api/conversations?clinicId=$TKW_CLINIC_ID"
-MC_LISTP=$(node -e 'try{const a=JSON.parse(require("fs").readFileSync("/tmp/e2e-mc-list-para.json","utf8"));const w=a.find(x=>x.id===process.argv[1]);const w2=a.find(x=>x.id===process.argv[2]);const r=a.find(x=>x.id===process.argv[3]);console.log(w&&w.clinicName===process.argv[4]&&!w2&&r?"ok":"bad:"+JSON.stringify({w:!!w,w2:!!w2,r:!!r}))}catch{console.log("badjson")}' "$CV_MC_W" "$CV_MC_W2" "$CV_MC_R" "$WTC_CLINIC_NAME")
+MC_LISTP=$(node -e 'try{const a=(JSON.parse(require("fs").readFileSync("/tmp/e2e-mc-list-para.json","utf8")).items??[]);const w=a.find(x=>x.id===process.argv[1]);const w2=a.find(x=>x.id===process.argv[2]);const r=a.find(x=>x.id===process.argv[3]);console.log(w&&w.clinicName===process.argv[4]&&!w2&&r?"ok":"bad:"+JSON.stringify({w:!!w,w2:!!w2,r:!!r}))}catch{console.log("badjson")}' "$CV_MC_W" "$CV_MC_W2" "$CV_MC_R" "$WTC_CLINIC_NAME")
 check "H6-MC-1 H6M list?clinicId=TKW：跨店指派線仍可見（clinic-tab OR 語義）+ 外店未指派線仍唔見" "$MC_LISTP" "ok"
 
 # ── H6-MC-2. crossClinic audit meta（T1.2：from=TKW staff → to=WTC staff）──

@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Bell, BellRing, CalendarDays, MessageCircle, Search, Settings, X } from "lucide-react";
 import type { ClinicInfo, ConversationItem, ConvStatus, StaffNoticeItem } from "./types";
 import { relTime } from "./time";
+// ★ cwi-final S1-2（L-3）：膠囊 predicate — client 同 server 共用單一來源（計數不變式）
+import { matchCapsule, type CapsuleKey } from "@/lib/inbox/capsule";
 import type { NotifyPrefs } from "@/lib/notify-client";
 
 interface Props {
@@ -20,6 +22,12 @@ interface Props {
   onAssignedFilter: (f: "all" | "unassigned" | "mine" | "routed" | "followup") => void;
   /** ★ cwi-inboxfix-20260905（MD §1.1）：計數（?counts=1；列表 refetch 順帶更新）— null = 未攞到 */
   counts: { all: number; unassigned: number; mine: number; routed: number; pending: number; resolved: number; followup?: number } | null;
+  /** ★ cwi-final S1-2（L-3）：scopeClinicIds live（full fetch 用 server scopedSet 覆蓋）— matchCapsule inClinic 雙保險 */
+  scopeClinicIds?: string[] | null;
+  /** ★ cwi-final S1-2（裁決 6）：active 對話超過 5000 — 頂部黃条 */
+  listTruncated?: boolean;
+  /** ★ cwi-final S1-2（裁決 5）：捲到底（近底 30px）— 目前只 resolved view 用（追下一頁） */
+  onScrollBottom?: () => void;
   conversations: ConversationItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
@@ -198,23 +206,27 @@ export function ConversationList(p: Props) {
   const items = useMemo(() => {
     if (p.searchResults) return p.searchResults;
     let list = p.conversations;
-    // ★ cwi-inboxfix-20260905（MD I-1/I-2）：公海/我負責 膠囊 filter（client 端，
-    //   與 server ?assigned= 語義等價 — 見 fetchConversations 註解）
-    // ★ cwi-followup-v3：待跟進 = 有 followupDueAt（未處理 SUGGESTED 建議）
+    // ★ cwi-final S1-2（L-3）：膠囊 filter 改用 matchCapsule（client / server / counts 三處同源）—
+    //   unassigned 加 clinic 維度雙保險（I-2）；followup 唔 filter status（S2-3：包含 RESOLVED）。
+    const isResolvedView = p.statusFilter === "RESOLVED";
     if (p.assignedFilter !== "all") {
-      list = list.filter((c) =>
-        p.assignedFilter === "unassigned"
-          ? c.assigneeId == null
-          : p.assignedFilter === "routed"
-            // ★ cwi-routing-20260906（MD §4.3）：派俾我 = 未指派 且（routedStaffId=我 ∨ routedGroupId∈我組）
-            ? c.assigneeId == null &&
-              (c.routedStaffId === p.myStaffId || (c.routedGroupId != null && (p.myGroupIds ?? []).includes(c.routedGroupId)))
-            : p.assignedFilter === "followup"
-              ? c.followupDueAt != null && c.status !== "RESOLVED"
-              : c.assigneeId === p.myStaffId
-      );
+      const cx = {
+        meId: p.myStaffId,
+        myGroupIds: p.myGroupIds ?? [],
+        scopeClinicIds: p.scopeClinicIds ?? null,
+        activeClinicId: p.activeClinicId,
+      };
+      list = list.filter((c) => matchCapsule(p.assignedFilter as CapsuleKey, c, cx));
     }
-    if (p.statusFilter !== "ALL") list = list.filter((c) => c.status === p.statusFilter);
+    // active view：膠囊計數（counts）皆 !RESOLVED 口徑 → all/unassigned/mine/routed 要排除 RESOLVED 行
+    //   （首屏夾咗 RESOLVED 尾 100 + 待跟進 RESOLVED）；followup 保留 RESOLVED（S2-3）。
+    //   resolved view：列表本身已全 RESOLVED — 唔再加 status filter（會清埋）。
+    if (!isResolvedView) {
+      if (p.assignedFilter !== "all" && p.assignedFilter !== "followup") {
+        list = list.filter((c) => c.status !== "RESOLVED");
+      }
+      if (p.statusFilter !== "ALL") list = list.filter((c) => c.status === p.statusFilter);
+    }
     return [...list].sort((a, b) => {
       // ★ cwi-followup-v3（MD §2.1）：待跟進列表 = 建議日期最舊先（唔係最新）— 久咗未跟先最緊要
       if (p.assignedFilter === "followup") {
@@ -230,7 +242,7 @@ export function ConversationList(p: Props) {
       if (ar !== br) return ar - br;
       return new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime();
     });
-  }, [p.conversations, p.searchResults, p.statusFilter, p.assignedFilter, p.myStaffId, p.myGroupIds]);
+  }, [p.conversations, p.searchResults, p.statusFilter, p.assignedFilter, p.myStaffId, p.myGroupIds, p.scopeClinicIds, p.activeClinicId]);
 
   return (
     <aside
@@ -242,6 +254,12 @@ export function ConversationList(p: Props) {
       {p.connOffline && (
         <div className="mx-2.5 mt-2 px-3 py-1 rounded-full bg-warn-soft text-warn-text text-[11px] font-medium" role="status">
           ⚠ 連線中斷 — 重連中…（恢復後自動補漏）
+        </div>
+      )}
+      {/* ★ cwi-final S1-2（裁決 6）：active 超過 5000 — truncated 提示（縮窄用膠囊/店舖篩選） */}
+      {p.listTruncated && (
+        <div className="mx-2.5 mt-2 px-3 py-1 rounded-full bg-warn-soft text-warn-text text-[11px] font-medium" role="status">
+          ⚠ 未解決超過 5000，只顯示最新 5000 — 請用膠囊/店舖篩選
         </div>
       )}
       {/* header：標題 + clinic dropdown（ADMIN only）+ ★ H2 bell badge */}
@@ -675,7 +693,15 @@ export function ConversationList(p: Props) {
       </div>
 
       {/* list — 卡片式行（66px 行高 / 38px 頭像 / gap 分隔，無 border-b） */}
-      <div className="flex-1 overflow-y-auto min-h-0 px-2.5 pb-3 flex flex-col gap-[3px]">
+      <div
+        className="flex-1 overflow-y-auto min-h-0 px-2.5 pb-3 flex flex-col gap-[3px]"
+        onScroll={(e) => {
+          // ★ cwi-final S1-2（裁決 5）：近底 30px 觸發（caller 決定用途 — 目前只 resolved view 追頁）
+          if (!p.onScrollBottom) return;
+          const el = e.currentTarget;
+          if (el.scrollHeight - el.scrollTop - el.clientHeight <= 30) p.onScrollBottom();
+        }}
+      >
         {items.length === 0 && (
           <div className="flex flex-col items-center gap-2 py-10 text-t3">
             <MessageCircle size={28} strokeWidth={2.75} />

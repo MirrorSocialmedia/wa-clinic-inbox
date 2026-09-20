@@ -89,10 +89,11 @@ export interface ConversationItem {
   reopenedAt?: Date | string | null;
   /** ★ cwi-followup-v3：最舊未處理跟進建議（SUGGESTED）dueAt — 「待跟進」膠囊 client filter + 最舊先排序；null = 冇 */
   followupDueAt?: string | null;
+  /** ★ cwi-followup-p3（鐵律 5）：badge「跟進回覆」— 24h 內由 client derive */
+  followupRepliedAt?: string | null;
   contact: ContactInfo | null;
-  /** ★ booking-ui（A）：已釘住舊客（chat 卡藍掣「幫我喺 Apricot 落單」可見性）— null = 未釘住 */
-  pinnedPatient: { patientApricotId: string } | null;
-  /** /api/conversations 原樣 flat 欄（G-3 人手落單 gate 用 — 冇 = 未釘住） */
+  /** ★ booking-ui（A）：已釘住舊客（chat 卡藍掣「幫我喺 Apricot 落單」可見性）— null = 未釘住
+   * ★ cwi-final S1-2（裁決 8 / audit3 P2-32）：形狀統一 = 一律用 flat API 版（舊 {patientApricotId} 形狀已廢） */
   pinnedPatientApricotId?: string | null;
   /** Phase 3：最新 PENDING 預約（綠色卡）/ ★ booking-ui（D）：CONFIRMED 卡 — null = 冇 */
   pendingBooking: BookingInfo | null;

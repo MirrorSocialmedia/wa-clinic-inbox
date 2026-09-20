@@ -2,19 +2,28 @@ import { redirect } from "next/navigation";
 import prisma from "@/lib/prisma";
 import { resolveSessionScope } from "@/lib/rbac";
 import { getServerSession } from "@/lib/session-server";
-import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
+import {
+  loadCounts,
+  loadConversationRows,
+  loadFollowupDue,
+  resolveListScope,
+  toConversationDTOs,
+  type ScopeCtx,
+} from "@/lib/inbox/conversation-list";
 import { InboxClient } from "@/components/inbox/inbox-client";
 
 /**
  * /inbox — 共用收件箱（MD §6.4 三欄）。
  *
- * Server 端做首屏資料（SSR 一次過：clinics / conversations / staff），
- * client 之後用 Socket.IO 實時更新 + REST 補漏。
- * STAFF 硬性只回自己店（clinicScope fail-closed）。
+ * ★ cwi-final S1-2（裁決 11）：首屏對話資料改走單一來源 loader
+ * （src/lib/inbox/conversation-list.ts — 同 /api/conversations 同一 scope / 分頁 / 計數 / DTO）。
+ * 舊版各自 scope / take 200 / contact 全表 findMany / 各自 map 全部刪除（L-1 / audit3 P1-08）。
+ *
+ * - initialNextCursor 有值 → client mount 後由第二頁自動追（唔重拉第一頁）
+ * - myGroupIds = resolveListScope（**所有角色** — 舊版 STAFF-only 已廢）
+ * - STAFF 硬性只回自己店（clinicScope fail-closed — 經 baseScope 單一來源）
  */
 export const dynamic = "force-dynamic";
-
-const WINDOW_MS = 24 * 3600 * 1000;
 
 export default async function InboxPage({
   searchParams,
@@ -28,142 +37,33 @@ export default async function InboxPage({
   const sp = await searchParams;
   const convParam = typeof sp.conv === "string" ? sp.conv : "";
 
-  // cwi-hub-a-20260914（Part A）：列表 scope 同 /api/conversations 一致 — 單一來源 resolveSessionScope
-  // （ALL scope / SUPERVISOR = 全店；COMPANY / CLINICS = 範圍集合 ∪ 指派俾自己嘅線）。
-  // SSR 首屏必須包含，headless 無 client refetch 機會。
+  // cwi-hub-a-20260914（Part A）：scope 解析（單一來源）— 首屏必須包含，headless 無 client refetch 機會
   const { scopeType, scopedClinicIds } = await resolveSessionScope(session);
-  const scopedSet =
-    session.role === "SUPERVISOR" || scopeType === "ALL" ? null : scopedClinicIds;
-  const scope = scopedSet ? { clinicId: { in: scopedSet } } : {};
-  const convScope = scopedSet
-    ? { OR: [{ clinicId: { in: scopedSet } }, { assigneeId: session.staffId }] }
-    : {};
-  // staffMap 唔限 clinic scope — cwi-inboxfix-20260905（T9 e2e 發現）：跨店負責人的
-  // 三態 chip（● 某某 處理緊）需要全店 staff 名；同 /api/conversations 對齊（全量 active）。
-  // 零 PII 增量：staff 名對 STAFF 本就喺 API list 回傳（跨店線 assigneeName 一直有值）。
-  const [clinics, convs, contacts, staff, pendingBookings, skillGroups, myGroupMembers] = await Promise.all([
-    scopedSet
-      ? prisma.clinic.findMany({ where: { id: { in: scopedSet } }, orderBy: { code: "asc" } })
+
+  // ★ S1-2（裁決 11）：scope / 分頁 / 計數 / DTO 全部同 /api/conversations 共用
+  const scopeCtx: ScopeCtx = {
+    staff: { id: session.staffId, email: session.email, name: session.name, role: session.role },
+    scopeType,
+    scopedClinicIds,
+  };
+  const s = await resolveListScope(scopeCtx, null);
+  const followupDue = await loadFollowupDue(s);
+  const [{ rows, nextCursor }, counts, clinics, staff] = await Promise.all([
+    loadConversationRows(s, followupDue),
+    loadCounts(s, followupDue),
+    // 店 tabs（clinic 集合 — STAFF / 受限 = scopedSet；ALL / SUPERVISOR = 全店）
+    s.scopedSet
+      ? prisma.clinic.findMany({ where: { id: { in: s.scopedSet } }, orderBy: { code: "asc" } })
       : prisma.clinic.findMany({ orderBy: { code: "asc" } }),
-    prisma.conversation.findMany({ where: convScope, orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }], take: 200 }),
-    // 跟 /api/conversations 一致：全量 fetch（server-side map，只嵌入可見 row 引用嘅 contact）
-    prisma.contact.findMany({ select: { id: true, waId: true, profileName: true, labels: true } }),
+    // staffMap 唔限 clinic scope（三態 chip 需要全店 staff 名；同 API 對齊）
     prisma.staffUser.findMany({ where: { active: true }, select: { id: true, name: true, role: true, clinicId: true } }),
-    // Phase 3：PENDING 預約（綠色卡）/ ★ booking-ui（D）：CONFIRMED 亦顯示 — 同 conversations API 一致
-    prisma.bookingRequest.findMany({
-      where: { ...scope, status: { in: ["PENDING", "CONFIRMED"] } },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-    }),
-    // ★ cwi-routing-20260906（MD §4.3）：路由 badge 組名（出廠 4 組，全量 fetch）
-    prisma.skillGroup.findMany({ select: { id: true, name: true, code: true } }),
-    // 「派俾我」膠囊 — 我係邊啲組嘅成員（STAFF；ADMIN/SUPERVISOR 唔使）
-    session.role === "STAFF"
-      ? prisma.skillGroupMember.findMany({ where: { staffId: session.staffId }, select: { groupId: true } })
-      : Promise.resolve([] as { groupId: string }[]),
   ]);
-
-  const contactMap = new Map(contacts.map((c) => [c.id, c]));
-  const staffMap = new Map(staff.map((s) => [s.id, s.name]));
-  // cwi-multiclinic-20260903：clinic map（clinicName badge）+ 補齊指派俾我嘅外店線嘅店
-  // （SSR 首屏 clinicName/店名 badge 完整；client 另有 /api/clinics?scope=schedule fail-soft 補漏）
-  const clinicMap = new Map(clinics.map((c) => [c.id, c]));
-  const groupMap = new Map(skillGroups.map((g) => [g.id, g.name]));
-  const rowClinicIds = Array.from(new Set(convs.map((c) => c.clinicId)));
-  const missingClinicIds = rowClinicIds.filter((id) => !clinicMap.has(id));
-  if (missingClinicIds.length > 0) {
-    const extra = await prisma.clinic.findMany({ where: { id: { in: missingClinicIds } } });
-    for (const c of extra) clinicMap.set(c.id, c);
-  }
-  // ★ booking-ui（D）：PENDING 優先；冇 PENDING 先顯示最新 CONFIRMED（同 API 一致）
-  const pendingBookingMap = new Map<string, (typeof pendingBookings)[number]>();
-  for (const b of pendingBookings) {
-    const existing = pendingBookingMap.get(b.conversationId);
-    if (!existing || (existing.status !== "PENDING" && b.status === "PENDING")) {
-      pendingBookingMap.set(b.conversationId, b);
-    }
-  }
-  // providerslot-20260830 T3：hold 卡 — 每個 WA 號最新非終態 hold（join key = Contact.waId）。
-  // STAFF 限定自己店（fail-closed）；fail-soft：DB 抖動 → 空 Map（卡唔顯示，唔阻首屏）。
-  const holdByPhone = await latestHoldsByPhone(
-    contacts.map((c) => c.waId),
-    session.role === "STAFF" ? rowClinicIds : undefined
-  ).catch(() => new Map());
-  const now = Date.now();
-
-  // D.4（cwi-schedv2-20260903）：舊 SSR 當值卡管線移除（側欄改 MiniSchedule 自拉 /api/flows/slots）。
-
-  const conversations = convs.map((cv) => {
-    const lastIn = cv.lastInboundAt?.getTime() ?? null;
-    const remainingMs = lastIn === null ? 0 : Math.max(0, lastIn + WINDOW_MS - now);
-    return {
-      id: cv.id,
-      clinicId: cv.clinicId,
-      // cwi-multiclinic-20260903（MD A.3/A.6.4）：店名 badge（同 API list 對齊）
-      clinicName: clinicMap.get(cv.clinicId)?.name ?? null,
-      clinicCode: clinicMap.get(cv.clinicId)?.code ?? null,
-      contactId: cv.contactId,
-      status: cv.status,
-      assigneeId: cv.assigneeId,
-      assigneeName: cv.assigneeId ? staffMap.get(cv.assigneeId) ?? null : null,
-      // ★ Realtime P0 (R5)：樂觀鎖版本
-      assignVersion: cv.assignVersion,
-      unreadCount: cv.unreadCount,
-      lastInboundAt: cv.lastInboundAt ? cv.lastInboundAt.toISOString() : null,
-      lastMessageAt: cv.lastMessageAt.toISOString(),
-      intent: cv.intent,
-      intentConfidence: cv.intentConfidence,
-      urgency: cv.urgency,
-      urgent: cv.urgent,
-      aiSummary: cv.aiSummary,
-      // ★ cwi-routing-20260906（MD §4.3）：路由 badge — 🎯 組名 / 🎯 單人名 / ⚠ 已升級
-      routedGroupId: cv.routedGroupId,
-      routedStaffId: cv.routedStaffId,
-      routedRuleId: cv.routedRuleId,
-      routedAt: cv.routedAt,
-      escalatedAt: cv.escalatedAt,
-      // ★ cwi-statusrole2-20260910（MD §3）：badge「↻ 重新開啟」（同 API list 對齊）
-      reopenedAt: cv.reopenedAt,
-      routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId) ?? null) : null,
-      routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
-      contact: contactMap.get(cv.contactId) ?? null,
-      // ★ booking-ui（A）：已釘住舊客（藍掣可見性）
-      pinnedPatient: cv.pinnedPatientApricotId ? { patientApricotId: cv.pinnedPatientApricotId } : null,
-      // Phase 3：綠色卡（PENDING 預約）/ ★ booking-ui（D）：CONFIRMED 卡
-      pendingBooking: (() => {
-        const b = pendingBookingMap.get(cv.id);
-        if (!b) return null;
-        return {
-          id: b.id,
-          providerName: b.providerName,
-          requestedDate: b.requestedDate,
-          requestedTime: b.requestedTime,
-          timeOfDay: b.timeOfDay,
-          precheckPassed: b.precheckPassed,
-          status: b.status as "PENDING" | "CONFIRMED",
-          createdAt: b.createdAt.toISOString(),
-          // ★ booking-ui（D）：CONFIRMED 態 + 主訴
-          apricotApptId: b.apricotApptId,
-          visitReasonCode: b.visitReasonCode,
-          handledByStaffName: b.handledByStaffId ? (staffMap.get(b.handledByStaffId) ?? null) : null,
-          handledAt: b.handledAt ? b.handledAt.toISOString() : null,
-          chiefComplaint: b.chiefComplaint,
-        };
-      })(),
-      // providerslot-20260830 T3：Flow 硬保留 hold 卡（HELD / IN_APRICOT / COMMITTED）
-      holdEvent: (() => {
-        const ph = contactMap.get(cv.contactId)?.waId;
-        if (!ph) return null;
-        return holdByPhone.get(ph) ?? null;
-      })(),
-      window: {
-        open: remainingMs > 0,
-        remainingMs,
-        remainingHours: remainingMs / 3600000,
-        tone: (!remainingMs ? "red" : remainingMs < 6 * 3600 * 1000 ? "yellow" : "green") as "red" | "yellow" | "green",
-      },
-    };
-  });
+  // providerslot-20260830 T3：hold 卡 — STAFF 限本頁 rows 嘅店（fail-closed，同現行行為）
+  const initialConversations = await toConversationDTOs(
+    rows,
+    followupDue,
+    session.role === "STAFF" ? [...new Set(rows.map((r) => r.clinicId))] : undefined,
+  );
 
   return (
     <InboxClient
@@ -176,13 +76,15 @@ export default async function InboxPage({
         clinicId: session.clinicId,
         // cwi-hub-a-20260914：店集合（STAFF 用已解析 scope 集合 — 舊 session fallback 已喺 resolveSessionScope 內處理）
         clinicIds: session.role === "STAFF" ? scopedClinicIds : [],
-        // ★ cwi-routing-20260906（MD §4.3）：「派俾我 N」膠囊 — 我嘅組 id（client 端 filter + 計數 backup）
-        myGroupIds: myGroupMembers.map((g) => g.groupId),
+        // ★ cwi-final S1-2（裁決 11）：「派俾我 N」膠囊 — resolveListScope 單一來源（所有角色）
+        myGroupIds: s.myGroupIds,
       }}
       initialClinics={clinics}
-      initialConversations={conversations}
+      initialConversations={initialConversations}
       initialStaff={staff}
       initialSelectedConvId={convParam || null}
+      initialCounts={counts}
+      initialNextCursor={nextCursor}
     />
   );
 }

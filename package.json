@@ -24,6 +24,8 @@
     "e2e:cron": "tsx scripts/e2e-cron.ts",
     "e2e:t723": "tsx scripts/e2e-t723-upsert-alert.ts",
     "e2e:t610": "tsx scripts/e2e-t610-dlq-replay.ts",
+    "e2e:t613": "tsx scripts/e2e-s12-t613.ts",
+    "e2e:t700": "tsx scripts/e2e-s12-t700.ts",
     "e2e:t713": "tsx scripts/e2e-t713-side-effects.ts",
     "e2e:t714": "tsx scripts/e2e-s11c-t714.ts",
     "e2e:t724": "tsx scripts/unit-t724-status-rank.ts",

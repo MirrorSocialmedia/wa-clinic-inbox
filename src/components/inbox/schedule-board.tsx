@@ -690,7 +690,8 @@ function DayGrid({
     fetch(`/api/conversations?clinicId=${encodeURIComponent(clinicId)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => {
-        if (alive) setConvs(Array.isArray(j) ? (j as ConversationItem[]) : []);
+        // ★ cwi-final S1-2：/api/conversations 一律 object 回應 — 讀 .items
+        if (alive) setConvs(Array.isArray(j) ? (j as ConversationItem[]) : (j?.items ?? []));
       })
       .catch(() => {
         if (alive) setConvs([]);

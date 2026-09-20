@@ -311,10 +311,11 @@ async function t248Api(adminCookie: string): Promise<void> {
   );
   check("status 欄存在（enum 保留，純資料 migration）", enumRows[0]?.n === 1);
   const { status, body } = await api(adminCookie, "?status=PENDING");
-  check("GET ?status=PENDING 舊 link 200", status === 200, body);
-  const arr = Array.isArray(body) ? body : null;
-  check("舊 link 回純陣列（舊 client 兼容）", arr !== null, typeof body);
-  check("舊 link PENDING 結果 = 空（DB 已歸零）", arr?.length === 0, arr?.length);
+  check("GET ?status=PENDING 舊 link 200", status === 200, status);
+  // ★ cwi-final S1-2（裁決 1）：/api/conversations 一律 object {items,nextCursor,...} — 舊純陣列斷言已廢
+  const ob = body as { items?: unknown[] } | null;
+  check("舊 link 回 object（items 陣列）", !!ob && Array.isArray(ob.items), typeof body);
+  check("舊 link PENDING 結果 = 空（DB 已歸零）", ob?.items?.length === 0, ob?.items?.length);
   const { body: cbody } = await api(adminCookie, "?counts=1&status=PENDING");
   const c = (cbody as { counts?: Counts } | null)?.counts;
   check("counts.pending = 0", c?.pending === 0, c);

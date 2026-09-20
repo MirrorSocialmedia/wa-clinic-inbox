@@ -65,7 +65,7 @@ export function fmtRequestDay(dateStr: string): { main: string; weekday: string 
 }
 
 export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDone, slotClaimEnabled }: Props) {
-  const pinned = !!c.pinnedPatient?.patientApricotId;
+  const pinned = !!c.pinnedPatientApricotId;
   const locked = !!c.assigneeId && c.assigneeId !== myStaffId;
 
   // ── visitReason 下拉（dictionaries + default env）──────────────────

@@ -135,7 +135,8 @@ async function main(): Promise<void> {
   ok("A2 延遲 IN 喺最新位（asc 尾）", last?.waMessageId === W_DELAY, `tail=${last?.waMessageId}`);
 
   // ── A3：列表浮頂 + lastMessageAt ≈ now（GREATEST(now)，唔係 waTs=now-3h）────
-  const list = await fetch(`${BASE}/api/conversations?limit=100`, { headers: H }).then((r) => r.json() as Promise<{ id: string; lastMessageAt: string }[]>);
+  // ★ cwi-final S1-2：/api/conversations 一律 object 回應 {items,...} — 讀 .items（limit 參數忽略，page size=200）
+  const list = (await fetch(`${BASE}/api/conversations?limit=100`, { headers: H }).then((r) => r.json() as Promise<{ items: { id: string; lastMessageAt: string }[] }>)).items;
   const idx = list.findIndex((c) => c.id === convId);
   const my = list[idx];
   const ageSec = my ? (Date.now() - new Date(my.lastMessageAt).getTime()) / 1000 : -1;

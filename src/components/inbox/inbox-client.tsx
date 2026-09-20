@@ -29,6 +29,9 @@ import type {
   UrgentEscalationEvent,
   UserCtx,
 } from "./types";
+// ★ cwi-final S1-2：列表常量（純常量 — client bundle 可 import；
+//   list-constants 獨立檔正係因為 conversation-list.ts（server loader）帶 prisma）
+import { ACTIVE_HARD_CAP } from "@/lib/inbox/list-constants";
 import {
   DEFAULT_NOTIFY_PREFS,
   dismissNotifyBanner,
@@ -52,6 +55,51 @@ import { PatientDrawer } from "./patient-drawer";
 
 const PAGE_SIZE = 50;
 const WINDOW_MS = 24 * 3600 * 1000;
+
+/** ★ cwi-final S1-2：/api/conversations 一律 object 回應（舊 array 回應已廢） */
+export type ConvListCounts = {
+  all: number;
+  unassigned: number;
+  mine: number;
+  routed: number;
+  pending: number;
+  resolved: number;
+  followup: number;
+};
+interface ConvListPage {
+  items: ConversationItem[];
+  nextCursor: string | null;
+  scopeClinicIds: string[] | null;
+  myGroupIds: string[];
+  counts?: ConvListCounts | null;
+}
+
+/** ★ cwi-final S1-2（裁決 4）：full fetch merge — server rows 優先 by id；
+ *  prev-only row 保留只係（rtAddedIdsRef ∨ lastMessageAt > server max ts）— realtime 已插入
+ *  但 server 未反映嘅行唔會因整包覆蓋消失（同 F-8 口徑）。 */
+function mergeKeepRealtime(prev: ConversationItem[], serverRows: ConversationItem[], rtAdded: Set<string>): ConversationItem[] {
+  const serverIds = new Set<string>();
+  let serverMax = 0;
+  for (const c of serverRows) {
+    serverIds.add(c.id);
+    const t = new Date(c.lastMessageAt).getTime();
+    if (t > serverMax) serverMax = t;
+  }
+  const out: ConversationItem[] = [...serverRows];
+  for (const c of prev) {
+    if (serverIds.has(c.id)) continue;
+    const t = new Date(c.lastMessageAt).getTime();
+    if (rtAdded.has(c.id) || t > serverMax) out.push(c);
+  }
+  return out;
+}
+
+/** 追頁（page2+）merge — union by id（server 頁 row 為準；prev-only 全保留） */
+function mergePageById(prev: ConversationItem[], rows: ConversationItem[]): ConversationItem[] {
+  const map = new Map(prev.map((c) => [c.id, c]));
+  for (const c of rows) map.set(c.id, c);
+  return [...map.values()];
+}
 // cwi-realtime-fix §1.3 (RT-2) 補漏重疊窗 → cwi-realtime-v2 §2 收窄到 10s：
 // 游標改用 server createdAt（單調、無偏差）— 重疊窗只係保同秒寫入嘅邊界情況。
 const RT_OVERLAP_MS = 10_000;
@@ -105,6 +153,8 @@ export function InboxClient({
   initialStaff,
   initialSelectedConvId,
   slotClaimEnabled,
+  initialCounts,
+  initialNextCursor,
 }: {
   user: UserCtx;
   initialClinics: ClinicInfo[];
@@ -114,6 +164,10 @@ export function InboxClient({
   initialSelectedConvId?: string | null;
   /** ★ cwi-final S0-12：G2 閘（SSR 注入 env）— false → 隱藏 📅／重發 Flow */
   slotClaimEnabled?: boolean;
+  /** ★ cwi-final S1-2（裁決 11）：首屏膠囊計數（SSR loadCounts — 同 API 同一 loader） */
+  initialCounts?: ConvListCounts | null;
+  /** ★ cwi-final S1-2：首屏 cursor — 非 null → mount 後由第二頁自動追（唔重拉第一頁） */
+  initialNextCursor?: string | null;
 }) {
   const clinics = initialClinics;
   const staff = initialStaff;
@@ -167,14 +221,25 @@ export function InboxClient({
   const [connOffline, setConnOffline] = useState(false);
   // ★ cwi-inboxfix-20260905（MD I-1/I-2）：公海膠囊指派維度 filter（server 端）+ 計數（?counts=1 順帶）
   const [assignedFilter, setAssignedFilter] = useState<"all" | "unassigned" | "mine" | "routed" | "followup">("all"); // ★ cwi-routing-20260906：+派俾我；cwi-followup-v3：+待跟進
-  const [convCounts, setConvCounts] = useState<{
-    all: number;
-    unassigned: number;
-    mine: number;
-    routed: number;
-    pending: number;
-    resolved: number;
-  } | null>(null);
+  const [convCounts, setConvCounts] = useState<ConvListCounts | null>(initialCounts ?? null);
+  // ★ cwi-final S1-2（裁決 7）：myGroupIds live state — 初始 = SSR；每次 full fetch 用響應覆蓋
+  //   （admin 改組員 → 下次 refetch 生效）；ConversationList 收 live state。
+  const [myGroupIds, setMyGroupIds] = useState<string[]>(user.myGroupIds ?? []);
+  const myGroupIdsRef = useRef<string[]>(myGroupIds);
+  myGroupIdsRef.current = myGroupIds;
+  // ★ cwi-final S1-2（L-3）：scopeClinicIds live — STAFF 初始 = SSR 綁定店；full fetch 用 server scopedSet 覆蓋
+  const [scopeClinicIds, setScopeClinicIds] = useState<string[] | null>(user.role === "STAFF" ? user.clinicIds : null);
+  // ★ cwi-final S1-2（裁決 6）：active 超過 5000 → truncated（列表頂黃条）
+  const [listTruncated, setListTruncated] = useState(false);
+  // ★ cwi-final S1-2（裁決 5）：「睇已解決」獨立 view — 獨立分頁（mode=resolved）；切走 view 唔清
+  const [resolvedRows, setResolvedRows] = useState<ConversationItem[]>([]);
+  const resolvedCursorRef = useRef<string | null>(null);
+  const resolvedInFlightRef = useRef(false);
+  // ★ cwi-final S1-2（裁決 4）：realtime 新建 row 嘅 conv id（server 未反映）— full fetch merge 保留集；
+  //   首頁 full fetch 成功後清空。
+  const rtAddedIdsRef = useRef<Set<string>>(new Set());
+  // ★ cwi-final S1-2：full fetch 輪次代號 — 新一輪作廢舊嘅追頁
+  const listGenRef = useRef(0);
   const assignedFilterRef = useRef<"all" | "unassigned" | "mine" | "routed" | "followup">("all");
   assignedFilterRef.current = assignedFilter;
   const [search, setSearch] = useState("");
@@ -493,7 +558,7 @@ export function InboxClient({
           assigneeId: existing?.assigneeId ?? null,
           assigneeName: existing?.assigneeName ?? null,
           assignVersion: existing?.assignVersion ?? 0,
-          pinnedPatient: existing?.pinnedPatient ?? null,
+          pinnedPatientApricotId: existing?.pinnedPatientApricotId ?? null,
           unreadCount: isOut
             ? (existing?.unreadCount ?? 0)
             : selectedIdRef.current === e.conversationId && document.visibilityState === "visible"
@@ -519,6 +584,8 @@ export function InboxClient({
           preview: msg.body ?? `[${msg.type}]`,
         };
         if (idx === -1) {
+          // ★ cwi-final S1-2（裁決 4）：realtime 新建 row → 下次 full fetch merge 時保留
+          rtAddedIdsRef.current.add(e.conversationId);
           // 新對話：insert 排頭（按 lastMessageAt desc 大致排序）
           const next = [item, ...prev];
           next.sort((a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime());
@@ -788,7 +855,8 @@ export function InboxClient({
     const routedForMe = (c: ConversationItem): boolean =>
       c.assigneeId == null &&
       (c.routedStaffId === user.staffId ||
-        (c.routedGroupId != null && (user.myGroupIds ?? []).includes(c.routedGroupId)));
+        // ★ cwi-final S1-2（裁決 7）：live myGroupIds（ref 讀 — 閉包唔會 stale）
+        (c.routedGroupId != null && myGroupIdsRef.current.includes(c.routedGroupId)));
     const patchRoutingRow = (
       convId: string,
       patch: Partial<ConversationItem>,
@@ -1096,40 +1164,135 @@ export function InboxClient({
   }, []);
 
   // ── data fetchers ─────────────────────────────────────────────────────
-  const fetchConversations = useCallback(async (clinicId: string | "all") => {
+  // ★ cwi-final S1-2：單頁 fetch — 失敗回 null（舊一輪由 gen 判定作廢）
+  const fetchListPage = useCallback(
+    async (base: URLSearchParams, cursor: string | null, withCounts: boolean): Promise<ConvListPage | null> => {
+      try {
+        const qs = new URLSearchParams(base);
+        if (cursor) qs.set("cursor", cursor);
+        if (withCounts) qs.set("counts", "1");
+        const res = await fetch(`/api/conversations?${qs.toString()}`);
+        if (!res.ok) return null;
+        return (await res.json()) as ConvListPage;
+      } catch {
+        return null;
+      }
+    },
+    []
+  );
+
+  // ★ cwi-final S1-2（裁決 4/6/7）：full fetch = 第一頁（counts=1）→ mergeKeepRealtime →
+  //   自動追頁（keyset cursor，50ms 間隔讓出 main thread）→ ACTIVE_HARD_CAP=5000 上限
+  //   （超過 → listTruncated 黃条 + console.warn）→ 成功後清 rtAddedIdsRef + reset resolved view
+  //   + 推進 lastConvSeen（R3 口徑）。
+  //   opts.firstItems = SSR 首屏路徑：唔重拉第一頁，由 initialNextCursor 直接追起。
+  const fetchConversations = useCallback(
+    async (
+      clinicId: string | "all",
+      opts?: {
+        firstItems?: ConversationItem[] | null;
+        startCursor?: string | null;
+        firstMeta?: { counts?: ConvListCounts | null; myGroupIds?: string[] } | null;
+      }
+    ) => {
+      const gen = ++listGenRef.current; // 新一輪 full fetch → 舊嘅追頁作廢
+      try {
+        const base = new URLSearchParams();
+        if (clinicId !== "all") base.set("clinicId", clinicId);
+        let first: ConvListPage;
+        if (opts?.firstItems) {
+          // SSR 首屏：第一頁已渲染 — 由 initialNextCursor 追起（裁決 11）
+          first = {
+            items: opts.firstItems,
+            nextCursor: opts.startCursor ?? null,
+            scopeClinicIds: null,
+            myGroupIds: opts.firstMeta?.myGroupIds ?? [],
+            counts: opts.firstMeta?.counts ?? null,
+          };
+        } else {
+          const pg = await fetchListPage(base, null, true);
+          if (!pg || gen !== listGenRef.current) return;
+          first = pg;
+        }
+        if (first.counts) setConvCounts(first.counts);
+        if (first.myGroupIds.length) setMyGroupIds(first.myGroupIds);
+        if (first.scopeClinicIds !== null) setScopeClinicIds(first.scopeClinicIds);
+        const seen = new Map<string, ConversationItem>();
+        for (const c of first.items) seen.set(c.id, c);
+        setConversations((prev) => mergeKeepRealtime(prev, first.items, rtAddedIdsRef.current));
+        rtAddedIdsRef.current.clear(); // full fetch 成功 → realtime-only 行已對齊（裁決 4）
+        // full refetch → resolved view 續載狀態 reset（view 下次開啟先重拉第一頁）
+        setResolvedRows([]);
+        resolvedCursorRef.current = null;
+        let cursor = first.nextCursor;
+        while (cursor && seen.size < ACTIVE_HARD_CAP) {
+          await new Promise((r) => setTimeout(r, 50)); // 讓出 main thread
+          const pg = await fetchListPage(base, cursor, false);
+          if (!pg || gen !== listGenRef.current) return;
+          if (pg.items.length === 0) break; // 防禦：空頁但仍有 cursor → 防死循環
+          for (const c of pg.items) seen.set(c.id, c);
+          setConversations((prev) => mergePageById(prev, pg.items));
+          cursor = pg.nextCursor;
+        }
+        setListTruncated(!!cursor);
+        // eslint-disable-next-line no-console -- cwi-final S1-2：truncated 留痕（5000+ 屬異常形態）
+        if (cursor) console.warn("[list] active conversations exceed ACTIVE_HARD_CAP(5000) — 要做 S1-2 階段 B（server 端膠囊分頁）");
+        // ★ R3：全量 fetch 後游標 = 列表最尾 ts（「我見到咗全部」— 之後 delta 只補新嘅）
+        let maxTs = 0;
+        for (const c of seen.values()) {
+          const t = new Date(c.lastMessageAt).getTime();
+          if (t > maxTs) maxTs = t;
+        }
+        lastConvSeenRef.current = maxTs;
+      } catch {
+        /* UI 會喺下次 action 補齊 */
+      }
+    },
+    [fetchListPage]
+  );
+
+  // ★ cwi-final S1-2（裁決 5）：「睇已解決」view — mode=resolved keyset 分頁（捲到底 append）
+  const fetchResolvedPage = useCallback(async (append: boolean) => {
+    if (resolvedInFlightRef.current) return;
+    resolvedInFlightRef.current = true;
     try {
-      // ★ cwi-inboxfix-20260905：always 全量 list（帶 counts=1 順帶攞計數 — MD §1.1）。
-      //   膠囊指派維度 filter 喺 client 做（與 server ?assigned= 語義完全等價：
-      //   STAFF list scope 本身唔含外店未指派線 → unassigned client filter = I-2 公海；
-      //   ADMIN = 全店 ∪ activeClinicId filter）。理由：state 保持全量 → delta merge /
-      //   unreadTotal / 指派後行離開公海 都一致，唔會出現 stale 行。
-      const qs = new URLSearchParams();
-      if (clinicId !== "all") qs.set("clinicId", clinicId);
-      qs.set("counts", "1");
+      const qs = new URLSearchParams({ mode: "resolved" });
+      if (activeClinicRef.current !== "all") qs.set("clinicId", activeClinicRef.current);
+      const cur = append ? resolvedCursorRef.current : null;
+      if (cur) qs.set("cursor", cur);
       const res = await fetch(`/api/conversations?${qs.toString()}`);
       if (!res.ok) return;
-      const data = (await res.json()) as
-        | ConversationItem[]
-        | { items: ConversationItem[]; counts: {
-            all: number;
-            unassigned: number;
-            mine: number;
-            routed: number;
-            pending: number;
-            resolved: number;
-            followup?: number;
-          } };
-      const items = Array.isArray(data) ? data : data.items;
-      if (!Array.isArray(data)) setConvCounts(data.counts ?? null);
-      setConversations(items);
-      // ★ R3：全量 fetch 後游標 = 列表最尾 ts（「我見到咗全部」— 之後 delta 只補新嘅）
-      let maxTs = 0;
-      for (const c of items) maxTs = Math.max(maxTs, new Date(c.lastMessageAt).getTime());
-      lastConvSeenRef.current = maxTs;
+      const d = (await res.json()) as { items: ConversationItem[]; nextCursor: string | null };
+      resolvedCursorRef.current = d.nextCursor;
+      setResolvedRows((prev) => (append ? mergePageById(prev, d.items) : d.items));
     } catch {
-      /* UI 會喺下次 action 補齊 */
+      /* ignore — 下次 trigger 再試 */
+    } finally {
+      resolvedInFlightRef.current = false;
     }
   }, []);
+
+  // 首次開 resolved view → 自動載第一頁（切走 view 唔清；fetchConversations full refetch 會 reset）
+  useEffect(() => {
+    if (statusFilter !== "RESOLVED") return;
+    if (resolvedRows.length > 0 || resolvedCursorRef.current !== null || resolvedInFlightRef.current) return;
+    void fetchResolvedPage(false);
+  }, [statusFilter, resolvedRows.length, fetchResolvedPage]);
+
+  // ★ cwi-final S1-2（裁決 11）：SSR 首屏已有第一頁 → mount 後若 initialNextCursor 有值，
+  //   即刻由第二頁開始追（唔重拉第一頁）。
+  const ssrContinuedRef = useRef(false);
+  useEffect(() => {
+    if (ssrContinuedRef.current) return;
+    ssrContinuedRef.current = true;
+    if (initialNextCursor) {
+      void fetchConversations(activeClinicRef.current, {
+        firstItems: initialConversations,
+        startCursor: initialNextCursor,
+        firstMeta: { counts: initialCounts ?? null, myGroupIds: user.myGroupIds ?? [] },
+      });
+    }
+  }, [initialNextCursor, initialConversations, initialCounts, user.myGroupIds, fetchConversations, activeClinicRef]);
 
   // ★ cwi-final F-3：高频列表刷新合併（assign/route/socket 廣播）— 1.2s 窗口只 fetch 一次。
   //   只用於 conversation:assigned / notify:assigned 兩個 handler；首次 connect / 重連補漏 /
@@ -1360,7 +1523,9 @@ export function InboxClient({
       if (activeClinicRef.current !== "all") qs.set("clinicId", activeClinicRef.current);
       const res = await fetch(`/api/conversations?${qs.toString()}`);
       if (!res.ok) return 0;
-      const rows = (await res.json()) as ConversationItem[];
+      // ★ cwi-final S1-2：object 回應 — 讀 .items（定點查詢 branch：cap 200、nextCursor=null）
+      const data = (await res.json()) as { items: ConversationItem[] };
+      const rows = data.items;
       if (rows.length === 0) return 0;
       let maxTs = cursor;
       for (const r of rows) maxTs = Math.max(maxTs, new Date(r.lastMessageAt).getTime());
@@ -1601,8 +1766,9 @@ export function InboxClient({
         try {
           const res = await fetch("/api/conversations");
           if (res.ok) {
-            const all = (await res.json()) as ConversationItem[];
-            const match = all.find((c) => c.contactId === contactId);
+            // ★ cwi-final S1-2：object 回應 — .items（暂留 full list；S1-3 先改 contactId 參數）
+            const all = (await res.json()) as { items: ConversationItem[] };
+            const match = all.items.find((c) => c.contactId === contactId);
             if (match) {
               setSelectedConvId(match.id);
               selectedIdRef.current = match.id; // F-8：ref 同步（fetch guard 要即時准）
@@ -2170,7 +2336,7 @@ export function InboxClient({
             clinicId: hit.clinicId,
             contactId: hit.id,
             status: "OPEN",
-            pinnedPatient: null,
+            pinnedPatientApricotId: null,
             assigneeId: null,
             assigneeName: null,
             assignVersion: 0,
@@ -2200,11 +2366,13 @@ export function InboxClient({
   }, [search, activeClinicId, conversations]);
 
   // ── 隊列列表 filter（client 端：activeClinicId + statusFilter 喺 component 內做） ──
+  // ★ cwi-final S1-2（裁決 5）：statusFilter=RESOLVED → 列表用獨立 resolvedRows（mode=resolved 分頁）
   const visibleConversations = useMemo(() => {
-    if (user.role === "STAFF") return conversations; // 已 scoped
-    if (activeClinicId === "all") return conversations;
-    return conversations.filter((c) => c.clinicId === activeClinicId);
-  }, [conversations, activeClinicId, user.role]);
+    const src = statusFilter === "RESOLVED" ? resolvedRows : conversations;
+    if (user.role === "STAFF") return src; // 已 scoped（fetch 已帶 clinic scope）
+    if (activeClinicId === "all") return src;
+    return src.filter((c) => c.clinicId === activeClinicId);
+  }, [statusFilter, resolvedRows, conversations, activeClinicId, user.role]);
 
   const selectedConv = useMemo(
     () => conversations.find((c) => c.id === selectedConvId) ?? null,
@@ -2240,7 +2408,8 @@ export function InboxClient({
           setSearchResults(null);
         }}
         myStaffId={user.staffId}
-        myGroupIds={user.myGroupIds ?? []}
+        myGroupIds={myGroupIds}
+        scopeClinicIds={scopeClinicIds}
         myClinicIds={user.clinicIds}
         clinicById={clinicById}
         mentionUnread={mentionUnread}
@@ -2252,6 +2421,11 @@ export function InboxClient({
         prefs={prefs}
         onPrefsChange={updatePrefs}
         connOffline={connOffline}
+        listTruncated={listTruncated}
+        onScrollBottom={() => {
+          // ★ cwi-final S1-2（裁決 5）：只 resolved view 用 — 捲到底追下一頁
+          if (statusFilter === "RESOLVED" && resolvedCursorRef.current) void fetchResolvedPage(true);
+        }}
         rtDebug={rtDebug}
         audioStatus={{ ok: audioOk, standalone: pwaStandalone }}
         onUnlockAudio={unlockAudioNow}
