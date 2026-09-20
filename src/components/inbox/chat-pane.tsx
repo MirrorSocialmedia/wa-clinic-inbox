@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Bell,
@@ -479,10 +479,23 @@ export function ChatPane(p: Props) {
     onNoteReadRef.current = p.onNoteRead;
   });
 
+  // ★ cwi-final S1-1e（=S1-6）render 防呆：濾走「別對話」訊息（慢回應 race 殘留）—
+  //   layer 1（async guard）之後嘅最後一道防線；同 conversation 之外嘅 row 唔 render。
+  const visible = useMemo(
+    () => p.messages.filter((m) => m.conversationId === p.conversation?.id),
+    [p.messages, p.conversation?.id]
+  );
+  useEffect(() => {
+    if (visible.length !== p.messages.length) {
+      // eslint-disable-next-line no-console -- v2 §3 race 留痕（N>0 = 捉到一次 foreign 殘留）
+      console.warn("[rt] foreign messages dropped", { kept: visible.length, total: p.messages.length });
+    }
+  }, [visible.length, p.messages.length]);
+
   useEffect(() => {
     const el = listRef.current;
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [p.messages]);
+  }, [visible]);
 
   useEffect(() => {
     setDraft("");
@@ -515,7 +528,7 @@ export function ChatPane(p: Props) {
     );
     el.querySelectorAll<HTMLElement>("[data-note-id]").forEach((n) => obs.observe(n));
     return () => obs.disconnect();
-  }, [p.messages, p.conversation?.id]);
+  }, [visible, p.conversation?.id]);
 
   useEffect(() => {
     if (!p.pendingDraft) {
@@ -599,7 +612,7 @@ export function ChatPane(p: Props) {
   const gapDividerIdx =
     p.gapDividerAfterMs == null
       ? -1
-      : p.messages.findIndex((m) => new Date(m.createdAt).getTime() > (p.gapDividerAfterMs as number));
+      : visible.findIndex((m) => new Date(m.createdAt).getTime() > (p.gapDividerAfterMs as number));
   // ★ H2：@ autocomplete candidates（query 前綴 match；長名先；cap 8 — 輕量計算，staff 陣列細，唔使 memo）
   const mentionCandidates =
     mentionState === null
@@ -893,17 +906,17 @@ export function ChatPane(p: Props) {
         className="flex-1 overflow-y-auto min-h-0 px-4 py-4 md:px-6 space-y-3"
       >
         {p.loadingOlder && <div className="text-center text-[11px] text-t3">載入舊訊息…</div>}
-        {p.messages.length === 0 && !p.loadingOlder && (
+        {visible.length === 0 && !p.loadingOlder && (
           <div className="text-center text-t3 text-sm py-8">（呢個對話仲冇訊息）</div>
         )}
-        {p.messages.map((m, i) => {
+        {visible.map((m, i) => {
           const isOut = m.direction === "OUT";
           const isEcho = m.channel === "APP_ECHO";
           const isHistory = m.channel === "HISTORY";
           const isNote = m.channel === "INTERNAL"; // ★ H1：內部備註（黃底🔒，視覺上同病人訊息完全區隔）
           const isFlow = m.type === "interactive";
           const isAuto = isOut && m.aiAutoSent === true;
-          const prev = p.messages[i - 1];
+          const prev = visible[i - 1];
           const media = mediaSrc(m.mediaPath);
           // ★ T2：中間斷層分隔線插喺此 row 之前（見 gapDividerIdx）
           const gapBefore = gapDividerIdx === i;

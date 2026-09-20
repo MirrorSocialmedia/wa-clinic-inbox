@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CalendarClock, CheckCheck, ChevronLeft, ChevronRight, Lock, Sparkles, Tag, X } from "lucide-react";
 import type { ClinicLite, ConversationItem, ConvStatus, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
 import { relTime } from "./time";
@@ -109,6 +109,11 @@ export function DetailPane({
   // 聯絡人卡：標籤圖標按鈕展開狀態（§4 壓一格）
   const [showLabelEditor, setShowLabelEditor] = useState(false);
 
+  // ★ cwi-final S1-1e（=S1-6）：loadNotes 慢回應防線 — render 時同步 latest conv；
+  //   await 後核對已換對話 → 棄（防 A 嘅備註寫入 B 嘅備註區）
+  const latestConvRef = useRef<string | null>(null);
+  latestConvRef.current = conversation?.id ?? null;
+
   const loadNotes = useCallback(async (convId: string) => {
     try {
       setNotesLoading(true);
@@ -116,6 +121,7 @@ export function DetailPane({
         fetch(`/api/conversations/${convId}/messages?limit=100`),
         fetch(`/api/conversations/${convId}/note-read-receipts`),
       ]);
+      if (latestConvRef.current !== convId) return; // ★ cwi-final S1-1e（=S1-6）：fetch 期間已換對話 → 棄
       if (mRes.ok) {
         const mj = (await mRes.json()) as {
           messages?: { id: string; body: string | null; sentByStaffId: string | null; waTimestamp: string | null; channel?: string; type?: string }[];

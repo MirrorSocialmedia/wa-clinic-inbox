@@ -43,9 +43,15 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? 50) || 50));
   const before = parseTs(url.searchParams.get("before"));
   const after = parseTs(url.searchParams.get("after"));
+  // ★ cwi-final S1-1d（=S1-11）：before keyset — client 帶 beforeId，同 createdAt 同值邊界唔重唔漏
+  const beforeId = url.searchParams.get("beforeId") ?? undefined;
 
   const where: Record<string, unknown> = { conversationId: id };
-  if (before) where.createdAt = { lt: before }; // ★ cwi-audit2 A-5：向上捲改 createdAt 軸（同 after/顯示排序對稱）
+  if (before && beforeId) {
+    where.OR = [{ createdAt: { lt: before } }, { createdAt: before, id: { lt: beforeId } }];
+  } else if (before) {
+    where.createdAt = { lt: before }; // ★ cwi-audit2 A-5：向上捲改 createdAt 軸（同 after/顯示排序對稱）
+  }
   if (after) where.createdAt = { gt: after }; // ★ v2 §2：補漏游標比對 server createdAt
 
   // 多取 1 條判定 hasMore；同 timestamp 用 id 做次級排序（batch history 冪等穩定）。
@@ -55,7 +61,10 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   //  1) after  → createdAt asc：補漏游標（filter 係 createdAt，排序同 filter 一致；waTimestamp 係
   //              病人手機時鐘，做補漏排序會亂序）。
   //  2) before → createdAt desc：向上捲，由新到舊攞最接近游標嘅 N 條（同 1 對稱 — A-5 改軸）。
-  //  3) 皆無   → waTimestamp desc：「最新一頁」由新到舊攞 N 條。
+  //              ★ cwi-final S1-1d：有 beforeId → keyset OR（同值邊界唔重唔漏）。
+  //  3) 皆無   → createdAt desc：「最新一頁」由新到舊攞 N 條。
+  //              ★ cwi-final S1-1d（=S1-11）：waTimestamp 係病人手機時鐘，延遲送達（waTs 舊 3h）
+  //              會排咗底 → reload 唔見；createdAt 係 server 單調寫入時間，延遲送達都會浮頂。
   //  2/3 回傳前 reverse → 一律升序；after 分支天然升序。
   const rows = after
     ? await prisma.message.findMany({
@@ -71,7 +80,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
         })
       : await prisma.message.findMany({
           where,
-          orderBy: [{ waTimestamp: "desc" }, { id: "desc" }],
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }], // ★ cwi-final S1-1d：waTimestamp → createdAt 軸
           take: limit + 1,
         });
 

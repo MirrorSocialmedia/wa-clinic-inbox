@@ -502,6 +502,8 @@ model Message {
   waTimestamp    DateTime @db.Timestamptz
   createdAt      DateTime @db.Timestamptz  @default(now())
   @@index([conversationId, waTimestamp])
+  // ★ cwi-final S1-1d（=S1-11）：延遲送達 reload 唔見 — latest page / before 改 createdAt 軸
+  @@index([conversationId, createdAt, id])
 }
 
 // ★ cwi-final S1-1c（C-1③ / audit3 P1-06）：status 早過訊息暫存表。

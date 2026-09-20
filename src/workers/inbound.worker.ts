@@ -454,11 +454,11 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
         if (isUniqueViolation(err)) return { skipped: true as const, msg: null };
         throw err;
       }
-      const convUpdated = await touchConversation(tx, conv.id, waTs, {
+      const convUpdated = await touchConversation(tx, conv.id, new Date(), {
         incrementUnread: true,
         touchInbound: true,
         reopen: wasResolved ? { dropAssignee } : undefined,
-      });
+      }); // ★ cwi-final S1-1d（=S1-11）：非 HISTORY IN 用 server now()（唔再用病人手機時鐘 waTs）— 延遲送達都會浮頂 + 入 delta
       // ★ 翻開聯動（cwi-statusrole2-20260910 MD §3 + consult v2.1 C2 / T245）：CONSULT 復活 + audit。
       //   最新 session terminal="EXPIRED" 且距今 < 7 日 → 復活（terminal=null；turnCount/stage 保留）；
       //   ≥ 7 日 → 唔復活（新 session 由 C3 觸發時先開）。EXPIRED 距今基準 = session.updatedAt

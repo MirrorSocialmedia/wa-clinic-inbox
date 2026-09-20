@@ -71,7 +71,11 @@ function msgSortCmp(a: MessageItem, b: MessageItem): number {
   const ca = new Date(a.createdAt).getTime();
   const cb = new Date(b.createdAt).getTime();
   if (ca !== cb) return ca - cb;
-  return new Date(a.waTimestamp).getTime() - new Date(b.waTimestamp).getTime();
+  const twa = new Date(a.waTimestamp).getTime();
+  const twb = new Date(b.waTimestamp).getTime();
+  if (twa !== twb) return twa - twb;
+  // ★ cwi-final S1-1d（=S1-11）：createdAt+waTimestamp 雙同值 → id 做最終 tiebreak（同 server 軸一致）
+  return a.id.localeCompare(b.id);
 }
 
 interface ContactSearchHit {
@@ -1500,10 +1504,11 @@ export function InboxClient({
     setLoadingOlder(true);
     try {
       const res = await fetch(
-        `/api/conversations/${convId}/messages?before=${encodeURIComponent(cursor.createdAt)}&limit=${PAGE_SIZE}`
+        `/api/conversations/${convId}/messages?before=${encodeURIComponent(cursor.createdAt)}&beforeId=${cursor.id}&limit=${PAGE_SIZE}`
       );
       if (!res.ok) return;
       const data = (await res.json()) as { messages: MessageItem[]; hasMore: boolean };
+      if (selectedIdRef.current !== convId) return; // ★ cwi-final S1-1e（=S1-6）：fetch 期間已換對話 → 舊頁棄（防慢回應寫錯 thread）
       const prevIds = new Set(messagesRef.current.map((m) => m.id));
       const addedCount = data.messages.filter((m) => !prevIds.has(m.id)).length;
       setMessages((prev) => {
@@ -1525,6 +1530,7 @@ export function InboxClient({
       const res = await fetch(`/api/conversations/${convId}/note-read-receipts`);
       if (!res.ok) return;
       const data = (await res.json()) as { receipts: NoteReceipt[] };
+      if (selectedIdRef.current !== convId) return; // ★ cwi-final S1-1e（=S1-6）：fetch 期間已換對話 → 棄
       setReceipts(data.receipts);
     } catch {
       /* ignore */
@@ -1740,6 +1746,16 @@ export function InboxClient({
           // ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE 帶失效原因（UI 提示用）
           reason?: string | null;
         } | null;
+        // ★ cwi-final S1-1e（=S1-6）：post 期間已換對話（await 幾秒）→ 唔掂新對話嘅 messages，
+        //   只更新舊對話嘅列表 row（preview / lastMessageAt）
+        if (selectedIdRef.current !== convId) {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === convId ? { ...c, lastMessageAt: new Date().toISOString(), preview: body } : c
+            )
+          );
+          return { ok: true };
+        }
         if (res.status === 422) {
           return { ok: false, error: data?.message ?? "窗口已過，只可發 template", templates: data?.templates };
         }
@@ -1835,6 +1851,15 @@ export function InboxClient({
           message?: string;
           status?: string;
         } | null;
+        // ★ cwi-final S1-1e（=S1-6）：send 期間已換對話 → 只更新列表 row，唔掂 messages
+        if (selectedIdRef.current !== convId) {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === convId ? { ...c, lastMessageAt: new Date().toISOString(), preview: templateName } : c
+            )
+          );
+          return { ok: true };
+        }
         if (!res.ok) {
           return { ok: false, error: data?.message ?? data?.error ?? `發送失敗（${res.status}）` };
         }
@@ -2264,6 +2289,7 @@ export function InboxClient({
       )}
 
       <ChatPane
+        key={`chat-${selectedConv?.id ?? "none"}`} // ★ cwi-final S1-1e（=S1-6）：換對話 remount — 舊對話殘留 messages 唔會漏入新 pane
         onBack={() => {
           // ★ cwi-audit2-20260908 T1：取消選中都要同步 ref（render-body sync 已移除）
           //   — 否則舊對話嘅 socket 訊息會 append 入「未選中」狀態
@@ -2321,6 +2347,7 @@ export function InboxClient({
       />
 
       <DetailPane
+        key={`detail-${selectedConv?.id ?? "none"}`} // ★ cwi-final S1-1e（=S1-6）：換對話 remount — 舊備註/備註 state 唔會漏入新對話
         conversation={selectedConv}
         staff={staff}
         onPatch={patchConversation}
