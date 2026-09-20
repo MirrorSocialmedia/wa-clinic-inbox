@@ -59,7 +59,7 @@ import { runReminderScan } from "@/lib/booking/reminder";
 import { runWeeklyStats } from "@/lib/ops/automation-stats";
 import { runMining } from "@/lib/ops/mining";
 import { sweepFlowHolds } from "@/lib/flows/hold-sweep";
-import { runAutoReleaseSweep } from "@/lib/auto-release";
+import { runAutoReleaseSweep, runDisabledAssigneeSweep } from "@/lib/auto-release";
 import { runAutoResolveSweep } from "@/lib/auto-resolve";
 import { runUnassignedSlaSweep } from "@/lib/unassigned-sla";
 import { runRoutingEscalateSweep } from "@/lib/routing/escalate";
@@ -91,9 +91,11 @@ export async function startCronWorker(): Promise<Worker | null> {
         }
         case "auto-release": {
           // cwi-h6-20260830（h5 §3）：負責人超時未回覆 → 放手回隊列（三條件防呆；冪等可空跑）
+          // ★ cwi-final S1-9 兜底：assigneeId 指向 active=false staff → 釋放（正常路徑 = 停用 API 原子釋放）
           const r = await runAutoReleaseSweep();
+          const d = await runDisabledAssigneeSweep();
           log.info(
-            { checked: r.checked, released: r.released, failed: r.failed },
+            { checked: r.checked, released: r.released, failed: r.failed, disabledReleased: d.released },
             "cron: auto-release done"
           );
           return { ok: true, ...r };

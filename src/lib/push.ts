@@ -6,11 +6,12 @@
  *   （e2e T190 regex 斷言）。
  *
  * 收件人解析（mirror client shouldNotify 語義 — server 側為準）：
- * - message：未指派 → 全店 active STAFF；已指派 → 只負責人
- * - urgent：同 message（急症安全網 — 未指派全店、已指派負責人）+ 全 active ADMIN
+ * - message：未指派 → 店內 active STAFF（★ N-5：按 scope 三選一 — CLINICS 綁呢間 / ALL / COMPANY=店所属公司）
+ *   + ★ L-2 路由目標（routedStaffId + 組員，非 forced — 跟靜音）；已指派 → 只負責人
+ * - urgent：同 message（急症安全網）+ in-scope 全 active ADMIN（★ P2-12：urgent 亦受 scope 收窄）
  * - notice（mention/assigned/takeover）：caller 已知 staffId → 直接用 pushToStaff
  * - ADMIN：預設唔收 message（N-2 六店會炸）— 只 pushPrefs.adminMsgClinics 含該店
- *   先收；urgent 預設全收。
+ *   先收；urgent 預設全收（scope 內）。
  * - 全部 filter pushPrefs.mutedClinics 含該店嘅人（逐店靜音 — DB 為準）。
  *
  * Fire-and-forget：任何失敗只 log，絕唔 throw / 絕唔擋主 pipeline。
@@ -19,6 +20,7 @@
 import webpush from "web-push";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
+import { groupMembersCached } from "@/lib/notify";
 import type { Prisma } from "@prisma/client";
 
 export interface PushPayload {
@@ -178,13 +180,13 @@ export function pushEvent(e: { kind: "message" | "urgent"; clinicId: string; con
   if (!ensureVapid()) return;
   void (async () => {
     try {
-      const [conv, clinic] = await Promise.all([
+      const [conv, clinicRow] = await Promise.all([
         prisma.conversation.findUnique({ where: { id: e.conversationId }, select: { assigneeId: true } }),
-        prisma.clinic.findUnique({ where: { id: e.clinicId }, select: { code: true } }),
+        prisma.clinic.findUnique({ where: { id: e.clinicId }, select: { code: true, companyId: true } }),
       ]);
-      if (!conv || !clinic?.code) return;
+      if (!conv || !clinicRow?.code) return;
 
-      const payload: PushPayload = { kind: e.kind, clinicShort: clinic.code, conversationId: e.conversationId };
+      const payload: PushPayload = { kind: e.kind, clinicShort: clinicRow.code, conversationId: e.conversationId };
 
       // F-5（cwi-notify-fix）：Map<staffId> 去重 — ADMIN 做 assignee 唔會喺 assignee path
       // 同 ADMIN 循環各入一次（舊碼會 push 兩次）。forced = assignee（F-5 必收，繞過靜音）。
@@ -195,7 +197,7 @@ export function pushEvent(e: { kind: "message" | "urgent"; clinicId: string; con
         else if (forced) ex.forced = true; // assignee 身份優先（ADMIN assignee 唔会被循環覆蓋）
       };
 
-      // STAFF：已指派 → 只負責人（F-5 forced 必收）；未指派 → 全店 active STAFF
+      // STAFF：已指派 → 只負責人（F-5 forced 必收）；未指派 → ★ N-5 按 scope 三選一
       if (conv.assigneeId) {
         const s = await prisma.staffUser.findUnique({
           where: { id: conv.assigneeId },
@@ -203,18 +205,53 @@ export function pushEvent(e: { kind: "message" | "urgent"; clinicId: string; con
         });
         if (s?.active) addTarget(s.id, parsePushPrefs(s.pushPrefs, s.id), true);
       } else {
+        // ★ N-5：STAFF 按「範圍」而唔係淨係 StaffClinic — 非 CLINICS scope 嘅 StaffClinic 行
+        // 被 admin/staff/[id] 清走，靠 StaffClinic 會漏光 ALL/COMPANY 範圍 staff 嘅通知
         const rows = await prisma.staffUser.findMany({
-          where: { role: "STAFF", active: true, clinics: { some: { clinicId: e.clinicId } } },
+          where: {
+            role: "STAFF",
+            active: true,
+            OR: [
+              { scopeType: "CLINICS", clinics: { some: { clinicId: e.clinicId } } },
+              { scopeType: "ALL" },
+              ...(clinicRow?.companyId ? [{ scopeType: "COMPANY", scopeCompanyId: clinicRow.companyId }] : []),
+            ],
+          },
           select: { id: true, pushPrefs: true },
         });
         for (const r of rows) addTarget(r.id, parsePushPrefs(r.pushPrefs, r.id), false);
+
+        // ★ L-2：路由目標（非 forced — 跟靜音）
+        const rc = await prisma.conversation.findUnique({
+          where: { id: e.conversationId },
+          select: { routedStaffId: true, routedGroupId: true },
+        });
+        const routedIds = new Set<string>();
+        if (rc?.routedStaffId) routedIds.add(rc.routedStaffId);
+        if (rc?.routedGroupId) for (const m of await groupMembersCached(rc.routedGroupId)) routedIds.add(m);
+        if (routedIds.size) {
+          const rs = await prisma.staffUser.findMany({
+            where: { id: { in: [...routedIds] }, active: true, role: { not: "SUPERVISOR" } },
+            select: { id: true, pushPrefs: true },
+          });
+          for (const r of rs) addTarget(r.id, parsePushPrefs(r.pushPrefs, r.id), false);
+        }
       }
 
-      // ADMIN ∨ SUPERVISOR（★ cwi-statusrole2-20260910 MD §5.4：SUPERVISOR 預設全部靜音，
-      //   改用 ADMIN 分支邏輯 — 自己喺設定面板 opt-in 該店先收到）：
-      // urgent → 全 active（急症安全網 — 唔受 adminMsgClinics 限制）；message → 只 opt-in 咗該店嘅
+      // ADMIN ∨ SUPERVISOR：★ P2-12 — 收窄到 scope 覆蓋呢間店（SUPERVISOR 全放行 / ALL /
+      //   COMPANY=店所属公司 / CLINICS 綁呢間）— urgent 亦要喺 scope 內（唔再係「全 active 角色」）。
+      //   urgent → in-scope 全收（急症安全網）；message → 只 adminMsgClinics opt-in 咗該店嘅
       const admins = await prisma.staffUser.findMany({
-        where: { role: { in: ["ADMIN", "SUPERVISOR"] }, active: true },
+        where: {
+          role: { in: ["ADMIN", "SUPERVISOR"] },
+          active: true,
+          OR: [
+            { role: "SUPERVISOR" },
+            { scopeType: "ALL" },
+            ...(clinicRow?.companyId ? [{ scopeType: "COMPANY", scopeCompanyId: clinicRow.companyId }] : []),
+            { scopeType: "CLINICS", clinics: { some: { clinicId: e.clinicId } } },
+          ],
+        },
         select: { id: true, pushPrefs: true },
       });
       for (const a of admins) {

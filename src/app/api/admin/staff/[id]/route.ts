@@ -2,8 +2,8 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import argon2 from "argon2";
 import prisma from "@/lib/prisma";
-import { requireAdmin, invalidateActiveCache, invalidateStaffSessions } from "@/lib/rbac";
-import { publishControl, publishConvEvent, convRef } from "@/lib/notify";
+import { requireAdmin, invalidateActiveCache, invalidateStaffSessions, resolveClinicIds } from "@/lib/rbac";
+import { publishControl, publishConvEvent } from "@/lib/notify";
 import log from "@/lib/log";
 import { handle, toResponse } from "@/lib/api-error";
 
@@ -164,40 +164,102 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
     invalidateActiveCache(id);
     publishControl({ cmd: "staff:changed", staffId: id, active: fields.active });
     if (fields.active === false) {
-      // ★ cwi-inboxfix-20260905（§7 跌公海表）：負責人帳號停用 → 佢負責嘅對話即時跌返公海。
-      //   現行 P0-3 只切存取（cache + socket），唔郁 conversations（MD：agent 檢查，冇就補）。
-      //   鏡像 [id] route 放手不變式：assignVersion+1（R5）、slaNotifiedAt 保留（唔重新洗版）、
-      //   逐對話 conv:updated（clinicId-scoped socket — 店內列表即時見到跌公海）。
-      const held = await prisma.conversation.findMany({ where: { assigneeId: id } });
-      for (const h of held) {
-        await prisma.conversation.update({
-          where: { id: h.id },
-          data: {
-            assigneeId: null,
-            assignVersion: { increment: 1 },
-            assignedAt: null,
-            assigneeLastActionAt: null,
-          },
+      // ★ cwi-final S1-9（L-4 真問題）：負責人帳號停用 → 原子釋放（$transaction 逐對話 updateMany）。
+      //   自指條件 { id, OR:[assigneeId=id / routedStaffId=id] } = 並發核心：
+      //   期間被接手嘅對話（assigneeId 已變）→ updateMany 命中 0 行 → 唔郁（T709 並發斷言）。
+      //   INTERNAL 備註留痕（非 RESOLVED 行）；audit STAFF_DISABLED_RELEASE；
+      //   conv room 事件 = publishConvEvent（clinicId-scoped socket — 店內列表即刻見到跌公海）。
+      const released = await prisma.$transaction(async (tx) => {
+        const held = await tx.conversation.findMany({
+          where: { OR: [{ assigneeId: id }, { routedStaffId: id }] },
+          select: { id: true, clinicId: true, status: true, assigneeId: true, assignVersion: true, unreadCount: true, routedGroupId: true, routedStaffId: true },
         });
-        // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent — h 係 update 前 stale row，重取五欄
-        const hRow = await prisma.conversation.findUnique({
-          where: { id: h.id },
-          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
-        });
-        if (hRow) {
-          await publishConvEvent(convRef(hRow), "conv:updated", {
-            conversationId: h.id,
-            clinicId: h.clinicId,
-            status: h.status,
-            assigneeId: null,
-            assignVersion: h.assignVersion + 1,
-            unreadCount: h.unreadCount,
+        const out: typeof held = [];
+        for (const h of held) {
+          const r = await tx.conversation.updateMany({
+            where: { id: h.id, OR: [{ assigneeId: id }, { routedStaffId: id }] }, // ★ 條件：期間被接手嘅唔郁
+            data: {
+              ...(h.assigneeId === id ? { assigneeId: null, assignVersion: { increment: 1 }, assignedAt: null, assigneeLastActionAt: null } : {}),
+              ...(h.routedStaffId === id ? { routedStaffId: null } : {}),
+            },
+          });
+          if (r.count === 1) {
+            out.push(h);
+            if (h.assigneeId === id && h.status !== "RESOLVED") {
+              await tx.message.create({
+                data: {
+                  conversationId: h.id, direction: "OUT", channel: "INTERNAL", type: "note",
+                  body: "原負責人帳號已停用，對話已放返公海。", status: "SENT",
+                  sentByStaffId: admin.staff.id, waTimestamp: new Date(),
+                },
+              });
+            }
+          }
+        }
+        await tx.auditLog.create({ data: { staffId: admin.staff.id, action: "STAFF_DISABLED_RELEASE", entity: "StaffUser", entityId: id, meta: { released: out.length } as object } });
+        return out;
+      });
+      for (const h of released) {
+        if (h.assigneeId === id) {
+          await publishConvEvent({ ...h, assigneeId: null, routedStaffId: h.routedStaffId === id ? null : h.routedStaffId }, "conv:updated", {
+            conversationId: h.id, clinicId: h.clinicId, status: h.status, assigneeId: null, assignVersion: h.assignVersion + 1, unreadCount: h.unreadCount,
           });
         }
       }
-      log.info({ staffId: id, released: held.length }, "staff: account disabled — active cache invalidated + control broadcast + assigned conversations released to public pool");
+      log.info({ staffId: id, released: released.length }, "staff: account disabled — active cache invalidated + control broadcast + held conversations atomically released to public pool (S1-9)");
     } else {
       log.info({ staffId: id }, "staff: account re-enabled — active cache invalidated + control broadcast");
+    }
+  }
+
+  // ★ cwi-final S1-9：scope 改動 → 佢係 assignee 但跌出新範圍嘅 OPEN 對話 → 同樣原子釋放（自指條件）
+  //   + INTERNAL 備註「原負責人已唔再負責 {店}」（新範圍用 resolveClinicIds 計；ALL scope = 全部店 → 唔郁）。
+  if (scopeChanged && fields.active !== false) {
+    const scopedIds = await resolveClinicIds({
+      scopeType: effectiveScopeType,
+      scopeCompanyId: effectiveScopeCompanyId,
+      staffClinicIds: effectiveScopeType === "CLINICS" ? clinicList : [],
+    });
+    const releasedScope = await prisma.$transaction(async (tx) => {
+      const rows = await tx.conversation.findMany({
+        where: { assigneeId: id, status: "OPEN", clinicId: { notIn: scopedIds } },
+        select: { id: true, clinicId: true, status: true, assigneeId: true, assignVersion: true, unreadCount: true, routedGroupId: true, routedStaffId: true },
+      });
+      const clinicCode = new Map(
+        (await tx.clinic.findMany({ where: { id: { in: rows.map((r) => r.clinicId) } }, select: { id: true, code: true } })).map((c) => [c.id, c.code] as const)
+      );
+      const out: typeof rows = [];
+      for (const h of rows) {
+        const r = await tx.conversation.updateMany({
+          where: { id: h.id, assigneeId: id }, // ★ 自指條件：期間被接手嘅唔郁
+          data: {
+            assigneeId: null, assignVersion: { increment: 1 }, assignedAt: null, assigneeLastActionAt: null,
+            ...(h.routedStaffId === id ? { routedStaffId: null } : {}),
+          },
+        });
+        if (r.count === 1) {
+          out.push(h);
+          await tx.message.create({
+            data: {
+              conversationId: h.id, direction: "OUT", channel: "INTERNAL", type: "note",
+              body: `原負責人已唔再負責 ${clinicCode.get(h.clinicId) ?? h.clinicId}。`, status: "SENT",
+              sentByStaffId: admin.staff.id, waTimestamp: new Date(),
+            },
+          });
+        }
+      }
+      if (out.length > 0) {
+        await tx.auditLog.create({ data: { staffId: admin.staff.id, action: "STAFF_SCOPE_CHANGED_RELEASE", entity: "StaffUser", entityId: id, meta: { released: out.length, scopedClinics: scopedIds } as object } });
+      }
+      return out;
+    });
+    for (const h of releasedScope) {
+      await publishConvEvent({ ...h, assigneeId: null, routedStaffId: h.routedStaffId === id ? null : h.routedStaffId }, "conv:updated", {
+        conversationId: h.id, clinicId: h.clinicId, status: h.status, assigneeId: null, assignVersion: h.assignVersion + 1, unreadCount: h.unreadCount,
+      });
+    }
+    if (releasedScope.length > 0) {
+      log.info({ staffId: id, released: releasedScope.length }, "staff: scope changed — out-of-scope OPEN conversations atomically released (S1-9)");
     }
   }
 

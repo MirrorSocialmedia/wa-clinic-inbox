@@ -429,8 +429,10 @@ async function t240Ui(adminCookie: string): Promise<void> {
     await page.waitForTimeout(1200); // counts fetch 順帶
 
     const nCaps = await capsuleRow.locator("button").count();
-    check("第一行五粒膠囊", nCaps === 5, nCaps);
-    for (const re of [/^全部$/, /^公海 \d+$/, /^派俾我 \d+$/, /^我負責 \d+$/, /^待跟進 0$/]) {
+    // ★ cwi-final S1-8：「全部」膠囊移除（改文字顯示）；四粒膠囊全 toggle
+    check("第一行四粒膠囊（S1-8：全部移除）", nCaps === 4, nCaps);
+    check("S1-8：「全部 N」文字顯示存在", (await capsuleRow.locator('[data-e2e="capsule-all-count"]').count()) === 1);
+    for (const re of [/^公海 \d+$/, /^派俾我 \d+$/, /^我負責 \d+$/, /^待跟進 \d+$/]) {
       const has = await capsuleRow.locator("button", { hasText: re }).count();
       check(`膠囊存在：${re}`, has === 1, has);
     }
@@ -489,13 +491,10 @@ async function t240Ui(adminCookie: string): Promise<void> {
     const rowM = pageM.locator('[data-e2e="capsule-row"]');
     await rowM.waitFor({ timeout: 30_000 });
     await pageM.waitForTimeout(1200);
-    check("<400px：待跟進 唔喺第一行", (await rowM.locator("button", { hasText: "待跟進" }).count()) === 0);
-    check("<400px：第一行 = 4 膠囊 + ⋯（5 按鈕）", (await rowM.locator("button").count()) === 5, await rowM.locator("button").count());
-    const moreBtn = rowM.locator("button", { hasText: "⋯" });
-    check("<400px：⋯ 溢出按鈕存在", (await moreBtn.count()) === 1);
-    await moreBtn.click();
-    await pageM.waitForTimeout(300);
-    check("<400px：⋯ 選單有「待跟進 0」", (await pageM.getByText("待跟進 0", { exact: true }).count()) >= 1);
+    check("<400px：「跟進 N」短字可見（S1-8：待跟進唔再隱藏）", (await rowM.locator('[data-e2e="capsule-followup"]').count()) === 1);
+    check("<400px：總共四粒膠囊（S1-8 兩行 2+2）", (await rowM.locator("button").count()) === 4, await rowM.locator("button").count());
+    check("<400px：冇 ⋯ 溢出按鈕（S1-8）", (await rowM.locator('button[data-e2e="capsule-more"]').count()) === 0);
+    check("<400px：「全部 N」文字顯示存在（S1-8）", (await rowM.locator('[data-e2e="capsule-all-count"]').count()) === 1);
     const overflowM = await rowM.evaluate((el: Element) => (el as HTMLElement).scrollWidth - (el as HTMLElement).clientWidth);
     check("<400px：無橫向捲（scrollWidth ≤ clientWidth）", overflowM <= 0, overflowM);
     await pageM.screenshot({ path: "/tmp/kairo-statusrole2-t1-3-overflow.png" });

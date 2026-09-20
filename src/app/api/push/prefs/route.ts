@@ -1,6 +1,6 @@
 import { type NextRequest } from "next/server";
 import { handle } from "@/lib/api-error";
-import { requireAuth } from "@/lib/rbac";
+import { requireAuth, scopedClinicSet } from "@/lib/rbac";
 import { parsePushPrefs } from "@/lib/push";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -45,7 +45,8 @@ function cleanClinicIds(v: unknown): string[] | null {
 }
 
 export const POST = handle(async (req: NextRequest) => {
-  const { staff, res } = await requireAuth(req);
+  const ctx = await requireAuth(req);
+  const { staff, res } = ctx;
   const cookie = res.headers.get("set-cookie") ?? "";
 
   const body = (await req.json().catch(() => null)) as { mutedClinics?: unknown; adminMsgClinics?: unknown } | null;
@@ -80,8 +81,19 @@ export const POST = handle(async (req: NextRequest) => {
     }
   }
 
+  // ★ cwi-final S1-5：adminMsgClinics ∩ caller scope（scopedClinicSet — null = 唔限：
+  //   SUPERVISOR / ALL scope）。scope 外嘅店唔准 opt-in — 收窄後 push 唔會推畀 scope 外。
+  const scopeSet = scopedClinicSet(ctx);
+
   // F-2：只寫自己角色嘅欄（另一欄唔入 JSON — 舊污染值順帶清走）
-  const prefs: object = isStaff ? { mutedClinics: ids } : { adminMsgClinics: ids };
+  const finalIds = scopeSet === null ? ids : ids.filter((x) => scopeSet.includes(x));
+  const prefs: object = isStaff ? { mutedClinics: finalIds } : { adminMsgClinics: finalIds };
+  if (finalIds.length !== ids.length) {
+    log.warn(
+      { staffId: staff.id, role: staff.role, requested: ids.length, kept: finalIds.length },
+      "push/prefs: adminMsgClinics 含 scope 外 clinic id — 已裁走（唔寫入）"
+    );
+  }
   await prisma.staffUser.update({
     where: { id: staff.id },
     data: { pushPrefs: prefs },

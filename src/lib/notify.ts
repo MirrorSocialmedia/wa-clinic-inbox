@@ -171,8 +171,9 @@ export function bustScopeCache(): void {
   staffCoversClinicCache.clear();
 }
 
-/** 技能組 active 成員（60s cache）。 */
-async function groupMembersCached(groupId: string): Promise<string[]> {
+/** 技能組 active 成員（60s cache）。
+ * ★ cwi-final S1-5：export 畀 push.ts（L-2 路由目標收件人 — 同一份 cache，唔開第二套）。 */
+export async function groupMembersCached(groupId: string): Promise<string[]> {
   const now = Date.now();
   const hit = groupMembersCache.get(groupId);
   if (hit && hit.expiresAt > now) return hit.value;

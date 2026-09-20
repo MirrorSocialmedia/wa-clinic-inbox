@@ -21,6 +21,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { assignConversation, AssignError } from "@/lib/assign";
 import { getParams } from "@/lib/workflow/store";
+import { publishConvEvent } from "@/lib/notify";
 
 /** shouldAutoRelease 純函數入參（E2E / unit 都可直接構造）。 */
 export interface AutoReleaseCandidate {
@@ -121,4 +122,49 @@ export async function runAutoReleaseSweep(
   }
 
   return { checked, released, failed };
+}
+
+/**
+ * ★ cwi-final S1-9 兜底（掛 auto-release cron 每 5 分鐘）：assigneeId 指向 active=false staff → 釋放回公海。
+ *   正常路徑係停用 API 嘅原子釋放（staff/[id] PUT）；呢度只係兜底「漏咗」嘅殘留行
+ *   （歷史數據 / 過往直接改 DB）— 同自指條件邏輯（updateMany 命中先計）、sentByStaffId=null（無真人）。
+ *   冪等：釋放後 assigneeId=null → 下次 sweep 唔會再命中。
+ */
+export async function runDisabledAssigneeSweep(): Promise<{ released: number }> {
+  const disabledIds = (await prisma.staffUser.findMany({ where: { active: false }, select: { id: true } })).map((s) => s.id);
+  if (disabledIds.length === 0) return { released: 0 };
+  let released = 0;
+  for (const staffId of disabledIds) {
+    const rows = await prisma.conversation.findMany({
+      where: { assigneeId: staffId },
+      select: { id: true, clinicId: true, status: true, assignVersion: true, unreadCount: true, routedGroupId: true, routedStaffId: true },
+    });
+    for (const h of rows) {
+      const r = await prisma.conversation.updateMany({
+        where: { id: h.id, assigneeId: staffId }, // ★ 自指條件：期間被接手嘅唔郁
+        data: {
+          assigneeId: null, assignVersion: { increment: 1 }, assignedAt: null, assigneeLastActionAt: null,
+          ...(h.routedStaffId === staffId ? { routedStaffId: null } : {}),
+        },
+      });
+      if (r.count !== 1) continue;
+      released++;
+      if (h.status !== "RESOLVED") {
+        await prisma.message.create({
+          data: {
+            conversationId: h.id, direction: "OUT", channel: "INTERNAL", type: "note",
+            body: "原負責人帳號已停用，對話已放返公海。", status: "SENT",
+            sentByStaffId: null, waTimestamp: new Date(),
+          },
+        }).catch((err) => log.warn({ conversationId: h.id, err: err instanceof Error ? err.message : String(err) }, "disabled-assignee sweep: INTERNAL 備註寫失敗"));
+      }
+      await publishConvEvent(
+        { ...h, assigneeId: null, routedStaffId: h.routedStaffId === staffId ? null : h.routedStaffId },
+        "conv:updated",
+        { conversationId: h.id, clinicId: h.clinicId, status: h.status, assigneeId: null, assignVersion: h.assignVersion + 1, unreadCount: h.unreadCount }
+      ).catch((err) => log.warn({ conversationId: h.id, err: err instanceof Error ? err.message : String(err) }, "disabled-assignee sweep: publishConvEvent 失敗"));
+    }
+  }
+  if (released > 0) log.info({ released }, "disabled-assignee sweep: 殘留停用帳號指派已釋放回公海");
+  return { released };
 }
