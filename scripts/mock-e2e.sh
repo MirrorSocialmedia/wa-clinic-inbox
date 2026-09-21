@@ -2693,7 +2693,9 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X PATCH "$BASE/ap
 check "T86 PATCH /api/notices 標已讀 → 200" "$CODE" "200"
 NOTICE_CNT2=$(curl -s -b "$COOKIE_MF" "$BASE/api/notices" | grep -oE '"count":[0-9]+' | head -1 | cut -d: -f2)
 check "T86 標已讀後未讀清零" "$NOTICE_CNT2" "0"
-check "T86 StaffNotice readAt 已落" "$(q "SELECT (\"readAt\" IS NOT NULL)::text r FROM \"StaffNotice\" WHERE id='$NOTICE_ID_T86'" | jf r)" "true"
+# ★ cwi-final S1-12（2026-09-21 口径變更）：shop readAt/readByStaffId 只由 ADMIN 或對話 assignee 可設（readAt IS NULL 條件保留第一個標記人）。
+# T86 = MF STAFF（非 ADMIN、對話無 assignee）標已讀 → per-staff StaffNoticeRead 照落（上面「未讀清零」已斷）但 shop readAt 保持 NULL。
+check "T86 StaffNotice shop readAt 未落（S1-12：非 assignee/ADMIN 唔寫 shop 語義）" "$(q "SELECT (\"readAt\" IS NULL)::text r FROM \"StaffNotice\" WHERE id='$NOTICE_ID_T86'" | jf r)" "true"
 # hermetic 清理
 q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$CONV_T86'" >/dev/null 2>&1
 q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T86'" >/dev/null 2>&1

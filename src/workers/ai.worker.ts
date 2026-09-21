@@ -21,6 +21,7 @@ import { getAutomationLevel } from "@/lib/ai/automation";
 import type { SessionSlots } from "@/lib/ai/session-types";
 import { hkToday } from "@/lib/duty/client";
 import { applyRoutingFirstReply } from "@/lib/routing/route";
+import { capDraftStack } from "@/lib/ai/draft-stack";
 // ★ Phase C（cwi-sess-20260824-c1）：slot-filling session runner（C6）
 import { getSlots } from "@/lib/availability";
 import {
@@ -1261,6 +1262,7 @@ async function handlePainTriageTurn(
       }
       case "CREATE_DRAFT": {
         // 出口 E.5：L1 草稿俾 staff 發（P-4：唔自動入 booking session）；冪等同主流程（unique + 前置查）
+        let createdFresh = false; // ★ cwi-final S1-13（D-6）：只喺真 create 成功先收窄堆疊
         let existing = await prisma.aiDraft.findUnique({
           where: { conversationId_inReplyToMessageId: { conversationId: conv.id, inReplyToMessageId: msg.id } },
         });
@@ -1299,6 +1301,7 @@ async function handlePainTriageTurn(
                 ...(painTrace ? { traceJson: painTrace as Prisma.InputJsonValue } : {}),
               },
             });
+            createdFresh = true;
           } catch (err) {
             if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
               existing = await prisma.aiDraft.findUnique({
@@ -1312,6 +1315,8 @@ async function handlePainTriageTurn(
         if (existing && msg.aiDraftId !== existing.id) {
           await prisma.message.update({ where: { id: msg.id }, data: { aiDraftId: existing.id } });
         }
+        // ★ cwi-final S1-13（D-6）：堆疊上限 — 只喺今次真 create 成功（P2002 攞舊唔計）之後收窄
+        if (createdFresh) await capDraftStack(conv.id);
         break;
       }
     }

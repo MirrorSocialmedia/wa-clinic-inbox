@@ -255,12 +255,15 @@ async function touchConversation(
             "lastOutboundAt" = GREATEST(COALESCE("lastOutboundAt", ${p(ts)}), ${p(ts)})`;
   }
   if (opts.reopen) {
+    // ★ cwi-final S1-10（N-4）：翻開 RESOLVED 對話重計 15 分鐘升級計時器 —
+    //   routedAt 重設（只限有 routedRuleId 嘅已路由對話；從未路由唔造值）。
     sql += `
       , "status" = CASE WHEN "status" = 'RESOLVED' THEN 'OPEN' ELSE "status" END
       , "reopenedAt" = CASE WHEN "status" = 'RESOLVED' THEN now() ELSE "reopenedAt" END
       , "escalatedAt" = CASE WHEN "status" = 'RESOLVED' THEN NULL ELSE "escalatedAt" END
       , "resolvedBy" = CASE WHEN "status" = 'RESOLVED' THEN NULL ELSE "resolvedBy" END
       , "resolvedAt" = CASE WHEN "status" = 'RESOLVED' THEN NULL ELSE "resolvedAt" END
+      , "routedAt" = CASE WHEN "status" = 'RESOLVED' AND "routedRuleId" IS NOT NULL THEN now() ELSE "routedAt" END
       , "assigneeId" = CASE WHEN "status" = 'RESOLVED' AND ${p(opts.reopen.dropAssignee ? 1 : 0)} = 1 THEN NULL ELSE "assigneeId" END`;
   }
   sql += `

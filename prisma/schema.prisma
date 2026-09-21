@@ -66,6 +66,7 @@ enum DraftStatus {
   // Phase 2b：AUTO 模式 AI 直接發出（staff 之後可審計；sentByStaffId=null + aiAutoSent=true）
   SENT_AUTO
   DISCARDED
+  EXPIRED // ★ D-6：被第 4 個草稿擠出（唔刪；統計照計；仍可被「已填入 composer」嘅發送連結）
 }
 
 // AI Workflow Phase A（cwi-ai-20260824-t1）：內部通知軌（D-8/D-9）—「AI 通知俾職員」
@@ -438,11 +439,15 @@ model Conversation {
   //   C2 起 consult 路徑改寫 ConsultSession 同名欄（session 建立時由呢度複製 — 橋接搬遷；
   //   Conversation 欄保留：C1 e2e + 非 consult 路徑仍用）。
   lastOutboundText String?
+  // ★ cwi-final S1-12：通用更新時間戳 — S1-2 delta 改 `updatedAt >= after`，
+  //   令狀態／指派／分類改動都入 delta（@default(now()) 必有 — 否則現有行 migration 失敗）。
+  updatedAt        DateTime   @default(now()) @updatedAt @db.Timestamptz
   // ★ consult v2.1 C2（MD §3）：CONSULT 銷售 session（C3 規則引擎落；一對話同時最多一個 active）。
   consultSessions ConsultSession[]
 
   @@unique([clinicId, contactId])
   @@index([clinicId, status, lastMessageAt])
+  @@index([clinicId, updatedAt])              // ★ cwi-final S1-12：S1-2 delta 用
   @@index([routedGroupId, assigneeId])        // 「派俾我」膠囊 + 升級 sweep 輔助
   @@index([routedStaffId])
 }
@@ -614,6 +619,8 @@ model AiDraft {
   // AI job 重試（attempts 3）或部分失敗重跑時，唯一約束 + findUnique 前置檢查
   // 保證唔會生成重複 draft。一條訊息只觸發一次 AI 分類，語義上多 draft 無意義。
   @@unique([conversationId, inReplyToMessageId])
+  // ★ cwi-final S1-13（D-6）：草稿堆疊 — GET drafts 取最近 3 個 PROPOSED 用
+  @@index([conversationId, status, createdAt])
 }
 
 // ★ Part F（F.5）：GoldenCase 評測資產（DB 表 + 定期 export repo evals/golden/）。
@@ -856,6 +863,27 @@ model StaffNotice {
   readByStaffId  String?
   readAt         DateTime?      @db.Timestamptz
   @@index([clinicId, readAt, createdAt])
+}
+
+// ★ cwi-final S1-12（audit3 P1-09）：per-staff 對話已讀狀態 — 每個 staff 獨立讀進度
+//   （myUnread = 比該 staff lastReadAt 新嘅 IN 訊息數）。
+//   Conversation.unreadCount 保留「全店未處理」語義（公海 SLA）；SUPERVISOR markRead 唔清。
+model ConversationRead {
+  conversationId String
+  staffId        String
+  lastReadAt     DateTime @db.Timestamptz
+  @@id([conversationId, staffId])
+  @@index([staffId])
+}
+
+// ★ cwi-final S1-12（audit3 P1-09）：per-staff notice 已讀
+//   （StaffNotice.readAt/readByStaffId 保留做「全店已處理」— 只 assignee/ADMIN 可設）。
+model StaffNoticeRead {
+  noticeId String
+  staffId  String
+  readAt   DateTime @default(now()) @db.Timestamptz
+  @@id([noticeId, staffId])
+  @@index([staffId])
 }
 
 // ★ AI Workflow D-10（cwi-ai-20260824-t1）：病人事實抽取表。

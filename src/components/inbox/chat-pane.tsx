@@ -91,10 +91,14 @@ interface Props {
   loadingOlder: boolean;
   onScrollTop: () => void;
   window: { open: boolean; remainingMs: number; tone: string } | null;
-  onSend: (body: string, source?: "adopted" | "typed", /** ★ cwi-followup-v3：窗口內 free-form 採用 — 帶跟進建議 task id（server fail-soft claim SUGGESTED→SENT） */ followupTaskId?: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null; /** ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE 失效原因 */ notSendableReason?: string }>;
+  onSend: (body: string, source?: "adopted" | "typed", /** ★ cwi-followup-v3：窗口內 free-form 採用 — 帶跟進建議 task id（server fail-soft claim SUGGESTED→SENT） */ followupTaskId?: string, /** ★ cwi-final S1-13（D-6）：員工實際採用嘅草稿 id（切換過就係切換後嗰個） */ aiDraftId?: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null; /** ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE 失效原因 */ notSendableReason?: string }>;
   staffName: string;
-  /** Phase 2：該對話最新嘅 pending AI 草稿（PROPOSED）；null = 無 */
-  pendingDraft: DraftInfo | null;
+  /** Phase 2 + ★ cwi-final S1-13（D-6）：該對話 pending AI 草稿堆疊（新到舊、最多 3）；空陣列 = 無 */
+  pendingDrafts: DraftInfo[];
+  /** ★ cwi-final S1-13（D-6）：目前展示嘅草稿 index（0 = 最新） */
+  draftIndex: number;
+  /** ★ cwi-final S1-13（D-6）：切換 index（‹› 掣 / Alt+↑↓） */
+  onDraftIndexChange: (i: number) => void;
   /** 採用：寫 audit + （前端）填 composer；返回後 draft 卡保留到發送/棄 */
   onAdopt: (draftId: string) => Promise<void>;
   /** 棄：DELETE draft（→ DISCARDED） */
@@ -362,6 +366,8 @@ function UndoControls({
  */
 export function ChatPane(p: Props) {
   const [draft, setDraft] = useState("");
+  // ★ cwi-final S1-13（D-6）：堆疊入目前展示緊嘅卡（parent 已 clamp index）
+  const shownDraft = p.pendingDrafts[p.draftIndex] ?? null;
   const [sending, setSending] = useState(false);
   const [sendingNote, setSendingNote] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -465,6 +471,8 @@ export function ChatPane(p: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(false);
   const autoFilledDraftRef = useRef<string | null>(null);
+  // ★ cwi-final S1-13（D-6）：最後一次由草稿填入 composer 嘅原文 — 切換時判定「有冇改字」用
+  const filledTextRef = useRef<string | null>(null);
   // ★ consult v2.1 C5（MD §8.4）：composer 內嘅文字係咪由 AI 草稿「採用」嚟（auto-fill / 採用並編輯）。
   //   發送時 source = adopted（採用並編輯，含改動）vs typed（自己由零打字 → humanTookOver）。
   const adoptedDraftRef = useRef<string | null>(null);
@@ -508,6 +516,7 @@ export function ChatPane(p: Props) {
     setTemplateOptions(null);
     pinnedRef.current = true;
     autoFilledDraftRef.current = null;
+    filledTextRef.current = null; // ★ cwi-final S1-13（D-6）：換對話 → 填入基準重置
     adoptedFollowupRef.current = null; // ★ cwi-followup-v3：換對話 → 建議採用旗清掉
     noteReadSentRef.current = new Set();
   }, [p.conversation?.id]);
@@ -534,24 +543,27 @@ export function ChatPane(p: Props) {
   }, [visible, p.conversation?.id]);
 
   useEffect(() => {
-    if (!p.pendingDraft) {
+    if (!shownDraft) {
       autoFilledDraftRef.current = null;
       setCopiedDraft(false);
       return;
     }
-    if (autoFilledDraftRef.current !== p.pendingDraft.id) setCopiedDraft(false);
-    if (autoFilledDraftRef.current === p.pendingDraft.id) return;
+    if (autoFilledDraftRef.current !== shownDraft.id) setCopiedDraft(false);
+    if (autoFilledDraftRef.current === shownDraft.id) return;
+    // ★ cwi-final S1-13（D-6）：auto-fill 只對 index 0（最新）且非 stale — 舊卡唔會蓋住 composer
+    if (p.draftIndex !== 0 || shownDraft.stale) return;
     // cwi-window-20260901（P2）：COPY_ONLY 過窗草稿唔入 composer（發唔出 — 只准複製去手機 App）
-    if (p.pendingDraft.mode === "COPY_ONLY") return;
+    if (shownDraft.mode === "COPY_ONLY") return;
     // ★ H1：lock 模式（assignee 係其他人）唔好 auto-fill AI 草稿入 composer — 嗰度係內部備註欄
     const locked = !!p.conversation?.assigneeId && p.conversation?.assigneeId !== p.myStaffId;
     if (locked) return;
     if (draft.trim() === "") {
-      setDraft(p.pendingDraft.draftText);
-      autoFilledDraftRef.current = p.pendingDraft.id;
-      adoptedDraftRef.current = p.pendingDraft.id; // ★ C5 §8.4：auto-fill = 採用（source: adopted）
+      setDraft(shownDraft.draftText);
+      autoFilledDraftRef.current = shownDraft.id;
+      filledTextRef.current = shownDraft.draftText; // ★ cwi-final S1-13：填入基準（改字判定）
+      adoptedDraftRef.current = shownDraft.id; // ★ C5 §8.4：auto-fill = 採用（source: adopted）
     }
-  }, [p.pendingDraft, draft, p.conversation?.assigneeId, p.myStaffId]);
+  }, [shownDraft, p.draftIndex, draft, p.conversation?.assigneeId, p.myStaffId]);
 
   // ★ C5 §8.4：換對話 → 採用旗清掉（composer 狀態唔會跨對話沿用）
   useEffect(() => {
@@ -627,7 +639,21 @@ export function ChatPane(p: Props) {
   // ★ cwi-routing-20260906 §8：SUPERVISOR 覆唔到客 — composer 轉唯讀提示（內部備註照發）
   const readOnly = p.userRole === "SUPERVISOR";
   // cwi-window-20260901（P2）：COPY_ONLY 過窗草稿（發唔出 — 只准複製去手機 App）
-  const isCopyOnly = p.pendingDraft?.mode === "COPY_ONLY";
+  const isCopyOnly = shownDraft?.mode === "COPY_ONLY";
+
+  // ★ cwi-final S1-13（D-6）：堆疊切換（‹› 掣 / Alt+↑↓）— 改咗字先撳 → 確認 dialog（取消 = 文字保留、index 不變）
+  function switchDraft(i: number) {
+    const target = p.pendingDrafts[i];
+    if (!target) return;
+    const edited = draft.trim() !== "" && draft !== filledTextRef.current;
+    if (edited && !window.confirm("你改緊嘅內容會被換走，確定切換？")) return;
+    p.onDraftIndexChange(i);
+    if (target.mode !== "COPY_ONLY" && !locked) {
+      setDraft(target.draftText);
+      filledTextRef.current = target.draftText;
+      adoptedDraftRef.current = target.id; // ★ 發送時帶呢個 id
+    }
+  }
   const assigneeName = c.assigneeName ?? null;
   const staffNameById = new Map(p.staff.map((s) => [s.id, s.name]));
   // ★ cwi-audit2-20260908 T2（A-3 超額）：中間斷層分隔線位置 = 第一條 createdAt > 邊界嘅 row
@@ -712,7 +738,9 @@ export function ChatPane(p: Props) {
       adoptedDraftRef.current || adoptedFollowupRef.current ? "adopted" : "typed";
     // ★ cwi-followup-v3：窗口內 free-form 採用 → 帶 followupTaskId（server fail-soft claim SUGGESTED→SENT）
     const followupTaskId = adoptedFollowupRef.current;
-    const r = await p.onSend(body, source, followupTaskId ?? undefined);
+    // ★ cwi-final S1-13（D-6）：員工實際採用嘅草稿 id（切換過就係切換後嗰個）→ server 準確連結
+    const aiDraftId = adoptedDraftRef.current ?? undefined;
+    const r = await p.onSend(body, source, followupTaskId ?? undefined, aiDraftId);
     if (!r.ok) {
       // ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE — 建議已失效（task 已同步轉態）→
       //   清採用旗 + 刷新建議卡；**文字保留喺 composer**（員工再撳發送 = 普通訊息）。
@@ -1209,30 +1237,54 @@ export function ChatPane(p: Props) {
           })()}
 
         {/* Phase 2：AI 草稿卡 — signature element：全頁唯一 2px brand 邊框（Organic rounded-[26px]）
-            cwi-window-20260901（P2）：COPY_ONLY（過窗）= banner + 複製掣 + 採用並發送 disable */}
-        {p.pendingDraft && (
-          <div className={`mb-2 rounded-[26px] border-2 bg-panel p-3.5 ${isCopyOnly ? "border-warn" : "border-brand"}`} data-testid="c5-draft-card">
+            cwi-window-20260901（P2）：COPY_ONLY（過窗）= banner + 複製掣 + 採用並發送 disable
+            ★ cwi-final S1-13（D-6）：堆疊 — 1/3 計數 + ‹› 切換 + stale 灰字 + 改字切換確認 */}
+        {shownDraft && (
+          <div className={`mb-2 rounded-[26px] border-2 bg-panel p-3.5 ${isCopyOnly ? "border-warn" : "border-brand"} ${shownDraft.stale ? "opacity-60" : ""}`} data-testid="c5-draft-card">
             <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
               <Sparkles size={15} strokeWidth={2.75} className={isCopyOnly ? "text-warn-text" : "text-brand-text"} />
               <span className={`text-[12.5px] font-semibold ${isCopyOnly ? "text-warn-text" : "text-brand-text"}`}>
-                AI 草稿{isCopyOnly ? "（只可複製）" : ""} · {(p.pendingDraft.latencyMs / 1000).toFixed(1)}s
+                AI 草稿{isCopyOnly ? "（只可複製）" : ""} · {(shownDraft.latencyMs / 1000).toFixed(1)}s
               </span>
               {/* ★ cwi-inboxfix-20260905（MD §2）：model 名移入 ⓘ tooltip；AI trace 同係呢粒 ⓘ 撳先展開（內容唔變） */}
               <button
-                onClick={() => p.pendingDraft?.traceJson && setTraceOpen((v) => !v)}
-                title={p.pendingDraft.model}
+                onClick={() => shownDraft?.traceJson && setTraceOpen((v) => !v)}
+                title={shownDraft.model}
                 aria-label="AI model 同 trace"
                 className={isCopyOnly ? "text-warn-text/70 hover:text-warn-text" : "text-t3 hover:text-t1"}
               >
                 <Info size={12} strokeWidth={2.25} />
               </button>
+              {/* ★ cwi-final S1-13（D-6）：堆疊切換（≥2 個先出） */}
+              {p.pendingDrafts.length > 1 && (
+                <span className="ml-auto flex items-center gap-1 text-xs text-t3" data-testid="draft-stack-nav">
+                  <button
+                    aria-label="較新草稿"
+                    disabled={p.draftIndex === 0}
+                    onClick={() => switchDraft(p.draftIndex - 1)}
+                    className="px-1.5 py-0.5 rounded hover:bg-panel-2 hover:text-t1 disabled:opacity-30"
+                  >
+                    ‹
+                  </button>
+                  <span data-testid="draft-stack-counter">{p.draftIndex + 1}/{p.pendingDrafts.length}</span>
+                  <button
+                    aria-label="較舊草稿"
+                    disabled={p.draftIndex >= p.pendingDrafts.length - 1}
+                    onClick={() => switchDraft(p.draftIndex + 1)}
+                    className="px-1.5 py-0.5 rounded hover:bg-panel-2 hover:text-t1 disabled:opacity-30"
+                  >
+                    ›
+                  </button>
+                </span>
+              )}
               <span className="ml-auto flex gap-1.5 max-md:w-full max-md:order-last max-md:mt-2 max-md:[&>button]:flex-1">
                 {!isCopyOnly && (
                   <button
                     onClick={() => {
-                      setDraft(p.pendingDraft!.draftText);
-                      adoptedDraftRef.current = p.pendingDraft!.id; // ★ C5 §8.4：採用並編輯（含後續改動）= adopted
-                      void p.onAdopt(p.pendingDraft!.id);
+                      setDraft(shownDraft!.draftText);
+                      filledTextRef.current = shownDraft!.draftText; // ★ cwi-final S1-13：填入基準（改字判定）
+                      adoptedDraftRef.current = shownDraft!.id; // ★ C5 §8.4：採用並編輯（含後續改動）= adopted
+                      void p.onAdopt(shownDraft!.id);
                     }}
                     disabled={p.draftBusy || locked}
                     title={locked ? "先接手（become 負責人）先可以採用草稿發 WhatsApp" : undefined}
@@ -1244,7 +1296,7 @@ export function ChatPane(p: Props) {
                 {isCopyOnly && (
                   <button
                     onClick={() => {
-                      void navigator.clipboard.writeText(p.pendingDraft!.draftText).then(() => {
+                      void navigator.clipboard.writeText(shownDraft!.draftText).then(() => {
                         setCopiedDraft(true);
                         setTimeout(() => setCopiedDraft(false), 2000);
                       }).catch(() => undefined);
@@ -1255,7 +1307,7 @@ export function ChatPane(p: Props) {
                   </button>
                 )}
                 <button
-                  onClick={() => void p.onDiscard(p.pendingDraft!.id)}
+                  onClick={() => void p.onDiscard(shownDraft!.id)}
                   disabled={p.draftBusy}
                   className="text-xs px-3 py-1 rounded-full border border-line-strong text-t2 hover:bg-panel-2 disabled:opacity-40"
                 >
@@ -1263,6 +1315,18 @@ export function ChatPane(p: Props) {
                 </button>
               </span>
             </div>
+            {/* ★ cwi-final S1-13（D-6）：stale = 呢個草稿之後病人再講咗嘢（非回覆最新嗰句） */}
+            {shownDraft.stale && (
+              <div className="text-[11px] text-t3 mb-1.5" data-testid="draft-stale">
+                病人之後再講咗嘢
+              </div>
+            )}
+            {/* ★ cwi-final S1-13（D-6）：卡係舊個（index > 0）→ 有新草稿提示 */}
+            {p.draftIndex > 0 && (
+              <div className="text-[11px] text-brand-text mb-1.5" data-testid="draft-newer-hint">
+                有新草稿 ↑
+              </div>
+            )}
             {isCopyOnly && (
               <div className="text-[11px] text-warn-text bg-warn-soft rounded-xl px-2.5 py-1.5 mb-1.5">
                 24 小時窗口已過 — 呢段字發唔出。複製去手機 WhatsApp App 覆（免費、echo 自動回流）
@@ -1272,12 +1336,12 @@ export function ChatPane(p: Props) {
               <div className="text-[10px] text-warn-text mb-1">🔒 先〔接手〕成為負責人，先可以採用草稿發去 WhatsApp</div>
             )}
             <div className="text-[13px] leading-[1.65] text-t1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
-              {p.pendingDraft.draftText}
+              {shownDraft.draftText}
             </div>
             {/* ★ Part F（cwi-raggolden-20260904，F.7）：trace panel — ★ cwi-inboxfix-20260905（MD §2）：收埋做 ⓘ 掣展開（內容唔變） */}
-            {p.pendingDraft.traceJson && traceOpen && (
+            {shownDraft.traceJson && traceOpen && (
               <div className="mt-1.5 rounded-xl border border-line bg-panel-2/60">
-                <TracePanel trace={p.pendingDraft.traceJson} />
+                <TracePanel trace={shownDraft.traceJson} />
               </div>
             )}
           </div>
@@ -1435,6 +1499,12 @@ export function ChatPane(p: Props) {
                   setDraft(v);
                 }}
                 onKeyDown={(e) => {
+                  // ★ cwi-final S1-13（D-6）：Alt+↑／Alt+↓ = 堆疊切換（↑ 較新 / ↓ 較舊）
+                  if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+                    e.preventDefault();
+                    switchDraft(p.draftIndex + (e.key === "ArrowDown" ? 1 : -1));
+                    return;
+                  }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     void send();
@@ -1462,7 +1532,7 @@ export function ChatPane(p: Props) {
           <WindowExits
             conversation={c}
             myStaffId={p.myStaffId}
-            draftText={p.pendingDraft?.draftText}
+            draftText={shownDraft?.draftText}
             onError={(m) => setSendError(m)}
           />
         )}

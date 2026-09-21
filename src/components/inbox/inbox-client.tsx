@@ -14,6 +14,7 @@ import type {
   ConvStatus,
   ConvUpdatedEvent,
   DraftInfo,
+  DraftExpiredEvent,
   DraftReadyEvent,
   MessageItem,
   MessageStatusEvent,
@@ -251,7 +252,10 @@ export function InboxClient({
   const [notice, setNotice] = useState<string | null>(null);
 
   // Phase 2：pending AI 草稿（per conversationId）+ 急症 toast
-  const [pendingDrafts, setPendingDrafts] = useState<Record<string, DraftInfo>>({});
+  // ★ cwi-final S1-13（D-6）：堆疊陣列（新到舊、最多 3）取代單卡
+  const [pendingDrafts, setPendingDrafts] = useState<Record<string, DraftInfo[]>>({});
+  // ★ cwi-final S1-13（D-6）：每對話目前展示緊嘅草稿 index（預設 0 = 最新）
+  const [draftIndex, setDraftIndex] = useState<Record<string, number>>({});
   // ★ cwi-followup-v3：選中對話嘅現行未處理跟進建議（SUGGESTED）；null = 無
   const [suggestion, setSuggestion] = useState<FollowupSuggestion | null>(null);
   const [suggestionBusy, setSuggestionBusy] = useState(false);
@@ -291,11 +295,15 @@ export function InboxClient({
   // ★ Realtime P0 (R5)：assign/接手要讀最新 assignVersion — ref 避免 callback stale closure
   const conversationsRef = useRef<ConversationItem[]>(conversations);
   conversationsRef.current = conversations;
+  // ★ cwi-final S1-13（D-6）：draft:expired handler 要讀最新堆疊（socket callback 避 stale closure）
+  const pendingDraftsRef = useRef<Record<string, DraftInfo[]>>(pendingDrafts);
+  pendingDraftsRef.current = pendingDrafts;
 
   // ── ★ Part B（N-7）：未讀 → 分頁標題 (N) WA Inbox + favicon 紅點 ─────────────
   //   由現有 list state 導出（零新 API）；常駐驅動 — permission denied/唔支援都一樣見，
   //   唔使聲稱 PWA push（N-9：Tab 閂 = 收唔到）。
-  const unreadTotal = conversations.reduce((sum, c) => sum + c.unreadCount, 0);
+  //   ★ cwi-final S1-12：per-staff 口徑 — myUnread（其他 staff 開過對話唔代表我讀咗）
+  const unreadTotal = conversations.reduce((sum, c) => sum + c.myUnread, 0);
   useEffect(() => {
     document.title = unreadTotal > 0 ? `(${unreadTotal}) WA Inbox` : "WA Inbox";
   }, [unreadTotal]);
@@ -601,6 +609,13 @@ export function InboxClient({
             : selectedIdRef.current === e.conversationId && document.visibilityState === "visible"
               ? 0 // ★ cwi-hotfix-20260908 §2 (T303)：開住對話 + tab 可見 → badge 即時清（server markRead 另走 debounce）
               : e.conversation.unreadCount, // tab hidden → 保留事件值（用戶真未睇；visibilitychange 返嚟先清 — T304）
+          // ★ cwi-final S1-12：per-staff 未讀本地推計（事件唔帶 per-staff 值 — 開住對話 = 0；
+          //   其他情況 = 舊值 +1；下次 list refetch 會用 DB myUnread 覆寫對齊）
+          myUnread: isOut
+            ? (existing?.myUnread ?? 0)
+            : selectedIdRef.current === e.conversationId && document.visibilityState === "visible"
+              ? 0
+              : (existing?.myUnread ?? 0) + 1,
           lastInboundAt: isOut
             ? existing?.lastInboundAt ?? null
             : (e.conversation.lastInboundAt ?? null),
@@ -751,25 +766,62 @@ export function InboxClient({
     });
 
     // 新 pending draft → 入 card（對話欄上方）
+    // ★ cwi-final S1-13（D-6）：push 入堆疊陣列（唔覆蓋；>3 收窄靠 server capDraftStack）— 新草稿到頂，
+    //   舊卡標 stale（病人喺呢個草稿之後再講咗嘢）；index 跳返 0（最新）。
     socket.on("draft:ready", (e: DraftReadyEvent) => {
       if (!firstTime(e)) return;
-      setPendingDrafts((prev) => ({
-        ...prev,
-        [e.conversationId]: {
-          id: e.draftId,
-          conversationId: e.conversationId,
-          inReplyToMessageId: e.inReplyToMessageId,
-          draftText: e.draftText,
-          model: e.model,
-          latencyMs: e.latencyMs,
-          status: "PROPOSED",
-          createdAt: new Date().toISOString(),
-          // cwi-window-20260901（P2）：COPY_ONLY = 過窗草稿（UI 只准複製）
-          mode: e.mode ?? "NORMAL",
-          // ★ Part F（F.7）：trace panel 數據源
-          traceJson: e.traceJson ?? null,
-        },
-      }));
+      setPendingDrafts((prev) => {
+        const cur = prev[e.conversationId] ?? [];
+        if (cur.some((d) => d.id === e.draftId)) return prev; // 重發（eventId 已去重，雙保險）
+        const older = cur.map((d) => ({ ...d, stale: d.stale || d.inReplyToMessageId !== e.inReplyToMessageId }));
+        const next = [
+          {
+            id: e.draftId,
+            conversationId: e.conversationId,
+            inReplyToMessageId: e.inReplyToMessageId,
+            draftText: e.draftText,
+            model: e.model,
+            latencyMs: e.latencyMs,
+            status: "PROPOSED" as const,
+            // ★ cwi-final S1-13：emitter 現時未帶 createdAt → fallback（spec 裁決）
+            createdAt: e.createdAt ?? new Date().toISOString(),
+            // cwi-window-20260901（P2）：COPY_ONLY = 過窗草稿（UI 只准複製）
+            mode: e.mode ?? "NORMAL",
+            // ★ Part F（F.7）：trace panel 數據源
+            traceJson: e.traceJson ?? null,
+            stale: false,
+          } as DraftInfo,
+          ...older,
+        ].slice(0, 3);
+        return { ...prev, [e.conversationId]: next };
+      });
+      setDraftIndex((prev) => ({ ...prev, [e.conversationId]: 0 })); // 新草稿到 → 跳返最新
+    });
+
+    // ★ cwi-final S1-13（D-6）：草稿被第 4 個擠出（PROPOSED → EXPIRED）→ 由堆疊移除
+    socket.on("draft:expired", (e: DraftExpiredEvent) => {
+      if (!firstTime(e)) return;
+      const ids = new Set(e.draftIds);
+      setPendingDrafts((prev) => {
+        const cur = prev[e.conversationId];
+        if (!cur) return prev;
+        const nextArr = cur.filter((d) => !ids.has(d.id));
+        if (nextArr.length === cur.length) return prev;
+        const next = { ...prev };
+        if (nextArr.length === 0) delete next[e.conversationId];
+        else next[e.conversationId] = nextArr;
+        return next;
+      });
+      // index 超界 clamp（render 時亦會再 clamp — 雙保險）
+      setDraftIndex((prev) => {
+        const cur = prev[e.conversationId] ?? 0;
+        if (cur === 0) return prev;
+        // 注意：pendingDraftsRef 係本輪 render 前嘅陣列（setPendingDrafts 未 settle）→ 手算移除後長度
+        const len = (pendingDraftsRef.current[e.conversationId] ?? []).filter((d) => !ids.has(d.id)).length;
+        const clamped = Math.min(cur, Math.max(0, len - 1));
+        if (clamped === cur) return prev;
+        return { ...prev, [e.conversationId]: clamped };
+      });
     });
 
     // 急症升級 → 隊列頂紅標 + toast（12s 自動消）
@@ -1161,12 +1213,14 @@ export function InboxClient({
       const res = await fetch(`/api/conversations/${convId}/drafts`);
       if (!res.ok) return;
       const data = (await res.json()) as { drafts: DraftInfo[] };
+      // ★ cwi-final S1-13（D-6）：存成個堆疊陣列（新到舊、最多 3 — server take 已收窄）+ index 重置 0
       setPendingDrafts((prev) => {
         const next = { ...prev };
-        if (data.drafts.length > 0) next[convId] = data.drafts[0];
+        if (data.drafts.length > 0) next[convId] = data.drafts.slice(0, 3);
         else delete next[convId];
         return next;
       });
+      setDraftIndex((prev) => ({ ...prev, [convId]: 0 }));
     } catch {
       /* ignore */
     }
@@ -1208,10 +1262,22 @@ export function InboxClient({
     setDraftBusy(true);
     try {
       await fetch(`/api/conversations/${convId}/drafts/${draftId}`, { method: "DELETE" });
+      // ★ cwi-final S1-13（D-6）：只刪堆疊入嗰一個 id（唔再刪成個對話嘅卡）+ index clamp
       setPendingDrafts((prev) => {
+        const cur = prev[convId];
+        if (!cur) return prev;
+        const nextArr = cur.filter((d) => d.id !== draftId);
         const next = { ...prev };
-        delete next[convId];
+        if (nextArr.length === 0) delete next[convId];
+        else next[convId] = nextArr;
         return next;
+      });
+      setDraftIndex((prev) => {
+        const cur = prev[convId] ?? 0;
+        const len = (pendingDraftsRef.current[convId] ?? []).filter((d) => d.id !== draftId).length;
+        const clamped = Math.min(cur, Math.max(0, len - 1));
+        if (clamped === cur) return prev;
+        return { ...prev, [convId]: clamped };
       });
     } finally {
       setDraftBusy(false);
@@ -1652,7 +1718,8 @@ export function InboxClient({
       if (sel) {
         const c = conversationsRef.current.find((x) => x.id === sel);
         if (c && c.unreadCount > 0) {
-          setConversations((prev) => prev.map((x) => (x.id === sel ? { ...x, unreadCount: 0 } : x)));
+          // ★ cwi-final S1-12：myUnread 一併清（開住對話 = 已讀；server markRead 已 debounce 同步）
+          setConversations((prev) => prev.map((x) => (x.id === sel ? { ...x, unreadCount: 0, myUnread: 0 } : x)));
           void markReadDebounced(sel);
         }
         void fetchMessagesLatest(sel);
@@ -1949,7 +2016,9 @@ export function InboxClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ markRead: true }),
       });
-      setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, unreadCount: 0 } : c)));
+      setConversations((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, unreadCount: 0, myUnread: 0 } : c)), // ★ cwi-final S1-12：per-staff 一併清
+      );
     } catch {
       /* ignore */
     }
@@ -1957,7 +2026,7 @@ export function InboxClient({
 
   // ── composer ──────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    async (body: string, source?: "adopted" | "typed", followupTaskId?: string): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; takenOverBy?: string | null; notSendableReason?: string }> => {
+    async (body: string, source?: "adopted" | "typed", followupTaskId?: string, /** ★ cwi-final S1-13（D-6）：員工實際採用嘅草稿 id（切換過就係切換後嗰個） */ aiDraftId?: string): Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; takenOverBy?: string | null; notSendableReason?: string }> => {
       const convId = selectedIdRef.current;
       if (!convId) return { ok: false, error: "未選擇對話" };
       // ★ realtime-p0 R1：一次「邏輯發送」一個 UUID；網絡 retry 用同一 key（chat-pane 嘅
@@ -1973,7 +2042,7 @@ export function InboxClient({
               headers: { "Content-Type": "application/json" },
               // ★ consult v2.1 C5（MD §8.4）：source 標記（adopted/typed）— typed → server 置 humanTookOver
               // ★ cwi-followup-v3：followupTaskId = 窗口內 free-form 採用（server fail-soft claim SUGGESTED→SENT）
-              body: JSON.stringify({ conversationId: convId, body, clientMessageId, ...(source ? { source } : {}), ...(followupTaskId ? { followupTaskId } : {}) }),
+              body: JSON.stringify({ conversationId: convId, body, clientMessageId, ...(source ? { source } : {}), ...(followupTaskId ? { followupTaskId } : {}), ...(aiDraftId ? { aiDraftId } : {}) }),
             });
           } catch (err) {
             lastErr = err;
@@ -1997,6 +2066,8 @@ export function InboxClient({
           assigneeId?: string | null;
           // ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE 帶失效原因（UI 提示用）
           reason?: string | null;
+          // ★ cwi-final S1-13（D-6）：server 準確連結咗嘅草稿 id（員工實際發出嗰個）
+          linkedDraftId?: string | null;
         } | null;
         // ★ cwi-final S1-1e（=S1-6）：post 期間已換對話（await 幾秒）→ 唔掂新對話嘅 messages，
         //   只更新舊對話嘅列表 row（preview / lastMessageAt）
@@ -2074,6 +2145,26 @@ export function InboxClient({
           )
         );
         // Phase 2：發送後重查 pending drafts（若 draft 被採用發出 → 狀態變 SENT_*，卡片應消失）
+        // ★ cwi-final S1-13（D-6）：回執 linkedDraftId → 即時由堆疊移除嗰一個（重查前嘅即時反馈）
+        if (data?.linkedDraftId) {
+          const removedId = data.linkedDraftId;
+          setPendingDrafts((prev) => {
+            const cur = prev[convId];
+            if (!cur) return prev;
+            const nextArr = cur.filter((d) => d.id !== removedId);
+            const next = { ...prev };
+            if (nextArr.length === 0) delete next[convId];
+            else next[convId] = nextArr;
+            return next;
+          });
+          setDraftIndex((prev) => {
+            const cur = prev[convId] ?? 0;
+            const len = (pendingDraftsRef.current[convId] ?? []).filter((d) => d.id !== removedId).length;
+            const clamped = Math.min(cur, Math.max(0, len - 1));
+            if (clamped === cur) return prev;
+            return { ...prev, [convId]: clamped };
+          });
+        }
         void fetchPendingDrafts(convId);
         return { ok: true };
       } catch {
@@ -2427,6 +2518,7 @@ export function InboxClient({
             assigneeName: null,
             assignVersion: 0,
             unreadCount: 0,
+            myUnread: 0, // ★ cwi-final S1-12
             lastInboundAt: null,
             lastMessageAt: new Date(0).toISOString(),
             intent: null,
@@ -2580,7 +2672,18 @@ export function InboxClient({
         onVoidMessage={voidMessage}
         userRole={user.role}
         staffName={user.name}
-        pendingDraft={selectedConv ? (pendingDrafts[selectedConv.id] ?? null) : null}
+        // ★ cwi-final S1-13（D-6）：草稿堆疊（新到舊、最多 3）+ 目前 index（render 時 clamp）
+        pendingDrafts={selectedConv ? (pendingDrafts[selectedConv.id] ?? []) : []}
+        draftIndex={
+          selectedConv
+            ? Math.min(draftIndex[selectedConv.id] ?? 0, Math.max(0, (pendingDrafts[selectedConv.id] ?? []).length - 1))
+            : 0
+        }
+        onDraftIndexChange={(i) => {
+          if (!selectedConv) return;
+          const convId = selectedConv.id;
+          setDraftIndex((prev) => ({ ...prev, [convId]: i }));
+        }}
         onAdopt={adoptDraft}
         onDiscard={discardDraft}
         draftBusy={draftBusy}

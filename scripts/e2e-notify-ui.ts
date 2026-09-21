@@ -741,10 +741,14 @@ async function main(): Promise<void> {
       await new Promise((r) => setTimeout(r, 3000));
       // 交付證明（訊息入對話欄）— 重 publish 兜底 socket 未連 race
       await publishUntilSeen(a.P, "t162", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1 })), PII_BODY);
-      // 事件到咗但必須唔響唔彈
+      // 事件到咗但必須唔響唔彈 — ★ cwi-final B9 教訓（2026-09-21 實測假紅）：後端 cron（5min escalation sweep +
+      // SYSTEM notice）會喺任意時刻 broadcast 唔相干 notice:new / urgent:escalation 入開住嘅 tab（11:25 HK sweep 撞窗，
+      // 非本 scenario 事件）。本 scenario 只 publish 咗一條 message:new（tag=convU / title「新訊息 · …」）— 只斷嗰條；
+      // v2 聲同通知綁定（通知被 suppress → chime 唔獨立響），mediaPlays 全量斷言對 cron 噪声假紅故撤。
       const s = await spy(a.P);
-      if (s.notifications.length > 0 || s.ctxCreations > 0 || s.mediaPlays.length > 0) {
-        fail(`t162: 正開對話唔應該響/彈（spy=${JSON.stringify(s)}）`);
+      const msgNotifs = s.notifications.filter((n) => n.tag === convU || (n.title ?? "").startsWith("新訊息"));
+      if (msgNotifs.length > 0 || s.ctxCreations > 0) {
+        fail(`t162: 正開對話唔應該響/彈（msgNotifs=${JSON.stringify(msgNotifs)} spy=${JSON.stringify(s)}）`);
       }
       console.log("NOTIFY-UI-OK");
     } else if (scenario === "t188") {
@@ -802,14 +806,16 @@ async function main(): Promise<void> {
       await waitForListReady(a.P, PII_NAME);
       await new Promise((r) => setTimeout(r, 3000));
       // 交付證明（列表 preview 更新）— 防事件丟失假綠；標題跟 client state 走
-      // （(N) = 全列表未讀總和 — baseline 讀 badge（純 React state，無 Next title manager race），唔假設環境無其他未讀）
+      // （★ cwi-final S1-12：(N) = per-staff myUnread 總和 — badge 同源（inbox-client.tsx unreadTotal = Σ myUnread）；
+      //   message:new 本地推計一條 IN 訊息 = +1，payload unread 係 shop 口徑參考值。baseline 讀 badge（純 React state，
+      //   無 Next title manager race），唔假設環境無其他未讀）
       const badgeNum = async () => {
         const b = (await a.P.locator('[aria-label^="訊息未讀"]').first().getAttribute("aria-label")) ?? "";
         const m = /（(\d+) 則）/.exec(b);
         return m ? Number(m[1]) : 0;
       };
       const beforeNum = await badgeNum();
-      const expectNum = beforeNum + 3;
+      const expectNum = beforeNum + 1; // ★ cwi-final S1-12：per-staff myUnread — 一條新 IN 訊息 = +1（舊 shop 口徑係 +payload.unread）
       await publishUntilSeen(a.P, "t165 交付", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 3 })), PII_BODY);
       let title = "";
       const t0 = Date.now();

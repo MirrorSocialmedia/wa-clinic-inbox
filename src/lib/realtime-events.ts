@@ -102,6 +102,16 @@ const draftReady = z.looseObject({
   latencyMs: z.number().nonnegative(),
   mode: z.string(),
   traceJson: z.unknown().nullish(),
+  // ★ cwi-final S1-13（D-6）：堆疊排序用（emitter 未帶時 nullish 兼容）
+  createdAt: z.string().nullish(),
+  eventId: id,
+});
+
+// ★ cwi-final S1-13（D-6）：草稿被第 4 個擠出 → client 由堆疊移除
+const draftExpired = z.looseObject({
+  conversationId: id,
+  clinicId: id,
+  draftIds: z.array(id),
   eventId: id,
 });
 
@@ -260,6 +270,7 @@ export const EVENT_SCHEMAS: Record<string, z.ZodType> = {
   "conv:updated": convUpdated,
   "conversation:assigned": conversationAssigned,
   "draft:ready": draftReady,
+  "draft:expired": draftExpired,
   "ai:classified": aiClassified,
   "urgent:escalation": urgentEscalation,
   "notice:new": noticeNew,

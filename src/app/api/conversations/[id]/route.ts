@@ -11,7 +11,8 @@ import { assertCanAssign } from "@/lib/assign";
  * GET /api/conversations/[id] — 單個對話（+ contact；conversation 含 AI 欄位 intent/urgency/urgent/aiSummary）。別店 → 403。
  * PATCH /api/conversations/[id] — 狀態轉換 / assignee / markRead / urgent。
  *   { status?: OPEN|PENDING|RESOLVED, assigneeId?: string|null, markRead?: boolean, urgent?: boolean }
- *   markRead=true → unreadCount=0（打開對話時調）
+ *   markRead=true → upsert ConversationRead（所有角色，S1-12 per-staff 已讀）；
+ *   unreadCount=0 只限 assignee、或未指派時嘅 STAFF/ADMIN（SUPERVISOR 唔清 — 全店未處理語義）
  *   urgent=false → 人工清急症紅標（true 由 AI worker 置；staff 唔可以手動標 false 假急症）
  *   status→RESOLVED → 自動清 urgent（急症已處理）
  */
@@ -65,6 +66,22 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
     }
   }
 
+  // ★ cwi-final S1-12（audit3 P1-09）：markRead 兩層 —
+  //   ① 所有角色（連 SUPERVISOR）：upsert ConversationRead（個人讀進度 → 後端 myUnread）
+  //   ② Conversation.unreadCount（全店「未處理」/公海 SLA）：只有 assignee、
+  //      或未指派時嘅 STAFF/ADMIN 先清；SUPERVISOR 唔清。
+  if (markRead === true) {
+    const readAt = new Date();
+    await prisma.conversationRead.upsert({
+      where: { conversationId_staffId: { conversationId: id, staffId: auth.staff.id } },
+      create: { conversationId: id, staffId: auth.staff.id, lastReadAt: readAt },
+      update: { lastReadAt: readAt },
+    });
+  }
+  const clearUnread =
+    markRead === true &&
+    (conv.assigneeId === auth.staff.id || (conv.assigneeId === null && auth.staff.role !== "SUPERVISOR"));
+
   const updated = await prisma.conversation.update({
     where: { id },
     data: {
@@ -80,7 +97,7 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
             ...(assigneeId ? { slaNotifiedAt: null } : {}),
           }
         : {}),
-      ...(markRead === true ? { unreadCount: 0 } : {}),
+      ...(clearUnread ? { unreadCount: 0 } : {}),
       // 急症紅標：status→RESOLVED 自動清；urgent=false 手動清；唔會由呢度設 true
       ...(status === "RESOLVED" || urgent === false ? { urgent: false } : {}),
     },

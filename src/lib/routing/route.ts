@@ -21,6 +21,7 @@ import { fetchDutyRoster, hkToday } from "@/lib/duty/client";
 import { phoneHash } from "@/lib/phone-hash";
 import { lookupPatient } from "@/lib/workforce/client";
 import { publishConvEvent, convRef } from "@/lib/notify";
+import { capDraftStack } from "@/lib/ai/draft-stack";
 import { pushRoutingEvent } from "@/lib/push";
 
 export interface RouteRule {
@@ -252,7 +253,9 @@ export async function applyRouting(input: RoutingInput): Promise<RoutingResult> 
   try {
     // ★ cwi-routing-guard-20260908：已路由且未 RESOLVED → 唔重標記。
     //   保留首次 routedAt（15min 升級計時器唔後移）+ StaffNotice/push/audit 去重。
-    //   RESOLVED = re-open 新週期 → 放行（下方 update 會 reset escalatedAt=null）。
+    //   cwi-final S1-10（N-4）：RESOLVED re-open 新週期由 inbound reopen SQL 負責重設
+    //   routedAt/escalatedAt（reopen 已先 commit：status=OPEN）→ 到呢度已係「已路由且未 RESOLVED」
+    //   → skip re-mark（原「RESOLVED 放行」分支係死路，唔會行到）。
     if (input.conv.routedRuleId != null && input.conv.status !== "RESOLVED") {
       log.debug({ conversationId: input.conv.id, ruleId: input.conv.routedRuleId }, "routing: already routed — skip re-mark");
       return none;
@@ -477,6 +480,7 @@ export async function applyRoutingFirstReply(args: {
   if (args.intent === "URGENT_PAIN" || args.intent === "COMPLAINT" || args.urgency === "HIGH") return null; // 鐵律
 
   try {
+    let createdFresh = false; // ★ cwi-final S1-13（D-6）：只喺真 create 成功先收窄堆疊
     let draft = await prisma.aiDraft.findUnique({
       where: { conversationId_inReplyToMessageId: { conversationId: args.convId, inReplyToMessageId: args.msgId } },
     });
@@ -504,6 +508,7 @@ export async function applyRoutingFirstReply(args: {
             mode: args.winOpen ? "NORMAL" : "COPY_ONLY",
           },
         });
+        createdFresh = true;
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
           draft = await prisma.aiDraft.findUnique({
@@ -519,6 +524,8 @@ export async function applyRoutingFirstReply(args: {
       if (msg && msg.aiDraftId !== draft.id) {
         await prisma.message.update({ where: { id: args.msgId }, data: { aiDraftId: draft.id } });
       }
+      // ★ cwi-final S1-13（D-6）：堆疊上限 — 只喺今次真 create 成功（P2002 攞舊唔計）之後收窄
+      if (createdFresh) await capDraftStack(args.convId);
       return draft.id;
     }
     return null;

@@ -8,7 +8,8 @@
  *     第一條 OUT（channel API/APP_ECHO — staff web 發 / staff App 發 / AI AUTO 都算）嘅時差。
  *   • 分母 = 有覆到嘅 inbound（unanswered 唔計入中位數；另計 answered/totalInbound 俾回應率）。
  * - draftAdoption（草稿採用率）= (SENT_AS_IS + SENT_EDITED) / period 內建立嘅全部 AiDraft
- *   （分母含 PROPOSED / DISCARDED / SENT_AUTO — 字面遵從任務規格；
+ *   （分母含 PROPOSED / DISCARDED / SENT_AUTO / EXPIRED — 字面遵從任務規格；
+ *   ★ cwi-final S1-13 D-6：EXPIRED（被第 4 個擠出）一樣計入分母 — 建咗就係建咗；
  *   ★ cwi-window-20260901 P2：COPY_ONLY 過窗草稿剔除 — 佢發唔出，唔係模型質素問題）。
  * - flowCompletion（Flow 完成率）= period 內建立嘅 FlowSession 中 status=COMPLETED / 總數
  *   （所有 session 建立時都係 SENT — 分母 = 發出咗嘅 Flow 卡）。

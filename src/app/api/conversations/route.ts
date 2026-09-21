@@ -83,7 +83,7 @@ export const GET = handle(async (req: NextRequest) => {
     };
     rows = rows.filter((r) => matchCapsule(assignedParam as (typeof CAPSULE_KEYS)[number], r, cx, new Set(followupDue.keys())));
   }
-  const items = await toConversationDTOs(rows, followupDue, clinicParam ?? s.scopedSet ?? undefined);
+  const items = await toConversationDTOs(rows, followupDue, clinicParam ?? s.scopedSet ?? undefined, s.meId);
   // ★ 一律回 object（舊 array 回應取消 — caller 已全部遷移 .items）
   const body: Record<string, unknown> = {
     items,

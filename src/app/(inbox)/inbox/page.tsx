@@ -63,6 +63,7 @@ export default async function InboxPage({
     rows,
     followupDue,
     session.role === "STAFF" ? [...new Set(rows.map((r) => r.clinicId))] : undefined,
+    session.staffId, // ★ cwi-final S1-12：myUnread（per-staff 未讀）
   );
 
   return (

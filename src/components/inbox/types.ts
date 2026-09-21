@@ -70,6 +70,8 @@ export interface ConversationItem {
   /** ★ Realtime P0 (R5, cwi-rt-20260823-a1)：樂觀鎖版本 — assign/接手時帶返 server */
   assignVersion: number;
   unreadCount: number;
+  /** ★ cwi-final S1-12（audit3 P1-09）：per-staff 未讀（比本人 lastReadAt 新嘅 IN 訊息數）— UI 粗體/badge 用；公海 SLA 仍用 unreadCount */
+  myUnread: number;
   lastInboundAt: string | null;
   lastMessageAt: string;
   intent: string | null;
@@ -292,8 +294,12 @@ export interface DraftInfo {
   draftText: string;
   model: string;
   latencyMs: number;
-  status: "PROPOSED" | "SENT_AS_IS" | "SENT_EDITED" | "DISCARDED";
+  // ★ cwi-final S1-13（D-6）：EXPIRED = 被第 4 個草稿擠出（GET 唔會回，socket draft:expired 移除）；
+  //   SENT_AUTO = AUTO 模式已自動發（舊 row 兼容）
+  status: "PROPOSED" | "SENT_AS_IS" | "SENT_EDITED" | "DISCARDED" | "EXPIRED" | "SENT_AUTO";
   createdAt: string;
+  /** ★ cwi-final S1-13（D-6）：呢個草稿之後病人再講咗嘢（GET drafts 帶；非回覆最新嗰句） */
+  stale?: boolean;
   /** cwi-window-20260901（P2）：NORMAL（窗口內）/ COPY_ONLY（過窗 — 發唔出，只准複製去手機 App）。舊 row / 舊 server 可能冇 → 預設 NORMAL。 */
   mode?: "NORMAL" | "COPY_ONLY";
   /** ★ Part F（cwi-raggolden-20260904，F.7）：trace panel 數據源（可展開段）。舊 draft / 痛症出口前可能 null。 */
@@ -345,10 +351,21 @@ export interface DraftReadyEvent {
   draftText: string;
   model: string;
   latencyMs: number;
+  /** ★ cwi-final S1-13（D-6）：server 端建立時間（emitter 現時未帶 → client `?? new Date()` fallback） */
+  createdAt?: string;
   /** cwi-window-20260901（P2）：COPY_ONLY = 過窗草稿（UI 只准複製） */
   mode?: "NORMAL" | "COPY_ONLY";
   /** ★ Part F（F.7）：trace panel 數據源 */
   traceJson?: DraftTrace | null;
+}
+
+/** ★ cwi-final S1-13（D-6）：socket draft:expired — 草稿被第 4 個擠出（PROPOSED → EXPIRED，唔刪） */
+export interface DraftExpiredEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
+  conversationId: string;
+  clinicId: string;
+  draftIds: string[];
 }
 
 /** socket urgent:escalation — 急症實時升級（toast + 隊列頂紅） */

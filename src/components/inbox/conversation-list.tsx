@@ -870,16 +870,18 @@ export function ConversationList(p: Props) {
                         ? "text-danger-text"
                         : selected
                           ? "text-brand-text"
-                          : c.unreadCount > 0
+                          // ★ cwi-final S1-12：粗體色用 per-staff myUnread（公海 SLA 仍用 unreadCount）
+                          : c.myUnread > 0
                             ? "text-t2"
                             : "text-t3"
                     }`}
                   >
                     {previewOf(c)}
                   </span>
-                  {c.unreadCount > 0 && (
+                  {/* ★ cwi-final S1-12：badge = per-staff 未讀（A 開過對話唔代表 B 讀咗） */}
+                  {c.myUnread > 0 && (
                     <span className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-wa text-white text-[11px] font-semibold flex items-center justify-center">
-                      {c.unreadCount > 99 ? "99+" : c.unreadCount}
+                      {c.myUnread > 99 ? "99+" : c.myUnread}
                     </span>
                   )}
                 </div>

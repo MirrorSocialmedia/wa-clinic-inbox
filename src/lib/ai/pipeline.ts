@@ -25,6 +25,7 @@ import type { Clinic } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { publishConvEvent, convRef } from "@/lib/notify";
+import { capDraftStack } from "./draft-stack";
 import {
   classifyAndDraft,
   getAiConfig,
@@ -341,6 +342,7 @@ export function livePersistPort(deps: LivePersistDeps): PersistPort {
 
     async createDraft({ convId, msgId, msgAiDraftId, draftText, model, latencyMs, intent, mode }) {
       // ── 4. AI 草稿入庫（原 ai.worker.ts 逐字 — 冪等：unique(conversationId, inReplyToMessageId)）──
+      let createdFresh = false; // ★ cwi-final S1-13（D-6）：只喺真 create 成功先收窄堆疊
       let existing = await prisma.aiDraft.findUnique({
         where: {
           conversationId_inReplyToMessageId: {
@@ -364,6 +366,7 @@ export function livePersistPort(deps: LivePersistDeps): PersistPort {
               mode,
             },
           });
+          createdFresh = true;
         } catch (err) {
           if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
             // 競態（並行 retry 撞 unique）→ 取已存在嗰條
@@ -384,6 +387,8 @@ export function livePersistPort(deps: LivePersistDeps): PersistPort {
       if (msgAiDraftId !== existing!.id) {
         await prisma.message.update({ where: { id: msgId }, data: { aiDraftId: existing!.id } });
       }
+      // ★ cwi-final S1-13（D-6）：堆疊上限 — 只喺今次真 create 成功（P2002 攞舊唔計）之後收窄
+      if (createdFresh) await capDraftStack(convId);
       return existing;
     },
 

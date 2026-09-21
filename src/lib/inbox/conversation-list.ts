@@ -267,10 +267,31 @@ export async function loadCounts(s: ListScope, followupDue: Map<string, number>)
  * DTO — API 同 SSR 共用（順手修 audit3 P2-32 pinnedPatient 形狀唔一致 — 一律 API 版
  * `pinnedPatientApricotId: string|null`）。lookups 全部 page-scoped（只查本頁 id）。
  */
+/**
+ * ★ cwi-final S1-12（audit3 P1-09）：本頁對話 per-staff 未讀 — 一次 raw SQL 查全頁
+ * （spec 逐字：Message LEFT JOIN ConversationRead，比該 staff lastReadAt 新嘅 IN 訊息；
+ *   HISTORY 匯入唔計；無已讀記錄 → 'epoch' = 全部計）。unreadCount（全店語義）完全分開。
+ */
+export async function loadMyUnreadByConv(staffId: string, convIds: string[]): Promise<Map<string, number>> {
+  if (convIds.length === 0) return new Map();
+  const rows = await prisma.$queryRawUnsafe<{ conversationId: string; n: number }[]>(
+    `SELECT m."conversationId", count(*)::int AS n
+     FROM "Message" m
+     LEFT JOIN "ConversationRead" r ON r."conversationId" = m."conversationId" AND r."staffId" = $1
+     WHERE m."conversationId" = ANY($2) AND m.direction = 'IN' AND m.channel <> 'HISTORY'
+       AND m."createdAt" > COALESCE(r."lastReadAt", 'epoch')
+     GROUP BY 1`,
+    staffId,
+    convIds,
+  );
+  return new Map(rows.map((r) => [r.conversationId, r.n]));
+}
+
 export async function toConversationDTOs(
   rows: Conversation[],
   followupDue: Map<string, number>,
   holdClinicFilter: string | string[] | undefined,
+  meId?: string | null,
 ): Promise<ConversationItem[]> {
   if (rows.length === 0) return [];
   const contactIds = [...new Set(rows.map((r) => r.contactId))];
@@ -278,7 +299,8 @@ export async function toConversationDTOs(
   const rowStaffIds = rows.flatMap((r) => [r.assigneeId, r.routedStaffId]).filter((x): x is string => !!x);
   const groupIds = [...new Set(rows.map((r) => r.routedGroupId).filter((x): x is string => !!x))];
   // 裁決 9：bookings 先查（staffIds 要併入 booking.handledByStaffId）
-  const [contacts, clinics, groups, bookings] = await Promise.all([
+  // ★ cwi-final S1-12：myUnread 一次查全頁（meId 有值先查；SSR/API 都傳）
+  const [contacts, clinics, groups, bookings, myUnreadMap] = await Promise.all([
     prisma.contact.findMany({
       where: { id: { in: contactIds } },
       select: { id: true, waId: true, profileName: true, labels: true },
@@ -289,6 +311,9 @@ export async function toConversationDTOs(
       where: { conversationId: { in: rows.map((r) => r.id) }, status: { in: ["PENDING", "CONFIRMED"] } },
       orderBy: { createdAt: "desc" },
     }),
+    meId
+      ? loadMyUnreadByConv(meId, rows.map((r) => r.id))
+      : Promise.resolve(new Map<string, number>()),
   ]);
   const staffIds = [...new Set([...rowStaffIds, ...bookings.map((b) => b.handledByStaffId).filter((x): x is string => !!x)])];
   const staff = await prisma.staffUser.findMany({ where: { id: { in: staffIds } }, select: { id: true, name: true, active: true } });
@@ -329,6 +354,8 @@ export async function toConversationDTOs(
       // ★ Realtime P0 (R5)：樂觀鎖版本（client assign 時帶返嚟）
       assignVersion: cv.assignVersion,
       unreadCount: cv.unreadCount,
+      // ★ cwi-final S1-12：per-staff 未讀（UI 粗體/badge 用；公海 SLA 仍用 unreadCount）
+      myUnread: myUnreadMap.get(cv.id) ?? 0,
       lastInboundAt: cv.lastInboundAt ? cv.lastInboundAt.toISOString() : null,
       lastMessageAt: cv.lastMessageAt.toISOString(),
       intent: cv.intent,

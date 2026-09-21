@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
-import { Prisma } from "@prisma/client";
+import { Prisma, type AiDraft } from "@prisma/client";
 import log from "@/lib/log";
 import { requireAuth, assertConversationAccess, clinicScope, assertCanWriteConversation } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
@@ -66,6 +66,8 @@ const schema = z
     // ★ cwi-followup-v3：窗口內 free-form 採用跟進建議 — 發送後 claim 該 SUGGESTED task → SENT。
     //   （建議卡「採用並編輯」入 composer 後發送帶呢個；同 AI 草稿卡流程一致，sentVia=AI_ADOPTED。）
     followupTaskId: z.string().min(1).max(64).optional(),
+    // ★ cwi-final S1-13（D-6）：員工實際採用嘅草稿 id（切換過就係切換後嗰個）
+    aiDraftId: z.string().min(1).max(64).optional(),
   })
   .refine((d) => (d.body ? 1 : 0) + (d.templateName ? 1 : 0) === 1, {
     message: "body 同 templateName 必須二揀一",
@@ -370,29 +372,42 @@ export const POST = handle(async (req: NextRequest) => {
     .catch(() => undefined);
 
   // Phase 2：AI draft 採用追蹤（採用率 + 微調數據）。
-  // 查對話最新嘅 PROPOSED draft（ai.worker 已將 Message.aiDraftId 指向佢）：
-  // - 發出內容同 draft 一字不差 → SENT_AS_IS；改過 → SENT_EDITED（finalText 留底）
+  // ★ cwi-final S1-13（D-6）：優先按 client 帶嘅 aiDraftId 準確連結（堆疊切換後唔會錯記最新嗰個）；
+  //   舊 client（冇帶 aiDraftId）fallback 返「最新一條有 aiDraftId 嘅 IN 訊息」— 保留一個 release 後刪。
   // ★ 失敗唔準影響發送（try/catch 吞掉）— draft 統計只係观测数据。
+  let linkedDraftId: string | null = null;
   try {
-    const linkedMsg = await prisma.message.findFirst({
-      where: { conversationId: conv.id, direction: "IN", aiDraftId: { not: null } },
-      orderBy: { waTimestamp: "desc" },
-      select: { aiDraftId: true },
-    });
-    if (linkedMsg?.aiDraftId && parsed.data.body) {
-      const draft = await prisma.aiDraft.findUnique({ where: { id: linkedMsg.aiDraftId } });
-      if (draft && draft.conversationId === conv.id && draft.status === "PROPOSED") {
-        const asIs = parsed.data.body.trim() === draft.draftText.trim();
-        await prisma.aiDraft.update({
-          where: { id: draft.id },
-          data: { status: asIs ? "SENT_AS_IS" : "SENT_EDITED", finalText: parsed.data.body },
-        });
+    let draft: AiDraft | null = null;
+    if (parsed.data.body && parsed.data.aiDraftId) {
+      draft = await prisma.aiDraft.findFirst({ where: { id: parsed.data.aiDraftId, conversationId: conv.id } });
+      if (!draft) log.info({ conversationId: conv.id, aiDraftId: parsed.data.aiDraftId }, "send: aiDraftId 唔屬於呢個對話 — 唔連結");
+    } else if (parsed.data.body && parsed.data.source === "adopted") {
+      // 舊 client fallback（冇帶 aiDraftId）— 保留一個 release 後刪
+      const linkedMsg = await prisma.message.findFirst({
+        where: { conversationId: conv.id, direction: "IN", aiDraftId: { not: null } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],   // ★ 唔再用 waTimestamp
+        select: { aiDraftId: true },
+      });
+      if (linkedMsg?.aiDraftId) draft = await prisma.aiDraft.findUnique({ where: { id: linkedMsg.aiDraftId } });
+    }
+    if (draft && (draft.status === "PROPOSED" || draft.status === "EXPIRED")) {
+      const asIs = parsed.data.body!.trim() === draft.draftText.trim();
+      const upd = await prisma.aiDraft.updateMany({
+        where: { id: draft.id, status: { in: ["PROPOSED", "EXPIRED"] } },
+        data: { status: asIs ? "SENT_AS_IS" : "SENT_EDITED", finalText: parsed.data.body },
+      });
+      if (upd.count === 1) {
         await prisma.message.update({ where: { id: msg.id }, data: { aiDraftId: draft.id } });
+        linkedDraftId = draft.id;
         log.info(
           { clinicId: conv.clinicId, conversationId: conv.id, draftId: draft.id, messageId: msg.id, adopted: asIs },
           "send: ai draft linked (SENT_AS_IS/SENT_EDITED)"
         );
+      } else {
+        log.info({ conversationId: conv.id, draftId: draft.id }, "send: 草稿已被其他發送用咗 — 唔重複連結");
       }
+    } else if (draft) {
+      log.info({ conversationId: conv.id, draftId: draft.id, status: draft.status }, "send: 草稿唔係 PROPOSED/EXPIRED — 唔連結");
     }
   } catch (err) {
     log.warn(
@@ -457,5 +472,5 @@ export const POST = handle(async (req: NextRequest) => {
     }
   }
 
-  return NextResponse.json({ ok: true, messageId: msg.id, status: "QUEUED" }, { status: 202 });
+  return NextResponse.json({ ok: true, messageId: msg.id, status: "QUEUED", linkedDraftId }, { status: 202 });
 });

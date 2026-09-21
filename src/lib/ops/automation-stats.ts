@@ -92,6 +92,8 @@ export function aggregateDraftRows(rows: DraftAggInput[]): Map<string, WeekAgg> 
         break;
       case "PROPOSED":
         break; // 只計 draftCount
+      case "EXPIRED":
+        break; // ★ cwi-final S1-13（D-6）：被擠出 — 只計 draftCount（唔計 adopted/discarded）
     }
   }
   return out;
