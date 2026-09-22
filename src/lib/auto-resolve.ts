@@ -4,8 +4,8 @@
  * 守門（三條 + 時序前提，缺一唔關）：
  *   ① 靜音夠 N 日 — lastMessageAt <= now - N（N = triage.autoResolveDays per-clinic，default 3）
  *   ② 病人最後一句已覆 — lastInboundAt != null 且 lastOutboundAt != null 且 lastInboundAt <= lastOutboundAt
- *   ③ 無 SCHEDULED/DUE FollowupTask — ★ 本 repo 無 FollowupTask model（未實施）→ 恒真；
- *      followup 功能落 DB 後喺 shouldAutoResolve 補（MD：「等緊跟進唔好關」；followup MD §4 自帶）。
+ *   ③ 無未處理（SUGGESTED）FollowupTask — ★ cwi-final S2-3 已接活：sweep 逐對話查 SUGGESTED，
+ *      有 → skip（「等緊跟進唔好關」— 建议未處理 = 對話仲有未了事項）。
  *   ④ 無 terminal IS NULL 嘅 ConsultSession — ★ C2 已接活（T244）：sweep 逐對話查 active session，
  *      有 → skip（銷售對話進行中唔好關）。
  *
@@ -19,6 +19,17 @@
  *
  * 反循環：cron 每日跑；已 RESOLVED 嘅對話下次唔再命中；併發（inbound 同時落）→
  *   updateMany where status=OPEN 命中 0 → skip（冪等，冇副作用）。
+ *
+ * ★ cwi-final S2-3 行為決定（RESOLVED 對話 × 跟進建議）：
+ *   - 有未處理（SUGGESTED）建議 → 唔自動解決（守門 ③ — 上面已接活）。
+ *   - 已經 RESOLVED 嘅對話出 B/C/D/E 建議（scan 唔排除 RESOLVED 對話）→「待跟進」膠囊照顯示
+ *     （標灰色「已解決」chip）；員工採用發送 → 對話翻開：
+ *       - `messages/send` route：建 Message 之後 RESOLVED → OPEN（reopenedAt 寫、resolvedBy/resolvedAt 清）
+ *         + 有改到先推 conv:updated（舊缺口：client 只係 optimistic 顯示 OPEN，DB 仍 RESOLVED）。
+ *       - `followup/engine.ts sendFollowupTask`：同樣補（採用過窗 template 直發路徑）。
+ *     註：發送前 ⑤ RESOLVED 取消守門（checkCancellations，T386⑤）保留 — 嗰度係「撳發嗰一下」
+ *     嘅最終守門；recheckOpenSuggestions 輪巡唔取消 RESOLVED 對話建議（避免 cancel→重建 flap —
+ *     RESOLVED 唔喺 TERMINAL_CANCEL）。兩邊口徑一致：規則 cancelOnResolved=false 時採用發送通行 + 重開。
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -40,7 +51,8 @@ export interface AutoResolveCandidate {
 
 /**
  * 守門判定（純函數 — deterministic 測試；now 可注入）。
- * opts.hasOpenFollowup（③）本 repo 無 model → 默認 false（恒真）；功能落地後由 caller 傳。
+ * opts.hasOpenFollowup（③）★ cwi-final S2-3 已接活：sweep 傳真實查詢結果（有 SUGGESTED = true → 唔關）；
+ *   純函數單測唔傳 = 默認 false（舊行为兼容）。
  * opts.activeConsultSession（④）C2 已接活（T244）：sweep 傳真實查詢結果。
  */
 export function shouldAutoResolve(
@@ -55,7 +67,7 @@ export function shouldAutoResolve(
   // ② 病人最後一句已覆（兩者都要有 — null 保守唔關）
   if (conv.lastInboundAt == null || conv.lastOutboundAt == null) return false;
   if (conv.lastInboundAt.getTime() > conv.lastOutboundAt.getTime()) return false;
-  // ③ 無 SCHEDULED/DUE FollowupTask — ★ 未實施（model 唔存在）→ 默認恒真；功能落地後補
+  // ③ 無未處理（SUGGESTED）FollowupTask — ★ cwi-final S2-3 已接活：sweep 傳真實查詢結果（有 → 等緊跟進唔好關）
   if (opts.hasOpenFollowup === true) return false;
   // ④ 無 active（terminal IS NULL）ConsultSession — ★ C2 接活（T244，consult MD C-5）
   if (opts.activeConsultSession === true) return false;
@@ -106,7 +118,13 @@ export async function runAutoResolveSweep(
       paramsByClinic.set(c.clinicId, p);
     }
     const n = daysOverride ?? p.autoResolveDays;
-    if (!shouldAutoResolve(c, n, now)) continue;
+    // 守門 ③（cwi-final S2-3 接活）：有未處理（SUGGESTED）建議 → 等緊跟進唔好關。
+    // 輕量查詢（select id）；daily cron 逐對話查，量級無壓力。
+    const hasOpenFollowup = !!(await prisma.followupTask.findFirst({
+      where: { conversationId: c.id, status: "SUGGESTED" },
+      select: { id: true },
+    }));
+    if (!shouldAutoResolve(c, n, now, { hasOpenFollowup })) continue;
     // 守門 ④（C2 接活，T244）：active（terminal IS NULL）ConsultSession → 銷售對話進行中唔好關。
     // 輕量查詢（select id）；daily cron 逐對話查，量級無壓力。
     const activeConsult = await prisma.consultSession.findFirst({

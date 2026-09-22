@@ -263,6 +263,16 @@ const notifyTakeover = z.looseObject({
   eventId: id,
 });
 
+/** ★ cwi-final S2-4：跟進建議狀態變動（create / expire / skip / send / opt-out 取消 / recheck 取消）
+ * client 收 → 補該 row（followupDueAt）+ debounce 2s refetch counts；當前對話 → fetchSuggestion */
+const followupChanged = z.looseObject({
+  conversationId: id,
+  clinicId: id,
+  taskId: id,
+  status: z.string(),
+  eventId: id,
+});
+
 /** 事件名 → schema 註冊表（publishConvEvent 按 event 名查） */
 export const EVENT_SCHEMAS: Record<string, z.ZodType> = {
   "message:new": messageNew,
@@ -286,4 +296,5 @@ export const EVENT_SCHEMAS: Record<string, z.ZodType> = {
   "notify:mention": notifyMention,
   "notify:assigned": notifyAssigned,
   "notify:takeover": notifyTakeover,
+  "followup:changed": followupChanged,
 };

@@ -16,7 +16,8 @@
  *      （URGENT_PAIN/COMPLAINT intent 唔重發 — 佢哋自己條路已經發）
  *      PAIN_TRIAGE（#1）→ 現有 PAIN 路徑開 pain session（intent 非 PAIN 時補 staffNotice）
  *      START_BOOKING → caller（worker）轉既有 C6 bookingSession flow（L3/L4 條件鏡照）
- *      END_SESSION（#5/#22）→ follow-up audit placeholder（FollowupTask model 本 repo 未實施 — 記錄）
+ *      END_SESSION（#5/#22）→ follow-up audit placeholder（FollowupTask model 已實施（cwi-final）；
+ *      呢條路徑仍只留 audit 痕跡 — 唔自動建 task；MD 掛鉤點保留）
  *      + 本輪 suppress draft（病人叫停/推搪後唔 auto-reply）
  *    - #4（窗口）/ #6（humanTookOver）= processed:false → session 零寫入（idle 時鐘唔洗；
  *      C1 gate 已處理對話層 + conv.consultGateAction）
@@ -245,7 +246,7 @@ export async function runConsultEngineTurn(input: ConsultTurnInput): Promise<Con
       await store.terminalEffect({ kind: "PAIN_TRIAGE", meta: { sessionId: row.id, row: 1 } });
     } else if (transition.action === "END_SESSION") {
       suppressDraft = true; // 叫停/推搪後唔 auto-reply（既有 draft 流唔會再出）
-      // 排 follow-up = audit placeholder（FollowupTask model 本 repo 未實施 — 只記錄）
+      // 排 follow-up = audit placeholder（FollowupTask model 已實施（cwi-final）；呢路徑仍只留痕跡 — 唔自動建 task）
       await store.terminalEffect({ kind: "END_SESSION", meta: { sessionId: row.id, row: transition.row, msgId: msg.id } });
     }
 

@@ -71,6 +71,34 @@ async function lazyNotifyMessageNew(
   await publishConvEvent(convRef(conv), "message:new", payload);
 }
 
+// ★ cwi-final S2-4：followup:changed 事件（實時建議計數）單一出口。
+//   commit-then-emit：caller 必須喺 task 狀態落 DB 之後先調；best-effort —
+//   事件失敗（Redis/對話已刪）log 後吞掉，唔准阻塞 scan/發送主流程（realtime 通知鐵律）。
+async function emitFollowupChanged(
+  conversationId: string | null | undefined,
+  clinicId: string | null | undefined,
+  taskId: string,
+  status: string
+): Promise<void> {
+  if (!conversationId || !clinicId) return;
+  try {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+    });
+    if (!conv) return; // 對話已刪 — 無 room 可推（fail-soft）
+    const { publishConvEvent, convRef } = await import("@/lib/notify");
+    await publishConvEvent(convRef(conv), "followup:changed", {
+      conversationId,
+      clinicId: conv.clinicId,
+      taskId,
+      status,
+    });
+  } catch (err) {
+    log.warn({ taskId, status, err: err instanceof Error ? err.message : String(err) }, "followup: followup:changed emit failed（best-effort）");
+  }
+}
+
 const DAY_MS = 86_400_000;
 
 // ── 工具 ─────────────────────────────────────────────────────────────────
@@ -315,6 +343,8 @@ async function createTask(
     throw e;
   }
   counters.created = (counters.created ?? 0) + 1;
+  // ★ cwi-final S2-4：新建議 → 即時推（另一 tab 膠囊計數实时更新）
+  void emitFollowupChanged(draft.conversationId, draft.clinicId, task.id, "SUGGESTED");
   // ★ v3：cron 零 outbound — 冇 L2 直發。SUGGESTED 等員工喺收件箱建議卡撳採用/跳過。
   return { id: task.id, status: task.status, dueAt: task.dueAt };
 }
@@ -582,6 +612,8 @@ export interface FollowupScanResult {
   rules: number;
   created: number;
   expired: number;
+  /** ★ cwi-final S2-2：recheck 取消數（已有 SUGGESTED 重跑 checkCancellations 命中） */
+  rechecked: number;
   inFlight: number;
   /** ★ cwi-final S2-1：科目級終態（同 rule × 同 subjectKey 已 SENT/COMPLETED/SKIPPED/EXPIRED/業務取消） */
   subjectDone: number;
@@ -647,7 +679,7 @@ export function suggestionExpiryAt(task: {
 export async function expireStaleSuggestions(now: Date = new Date()): Promise<number> {
   const suggested = await prisma.followupTask.findMany({
     where: { status: "SUGGESTED" },
-    select: { id: true, dueAt: true, contextJson: true, ruleId: true },
+    select: { id: true, dueAt: true, contextJson: true, ruleId: true, conversationId: true, clinicId: true },
   });
   const rules = await prisma.followupRule.findMany({ select: { id: true, trigger: true } });
   const triggerById = new Map(rules.map((r) => [r.id, r.trigger]));
@@ -660,6 +692,8 @@ export async function expireStaleSuggestions(now: Date = new Date()): Promise<nu
         data: { status: "EXPIRED", handledAt: now },
       });
       n += r.count;
+      // ★ cwi-final S2-4：過期 → 即時推（建議卡消失 + 膠囊計數減）
+      if (r.count > 0) void emitFollowupChanged(t.conversationId, t.clinicId, t.id, "EXPIRED");
     }
   }
   if (n > 0) log.info({ expired: n }, "followup: 過期建議 → EXPIRED（唔通知唔提示）");
@@ -939,6 +973,9 @@ async function scanQuotedNotBooked(
 export async function runFollowupScan(now: Date = new Date()): Promise<FollowupScanResult> {
   // ① 時效：過期 SUGGESTED → EXPIRED（先於 scan — 新建議唔會建喺已過期病人身上，dedup 計 terminal）
   const expired = await expireStaleSuggestions(now);
+  // ★ cwi-final S2-2（N-8）：重跑取消檢查 — 已出嘅 SUGGESTED 之後客戶 opt-out/覆咗/約咗 → 即時 CANCELLED
+  //   （opt-out 永遠優先；workforce 依賴失敗 → 保留唔取消）
+  const rechecked = await recheckOpenSuggestions(now);
   const rules = (await prisma.followupRule.findMany({ where: { enabled: true } })) as unknown as FollowupRuleRow[];
   const clinics = await prisma.clinic.findMany({ select: { id: true, code: true } });
   const counters: Record<string, number> = {};
@@ -1015,6 +1052,7 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
     rules: rules.length,
     created: counters.created ?? 0,
     expired,
+    rechecked,
     inFlight: counters["in-flight"] ?? 0,
     subjectDone: counters["subject-done"] ?? 0,
     exhausted: counters.exhausted ?? 0,
@@ -1119,6 +1157,76 @@ export async function checkCancellations(
 }
 
 /**
+ * ★ cwi-final S2-2（N-8）：重跑已有 SUGGESTED 嘅取消檢查（runFollowupScan 每輪、expire 之後跑）。
+ *
+ * 背景：opt-out 舊版只阻「新建」（createTask 門 + 發送前檢查）— 已出嘅 SUGGESTED 會留喺建議卡
+ *   直至過期/人手處理。N-8：病人講咗「唔好再搵我」→ 已存在建議即時消失（另一 tab  realtime）。
+ *
+ * 口徑：
+ * - snapshot-ids（先攞晒 SUGGESTED id 先逐批跑）+ 批量 200 — 固定快照 = 零無限循環
+ *   （取消只減唔增；scan 新建喺 recheck 之後先行，唔喺快照內）。
+ * - workforce 依賴失敗（checkCancellations throw）→ **保留**唔取消 + log（寧可照留 — 同
+ *   發送前 fail-soft 同一口徑：病人收到多條提醒好過漏提醒）。
+ * - **RESOLVED 唔喺 recheck 取消範圍**（S2-3 行為決定）：RESOLVED 對話嘅 B/C/D/E 建議仍然有效
+ *   — 「待跟進」膠囊照顯示（灰色已解決 chip），員工採用發送 → 對話重開（send 路徑補 status 翻）。
+ *   若 recheck 照 cancelOnResolved 取消 → 每 10 分鐘 scan 一次 cancel→重建 flap（RESOLVED 唔喺
+ *   TERMINAL_CANCEL → 科目唔終態）→ 膠囊計數閃爍。A 類本身只在 OPEN 對話建（v3 B-5）。
+ *   發送路徑 ⑤ RESOLVED 守門保留（T386⑤ 釘死）— 嗰度係「撳發嗰一下」嘅最終守門，唔係輪巡。
+ */
+export async function recheckOpenSuggestions(now: Date = new Date()): Promise<number> {
+  const ids = (
+    await prisma.followupTask.findMany({
+      where: { status: "SUGGESTED" },
+      select: { id: true },
+      orderBy: { createdAt: "asc" },
+    })
+  ).map((t) => t.id);
+  let cancelled = 0;
+  for (let i = 0; i < ids.length; i += 200) {
+    const batchIds = ids.slice(i, i + 200);
+    const batch = await prisma.followupTask.findMany({
+      where: { id: { in: batchIds }, status: "SUGGESTED" },
+      select: { id: true, clinicId: true, conversationId: true, patientApricotId: true, ruleId: true, createdAt: true, contextJson: true },
+    });
+    if (batch.length === 0) continue;
+    const ruleIds = [...new Set(batch.map((t) => t.ruleId).filter((x): x is string => !!x))];
+    const rules = ruleIds.length
+      ? new Map((await prisma.followupRule.findMany({ where: { id: { in: ruleIds } } }) as unknown as FollowupRuleRow[]).map((r) => [r.id, r]))
+      : new Map<string, FollowupRuleRow>();
+    const clinicIds = [...new Set(batch.map((t) => t.clinicId))];
+    const clinics = new Map((await prisma.clinic.findMany({ where: { id: { in: clinicIds } }, select: { id: true, code: true } })).map((c) => [c.id, c]));
+    for (const t of batch) {
+      const rule = t.ruleId ? rules.get(t.ruleId) ?? null : null;
+      const clinic = t.clinicId ? clinics.get(t.clinicId) ?? null : null;
+      let reason: CancelReason | null;
+      try {
+        reason = await checkCancellations(t, rule, clinic, now);
+      } catch (e) {
+        // workforce 依賴失敗（非 fail-soft 範圍：429/500 等）→ 保留唔取消（spec 逐字）+ log
+        log.warn(
+          { taskId: t.id, err: e instanceof Error ? e.message : String(e) },
+          "followup: recheck 依賴失敗 — 保留唔取消（下輪再試）"
+        );
+        continue;
+      }
+      if (!reason) continue;
+      if (reason === "RESOLVED") continue; // S2-3 行為決定（見上）— 輪巡唔取消 RESOLVED 對話建議
+      const r = await prisma.followupTask.updateMany({
+        where: { id: t.id, status: "SUGGESTED" },
+        data: { status: "CANCELLED", cancelReason: reason, handledAt: now },
+      });
+      if (r.count === 1) {
+        cancelled++;
+        // ★ cwi-final S2-4：recheck 取消 → 即時推（另一 tab 建議卡消失）
+        void emitFollowupChanged(t.conversationId, t.clinicId, t.id, "CANCELLED");
+      }
+    }
+  }
+  if (cancelled > 0) log.info({ rechecked: cancelled }, "followup: recheck 已有建議 → CANCELLED（opt-out/已覆/已約/已到診）");
+  return cancelled;
+}
+
+/**
  * ★ cwi-final S0-6：composer 路徑 claim 前嘅守門（同 sendFollowupTask 同一套檢查，但唔建訊息）。
  * 回 null = 可以 claim；否則回原因（task 已同步轉態）。
  */
@@ -1211,8 +1319,9 @@ export async function sendFollowupTask(
   const conv = task.conversationId
     ? await prisma.conversation.findUnique({
         // ★ cwi-final S1-4：ConvRef 五欄齊（publishConvEvent targeting 用）
+        // ★ cwi-final S2-3：+ status — 採用發送時 RESOLVED 對話要重開（下方補 status 翻）
         where: { id: task.conversationId },
-        select: { id: true, clinicId: true, contactId: true, lastInboundAt: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+        select: { id: true, clinicId: true, contactId: true, lastInboundAt: true, assigneeId: true, routedStaffId: true, routedGroupId: true, status: true },
       })
     : null;
   const convId = task.conversationId;
@@ -1295,6 +1404,33 @@ export async function sendFollowupTask(
       .catch(() => undefined);
   }
 
+  // ★ cwi-final S2-3（行為決定）：員工採用發送 → RESOLVED 對話重開。
+  //   舊缺口：client 只係 optimistic 顯示 OPEN，DB 仍 RESOLVED（對話喺「已解決」view 消失、
+  //   膠囊重計、routing 重計時全部錯位）。呢度補：只改到 RESOLVED 先算（併發冪等）；
+  //   改到先推 conv:updated（commit-then-emit；best-effort — 通知失敗唔阻發送）。
+  if (conv.status === "RESOLVED") {
+    const flipped = await prisma.conversation.updateMany({
+      where: { id: convId, status: "RESOLVED" },
+      data: { status: "OPEN", reopenedAt: now, resolvedBy: null, resolvedAt: null },
+    });
+    if (flipped.count === 1) {
+      conv.status = "OPEN"; // 本地同步（下方 lazyNotifyMessageNew 嘅 ConvRef 唔含 status，純一致性）
+      try {
+        const { publishConvEvent, convRef } = await import("@/lib/notify");
+        await publishConvEvent(convRef(conv), "conv:updated", {
+          conversationId: convId,
+          clinicId: conv.clinicId,
+          status: "OPEN",
+          reopenedAt: now,
+        });
+      } catch (err) {
+        log.warn({ conversationId: convId, err: err instanceof Error ? err.message : String(err) }, "followup: send 重開 conv:updated emit failed（best-effort）");
+      }
+    }
+  }
+  // ★ cwi-final S2-4：claim 成功（SENT）→ 即時推（建議卡消失 + 膠囊計數減）
+  void emitFollowupChanged(convId, conv.clinicId, taskId, "SENT");
+
   // ④ outbound（W 現有機制：QUEUED → outbound worker → Graph）+ notify + audit
   try {
     await lazyEnqueue(msg.id);
@@ -1353,6 +1489,8 @@ export async function skipFollowupTask(
     data: { status: "SKIPPED", cancelReason: "MANUAL", handledAt: now, handledBy: opts.staffId ?? null },
   });
   if (r.count === 1) {
+    // ★ cwi-final S2-4：跳過 → 即時推（建議卡消失 + 膠囊計數減）
+    void emitFollowupChanged(task.conversationId, task.clinicId, taskId, "SKIPPED");
     await prisma.auditLog
       .create({
         data: {

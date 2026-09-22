@@ -1158,6 +1158,9 @@ export function ChatPane(p: Props) {
             過窗 = 只可發 template（預覽已填變數）；template 未審批 = 等審批 + 唔俾發；
             跳過 = SKIPPED(MANUAL) + dedupWindowDays(7) 內唔再出。 */}
         {p.suggestion &&
+          // ★ cwi-final S2-2（N-8）：病人 opt-out → 唔顯示建議卡（server 已即時取消 SUGGESTED；
+          //   呢度 = UI 雙保險 — 事件/刷新 race 間隙卡唔會閃現）
+          p.suggestion.optOut !== true &&
           (() => {
             const s = p.suggestion;
             const inWindow = !!p.window?.open;

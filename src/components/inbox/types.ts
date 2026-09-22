@@ -281,6 +281,17 @@ export interface ConvUpdatedEvent {
   unreadCount?: number;
 }
 
+/** ★ cwi-final S2-4：跟進建議狀態變動（server emitter = followup engine / opt-out / send route claim） */
+export interface FollowupChangedEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
+  conversationId: string;
+  clinicId: string;
+  taskId: string;
+  /** FollowupTask 新狀態（SUGGESTED/EXPIRED/SKIPPED/SENT/CANCELLED） */
+  status: string;
+}
+
 /** Phase 2：AI triage 相關 type（同 ai.worker notify payload 對齊） */
 
 export type AiIntent = "BOOKING_REQUEST" | "QUESTION" | "URGENT_PAIN" | "OUT_OF_SCOPE" | "OTHER";

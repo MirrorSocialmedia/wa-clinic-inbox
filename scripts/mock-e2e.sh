@@ -6872,6 +6872,36 @@ else
 fi
 [ "$J_FAIL" = 0 ] && pass "J 段完成：cwi-final S2-1 subjectKey 科目級去重（T620–T740）" || fail "J 段有項失敗（見上 ❌）"
 
+# ══════════════ K. cwi-final S2-2/S2-3/S2-4（opt-out 取消 / auto-resolve 守門③ / 建議 realtime）T621–T741 ══════════════
+echo ""
+echo "[K/4] cwi-final S2-2+S2-3+S2-4: opt-out 取消建議 / auto-resolve 守門③ / followup:changed 實時 (T621-T741)"
+K_FAIL=0
+# in-process engine/opt-out/sweep + 真 socket client（T741 另一 tab 口徑）— dev worker 的 cron scan/recheck
+# 就算段內觸發，都被 unique partial index + 科目級終態 + intent=CLOSING 控制組隔離收斂（腳本內註釋有全盤分析）。
+S22_OUT=$(pnpm -s tsx scripts/e2e-s22-t621-t622-t741.ts 2>&1)
+S22_CODE=$?
+echo "$S22_OUT" | grep -vE '"level":(30|40)' | tail -60 | sed 's/^/    /'
+if [ "$S22_CODE" = "0" ] && echo "$S22_OUT" | grep -q "^T621-OK$"; then
+  pass "T621 opt-out → 已有 SUGGESTED 即時 CANCELLED(OPT_OUT)+handledAt（contact 旗標 + 膠囊 -1 + recheck 收斂 0）"
+else
+  fail "T621 opt-out 取消已有建議 e2e 失敗（exit=$S22_CODE，見上 ❌）"; K_FAIL=1
+fi
+if [ "$S22_CODE" = "0" ] && echo "$S22_OUT" | grep -q "^T622-OK$"; then
+  pass "T622 auto-resolve 守門③接活（idle+SUGGESTED→仍 OPEN / 控制組→RESOLVED）+ RESOLVED 對話 B 類建議膠囊計數同列表都有"
+else
+  fail "T622 auto-resolve 守門③ + RESOLVED 膠囊 e2e 失敗（exit=$S22_CODE，見上 ❌）"; K_FAIL=1
+fi
+if [ "$S22_CODE" = "0" ] && echo "$S22_OUT" | grep -q "^T741-OK$"; then
+  pass "T741 scan 建建議 → 另一 tab followup:changed 事件 ≤3s + 膠囊數據源（?ids= row.followupDueAt + loadFollowupDue）"
+else
+  fail "T741 followup:changed 實時 e2e 失敗（exit=$S22_CODE，見上 ❌）"; K_FAIL=1
+fi
+if [ "$S22_CODE" = "0" ] && echo "$S22_OUT" | grep -q "^S22-SWEEP-OK$"; then
+  pass "S22-SWEEP hermetic 清理零殘留（tasks/convs/contacts/rules/staff/clinic/company）"
+else
+  fail "S22-SWEEP 清理失敗或有殘留"; K_FAIL=1
+fi
+[ "$K_FAIL" = 0 ] && pass "K 段完成：cwi-final S2-2+S2-3+S2-4（T621–T741）" || fail "K 段有項失敗（見上 ❌）"
 
 
 # ── summary ────────────────────────────────────────────────────────────

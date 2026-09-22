@@ -50,6 +50,8 @@ export function detectOptOutIntent(body: string | null | undefined): boolean {
 export interface OptOutApplyResult {
   changed: boolean;
   contactId: string | null;
+  /** ★ cwi-final S2-2（N-8）：本次 opt-out 即時取消嘅已有建議數（0 = 冇未處理建議 / 冪等重入） */
+  cancelledSuggestions: number;
 }
 
 /**
@@ -67,8 +69,8 @@ export async function applyFollowupOptOut(params: {
     where: { id: params.contactId },
     select: { id: true, clinicId: true, followupOptOut: true },
   });
-  if (!contact) return { changed: false, contactId: null };
-  if (contact.followupOptOut) return { changed: false, contactId: contact.id };
+  if (!contact) return { changed: false, contactId: null, cancelledSuggestions: 0 };
+  if (contact.followupOptOut) return { changed: false, contactId: contact.id, cancelledSuggestions: 0 };
 
   await prisma.contact.update({
     where: { id: contact.id },
@@ -85,6 +87,48 @@ export async function applyFollowupOptOut(params: {
   });
   log.info({ contactId: contact.id, source: params.source }, "followup: opt-out applied");
 
+  // ★ cwi-final S2-2（N-8）：opt-out → 該 contact 全部 conversation 嘅已有 SUGGESTED 即時取消。
+  //   舊版只阻新建（scan 門 + 發送前檢查）— 已出嘅建議卡會留到過期/人手處理。
+  //   fail-soft 包晒：取消失敗唔阻 opt-out 生效（旗標本身 = 單一事實來源；
+  //   下輪 scan recheck ① OPT_OUT 永遠檢查會補殺；發送路徑照攔）。
+  let cancelledSuggestions = 0;
+  try {
+    const convs = await prisma.conversation.findMany({
+      where: { contactId: contact.id },
+      select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+    });
+    if (convs.length > 0) {
+      const openTasks = await prisma.followupTask.findMany({
+        where: { status: "SUGGESTED", conversationId: { in: convs.map((c) => c.id) } },
+        select: { id: true, conversationId: true, clinicId: true },
+      });
+      if (openTasks.length > 0) {
+        const r = await prisma.followupTask.updateMany({
+          where: { status: "SUGGESTED", conversationId: { in: convs.map((c) => c.id) } },
+          data: { status: "CANCELLED", cancelReason: "OPT_OUT", handledAt: now },
+        });
+        cancelledSuggestions = r.count;
+        // ★ cwi-final S2-4：逐 task 推 followup:changed（另一 tab 建議卡即時消失）— 逐條 best-effort
+        const { publishConvEvent, convRef } = await import("@/lib/notify");
+        for (const t of openTasks) {
+          const cv = t.conversationId ? convs.find((c) => c.id === t.conversationId) : null;
+          if (!cv || !t.conversationId) continue;
+          await publishConvEvent(convRef(cv), "followup:changed", {
+            conversationId: t.conversationId,
+            clinicId: t.clinicId,
+            taskId: t.id,
+            status: "CANCELLED",
+          }).catch((err) => log.warn({ taskId: t.id, err: err instanceof Error ? err.message : String(err) }, "followup: opt-out followup:changed emit failed（best-effort）"));
+        }
+      }
+    }
+  } catch (err) {
+    log.warn(
+      { contactId: contact.id, err: err instanceof Error ? err.message : String(err) },
+      "followup: opt-out 取消已有建議失敗（best-effort — opt-out 旗標已生效，recheck 會補）"
+    );
+  }
+
   if (params.source === "auto") {
     // 通知店員確認（ StaffNotice — 同一對話唔會重複：changed 守衛已擋）
     const clinic = await prisma.clinic.findUnique({ where: { id: contact.clinicId }, select: { code: true } });
@@ -99,7 +143,7 @@ export async function applyFollowupOptOut(params: {
       })
       .catch((err) => log.warn({ err: err instanceof Error ? err.message : String(err) }, "followup: opt-out notice failed（best-effort）"));
   }
-  return { changed: true, contactId: contact.id };
+  return { changed: true, contactId: contact.id, cancelledSuggestions };
 }
 
 /** 手動復原（staff toggle 返開）— 只 manual 路徑；audit 留痕。 */
@@ -113,8 +157,8 @@ export async function clearFollowupOptOut(params: {
     where: { id: params.contactId },
     select: { id: true, followupOptOut: true },
   });
-  if (!contact) return { changed: false, contactId: null };
-  if (!contact.followupOptOut) return { changed: false, contactId: contact.id };
+  if (!contact) return { changed: false, contactId: null, cancelledSuggestions: 0 };
+  if (!contact.followupOptOut) return { changed: false, contactId: contact.id, cancelledSuggestions: 0 };
   await prisma.contact.update({
     where: { id: contact.id },
     data: { followupOptOut: false, optOutAt: null, optOutSource: null },
@@ -128,5 +172,5 @@ export async function clearFollowupOptOut(params: {
       meta: { staffRestored: true } as object,
     },
   });
-  return { changed: true, contactId: contact.id };
+  return { changed: true, contactId: contact.id, cancelledSuggestions: 0 };
 }

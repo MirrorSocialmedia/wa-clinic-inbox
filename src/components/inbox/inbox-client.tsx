@@ -10,6 +10,7 @@ import type {
   ClinicLite,
   ConversationAssignedEvent,
   ConversationItem,
+  FollowupChangedEvent,
   FollowupSuggestion,
   ConvStatus,
   ConvUpdatedEvent,
@@ -751,6 +752,47 @@ export function InboxClient({
       );
     });
 
+    // ── ★ cwi-final S2-4：跟進建議狀態變動（create/expire/skip/send/opt-out 取消/recheck 取消）──
+    // 收到 → 補該 row（followupDueAt = 膠囊計數/排序數據源）+ debounce 2s refetch counts；
+    // 如果係當前對話 → fetchSuggestion（建議卡出現/消失即時）。
+    socket.on("followup:changed", (e: FollowupChangedEvent) => {
+      if (!firstTime(e)) return;
+      if (!e.conversationId) return;
+      // 1) 補一行：GET /api/conversations?ids=（server row 為準；client-only preview 欄保留）
+      void (async () => {
+        try {
+          const res = await fetch(`/api/conversations?ids=${encodeURIComponent(e.conversationId)}`);
+          if (!res.ok) return;
+          const data = (await res.json()) as { items: ConversationItem[] };
+          const row = data.items[0];
+          if (!row) return;
+          setConversations((prev) => {
+            const idx = prev.findIndex((c) => c.id === row.id);
+            if (idx === -1) {
+              // 唔喺現列表（如 RESOLVED 對話喺 active view 外）→ insert + lastMessageAt 排序（下次 full fetch 對齊）
+              const next = [...prev, { ...row, preview: row.preview ?? undefined }];
+              next.sort((a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime());
+              return next;
+            }
+            const cur = prev[idx];
+            const next = [...prev];
+            next[idx] = { ...cur, ...row, preview: row.preview ?? cur.preview };
+            return next;
+          });
+        } catch {
+          /* ignore — 下次 refetch 補 */
+        }
+      })();
+      // 2) debounce 2 秒 refetch counts（「待跟進」膠囊計數 = ?counts=1；高頻事件合併成一次）
+      if (followupCountsTimerRef.current) clearTimeout(followupCountsTimerRef.current);
+      followupCountsTimerRef.current = setTimeout(() => {
+        followupCountsTimerRef.current = null;
+        void fetchConversations(activeClinicRef.current);
+      }, 2000);
+      // 3) 當前對話 → 重拉建議卡
+      if (selectedIdRef.current === e.conversationId) void fetchSuggestion(e.conversationId);
+    });
+
     // ── Phase 2：AI triage 事件 ────────────────────────────────
 
     // 分類成功 → 更新 intent/urgency/urgent/summary（metadata + summary 係聊天內容）
@@ -1419,6 +1461,8 @@ export function InboxClient({
   //   只用於 conversation:assigned / notify:assigned 兩個 handler；首次 connect / 重連補漏 /
   //   手動 action（suggestion 採用/發送）照舊即時 fetch（補丁單明列禁改）。
   const listRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ★ cwi-final S2-4：followup:changed → debounce 2s counts refetch（spec 明列 2 秒 — 獨立於 F-3 1.2s list refresh）
+  const followupCountsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleListRefresh = useCallback(() => {
     if (listRefreshTimerRef.current) return;
     listRefreshTimerRef.current = setTimeout(() => {
@@ -1429,6 +1473,7 @@ export function InboxClient({
   useEffect(
     () => () => {
       if (listRefreshTimerRef.current) clearTimeout(listRefreshTimerRef.current);
+      if (followupCountsTimerRef.current) clearTimeout(followupCountsTimerRef.current);
     },
     []
   );

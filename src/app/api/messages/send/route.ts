@@ -6,6 +6,7 @@ import log from "@/lib/log";
 import { requireAuth, assertConversationAccess, clinicScope, assertCanWriteConversation } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { enqueueOutboundSend } from "@/lib/queue";
+import { convRef, publishConvEvent } from "@/lib/notify";
 import { getWindowState } from "@/lib/wa/window";
 import { billingCategoryForTemplate, BILLING_SERVICE } from "@/lib/wa/billing";
 import { assignConversation } from "@/lib/assign";
@@ -338,6 +339,26 @@ export const POST = handle(async (req: NextRequest) => {
     throw err;
   }
 
+  // ★ cwi-final S2-3（行為決定）：員工發送 → RESOLVED 對話重開。
+  //   舊缺口：client 只係 optimistic 顯示 OPEN，DB 仍 RESOLVED（「已解決」view 消失、
+  //   膠囊重計、routing 重計時全部錯位）。只改到 RESOLVED 先算（併發冪等）；改到先推
+  //   conv:updated（commit-then-emit；best-effort — 通知失敗唔阻發送）。
+  if (conv.status === "RESOLVED") {
+    const flipped = await prisma.conversation.updateMany({
+      where: { id: conv.id, status: "RESOLVED" },
+      data: { status: "OPEN", reopenedAt: now, resolvedBy: null, resolvedAt: null },
+    });
+    if (flipped.count === 1) {
+      conv.status = "OPEN"; // 本地同步（後續段唔再讀 status，純一致性）
+      await publishConvEvent(convRef(conv), "conv:updated", {
+        conversationId: conv.id,
+        clinicId: conv.clinicId,
+        status: "OPEN",
+        reopenedAt: now,
+      }).catch((err) => log.warn({ conversationId: conv.id, err: err instanceof Error ? err.message : String(err) }, "send: 重開 conv:updated emit failed（best-effort）"));
+    }
+  }
+
   // cwi-h6-20260830（h5 §1 寫入點 2）：發送成功（入隊）— 負責人自己嘅動作 → 觸 assigneeLastActionAt。
   //   非負責人（ADMIN 豁免路徑）唔觸 — 呢個欄只反映現任負責人嘅活動。
   if (conv.assigneeId && conv.assigneeId === ctx.staff.id) {
@@ -471,6 +492,13 @@ export const POST = handle(async (req: NextRequest) => {
           meta: { conversationId: conv.id, clinicId: conv.clinicId, trigger: r?.trigger ?? null, sentVia: "AI_ADOPTED", viaTemplate: false, messageId: msg.id } as object,
         },
       }).catch(() => undefined);
+      // ★ cwi-final S2-4：claim 成功（SENT）→ 即時推（另一 tab 建議卡消失 + 膠囊計數減）
+      await publishConvEvent(convRef(conv), "followup:changed", {
+        conversationId: conv.id,
+        clinicId: conv.clinicId,
+        taskId: parsed.data.followupTaskId,
+        status: "SENT",
+      }).catch((err) => log.warn({ followupTaskId: parsed.data.followupTaskId, err: err instanceof Error ? err.message : String(err) }, "send: followup:changed emit failed（best-effort）"));
     }
   }
 
