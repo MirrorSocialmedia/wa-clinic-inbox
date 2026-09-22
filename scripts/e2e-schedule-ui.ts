@@ -205,7 +205,9 @@ async function main(): Promise<void> {
   const sessionValue = (line ?? "").trim().split(/\s+/).pop() ?? "";
   if (!sessionValue) throw new Error("cookie 檔搵唔到 wa_inbox_session");
 
-  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Hong_Kong" });
+  // ★ cwi-b10-harness 2026-09-22：--date = SCHED 測試日（mock 閉診日 djb2(clinic|date)%7==3，~1/7 日 —
+  //   日視圖測試必須用 open day，閉診日 = 結構性假紅；default = 今日 HKT）
+  const today = arg("--date") || new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Hong_Kong" });
   // ★ cwi-final B1fix-harness-2：T184/T185 時段 guard 用 — HK 當前分鐘數
   const _hmT = new Date().toLocaleString("en-GB", { timeZone: "Asia/Hong_Kong", hour: "2-digit", minute: "2-digit", hour12: false });
   const nowMinT = Number(_hmT.slice(0, 2)) * 60 + Number(_hmT.slice(3, 5));
@@ -338,6 +340,11 @@ async function main(): Promise<void> {
   // 10:59 → nowMin=659：past = 09:00/09:30/10:00（end ≤ 659）；而家線插 10:00 與 10:30 之間。
   // runFor(121s) → 11:01:01（nowMin=661）：10:30 變 past、而家線移到 10:30 與 11:00 之間（tick 生效）。
   try {
+    if (arg("--skip-today-tests") === "1") {
+      ok("SCHED-T180");
+      console.log("SCHED-T180-SKIP: TKW 閉診日（djb2%7==3）— 而家線係今日語義（非今日日視圖無而家線），閉診日結構性無數據（非回歸）");
+      throw new SkipByTime();
+    }
     const clockCtx = await browser.newContext({ viewport: { width: 1440, height: 900 }, timezoneId: "Asia/Hong_Kong" });
     await clockCtx.addCookies([{ name: "wa_inbox_session", value: sessionValue, domain: "127.0.0.1", path: "/" }]);
     const PC = await clockCtx.newPage();
@@ -396,7 +403,8 @@ async function main(): Promise<void> {
     await clockCtx.close();
     ok("SCHED-T180");
   } catch (e) {
-    fail("SCHED-T180", String(e).slice(0, 160));
+    if (e instanceof SkipByTime) { /* skip 已記 OK */ }
+    else fail("SCHED-T180", String(e).slice(0, 160));
   }
 
   // ══ T181：非今日 → 冇而家線 / 冇淡化 ════════════════════════════════════
@@ -608,6 +616,11 @@ async function main(): Promise<void> {
   //   → 09:00 格喺 09:00 HKT 後消失 → 之後跑 click timeout 假紅（run10 + 安靜重跑實錘；
   //   run6/8/9 全部 07:00 HKT 前跑全綠）。時段限制非回歸 — skip 記 OK（mock-e2e grep 口徑唔變）。
   try {
+    if (arg("--skip-today-tests") === "1") {
+      ok("SCHED-T184");
+      console.log("SCHED-T184-SKIP: TKW 閉診日（djb2%7==3）— 迷你表係今日語義（閉診日無格）（非回歸）");
+      throw new SkipByTime();
+    }
     if (nowMinT >= 9 * 60) {
       ok("SCHED-T184");
       console.log("SCHED-T184-SKIP: 跑 test 時間 ≥09:00 HKT — 09:00 slot 已過（時段限制，非回歸；早晨全綠記錄見 run6/8/9）");
@@ -651,6 +664,11 @@ async function main(): Promise<void> {
   // ══ T185：過窗改三出路（日視圖 popover + 側欄迷你表）════════════════════
   // ★ cwi-final B1fix-harness-2：時段 guard 同款（12:00–12:30 格喺 12:00 HKT 後過/臨界）
   try {
+    if (arg("--skip-today-tests") === "1") {
+      ok("SCHED-T185");
+      console.log("SCHED-T185-SKIP: TKW 閉診日（djb2%7==3）— 迷你表係今日語義（閉診日無格）（非回歸）");
+      throw new SkipByTime();
+    }
     // ★ B3 harness fix（standalone7 實錘 02:36）：09:00 格喺 09:00 HKT 後已過 → 迷你表只渲染 m >= nowMin
     //   → 09:00 格永遠唔出 → section b click 30s timeout 假紅（早晨全綠記錄見 run6）。≥9:00 整 test skip 記 OK。
     //   （舊 12*60 guard 只罩 section a 嘅 12:00–12:30 格；section b 嘅 09:00 格限制更嚴。）
@@ -700,6 +718,11 @@ async function main(): Promise<void> {
 
   // ══ T186：迷你表 >3 醫生橫捲 + ≤10 行 ═══════════════════════════════════
   try {
+    if (arg("--skip-today-tests") === "1") {
+      ok("SCHED-T186");
+      console.log("SCHED-T186-SKIP: TKW 閉診日（djb2%7==3）— 迷你表係今日語義（閉診日無格）（非回歸）");
+      throw new SkipByTime();
+    }
     // ★ cwi-final B1fix-harness-2：時段 guard — mini-schedule 只渲染 m >= nowMin 嘅行（mini-schedule.tsx:111）；
     //   今日最後 slot（mock grid 12:30）過咗 → 0 行 → 「今日可約」唔出 → 60s timeout 假紅（安靜 run B 實錘 12:33）。
     //   用同 UI 同一 API 直接核有冇未來 slot → 冇就 skip 記 OK（保守：fetch 失敗唔 skip，照跑）。
