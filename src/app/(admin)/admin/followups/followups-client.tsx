@@ -186,7 +186,7 @@ export default function FollowupsClient() {
                         {fmtTs(r.lastScanAt)}
                         <div
                           className={
-                            r.lastScanResult === "DEP_FAIL"
+                            r.lastScanResult === "DEP_FAIL" || r.lastScanResult === "ERROR"
                               ? "text-danger-text font-semibold"
                               : r.lastScanResult === "EMPTY"
                                 ? "text-t3"

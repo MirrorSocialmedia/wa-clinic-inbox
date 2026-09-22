@@ -64,7 +64,7 @@ function followupReasonLine(s: FollowupSuggestion): string | null {
       return [d ? `${d} 報價` : null, item].filter(Boolean).join(" · ") || "報價後未預約";
     }
     case "CONVERSATION_IDLE":
-      return "客户一阵未回覆";
+      return "客戶一陣未回覆";
     default:
       return null;
   }

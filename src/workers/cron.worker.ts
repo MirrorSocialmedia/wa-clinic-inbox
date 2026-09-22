@@ -214,7 +214,7 @@ export async function startCronWorker(): Promise<Worker | null> {
           return r.ok ? { ok: true, ...r.summary } : { ok: false, error: r.error };
         }
         case "followup-scan": {
-          // ★ cwi-followup-p3-20260916（followup-v2 MD §4.1）：每 10 分鐘掃 enabled 規則建/發 task；
+          // ★ cwi-followup-p3-20260916（followup-v2 MD §4.1）：每 10 分鐘掃 enabled 規則建 SUGGESTED 建議（v3 恒 L1 — cron 零發送）；
           //   E2E 可手動 enqueue（pnpm e2e:cron followup-scan）。冪等 — 重跑安全（查重重複不建）。
           const r = await runFollowupScan();
           return { ...r };

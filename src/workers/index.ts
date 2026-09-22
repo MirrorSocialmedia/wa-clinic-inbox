@@ -99,7 +99,7 @@ async function registerSchedulers() {
     data: {},
   });
   // ★ cwi-followup-p3-20260916（followup-v2 MD §4.1）：follow-up 排程 — 每 10 分鐘掃 enabled 規則
-  //   （A 對話空窗 / B 預約提醒+爽約 / F 欠款；L2 到期即發，L1 入隊列等人撳；冪等查重重跑安全）
+  //   （A 對話空窗 / B1 預約 / B2 爽約 / C 術後 / D 召回 / E 報價；v3 恒 L1 — 只建 SUGGESTED 建議、cron 零發送；冪等查重重跑安全）
   await cronQueue.upsertJobScheduler("sched-followup-scan", { pattern: "*/10 * * * *" }, {
     name: "followup-scan",
     data: {},

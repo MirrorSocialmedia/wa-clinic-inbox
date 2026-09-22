@@ -550,7 +550,7 @@ export interface PatientChip {
   patientCode: string | null;
   /** 舊客 = 索引窗內 ≥2 次到診；新客 = 1 次（summary limit 2 派生） */
   customerType: "returning" | "new";
-  /** billOsAmt — 只喺 >0 顯示欠款 chip（§3.1） */
+  /** billOsAmt — 只喺 >0 顯示「未結餘額」chip（§3.1 中性顯示 — 非催收） */
   osAmt: number | null;
   lastVisitDate: string | null; // YYYY-MM-DD
 }

@@ -1065,8 +1065,9 @@ model ConsultSetting {
 }
 
 // ★ cwi-followup-p3-20260916（followup-v2 MD §4 — P3 A/B/F 三類先上；C/D/E 後三個 trigger P4）。
-// 紅線：FollowupTask.contextJson 只入顯示用結構化數據（到診日期/欠款金額/預約時間）—
+// 紅線：FollowupTask.contextJson 只入顯示用結構化數據（到診日期/預約時間）—
 //   零臨床全文、零原始電話（只 phoneHashes）；wa-inbox 唔存臨床全文（MD §6）。
+//   （F 欠款類已隨 v3 整類剷走 — 餘額只做病人記錄側欄中性顯示，唔入 contextJson）
 enum FollowupTrigger {
   CONVERSATION_IDLE   // A 對話跟進（wa-inbox 自己 lastInboundAt/lastOutboundAt 空窗）
   BEFORE_APPOINTMENT  // B 預約提醒（bookingStatus ∈ {0,102}，應診前）
@@ -1078,8 +1079,8 @@ enum FollowupTrigger {
   QUOTED_NOT_BOOKED   // E 報價未成交（P4）
 }
 enum FollowupLevel {
-  L1 // 入「待跟進」隊列等人撳（AI_ADOPTED）
-  L2 // cron 直接發（AI_AUTO）
+  L1 // 入「待跟進」隊列等人撳（AI_ADOPTED）— v3 恒此級
+  L2 // v3 已唔用（cron 直接發已取消 — 欄值保留避免 migration）
 }
 enum FollowupUnit {
   HOUR
@@ -1113,7 +1114,7 @@ model FollowupRule {
   delayUnit   FollowupUnit
   reasonCodes String[]         // visitReason code（C/D 類）
   templateName String          // → FollowupTemplate.key
-  level       FollowupLevel   @default(L1)
+  level       FollowupLevel   @default(L1)   // ★ cwi-final S2-8：v3 恒 L1（L2 直接發已取消；enum 保留避免 migration；PATCH 只收 L1）
   maxSends    Int             @default(1)
   cancelOnReply    Boolean    @default(true)
   cancelOnBooking  Boolean    @default(true)
@@ -1143,14 +1144,14 @@ model FollowupTask {
   status         FollowupStatus @default(SUGGESTED)
   templateName   String?        // → FollowupTemplate.key
   templateVars   Json?          // 渲染變數（顯示用：日期/金額/醫生名 — 零 PII 原文）
-  contextJson    Json?          // ★ 顯示用結構化數據（到診日期/欠款/預約 apptId）— 零臨床全文
+  contextJson    Json?          // ★ 顯示用結構化數據（到診日期/預約 apptId）— 零臨床全文（欠款已隨 F 類剷走）
   // ★ cwi-final S2-1：業務科目（appt:<id> / noshow:<id> / tx:<visitId> / recall:<patient>:<lastVisit> / quote:<quoteId> / idle:<conv>:<lastInboundAtISO>）— 科目級終態去重
   subjectKey     String?
   note           String?
   createdBy      String?
   handledBy      String?
   handledAt      DateTime?      @db.Timestamptz
-  cancelReason   String?        // OPT_OUT/REPLIED/BOOKED/ARRIVED/RESOLVED/PAID/NO_TEMPLATE
+  cancelReason   String?        // OPT_OUT/REPLIED/BOOKED/ARRIVED/RESOLVED/MANUAL/DEDUP/NO_CONVERSATION/NO_TEMPLATE
   sentMessageId  String?
   createdAt      DateTime       @default(now())
   @@index([clinicId, status, dueAt])
@@ -1159,11 +1160,12 @@ model FollowupTask {
 }
 
 // ★ cwi-followup-p3-20260916：template registry（MD §4.5 窗口過咗只可 template + 老細 07:31 拍板）。
-// - 6 條中文 draft 出廠 seed（A 對話跟進 / B 預約提醒 / B 爽約 / F 欠款 / C 術後 P4 / D 召回 P4）。
+// - 出廠 6 條 draft：seed.ts 5 條（A 對話跟進 / B 預約提醒 / B 爽約 / C 術後 / D 洗牙召回）+ scripts/seed-followup-p4.ts 1 條（E 報價 quote_followup）。
+//   （F 欠款類已剷 — 舊 outstanding_balance 行由 seed 冪等清走）
 // - approved=false 默認（老細審批中）— 未審批 + 窗口過咗 → task SKIPPED(NO_TEMPLATE) 唔會真發（安全設計）。
 // - text 內 {{var}} 由 templateVars 渲染；window 內發送當 free-form text（body = 渲染後文字）。
 model FollowupTemplate {
-  key          String    @id    // conversation_followup / appt_reminder / no_show / outstanding_balance / post_op_check / recall_cleaning
+  key          String    @id    // conversation_followup / appt_reminder / no_show / post_op_check / recall_cleaning / quote_followup
   name         String     // 顯示名（中文）
   text         String     // 中文正文（{{var}} 佔位）
   language     String    @default("zh_HK")

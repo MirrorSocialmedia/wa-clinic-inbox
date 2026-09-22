@@ -30,7 +30,7 @@ export interface FollowupHubRule {
   enabled: boolean;
   // ★ v3：A-1 掃描留痕（hub 顯示用）
   lastScanAt: string | null;
-  lastScanResult: string | null; // OK | DEP_FAIL | EMPTY
+  lastScanResult: string | null; // OK | DEP_FAIL | EMPTY | ERROR（★ cwi-final S2-8：非 workforce 例外 = ERROR）
 }
 export interface CancelCondition {
   key: string;

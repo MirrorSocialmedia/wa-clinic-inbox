@@ -6936,6 +6936,38 @@ fi
 [ "$L_FAIL" = 0 ] && pass "L 段完成：cwi-final S2-5+S2-6+S2-7（T742–T744）" || fail "L 段有項失敗（見上 ❌）"
 
 
+# ══════════════ M. cwi-final S2-8（其他 v3 小修）T745 ══════════════
+echo ""
+echo "[M/5] cwi-final S2-8: 其他 v3 小修（scan 健康分類 / audit 量削減 / SUPERVISOR PATCH 守門）(T745)"
+M_FAIL=0
+# in-process engine scan（健康分類 + audit gate）+ API（contacts PATCH SUPERVISOR 403）。
+# 專屬 clinic E2ES24C-C（零其他 fixture）；dev worker cron race 收斂分析喺 script 頭註釋（trigger 先裝先建 CV_B + audit boundary = conv 建立時間）。
+S24_OUT=$(pnpm -s tsx scripts/e2e-s24-t745.ts 2>&1)
+S24_CODE=$?
+echo "$S24_OUT" | grep -vE '"level":(30|40|50)' | tail -60 | sed 's/^/    /'
+if [ "$S24_CODE" = "0" ] && echo "$S24_OUT" | grep -q "^T745a-OK$"; then
+  pass "T745a scan 健康分類（非 WorkforceApiError 例外 = ERROR 唔係 DEP_FAIL + log.error + ruleFail 真累加 + ERROR 都寫 audit row）"
+else
+  fail "T745a scan 健康分類 e2e 失敗（exit=$S24_CODE，見上 ❌）"; M_FAIL=1
+fi
+if [ "$S24_CODE" = "0" ] && echo "$S24_OUT" | grep -q "^T745b-OK$"; then
+  pass "T745b FOLLOWUP_SCAN audit 量削減（EMPTY 零 row 但 trace 照寫 / created>0 出 row / 5xx WorkforceApiError = DEP_FAIL row）"
+else
+  fail "T745b audit 量削減 e2e 失敗（exit=$S24_CODE，見上 ❌）"; M_FAIL=1
+fi
+if [ "$S24_CODE" = "0" ] && echo "$S24_OUT" | grep -q "^T745c-OK$"; then
+  pass "T745c SUPERVISOR PATCH /api/contacts/:id → 403（稱呼/語言零改動）+ STAFF 對照 200"
+else
+  fail "T745c SUPERVISOR PATCH 守門 e2e 失敗（exit=$S24_CODE，見上 ❌）"; M_FAIL=1
+fi
+if [ "$S24_CODE" = "0" ] && echo "$S24_OUT" | grep -q "^S24-SWEEP-OK$"; then
+  pass "S24-SWEEP hermetic 清理零殘留（tasks/convs/contacts/rules/audit rows/staff/clinic/company/trigger）"
+else
+  fail "S24-SWEEP 清理失敗或有殘留"; M_FAIL=1
+fi
+[ "$M_FAIL" = 0 ] && pass "M 段完成：cwi-final S2-8（T745）" || fail "M 段有項失敗（見上 ❌）"
+
+
 # ── summary ────────────────────────────────────────────────────────────
 
 # ── summary ────────────────────────────────────────────────────────────

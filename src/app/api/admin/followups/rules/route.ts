@@ -7,7 +7,7 @@ import { handle } from "@/lib/api-error";
  * ★ cwi-followup-p3-20260916（followup-v2 MD §4.7 驗收 #6：規則管理）：follow-up 規則（ADMIN-only）。
  *
  * GET /api/admin/followups/rules
- *   → { rules: [{ id, name, enabled, trigger, delayValue, delayUnit, minAmount, templateName,
+ *   → { rules: [{ id, name, enabled, trigger, delayValue, delayUnit, templateName,
  *               templateApproved, level, maxSends, cancelOn*... }] }
  *   templateApproved = 該規則引用 template 嘅審批狀態（UI 提示：未審批 + 窗口過 → SKIPPED(NO_TEMPLATE)）。
  */

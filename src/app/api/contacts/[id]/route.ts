@@ -1,12 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 
 /**
  * PATCH /api/contacts/[id] — 編輯 Contact（MD §6.4 側欄：profileName / labels）。
  * 別店 → 403。
+ * ★ cwi-final S2-8（= S3-3 同一項）：SUPERVISOR 全店唯讀 → 唔准改稱呼/語言（assertCanWriteConversation 403）。
  */
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,8 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
   const contact = await prisma.contact.findUnique({ where: { id } });
   if (!contact) return NextResponse.json({ error: "not found" }, { status: 404 });
   assertClinicAccess(auth, contact.clinicId);
+  // ★ cwi-final S2-8（= S3-3 同一項）：SUPERVISOR 覆唔到客 — 稱呼/語言/labels 一律 403
+  assertCanWriteConversation(auth);
 
   const parsed = patchSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return toResponse(parsed.error);

@@ -8,7 +8,8 @@
  * 排程（cron "followup-scan" 每 10 分鐘）：
  *   ① expireStaleSuggestions（§2.4 時效表 — 過期 SUGGESTED → EXPIRED，唔通知唔提示）
  *   ② 對每條 enabled 規則掃候選 → 防呆（B-4 去重 / B-5 A 類）+ opt-out + 配對 → 建 SUGGESTED
- *   ③ A-1：per-rule lastScanAt/lastScanResult（OK|DEP_FAIL|EMPTY）+ audit FOLLOWUP_SCAN
+ *   ③ A-1：per-rule lastScanAt/lastScanResult（OK|DEP_FAIL|EMPTY|ERROR）+ audit FOLLOWUP_SCAN
+ *      （★ cwi-final S2-8：audit 只喺 created>0 或 DEP_FAIL/ERROR 先寫 — 空 scan 零 row）
  *
  * 狀態流：SUGGESTED →（員工採用）SENT →（病人回覆）COMPLETED
  *                 →（員工跳過）SKIPPED(MANUAL)   →（取消條件命中）CANCELLED   →（時效過期）EXPIRED
@@ -104,6 +105,17 @@ async function emitFollowupChanged(
 }
 
 const DAY_MS = 86_400_000;
+
+/**
+ * ★ cwi-final S2-8：workforce 依賴失敗判定 — 只有 WorkforceApiError（status 0/5xx/404）先算依賴斷線（DEP_FAIL）；
+ * 其他 exception（DB / 編程錯誤等）= 應用錯誤（ERROR）— 唔准顯示做「依賴唔通」。
+ */
+function isWorkforceDepFail(err: unknown): boolean {
+  return (
+    err instanceof WorkforceApiError &&
+    (err.status === 0 || err.status === 404 || (err.status >= 500 && err.status <= 599))
+  );
+}
 
 // ── 工具 ─────────────────────────────────────────────────────────────────
 
@@ -504,7 +516,7 @@ interface FollowupRuleRow {
   dedupWindowDays: number; // B-4 去重窗口（日；default 7）
   firstUseConfirmedAt: Date | null; // §3 B1 首啟用確認
   lastScanAt: Date | null; // A-1 留痕
-  lastScanResult: string | null; // A-1：OK | DEP_FAIL | EMPTY
+  lastScanResult: string | null; // A-1：OK | DEP_FAIL | EMPTY | ERROR（★ cwi-final S2-8 加 ERROR）
 }
 
 async function fetchClinicAppts(
@@ -653,7 +665,7 @@ export interface FollowupScanResult {
   booked: number; // E 類「報價後已有 booking」跳過數
   aIntentClose: number; // B-5① 最後 intent=THANKS/CLOSING 唔出
   aTwoStrike: number; // B-5② 兩連跳過永久停
-  ruleFail: number;
+  ruleFail: number; // ★ cwi-final S2-8：本輪 scan 有例外嘅規則數（真累加 — 舊版冇加）
 }
 
 // ── §2.4 時效：過期 SUGGESTED → EXPIRED（唔通知唔提示 — 過咗就算）──────────────
@@ -1034,12 +1046,19 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
       }
     } catch (err) {
       // 單條規則失敗唔阻其他規則（fail-soft；log 只 ruleId — 零病人資料）
+      // ★ cwi-final S2-8 健康分類：WorkforceApiError（status 0/5xx/404）= 依賴失敗（DEP_FAIL，warn）；
+      //   其他 exception = 應用錯誤（ERROR + log.error）— 唔好當「依賴唔通」顯示
       ruleErr = err;
-      log.error({ rule: rule.id, trigger: rule.trigger, err: err instanceof Error ? err.message : String(err) }, "followup: rule scan failed");
+      counters.ruleFail = (counters.ruleFail ?? 0) + 1;
+      const depFail = isWorkforceDepFail(err);
+      // ★ 唔好用三元選 method 再 call — 會丟 pino logger receiver（this=undefined → msgPrefixSym TypeError）
+      const errObj = { rule: rule.id, trigger: rule.trigger, kind: depFail ? "DEP_FAIL" : "ERROR", err: err instanceof Error ? err.message : String(err) };
+      if (depFail) log.warn(errObj, "followup: rule scan failed");
+      else log.error(errObj, "followup: rule scan failed");
     }
     // 合併 per-rule 計數入總計
     for (const [k, v] of Object.entries(rc)) counters[k] = (counters[k] ?? 0) + v;
-    // ③ A-1 依賴斷線留痕：per-rule lastScanAt/lastScanResult（OK|DEP_FAIL|EMPTY）+ audit（hub 3 連 DEP_FAIL 紅字依據）
+    // ③ A-1 依賴斷線留痕：per-rule lastScanAt/lastScanResult（OK|DEP_FAIL|EMPTY|ERROR）+ audit（hub 3 連 DEP_FAIL 紅字依據）
     const wf = rc.workforceFail ?? 0;
     const sawCandidate =
       (rc.created ?? 0) > 0 ||
@@ -1050,7 +1069,8 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
       (rc["a-intent-close"] ?? 0) > 0 ||
       (rc["a-two-strike"] ?? 0) > 0 ||
       (rc.noConversation ?? 0) > 0;
-    const scanResult = ruleErr || wf > 0 ? "DEP_FAIL" : sawCandidate ? "OK" : "EMPTY";
+    // ★ cwi-final S2-8 四分：DEP_FAIL（workforce 依賴 0/5xx/404 — 含輪內 fail-soft workforceFail）/ ERROR（其他例外）/ OK（有候選）/ EMPTY
+    const scanResult = isWorkforceDepFail(ruleErr) || wf > 0 ? "DEP_FAIL" : ruleErr ? "ERROR" : sawCandidate ? "OK" : "EMPTY";
     if (wf > 0) {
       log.warn({ ruleId: rule.id, trigger: rule.trigger, fails: wf }, "followup: workforce 依賴唔通 — 今輪零建議");
     }
@@ -1059,15 +1079,19 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
         where: { id: rule.id },
         data: { lastScanAt: now, lastScanResult: scanResult },
       });
-      await prisma.auditLog.create({
-        data: {
-          staffId: null,
-          action: "FOLLOWUP_SCAN",
-          entity: "FollowupRule",
-          entityId: rule.id,
-          meta: { trigger: rule.trigger, result: scanResult, created: rc.created ?? 0, workforceFail: wf } as object,
-        },
-      });
+      // ★ cwi-final S2-8 audit 量削減：只喺 created>0 或 DEP_FAIL/ERROR 先寫（舊版每規則每輪照寫 → ~864 行/日）；
+      //   lastScanAt/lastScanResult 照每輪寫（trace 口徑唔變）
+      if ((rc.created ?? 0) > 0 || scanResult === "DEP_FAIL" || scanResult === "ERROR") {
+        await prisma.auditLog.create({
+          data: {
+            staffId: null,
+            action: "FOLLOWUP_SCAN",
+            entity: "FollowupRule",
+            entityId: rule.id,
+            meta: { trigger: rule.trigger, result: scanResult, created: rc.created ?? 0, workforceFail: wf } as object,
+          },
+        });
+      }
     } catch (err) {
       log.warn({ rule: rule.id, err: err instanceof Error ? err.message : String(err) }, "followup: scan trace write failed（fail-soft）");
     }

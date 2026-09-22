@@ -73,6 +73,12 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
     },
   });
 
+  // ★ cwi-final S2-8（B-9 性別預設 — 留 hook）：pin 成功時若 Contact.salutation 為空 → 用 lookup 回嚟嘅 gender 設
+  //   （例：陈先生/陳女士 — template {{salutation}} 顯示用）。
+  //   ⏳ 前提未就緒：workforce patient-lookup 要 S5-13（workforce repo）先回 gender — 而家 matches[] 無 gender 欄 → 跳過。
+  //   S5-13 對接時：`match.gender` 存在 且 `contact.salutation` 為空 → UPDATE "Contact" SET "salutation" = <由 gender 派生>
+  //   （只補空、唔覆蓋人手已設嘅稱呼；零其他欄改動）。
+
   await prisma.auditLog
     .create({
       data: {

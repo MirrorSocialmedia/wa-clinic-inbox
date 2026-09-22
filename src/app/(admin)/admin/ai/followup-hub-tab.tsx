@@ -126,7 +126,7 @@ export default function FollowupHubTab() {
                         <div className="text-t3 text-[11px]">{fmtTs(r.lastScanAt)}</div>
                         <div
                           className={
-                            r.lastScanResult === "DEP_FAIL"
+                            r.lastScanResult === "DEP_FAIL" || r.lastScanResult === "ERROR"
                               ? "text-danger-text font-semibold"
                               : r.lastScanResult === "EMPTY"
                                 ? "text-t3"
