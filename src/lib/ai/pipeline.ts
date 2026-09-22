@@ -870,6 +870,8 @@ export async function runInboundAi(input: {
     if (updatedConv.assigneeId !== null) blocks.push("assigned");
     // RESOLVED 對話病人翻頭一句「唔該」唔應該觸發自動覆
     if (updatedConv.status === "RESOLVED") blocks.push("resolved");
+    // ★ cwi-final S1-14：急症對話（deterministic 紅旗 intake 標記）→ AI 永不自動覆（canDraft 維持 — 草稿照出俾 staff 睇）
+    if (updatedConv.urgent) blocks.push("conv-urgent");
     // ★ cwi-reopenreply-20260910（T84 決策 (b) 收窄版）：翻開後**首句**三條件閘
     if (isReopenedFirstReply(updatedConv)) {
       // 「翻開前最後一次解決時間」：resolvedAt（T2 翻開已清，防禦性）→ 否則最新 auto-resolve INTERNAL 備註

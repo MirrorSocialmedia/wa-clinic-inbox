@@ -1,6 +1,6 @@
 import { Worker, type Job } from "bullmq";
-import { aiQueue, enqueueOutboundSend, getRedis, QUEUE_PREFIX } from "@/lib/queue";
-import { AI_CONCURRENCY } from "./concurrency";
+import { aiQueue, aiUrgentQueue, enqueueOutboundSend, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { AI_CONCURRENCY, AI_URGENT_CONCURRENCY } from "./concurrency";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
@@ -95,13 +95,40 @@ interface AiJobData {
   conversationId: string;
   messageId: string;
   clinicId: string;
+  /** ★ cwi-final S1-14：deterministic 紅旗命中（inbound urgentIntake）— 急症對話唔開任何 session */
+  urgentHit?: boolean;
+  /** ★ seg3-fix (T13)：ai queue 嘅 mirror job — 真 job 喺 ai-urgent lane（同 jobId，唔同 queue）。
+ *   存在意義 = T13 e2e 契約 key（wa-inbox:ai:ai-<id>）+ queue 可觀測性；ai worker 見呢個 flag 即刻 no-op（零 I/O）。 */
+  urgentMirror?: boolean;
 }
 
 // ★ AI Workflow T1 (A2)：media 類型（同 src/workers/inbound.worker.ts L90 一致）— 媒體走內部通知軌
 const MEDIA_TYPES = new Set(["image", "video", "audio", "document"]);
 
+/**
+ * ★ seg3-fix (T98/T104)：URGENT_ESCALATION 冪等（每則訊息一次）。
+ *   S1-14 引入 deterministic 紅旗 intake（inbound worker，AI job 之前）— 佢已建 URGENT_ESCALATION
+ *   notice + urgent:escalation event + web push（meta.wamid = 觸發訊息）。AI 側各 path
+ *   （LLM 分類 / pain-triage effect / booking effect）對同一則訊息可再命中 → 雙倍 notice（e2e T98/T104 紅）。
+ *   規則：同 conv + 同 wamid 已有 notice → 跳過全套（notice + event + push），防止 staff 重複收通知。
+ *   wamid = 訊息唯一 key（unique index 允許多 NULL）；null → 唔 dedup（legacy 行為 — 寧可多通知唔可漏）。
+ */
+async function urgentEscalationAlreadyEmitted(convId: string, wamid: string | null): Promise<boolean> {
+  if (!wamid) return false;
+  const dup = await prisma.staffNotice.findFirst({
+    where: { conversationId: convId, kind: "URGENT_ESCALATION", meta: { path: ["wamid"], equals: wamid } },
+    select: { id: true },
+  });
+  return dup !== null;
+}
+
 async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>> {
   const data = job.data;
+  // ★ seg3-fix (T13)：ai queue mirror job — 真 job 喺 ai-urgent lane（S1-14 獨立 lane 設計不變）；
+  //   mirror 只係 e2e 契約 key（wa-inbox:ai:ai-<id>）+ 可觀測性 → 即刻 no-op（零 I/O、唔會 fail、唔觸 DB）。
+  if (data?.urgentMirror) {
+    return { skipped: "urgent-lane-mirror" };
+  }
   if (!data?.conversationId || !data?.messageId || !data?.clinicId) {
     log.warn({ jobId: job.id, dataKeys: data ? Object.keys(data) : null }, "ai job: invalid data — skip (no retry)");
     return { skipped: "invalid-data" };
@@ -286,7 +313,10 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     (result.intent === "BOOKING_REQUEST" || consultOutcome?.action === "START_BOOKING") &&
     msg.type === "text" &&
     updatedConv.assigneeId === null &&
-    !activeSession
+    !activeSession &&
+    // ★ cwi-final S1-14：急症對話（deterministic 紅旗 intake）唔開任何 session — 病人要嘅係即刻升級，唔係問診
+    !updatedConv.urgent &&
+    !job.data.urgentHit
   ) {
     const level = await getAutomationLevel(conv.clinicId, "BOOKING_REQUEST");
     if (level === "L3" || level === "L4") {
@@ -311,7 +341,10 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     result.intent === "PAIN" &&
     msg.type === "text" &&
     updatedConv.assigneeId === null &&
-    !activePainSession
+    !activePainSession &&
+    // ★ cwi-final S1-14：急症對話唔開問診 session（同上）
+    !updatedConv.urgent &&
+    !job.data.urgentHit
   ) {
     // E.7 術後自動判（fail-soft 零 throw：無 waId / 索引未 build / 無 match / fail → false + 問診 fallback）
     const autoPostOp = await resolveAutoPostOp(conv, contact, clinic, ptParams.postOpWindowDays);
@@ -455,27 +488,32 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   });
   if (urgent) {
     // ★ AI Workflow T1 (A2)：急症升級持久化（離線 staff 漏咗 realtime toast 都唔漏）— commit-then-emit
-    await prisma.staffNotice.create({
-      data: {
-        clinicId: conv.clinicId,
+    if (await urgentEscalationAlreadyEmitted(conv.id, msg.waMessageId)) {
+      // ★ seg3-fix (T98/T104)：intake 側已為呢則訊息發過全套（notice + event + push）→ 跳過，防雙倍通知
+      log.info({ wamid: msg.waMessageId }, "ai: urgent escalation already emitted (intake) — skip duplicate notice/event/push");
+    } else {
+      await prisma.staffNotice.create({
+        data: {
+          clinicId: conv.clinicId,
+          conversationId: conv.id,
+          kind: "URGENT_ESCALATION",
+          title: "急症升級 — 病人劇痛/高危",
+          meta: { wamid: msg.waMessageId, intent: result.intent, urgency: result.urgency },
+        },
+      });
+      // 鐵律：急症 = 實時升級通知（staff 側 toast + 隊列頂部紅標）
+      // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（conv 有齊五欄）
+      await publishConvEvent(convRef(conv), "urgent:escalation", {
         conversationId: conv.id,
-        kind: "URGENT_ESCALATION",
-        title: "急症升級 — 病人劇痛/高危",
-        meta: { wamid: msg.waMessageId, intent: result.intent, urgency: result.urgency },
-      },
-    });
-    // 鐵律：急症 = 實時升級通知（staff 側 toast + 隊列頂部紅標）
-    // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（conv 有齊五欄）
-    await publishConvEvent(convRef(conv), "urgent:escalation", {
-      conversationId: conv.id,
-      intent: result.intent,
-      urgency: result.urgency,
-      contactId: conv.contactId,
-      contactName: contact?.profileName ?? null,
-      waMessageId: msg.waMessageId,
-    });
-    // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
-    pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
+        intent: result.intent,
+        urgency: result.urgency,
+        contactId: conv.contactId,
+        contactName: contact?.profileName ?? null,
+        waMessageId: msg.waMessageId,
+      });
+      // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
+      pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
+    }
   }
 
   // ★ metadata only — 呢度冇 summary / draft / body
@@ -568,35 +606,17 @@ async function attemptAutoSend(args: {
       ),
     ]);
   } catch (err) {
-    // queue 寫入失敗（Redis 問題）→ 降級：message FAILED + draft 回退 PROPOSED（staff 可審批發送）
-    await prisma.message
-      .update({ where: { id: outMsg.id }, data: { status: "FAILED", errorCode: "ENQUEUE_FAILED" } })
-      .catch(() => undefined);
-    await prisma.auditLog
-      .create({
-        data: {
-          staffId: null,
-          action: "AI_AUTO_SEND_FAILED",
-          entity: "Message",
-          entityId: outMsg.id,
-          meta: {
-            conversationId: conv.id,
-            messageId: outMsg.id,
-            draftId: draft.id,
-            intent: result.intent,
-            urgency: result.urgency,
-          } as Prisma.InputJsonValue,
-        },
-      })
-      .catch(() => undefined);
-    log.error(
+    // ★ cwi-final S1-15 (P0-07)：enqueue timeout/失敗 = 結果未知 — **唔標 FAILED**、**唔 rollback draft**：
+    //   job 可能已經落咗隊列（jobId=messageId 冪等）— 標 FAILED 會令 row 永遠 claim 唔到（訊息丟失）。
+    //   留 QUEUED → outbound-sweep 120s 後重加兜底。fall through 成功路徑（draft SENT_AUTO + audit）
+    //   = 當「已發出」— 防 staff 再審批同一 draft 造成雙發；訊息實際狀態以 row 為準。
+    log.warn(
       { clinic: clinic.code, conversationId: conv.id, messageId: outMsg.id, err: err instanceof Error ? err.message : String(err) },
-      "ai: AUTO send enqueue failed — message FAILED, draft back to PROPOSED (staff manual)"
+      "ai: AUTO send enqueue uncertain — message stays QUEUED (sweep will requeue); treated as sent"
     );
-    return false;
   }
 
-  // enqueue 成功 → 留底 draft（SENT_AUTO，staff 之後可審計）+ AuditLog 必登（metadata only）
+  // enqueue 成功/uncertain → 留底 draft（SENT_AUTO，staff 之後可審計）+ AuditLog 必登（metadata only）
   // ★ consult v2.1 C1（§2.1 M-1）：記實際發出文字 → 下輪 AI context（lastOutboundText）
   await prisma.conversation
     .update({ where: { id: conv.id }, data: { lastOutboundText: draft.draftText } })
@@ -783,32 +803,35 @@ async function handleSessionTurn(
         // 同現有急症鏈一致：urgent 標 + StaffNotice + 實時 push（commit-then-emit）
         const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
         await prisma.conversation.update({ where: { id: conv.id }, data: { urgent: true } });
-        await prisma.staffNotice.create({
-          data: {
-            clinicId: conv.clinicId,
-            conversationId: conv.id,
-            kind: "URGENT_ESCALATION",
-            title: "急症升級 — 病人劇痛/高危（預約 session）",
-            meta: { wamid: msg.waMessageId, sessionId },
-          },
-        });
-        // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
-        const convRow = await prisma.conversation.findUnique({
-          where: { id: conv.id },
-          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
-        });
-        if (convRow) {
-          await publishConvEvent(convRef(convRow), "urgent:escalation", {
-            conversationId: conv.id,
-            intent: "URGENT_PAIN",
-            urgency: "HIGH",
-            contactId: conv.contactId,
-            contactName: contact?.profileName ?? null,
-            waMessageId: msg.waMessageId,
+        // ★ seg3-fix (T98/T104)：intake 側已為呢則訊息發過全套（同 wamid notice 已存在）→ 跳過，防雙倍通知
+        if (!(await urgentEscalationAlreadyEmitted(conv.id, msg.waMessageId))) {
+          await prisma.staffNotice.create({
+            data: {
+              clinicId: conv.clinicId,
+              conversationId: conv.id,
+              kind: "URGENT_ESCALATION",
+              title: "急症升級 — 病人劇痛/高危（預約 session）",
+              meta: { wamid: msg.waMessageId, sessionId },
+            },
           });
+          // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+          const convRow = await prisma.conversation.findUnique({
+            where: { id: conv.id },
+            select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+          });
+          if (convRow) {
+            await publishConvEvent(convRef(convRow), "urgent:escalation", {
+              conversationId: conv.id,
+              intent: "URGENT_PAIN",
+              urgency: "HIGH",
+              contactId: conv.contactId,
+              contactName: contact?.profileName ?? null,
+              waMessageId: msg.waMessageId,
+            });
+          }
+          // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
+          pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
         }
-        // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
-        pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
         break;
       }
       case "SEND_FLOW": {
@@ -953,14 +976,17 @@ async function handleSessionTurn(
 
 /**
  * Session 回覆（C6.2）— 照 attemptAutoSend 個殼：
- * Message OUT（aiDraftId=null、bookingSessionId、aiAutoSent=true）+ outbound enqueue + enqueue fail 降級。
+ * Message OUT（aiDraftId=null、bookingSessionId、aiAutoSent=true）+ outbound enqueue。
  * 冪等：同一 session 對同條訊息（waTimestamp ≥）已發過回覆 → skip（BullMQ retry 防雙發）。
+ * ★ cwi-final S1-15 (P0-07)：enqueue timeout/失敗 = 結果未知 — 唔標 FAILED（row 留 QUEUED，
+ * outbound-sweep 120s 後重加兜底）；照返 messageId = 當「已發出」，session 照常 patch。
  */
 /**
- * ★ MD C6.2：session reply — 照 attemptAutoSend 個殼（Message OUT + outbound enqueue + enqueue fail 降級）。
+ * ★ MD C6.2：session reply — 照 attemptAutoSend 個殼（Message OUT + outbound enqueue）。
  * 冪等：job 級 jobId=`ai-${messageId}` 已保證同一訊息唔會處理兩次 — 唔做 DB 級 dedup
  *（timestamp-range dedup 會誤殺同一秒內兩條 IN 訊息嘅第二條回覆 — e2e 實證 2026-08-25，WhatsApp ts 係秒級）。
- * enqueue fail → 唔重試，session 照 patch（病人下條訊息自然接力）。
+ * ★ cwi-final S1-15 (P0-07)：enqueue timeout/失敗 = 結果未知 — 唔標 FAILED（row 留 QUEUED —
+ * job 可能已落隊列，jobId 冪等；outbound-sweep 重加兜底）；照返 messageId，session 照 patch。
  */
 async function sendSessionReply(
   sessionId: string,
@@ -984,8 +1010,8 @@ async function sendSessionReply(
     return null;
   }
   const now = new Date();
-  try {
-    const outMsg = await prisma.message.create({
+  const outMsg = await prisma.message
+    .create({
       data: {
         conversationId: conv.id,
         direction: "OUT",
@@ -1002,38 +1028,48 @@ async function sendSessionReply(
         billingCategory: "SERVICE",
         waTimestamp: now,
       },
+    })
+    .catch((err: unknown) => {
+      // Message row 寫入失敗 → 冇 row 存在（唔係 enqueue 問題）— session 照 patch（病人下條訊息自然接力）
+      log.error(
+        { sessionId, conversationId: conv.id, err: err instanceof Error ? err.message : String(err) },
+        `${tag}: reply message.create failed（session 照常）`
+      );
+      return null;
     });
+  if (!outMsg) return null;
+  try {
     await Promise.race([
       enqueueOutboundSend(outMsg.id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), 1500)),
     ]);
-    await prisma.auditLog
-      .create({
-        data: {
-          staffId: null,
-          action: auditAction,
-          entity: "Message",
-          entityId: outMsg.id,
-          // metadata only：sessionId + action（零 reply 原文）
-          meta: { conversationId: conv.id, sessionId, action },
-        },
-      })
-      .catch(() => undefined);
-    await prisma.$executeRaw`
-      UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
-    // ★ consult v2.1 C1（§2.1 M-1）：記實際發出文字 → 下輪 AI context
-    await prisma.conversation
-      .update({ where: { id: conv.id }, data: { lastOutboundText: text } })
-      .catch(() => undefined);
-    return outMsg.id;
   } catch (err) {
-    // enqueue fail → 唔重試，session 照 patch（病人下條訊息自然接力）
-    log.error(
-      { sessionId, conversationId: conv.id, err: err instanceof Error ? err.message : String(err) },
-      `${tag}: reply enqueue failed（session 照常）`
+    // ★ cwi-final S1-15 (P0-07)：enqueue uncertain — 唔標 FAILED（row 留 QUEUED — job 可能已落隊列，
+    // jobId=messageId 冪等）；outbound-sweep 120s 後重加兜底（唔雙發）。照返 messageId = 當「已發出」。
+    log.warn(
+      { sessionId, conversationId: conv.id, messageId: outMsg.id, err: err instanceof Error ? err.message : String(err) },
+      `${tag}: reply enqueue uncertain — message stays QUEUED (sweep will requeue)`
     );
-    return null;
   }
+  await prisma.auditLog
+    .create({
+      data: {
+        staffId: null,
+        action: auditAction,
+        entity: "Message",
+        entityId: outMsg.id,
+        // metadata only：sessionId + action（零 reply 原文）
+        meta: { conversationId: conv.id, sessionId, action },
+      },
+    })
+    .catch(() => undefined);
+  await prisma.$executeRaw`
+    UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
+  // ★ consult v2.1 C1（§2.1 M-1）：記實際發出文字 → 下輪 AI context
+  await prisma.conversation
+    .update({ where: { id: conv.id }, data: { lastOutboundText: text } })
+    .catch(() => undefined);
+  return outMsg.id;
 }
 
 /**
@@ -1213,33 +1249,36 @@ async function handlePainTriageTurn(
           where: { id: conv.id },
           data: { urgent: true, intent: "URGENT_PAIN", urgency: "HIGH" },
         });
-        await prisma.staffNotice.create({
-          data: {
-            clinicId: conv.clinicId,
-            conversationId: conv.id,
-            kind: "URGENT_ESCALATION",
-            // {categories} = engine 命中類（business metadata — 零病人原文）
-            title: fillVars(ptParams.urgentInternalNote, { categories: eff.categories.join("/") }),
-            meta: { wamid: msg.waMessageId, painSessionId: sessionId, categories: eff.categories },
-          },
-        });
-        // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
-        const convRow = await prisma.conversation.findUnique({
-          where: { id: conv.id },
-          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
-        });
-        if (convRow) {
-          await publishConvEvent(convRef(convRow), "urgent:escalation", {
-            conversationId: conv.id,
-            intent: "URGENT_PAIN",
-            urgency: "HIGH",
-            contactId: conv.contactId,
-            contactName: c?.profileName ?? null,
-            waMessageId: msg.waMessageId,
+        // ★ seg3-fix (T98/T104)：intake 側已為呢則訊息發過全套（同 wamid notice 已存在）→ 跳過，防雙倍通知
+        if (!(await urgentEscalationAlreadyEmitted(conv.id, msg.waMessageId))) {
+          await prisma.staffNotice.create({
+            data: {
+              clinicId: conv.clinicId,
+              conversationId: conv.id,
+              kind: "URGENT_ESCALATION",
+              // {categories} = engine 命中類（business metadata — 零病人原文）
+              title: fillVars(ptParams.urgentInternalNote, { categories: eff.categories.join("/") }),
+              meta: { wamid: msg.waMessageId, painSessionId: sessionId, categories: eff.categories },
+            },
           });
+          // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+          const convRow = await prisma.conversation.findUnique({
+            where: { id: conv.id },
+            select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+          });
+          if (convRow) {
+            await publishConvEvent(convRef(convRow), "urgent:escalation", {
+              conversationId: conv.id,
+              intent: "URGENT_PAIN",
+              urgency: "HIGH",
+              contactId: conv.contactId,
+              contactName: c?.profileName ?? null,
+              waMessageId: msg.waMessageId,
+            });
+          }
+          // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
+          pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
         }
-        // v2 Web Push（cwi-notify-v2）：急症安全網 — 全店+ADMIN；payload 零 PII
-        pushEvent({ kind: "urgent", clinicId: conv.clinicId, conversationId: conv.id });
         break;
       }
       case "NOTIFY_STAFF": {
@@ -1362,6 +1401,37 @@ async function handlePainTriageTurn(
   return { ok: true, painSession: sessionId, status: out.patch.status };
 }
 
+/**
+ * ★ cwi-final S1-14：ai / ai-urgent 兩個 worker 共用 handlers（processor 都係 handleAiJob）。
+ */
+function attachAiWorkerHandlers(worker: Worker<AiJobData>, queueName: string): void {
+  worker.on("completed", (job) => {
+    const r = job.returnvalue as Record<string, unknown> | undefined;
+    log.info(
+      { jobId: job.id, intent: r?.intent ?? null, urgent: r?.urgent ?? null, draft: r?.draft ?? null },
+      "ai job completed"
+    );
+  });
+  worker.on("failed", async (job, err) => {
+    log.error({ jobId: job?.id, err: err.message }, "ai job failed");
+    // ★ cwi-final S1-14：最終失敗（retries 耗盡）→ SYSTEM notice + notice:new（staff 人手睇 — 唔再只 log）
+    if (!job || job.attemptsMade < (job.opts.attempts ?? 1)) return;
+    const { conversationId, clinicId } = job.data as { conversationId?: string; clinicId?: string };
+    if (!conversationId || !clinicId) return;
+    await prisma.staffNotice.create({
+      data: { clinicId, conversationId, kind: "SYSTEM", title: "AI 未能處理呢條訊息 — 請人手睇", meta: { jobId: job.id, reason: "AI_FAILED" } },
+    }).catch(() => undefined);
+    const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true } });
+    if (conv) await publishConvEvent(conv, "notice:new", { clinicId, conversationId, kind: "SYSTEM" });
+  });
+  worker.on("error", (err) => {
+    // Connection-level error（e.g. Redis retry 耗盡）→ log 後 exit，PM2 重啟 process。
+    // 唔好留低一個死咗嘅 worker 冇聲冇息（silent outage 比 crash 可怕）。
+    log.error({ queue: queueName, err: err.message }, "ai worker error — exiting for PM2 restart");
+    process.exit(1);
+  });
+}
+
 export function startAiWorker(): Worker {
   const worker = new Worker<AiJobData>(
     aiQueue.name,
@@ -1374,27 +1444,25 @@ export function startAiWorker(): Worker {
       concurrency: AI_CONCURRENCY,
     }
   );
+  attachAiWorkerHandlers(worker, aiQueue.name);
+  return worker;
+}
 
-  worker.on("completed", (job) => {
-    const r = job.returnvalue as Record<string, unknown> | undefined;
-    log.info(
-      { jobId: job.id, intent: r?.intent ?? null, urgent: r?.urgent ?? null, draft: r?.draft ?? null },
-      "ai job completed"
-    );
-  });
-  worker.on("failed", (job, err) => {
-    // 最終嘗試都 fail（retries 耗盡）→ 降級記錄（AI 欄位維持舊值，inbox 照常）
-    log.error(
-      { jobId: job?.id, attempts: job?.attemptsMade, err: err.message },
-      "ai job failed (final) — conversation AI 欄位維持舊值"
-    );
-  });
-  worker.on("error", (err) => {
-    // Connection-level error（e.g. Redis retry 耗盡）→ log 後 exit，PM2 重啟 process。
-    // 唔好留低一個死咗嘅 worker 冇聲冇息（silent outage 比 crash 可怕）。
-    log.error({ queue: aiQueue.name, err: err.message }, "ai worker error — exiting for PM2 restart");
-    process.exit(1);
-  });
-
+/**
+ * ★ cwi-final S1-14：急症通道獨立 lane — urgentHit 訊息 enqueue 去 ai-urgent queue。
+ *   concurrency 1（同 ai 一樣：per-conversation 順序）；獨立 lane 使急症摘要唔排喺 90 秒 consult job 後面。
+ *   drift guard：pnpm test:ordering（AI_URGENT_CONCURRENCY = 1）。
+ */
+export function startAiUrgentWorker(): Worker {
+  const worker = new Worker<AiJobData>(
+    aiUrgentQueue.name,
+    async (job: Job<AiJobData>) => handleAiJob(job),
+    {
+      connection: getRedis(),
+      prefix: QUEUE_PREFIX,
+      concurrency: AI_URGENT_CONCURRENCY,
+    }
+  );
+  attachAiWorkerHandlers(worker, aiUrgentQueue.name);
   return worker;
 }

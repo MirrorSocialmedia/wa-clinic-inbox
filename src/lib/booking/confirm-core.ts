@@ -232,8 +232,9 @@ export async function confirmBookingCore(
     return { ok: true, apricotApptId, autoMessage: { sent: false, reason: "window_closed" } };
   }
 
+  let msg;
   try {
-    const msg = await prisma.message.create({
+    msg = await prisma.message.create({
       data: {
         conversationId: conv.id,
         direction: "OUT",
@@ -249,22 +250,33 @@ export async function confirmBookingCore(
         waTimestamp: now,
       },
     });
+  } catch (err) {
+    // Message row 寫入失敗 → 冇 row（唔係 enqueue 問題）— staff 手動覆
+    log.error(
+      { bookingId: booking.id, err: err instanceof Error ? err.message : String(err), ...actorMeta },
+      "bookings: create — auto message write failed（狀態已 CONFIRMED，staff 手動覆）"
+    );
+    return { ok: true, apricotApptId, autoMessage: { sent: false, reason: "queue_unavailable" } };
+  }
+  try {
     await Promise.race([
       enqueueOutboundSend(msg.id),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
     ]);
-    await prisma.$executeRaw`
-      UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
-    log.info(
-      { bookingId: booking.id, messageId: msg.id, clinicId: booking.clinicId, ...actorMeta },
-      "bookings: create — auto confirmation message queued"
-    );
-    return { ok: true, apricotApptId, autoMessage: { sent: true, messageId: msg.id } };
   } catch (err) {
-    log.error(
-      { bookingId: booking.id, err: err instanceof Error ? err.message : String(err), ...actorMeta },
-      "bookings: create — auto message enqueue failed（狀態已 CONFIRMED，staff 手動覆）"
+    // ★ cwi-final S1-15 (P0-07)：enqueue uncertain — **唔標 FAILED / 唔報 queue_unavailable**：
+    //   job 可能已落隊列（jobId 冪等）— 留 QUEUED，outbound-sweep 120s 後重加兜底（唔雙發）。
+    //   回 sent:true = 當「已發出」— 防 caller 提示 staff 手動重覆（雙發）。
+    log.warn(
+      { bookingId: booking.id, messageId: msg.id, err: err instanceof Error ? err.message : String(err), ...actorMeta },
+      "bookings: create — auto message enqueue uncertain（QUEUED，sweep 兜底重加）"
     );
-    return { ok: true, apricotApptId, autoMessage: { sent: false, reason: "queue_unavailable" } };
   }
+  await prisma.$executeRaw`
+    UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
+  log.info(
+    { bookingId: booking.id, messageId: msg.id, clinicId: booking.clinicId, ...actorMeta },
+    "bookings: create — auto confirmation message queued"
+  );
+  return { ok: true, apricotApptId, autoMessage: { sent: true, messageId: msg.id } };
 }

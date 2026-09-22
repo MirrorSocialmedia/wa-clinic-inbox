@@ -2,9 +2,9 @@
  * ★ Realtime P0 (R4, cwi-rt-20260823-a1) — per-conversation ordering drift guard。
  *
  * 斷言：
- * 1. concurrency.ts 常數：inbound/outbound/ai = 1、media = 3
- * 2. 三個 worker 嘅 Worker options 真用咗常數（唔係硬編碼數字）
- * 3. 三個 worker 檔無任何 `concurrency: <number>` 硬編碼
+ * 1. concurrency.ts 常數：inbound/outbound/ai = 1、ai-urgent = 1、media = 3
+ * 2. worker 檔嘅 Worker options 真用咗常數（唔係硬編碼數字）
+ * 3. worker 檔無任何 `concurrency: <number>` 硬編碼
  *
  * 失敗 → exit 1（CI 紅）。用途：防止有人手癢調大 concurrency 打破 per-conversation 順序。
  * 跑法：pnpm test:ordering
@@ -14,7 +14,7 @@ import path from "node:path";
 
 const ROOT = path.join(import.meta.dirname, "..");
 
-import { INBOUND_CONCURRENCY, OUTBOUND_CONCURRENCY, AI_CONCURRENCY, MEDIA_CONCURRENCY } from "../src/workers/concurrency.js";
+import { INBOUND_CONCURRENCY, OUTBOUND_CONCURRENCY, AI_CONCURRENCY, AI_URGENT_CONCURRENCY, MEDIA_CONCURRENCY } from "../src/workers/concurrency.js";
 
 let failures = 0;
 function check(cond: boolean, label: string, detail?: string): void {
@@ -32,6 +32,8 @@ console.log("ordering-drift-guard (R4): 驗證 per-conversation ordering 唔被 
 check(INBOUND_CONCURRENCY === 1, "INBOUND_CONCURRENCY = 1", `actual=${INBOUND_CONCURRENCY}`);
 check(OUTBOUND_CONCURRENCY === 1, "OUTBOUND_CONCURRENCY = 1", `actual=${OUTBOUND_CONCURRENCY}`);
 check(AI_CONCURRENCY === 1, "AI_CONCURRENCY = 1", `actual=${AI_CONCURRENCY}`);
+// ★ cwi-final S1-14：急症通道獨立 lane（同 ai 一樣 — 1）
+check(AI_URGENT_CONCURRENCY === 1, "AI_URGENT_CONCURRENCY = 1", `actual=${AI_URGENT_CONCURRENCY}`);
 check(MEDIA_CONCURRENCY === 3, "MEDIA_CONCURRENCY = 3（media 無順序依賴，固定 3）", `actual=${MEDIA_CONCURRENCY}`);
 
 // 2) worker 檔真的用常數
@@ -50,6 +52,14 @@ for (const [file, constName] of workers) {
   check(
     !/concurrency:\s*\d+/.test(src),
     `${file}: 無硬編碼 concurrency: <number>`
+  );
+}
+// ★ cwi-final S1-14：ai-urgent worker 用 AI_URGENT_CONCURRENCY（獨立 lane — 同 ai 一樣 1）
+{
+  const src = readFileSync(path.join(ROOT, "src/workers/ai.worker.ts"), "utf8");
+  check(
+    /concurrency:\s*AI_URGENT_CONCURRENCY\b/.test(src),
+    "ai.worker.ts: ai-urgent Worker options 用 AI_URGENT_CONCURRENCY"
   );
 }
 // media worker 用常數（允許調 — 但唔准消失）

@@ -25,6 +25,19 @@ function accessToken(): string {
   return t;
 }
 
+// ── ★ cwi-final S1-15 (P0-07)：Graph 錯誤分類（outbound 狀態機 permanent/transient 判定）──
+// Graph API HTTP 錯誤（帶 httpStatus + Meta error code）— outbound.worker 據此決定：
+// permanent（4xx permanent code）→ FAILED 唔重試；transient（5xx / 429 / 其他 4xx）→ BullMQ retry。
+// timeout（AbortSignal.timeout → TimeoutError）唔係 GraphError — 結果未知，另有 UNKNOWN 路徑。
+export class GraphError extends Error { constructor(public httpStatus: number, public code: number | null, msg: string) { super(msg); } }
+
+/** 重試無效嘅 Meta error code（invalid number / message too long / invalid token 等）。 */
+const PERMANENT_CODES = new Set([131047, 131026, 131051, 131009, 131021, 100, 132000, 132001, 132012]);
+
+export function isPermanentGraphError(e: unknown): boolean {
+  return e instanceof GraphError && e.httpStatus >= 400 && e.httpStatus < 500 && e.httpStatus !== 429 && (e.code === null || PERMANENT_CODES.has(e.code));
+}
+
 export interface SendTextResult {
   wamid: string;
   /** mock mode = true */
@@ -75,6 +88,8 @@ export async function sendTextMessage(opts: {
       type: "text",
       text: { body },
     }),
+    // ★ cwi-final S1-15：hang 住嘅 Graph call 10s 超时 → TimeoutError → outbound 標 UNKNOWN（結果未知）
+    signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
   });
 
   const data = (await res.json().catch(() => null)) as
@@ -93,7 +108,8 @@ export async function sendTextMessage(opts: {
       },
       "graph: send text FAILED"
     );
-    throw new Error(`graph send failed: HTTP ${res.status} code=${data?.error?.code ?? "?"}`);
+    // ★ cwi-final S1-15：帶 httpStatus + code → caller 可分 permanent / transient
+    throw new GraphError(res.status, data?.error?.code ?? null, `graph send text HTTP ${res.status}`);
   }
 
   const wamid = data.messages[0].id;
@@ -154,6 +170,8 @@ export async function sendTemplateMessage(opts: {
         components,
       },
     }),
+    // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
+    signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
   });
 
   const data = (await res.json().catch(() => null)) as
@@ -173,7 +191,8 @@ export async function sendTemplateMessage(opts: {
       },
       "graph: send template FAILED"
     );
-    throw new Error(`graph send template failed: HTTP ${res.status} code=${data?.error?.code ?? "?"}`);
+    // ★ cwi-final S1-15：帶 httpStatus + code → caller 可分 permanent / transient
+    throw new GraphError(res.status, data?.error?.code ?? null, `graph send template HTTP ${res.status}`);
   }
 
   const wamid = data.messages[0].id;
@@ -201,12 +220,15 @@ export async function getMediaInfo(mediaId: string): Promise<MediaInfo> {
   }
   const res = await fetch(`${GRAPH_BASE}/${mediaId}`, {
     headers: { Authorization: `Bearer ${accessToken()}` },
+    // ★ cwi-final S1-15：同 send 路徑 — 10s 超时 → TimeoutError（caller media.ts catch 後 retry）
+    signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
   });
   const data = (await res.json().catch(() => null)) as
-    | { id: string; url: string; mime_type: string; file_size?: number; error?: { message?: string } }
+    | { id: string; url: string; mime_type: string; file_size?: number; error?: { message?: string; code?: number } }
     | null;
   if (!res.ok || !data?.url) {
-    throw new Error(`graph media info failed: HTTP ${res.status} ${data?.error?.message ?? ""}`);
+    // ★ cwi-final S1-15：帶 httpStatus + code（同 send 路徑統一 GraphError 口徑）
+    throw new GraphError(res.status, data?.error?.code ?? null, `graph media info HTTP ${res.status} ${data?.error?.message ?? ""}`);
   }
   return { url: data.url, mimeType: data.mime_type, fileSize: data.file_size ?? null, mocked: false };
 }
@@ -348,6 +370,8 @@ export async function sendFlowMessage(opts: {
         },
       },
     }),
+    // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
+    signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
   });
 
   const data = (await res.json().catch(() => null)) as
@@ -358,7 +382,8 @@ export async function sendFlowMessage(opts: {
       { phoneNumberId, to, httpStatus: res.status, waCode: data?.error?.code ?? null },
       "graph: send flow FAILED"
     );
-    throw new Error(`graph send flow failed: HTTP ${res.status} code=${data?.error?.code ?? "?"}`);
+    // ★ cwi-final S1-15：帶 httpStatus + code → caller 可分 permanent / transient
+    throw new GraphError(res.status, data?.error?.code ?? null, `graph send flow HTTP ${res.status}`);
   }
   const wamid = data.messages[0].id;
   log.info({ phoneNumberId, to, wamid }, "graph: send flow OK");

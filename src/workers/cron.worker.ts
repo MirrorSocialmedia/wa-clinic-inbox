@@ -38,6 +38,10 @@
  * - pending-status-sweep 每 2 分鐘 → cwi-final S1-1c（C-1③）：status 早過訊息 parked 行兜底 —
  *                                       drain 配對到 Message 嘅 wamid（LIMIT 500）+ 24h 仍配對唔到 → 丟棄
  *                                       （同 stuck-sweep 同一條 light cron lane）
+ * - outbound-sweep     每 2 分鐘 → cwi-final S1-15 (P0-07)：outbound 卡死兜底 —
+ *                                       stale QUEUED（120s-6h）重加 enqueue（jobId 冪等）+
+ *                                       stuck SENDING（>5min）→ UNKNOWN + SENDING_TIMEOUT + alert
+ *                                       （同 pending-status-sweep 同一條 light cron lane）
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
  */
@@ -52,6 +56,7 @@ import { runExpiry } from "@/lib/booking/expiry";
 import { runHealthCheck, type HealthOverrides } from "@/lib/health/check";
 import { runStuckSweep } from "@/lib/ops/stuck-sweep";
 import { runPendingStatusSweep } from "@/lib/ops/pending-status-sweep";
+import { runOutboundSweep } from "@/lib/ops/outbound-sweep";
 import { runQualityCheck } from "@/lib/quality/check";
 import { runWeeklyReport } from "@/lib/ops/report";
 import { runRetentionPurge } from "@/lib/ops/retention-purge";
@@ -175,6 +180,14 @@ export async function startCronWorker(): Promise<Worker | null> {
           // 同 stuck-sweep 同一條 light cron lane（每 2 分鐘）；冪等（monotonic apply + 行刪除）；
           // E2E 可手動 enqueue（pnpm e2e:cron pending-status-sweep）
           const r = await runPendingStatusSweep();
+          return { ok: true, ...r };
+        }
+        case "outbound-sweep": {
+          // ★ cwi-final S1-15 (P0-07)：outbound 卡死兜底 — stale QUEUED（120s-6h）重加 +
+          // stuck SENDING（>5min）→ UNKNOWN + SENDING_TIMEOUT + alert（outbound_unknown，HIGH）。
+          // 同 pending-status-sweep 同一條 light cron lane（每 2 分鐘）；冪等（jobId dedup + updateMany）；
+          // E2E 可手動 enqueue（pnpm e2e:cron outbound-sweep）
+          const r = await runOutboundSweep();
           return { ok: true, ...r };
         }
         case "reminder-scan": {

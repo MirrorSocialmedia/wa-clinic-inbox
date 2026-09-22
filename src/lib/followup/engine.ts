@@ -1240,11 +1240,13 @@ export async function sendFollowupTask(
   try {
     await lazyEnqueue(msg.id);
   } catch (err) {
-    // 寧漏勿重（同 reminder.ts）：task 已 SENT，enqueue 失敗 → message FAILED 員工人手補
-    await prisma.message
-      .update({ where: { id: msg.id }, data: { status: "FAILED", errorCode: "ENQUEUE_FAILED" } })
-      .catch(() => undefined);
-    log.error({ taskId, err: err instanceof Error ? err.message : String(err) }, "followup: enqueue failed（task 已 SENT — 員工人手補）");
+    // ★ cwi-final S1-15 (P0-07)：enqueue uncertain — **唔標 FAILED**（job 可能已落隊列 — jobId 冪等；
+    // 標 FAILED 會令 row 永遠 claim 唔到）。留 QUEUED → outbound-sweep 120s 後重加兜底（唔雙發）；
+    // task 已 SENT = 狀態一致（訊息在途）。
+    log.warn(
+      { taskId, err: err instanceof Error ? err.message : String(err) },
+      "followup: enqueue uncertain — message stays QUEUED (sweep will requeue)"
+    );
   }
   await prisma.$executeRaw`
     UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${convId}`;

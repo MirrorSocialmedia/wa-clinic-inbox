@@ -10,7 +10,7 @@
 import "./env";
 import { startInboundWorker } from "./inbound.worker";
 import { startOutboundWorker } from "./outbound.worker";
-import { startAiWorker } from "./ai.worker";
+import { startAiWorker, startAiUrgentWorker } from "./ai.worker";
 import { startCronWorker } from "./cron.worker";
 import { startMediaWorker } from "./media.worker";
 import { cronQueue, getRedis } from "@/lib/queue";
@@ -114,9 +114,15 @@ async function registerSchedulers() {
     name: "pending-status-sweep",
     data: {},
   });
+  // ★ cwi-final S1-15 (P0-07)：outbound 兜底 — stale QUEUED（120s-6h）重加 + stuck SENDING（>5min）→ UNKNOWN
+  //   （同 pending-status-sweep 一條 light cron lane，每 2 分鐘；冪等 — jobId dedup + updateMany）
+  await cronQueue.upsertJobScheduler("sched-outbound-sweep", { pattern: "*/2 * * * *" }, {
+    name: "outbound-sweep",
+    data: {},
+  });
   log.info(
     {},
-    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00, company-sync daily 03:00, followup-scan */10m, stuck-sweep */5m, pending-status-sweep */2m)"
+    "cron: schedulers registered (sync-availability */15m, bookings-expire */5m, health-check */5m, quality-check daily 06:30, stats-weekly Mon 05:00, weekly-report Mon 07:00, retention-purge daily 04:00, reminder-scan */15m, routing-escalate */5m, auto-resolve daily 03:00, company-sync daily 03:00, followup-scan */10m, stuck-sweep */5m, pending-status-sweep */2m, outbound-sweep */2m)"
   );
 }
 
@@ -135,6 +141,8 @@ async function main() {
   await startInboundWorker();
   await startOutboundWorker();
   await startAiWorker();
+  // ★ cwi-final S1-14：急症通道獨立 lane（concurrency 1 — 見 src/workers/concurrency.ts）
+  await startAiUrgentWorker();
   await startMediaWorker();
   await startCronWorker();
   await registerSchedulers();

@@ -16,6 +16,11 @@ export const OUTBOUND_CONCURRENCY = 1;
 /** ai worker：context 讀 DB 時同對話必須已 settle — 永遠 1。 */
 export const AI_CONCURRENCY = 1;
 /**
+ * ★ cwi-final S1-14：ai-urgent worker — 急症通道獨立 lane（concurrency 1 同 ai 一樣：
+ *   per-conversation 順序保證；獨立 queue 使急症摘要唔排喺長 job 後面）。
+ */
+export const AI_URGENT_CONCURRENCY = 1;
+/**
  * media worker：media 下載冇 per-conversation 順序依賴（獨立生命週期，
  * message row 先落 PENDING 先 enqueue），可以並行 — 3。
  */

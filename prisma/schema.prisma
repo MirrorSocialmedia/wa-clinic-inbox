@@ -40,12 +40,16 @@ enum ConvStatus {
 enum MsgStatus {
   RECEIVED
   QUEUED
+  // ★ cwi-final S1-15 (P0-07)：outbound worker 已 atomic claim（QUEUED + waMessageId null → SENDING），Graph call 進行中
+  SENDING
   SENT
   DELIVERED
   READ
   FAILED
   // cwi-inboxfix-20260905（MD §5.2）：8 秒撤回窗口內撤銷 — outbound job remove，病人收唔到
   CANCELLED
+  // ★ cwi-final S1-15 (P0-07)：Graph 結果未知（worker 死喺 mid-call / timeout）— 禁自動重發（防雙發），人工核（T715）
+  UNKNOWN
 }
 
 // ★ Realtime P0 (R4, cwi-rt-20260823-a1)：media 下載生命週期。
@@ -506,6 +510,11 @@ model Message {
   voidedAt       DateTime? @db.Timestamptz
   waTimestamp    DateTime @db.Timestamptz
   createdAt      DateTime @db.Timestamptz  @default(now())
+  // ★ cwi-final S1-15 (P0-07)：行更新時間（Prisma @updatedAt 自動維護 — claim / 狀態寫入都會更新）。
+  //   用途：outbound-sweep stuck SENDING 判斷（>5 min 未更新 → UNKNOWN + SENDING_TIMEOUT）。
+  //   DB 欄 NOT NULL + DEFAULT now()（20260921174425 seg3-fix 對齊 schema — raw SQL INSERT
+  //   唔帶欄自動補 now()；可空版本令 e2e raw-INSERT NULL 行 → Prisma 讀 500，T300–T302/T85）。
+  updatedAt      DateTime @db.Timestamptz @updatedAt
   @@index([conversationId, waTimestamp])
   // ★ cwi-final S1-1d（=S1-11）：延遲送達 reload 唔見 — latest page / before 改 createdAt 軸
   @@index([conversationId, createdAt, id])

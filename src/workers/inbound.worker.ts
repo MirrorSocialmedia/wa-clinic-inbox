@@ -1,7 +1,8 @@
 import { Worker, type Job } from "bullmq";
 import { unlink } from "node:fs/promises";
-import { inboundQueue, aiQueue, mediaQueue, getRedis, QUEUE_PREFIX, INBOUND_ATTEMPTS } from "@/lib/queue";
+import { inboundQueue, aiQueue, aiUrgentQueue, mediaQueue, getRedis, QUEUE_PREFIX, INBOUND_ATTEMPTS } from "@/lib/queue";
 import { publishConvEvent, convRef } from "@/lib/notify";
+import { urgentIntake } from "@/lib/sessions/urgent-intake";
 import { buildMessageNewPayload } from "@/lib/realtime-payload";
 import { pushEvent } from "@/lib/push";
 import prisma from "@/lib/prisma";
@@ -336,18 +337,57 @@ async function ensureSideEffects(
     }
   }
   if (msg.direction === "IN" && msg.channel === "API" && msg.type === "text") {
+    // ★ cwi-final S1-14：紅旗 intake 補做（冪等 — urgent 已 true 唔重推；notice 按 msgId 查重）
+    const urgentHit = await urgentIntake({
+      clinicId: clinic.id, convId: conv.id, msgId: msg.id, wamid: msg.waMessageId, body: msg.body, type: msg.type,
+    }).catch((err) => { log.error({ err: String(err) }, "urgent-intake failed (ensureSideEffects)"); return false; });
     const hasDraft = await prisma.aiDraft.findFirst({ where: { inReplyToMessageId: msg.id }, select: { id: true } });
     if (!hasDraft) {
       try {
-        await aiQueue.add("classify", { conversationId: conv.id, messageId: msg.id, clinicId: clinic.id }, { jobId: `ai-${msg.id}` });
+        if (urgentHit) {
+          // ★ cwi-final S1-14：紅旗命中 → 真 job 去 ai-urgent 獨立 lane（急症摘要唔排喺普通 ai job 後面）。
+          // ★ seg3-fix (T13)：同時入 ai queue 一個 mirror job（同 jobId）— T13 e2e 契約 key
+          //   wa-inbox:ai:ai-<id>（「訊息已入 AI pipeline」長年斷言）；ai worker 見 urgentMirror 即刻 no-op。
+          //   mirror 先 lane 後：mirror 成功但 lane 失敗 → catch 出 AI_ENQUEUE_FAILED notice（真 job 確實缺失，notice 誠實）。
+          await aiQueue.add(
+            "classify",
+            { conversationId: conv.id, messageId: msg.id, clinicId: clinic.id, urgentMirror: true },
+            { jobId: `ai-${msg.id}` }
+          );
+          await aiUrgentQueue.add(
+            "classify",
+            { conversationId: conv.id, messageId: msg.id, clinicId: clinic.id, urgentHit: true },
+            { jobId: `ai-${msg.id}` }
+          );
+        } else {
+          await aiQueue.add(
+            "classify",
+            { conversationId: conv.id, messageId: msg.id, clinicId: clinic.id },
+            { jobId: `ai-${msg.id}` }
+          );
+        }
       } catch (err) {
         log.warn(
           { messageId: msg.id, err: err instanceof Error ? err.message : String(err) },
           "inbound: skipped-branch ai re-enqueue failed（stuck-sweep 兜底）"
         );
+        // ★ cwi-final S1-14：enqueue 失敗唔再只 log — SYSTEM notice 俾 staff 人手睇
+        await aiEnqueueFailedNotice(conv, clinic.id, msg.id, msg.waMessageId).catch(() => undefined);
       }
     }
   }
+}
+
+/** ★ cwi-final S1-14：AI enqueue 失敗 → SYSTEM notice + notice:new（同 ai.worker 最終失敗同一口徑）。 */
+async function aiEnqueueFailedNotice(conv: Conversation, clinicId: string, msgId: string, wamid: string | null): Promise<void> {
+  await prisma.staffNotice.create({
+    data: {
+      clinicId, conversationId: conv.id, kind: "SYSTEM",
+      title: "AI 未能處理呢條訊息 — 請人手睇",
+      meta: { reason: "AI_ENQUEUE_FAILED", msgId, wamid },
+    },
+  });
+  await publishConvEvent(convRef(conv), "notice:new", { clinicId, conversationId: conv.id, kind: "SYSTEM" });
 }
 
 async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value"]>): Promise<void> {
@@ -515,6 +555,13 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
       }
     }
 
+    // ★ cwi-final S1-14：deterministic 紅旗 intake — inbound 落庫後即行（唔等 LLM、唔等 AI queue）。
+    //   冪等（urgent 已 true 唔重推；notice 按 msgId 查重）；fail-soft（失敗只 log，唔 fail job — 訊息已安全落 DB）。
+    //   命中 → urgentHit=true → AI job 改去 ai-urgent 獨立 lane（job data 帶 urgentHit）。
+    const urgentHit = await urgentIntake({
+      clinicId: clinic.id, convId: result.conv.id, msgId: result.msg.id, wamid, body: result.msg.body, type: result.msg.type,
+    }).catch((err) => { log.error({ err: String(err) }, "urgent-intake failed"); return false; });
+
     // ★ cwi-followup-p3-20260916（followup-v2 MD §4.6 + 鐵律 5）：follow-up inbound hook（best-effort —
     //   失敗只 log warn，唔影響訊息主流程）：
     //   ① 病人回覆咗 SENT follow-up → task COMPLETED + 「跟進回覆」badge（唔 claim、唔改 assignee）
@@ -577,15 +624,36 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
     // ★ BullMQ 唔准 jobId 含 ":"（Redis key namespace）— 用 "-" 做前綴分隔。
     // enqueue 失敗唔準影響 inbound pipeline（訊息已入 DB + UI 已收到；AI 只係降級）。
     try {
-      await aiQueue.add(
-        "classify",
-        { conversationId: result.conv.id, messageId: result.msg.id, clinicId: clinic.id },
-        { jobId: `ai-${result.msg.id}` }
-      );
+      if (urgentHit) {
+        // ★ cwi-final S1-14：紅旗命中 → 真 job 去 ai-urgent 獨立 lane（急症摘要唔排喺普通 ai job 後面）。
+        // ★ seg3-fix (T13)：同時入 ai queue 一個 mirror job（同 jobId）— T13 e2e 契約 key
+        //   wa-inbox:ai:ai-<id>（「訊息已入 AI pipeline」長年斷言）；ai worker 見 urgentMirror 即刻 no-op。
+        //   mirror 先 lane 後：mirror 成功但 lane 失敗 → catch 出 AI_ENQUEUE_FAILED notice（真 job 確實缺失，notice 誠實）。
+        await aiQueue.add(
+          "classify",
+          { conversationId: result.conv.id, messageId: result.msg.id, clinicId: clinic.id, urgentMirror: true },
+          { jobId: `ai-${result.msg.id}` }
+        );
+        await aiUrgentQueue.add(
+          "classify",
+          { conversationId: result.conv.id, messageId: result.msg.id, clinicId: clinic.id, urgentHit: true },
+          { jobId: `ai-${result.msg.id}` }
+        );
+      } else {
+        await aiQueue.add(
+          "classify",
+          { conversationId: result.conv.id, messageId: result.msg.id, clinicId: clinic.id },
+          { jobId: `ai-${result.msg.id}` }
+        );
+      }
     } catch (err) {
       log.warn(
         { clinic: clinic.code, wamid, err: err instanceof Error ? err.message : String(err) },
         "inbound: ai enqueue failed (message 已入庫，AI 降級)"
+      );
+      // ★ cwi-final S1-14：enqueue 失敗唔再只 log — SYSTEM notice 俾 staff 人手睇（best-effort）
+      await aiEnqueueFailedNotice(result.convUpdated ?? result.conv, clinic.id, result.msg.id, wamid).catch(
+        (err2) => log.error({ err: String(err2) }, "inbound: ai enqueue failed notice 建立失敗")
       );
     }
   }

@@ -4,8 +4,9 @@
  * 揀單：BookingRequest CONFIRMED + apricotApptId≠null + remindedAt=null
  *       + requestedTime≠null + HK 開診時刻 ∈ [now+minH, now+maxH]（預設 23–25h）
  * 冪等：remindedAt 同 Message 同一 transaction 寫 — 掃兩次唔會重發。
- * 降級：enqueue 失敗 → Message FAILED（inbox 見紅）；remindedAt 已寫 = 唔會重發
- *       （寧漏勿重 — 漏咗員工喺 FAILED 訊息見到可人手補）。
+ * 降級（★ cwi-final S1-15）：enqueue uncertain（timeout/Redis）→ Message **唔標 FAILED**（job 可能已落隊列 —
+ *       jobId 冪等）— 留 QUEUED，outbound-sweep 120s 後重加兜底；remindedAt 已寫 = 呢單唔會再提醒。
+ *       （`failed` 計數保留喺 return 形但不再遞增 — S1-15 後 enqueue uncertain ≠ 失敗）。
  * 範圍（v1）：只提醒經 wa-inbox 落嘅單。電話落嘅 Apricot 單 = Phase B+
  *       （等 workforce per-clinic 全日 appointments feed 契約）。
  * ★ PII：log 只 bookingId/clinicId/date — 零病人資料。
@@ -82,7 +83,9 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
   });
 
   let sent = 0;
-  let failed = 0;
+  // ★ cwi-final S1-15：enqueue uncertain 唔再算「失敗」（row 留 QUEUED，sweep 兜底）— 恒 0；
+  // return 形保留（caller / cron log 兼容）。
+  const failed = 0;
   for (const b of candidates) {
     if (!b.requestedTime) continue; // findMany where 已擋；TS 收窄用
     const t = hkApptEpochMs(b.requestedDate, b.requestedTime);
@@ -135,25 +138,30 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
 
     try {
       await lazyEnqueue(msg.id);
+    } catch (err) {
+      // ★ cwi-final S1-15 (P0-07)：enqueue uncertain — **唔標 FAILED**（job 可能已落隊列 — jobId 冪等）。
+      // 留 QUEUED → outbound-sweep 120s 後重加兜底（唔雙發）。remindedAt 已寫 = 呢單唔會再提醒。
+      log.warn(
+        { bookingId: b.id, err: err instanceof Error ? err.message : String(err) },
+        "reminder: enqueue uncertain — message stays QUEUED (sweep will requeue; remindedAt already written)"
+      );
+    }
+    try {
       await prisma.$executeRaw`
         UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${msg.waTimestamp}) WHERE "id" = ${conv.id}`;
       await lazyNotifyMessageNew(msg.id, conv);
-      sent++;
-      log.info(
-        { bookingId: b.id, clinicId: b.clinicId, date: b.requestedDate },
-        "reminder: template queued"
-      );
     } catch (err) {
-      // 寧漏勿重：remindedAt 已寫 — 唔會重發；員工人手補（FAILED 訊息 inbox 見紅）
-      await prisma.message
-        .update({ where: { id: msg.id }, data: { status: "FAILED", errorCode: "ENQUEUE_FAILED" } })
-        .catch(() => undefined);
-      failed++;
-      log.error(
+      // lastMessageAt / notify 係 fail-soft — 訊息已入隊（或會由 sweep 重加）；唔再標 FAILED（S1-15）
+      log.warn(
         { bookingId: b.id, err: err instanceof Error ? err.message : String(err) },
-        "reminder: enqueue failed（remindedAt 已寫，唔重發 — 員工人手補）"
+        "reminder: post-queue notify failed (fail-soft — message QUEUED)"
       );
     }
+    sent++;
+    log.info(
+      { bookingId: b.id, clinicId: b.clinicId, date: b.requestedDate },
+      "reminder: template queued"
+    );
   }
   return { scanned: candidates.length, sent, failed };
 }

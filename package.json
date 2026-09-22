@@ -35,6 +35,8 @@
     "e2e:t700": "tsx scripts/e2e-s12-t700.ts",
     "e2e:t713": "tsx scripts/e2e-t713-side-effects.ts",
     "e2e:t714": "tsx scripts/e2e-s11c-t714.ts",
+    "e2e:s114-t71x": "tsx scripts/e2e-s114-t71x.ts",
+    "e2e:s115-t71x": "tsx scripts/e2e-s115-t71x.ts",
     "e2e:t724": "tsx scripts/unit-t724-status-rank.ts",
     "replay:dlq": "tsx scripts/replay-dead-letters.ts",
     "e2e:t600": "tsx scripts/e2e-t600-multiclinic-staff.ts",

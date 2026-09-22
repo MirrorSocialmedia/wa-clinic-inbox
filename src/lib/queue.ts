@@ -5,10 +5,12 @@ import log from "@/lib/log";
 /**
  * WA Clinic Inbox — BullMQ 骨架（框架 MD §1/§2）
  *
- * 5 個 queue：
+ * 6 個 queue：
  * - inbound  : webhook event 解析（patient 訊息 / echo / history / status）
  * - outbound : 發訊息 + 重試 + status 回寫
  * - ai       : 意圖識別 + 草稿生成（Phase 2）
+ * - ai-urgent: ★ cwi-final S1-14 急症通道獨立 lane（urgentHit 訊息 — concurrency 1，
+ *              急症摘要唔排喺普通 ai job 後面；見 src/workers/concurrency.ts）
  * - cron     : 排程入口（空檔 refresh / bookings-expire / 健康自檢）
  * - media    : ★ Realtime P0 (R4) media 下載獨立隊列（inbound job 只落 row + enqueue，
  *              唔喺入面做 HTTP 下載 — 大 media 唔阻 per-conversation 順序）
@@ -81,6 +83,8 @@ function queueOptions(defaultJobOptions?: Record<string, unknown>): QueueOptions
 export const inboundQueue = new Queue("inbound", queueOptions({ attempts: INBOUND_ATTEMPTS }));
 export const outboundQueue = new Queue("outbound", queueOptions());
 export const aiQueue = new Queue("ai", queueOptions());
+// ★ cwi-final S1-14：急症通道獨立 queue（worker concurrency 1 — 見 ai.worker.ts startAiUrgentWorker）
+export const aiUrgentQueue = new Queue("ai-urgent", queueOptions());
 export const cronQueue = new Queue("cron", queueOptions());
 // ★ Realtime P0 (R4)：media 下載獨立隊列（concurrency 3 — 見 src/workers/media.worker.ts）
 export const mediaQueue = new Queue("media", queueOptions());
@@ -89,6 +93,7 @@ export const QUEUE_NAMES = {
   inbound: "inbound",
   outbound: "outbound",
   ai: "ai",
+  aiUrgent: "ai-urgent", // ★ cwi-final S1-14
   cron: "cron",
   media: "media",
 } as const;
@@ -106,5 +111,10 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
  * 註：reminder cron / AI AUTO 覆都行同一入口。
  */
 export async function enqueueOutboundSend(messageId: string): Promise<void> {
+  // ★ cwi-final S1-15 (P0-07) 測試 hook：ENQUEUE_DELAY_MS 人工拉長 enqueue 延遲
+  //   （e2e T716：2000 > caller 1500ms race timeout → 202 enqueueUncertain 路徑實測）。
+  //   production 未設 = 0（零行為改變）。
+  const delayMs = Math.max(0, parseInt(process.env.ENQUEUE_DELAY_MS ?? "0", 10) || 0);
+  if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
   await outboundQueue.add("send", { messageId }, { jobId: messageId });
 }

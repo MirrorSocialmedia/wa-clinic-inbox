@@ -424,16 +424,18 @@ export const POST = handle(async (req: NextRequest) => {
       ),
     ]);
   } catch (err) {
-    // queue fail：訊息留喺 DB（QUEUED）但冇 job — 標 FAILED 話知 UI，避免靜默
-    await prisma.message.update({
-      where: { id: msg.id },
-      data: { status: "FAILED", errorCode: "ENQUEUE_FAILED" },
-    }).catch(() => undefined);
+    // ★ cwi-final S1-15 (P0-07)：enqueue timeout/失敗 = 結果未知 — **唔標 FAILED**：
+    //   job 可能已經落咗隊列（jobId=messageId 冪等）— 標 FAILED 會令 row 永遠 claim 唔到（訊息丟失）。
+    //   留 QUEUED → outbound-sweep 120s 後重加兜底（重加安全）；回 202 + enqueueUncertain —
+    //   UI 唔顯示失敗（row 狀態先係單一事實來源：QUEUED 轉圈 → SENT/UNKNOWN）。
     log.error(
       { messageId: msg.id, err: err instanceof Error ? err.message : String(err) },
-      "send: enqueue failed, message marked FAILED"
+      "send: enqueue uncertain — message stays QUEUED (outbound-sweep will requeue)"
     );
-    return NextResponse.json({ error: "queue unavailable" }, { status: 503 });
+    return NextResponse.json(
+      { ok: true, messageId: msg.id, status: "QUEUED", enqueueUncertain: true },
+      { status: 202 }
+    );
   }
 
   log.info(
