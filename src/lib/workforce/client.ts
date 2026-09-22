@@ -1290,9 +1290,14 @@ function writeClinical(f: MockClinicalFile): void {
   }
 }
 /** #1 batch visits（C/D 觸發源；mock 唔做 server-side reasonCodes 過濾 — 引擎口徑唔依賴佢）。 */
-function mockClinicVisits(_params: Record<string, string>): unknown {
+function mockClinicVisits(params: Record<string, string>): unknown {
   const f = readClinical();
-  return { v: 1, visits: f.visits ?? [] };
+  // ★ cwi-final S2-1（T427 回歸修復）：真端點按 clinicCode 過濾（fetchClinicVisits 必傳）—
+  //   mock 舊狀返回全店 visits → 同病人跨店 visit 混入每店 scan，subjectKey tx:<visitId> 跨店碰撞
+  //   → 科目級 ① 誤殺 B-4① 跨店去重。對齊真端點口徑（mockQuotes 先例：status 過濾）。
+  let visits = f.visits ?? [];
+  if (params.clinicCode) visits = visits.filter((v) => (v.clinicCode as string | undefined) === params.clinicCode);
+  return { v: 1, visits };
 }
 /** E 報價查詢（status 過濾做咗 — 對齊真端點口徑）。 */
 function mockQuotes(params: Record<string, string>): unknown {

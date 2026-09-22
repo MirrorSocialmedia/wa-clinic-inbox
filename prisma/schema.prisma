@@ -1144,6 +1144,8 @@ model FollowupTask {
   templateName   String?        // → FollowupTemplate.key
   templateVars   Json?          // 渲染變數（顯示用：日期/金額/醫生名 — 零 PII 原文）
   contextJson    Json?          // ★ 顯示用結構化數據（到診日期/欠款/預約 apptId）— 零臨床全文
+  // ★ cwi-final S2-1：業務科目（appt:<id> / noshow:<id> / tx:<visitId> / recall:<patient>:<lastVisit> / quote:<quoteId> / idle:<conv>:<lastInboundAtISO>）— 科目級終態去重
+  subjectKey     String?
   note           String?
   createdBy      String?
   handledBy      String?
@@ -1153,6 +1155,7 @@ model FollowupTask {
   createdAt      DateTime       @default(now())
   @@index([clinicId, status, dueAt])
   @@index([conversationId, status])
+  @@index([ruleId, subjectKey])
 }
 
 // ★ cwi-followup-p3-20260916：template registry（MD §4.5 窗口過咗只可 template + 老細 07:31 拍板）。
@@ -1168,5 +1171,7 @@ model FollowupTemplate {
   approved     Boolean   @default(false)
   approvedAt   DateTime?
   approvedBy   String?
+  // ★ cwi-final S2-5：過窗 template 參數次序（registry 記變數次序 — components.parameters 排序用）
+  paramOrder   String[]  @default([])
   updatedAt    DateTime  @updatedAt
 }

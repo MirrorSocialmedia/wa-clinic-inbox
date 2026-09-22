@@ -121,57 +121,70 @@ function hasSome(a: Set<string>, b: readonly string[]): boolean {
 
 // ── 查重（MD §4.3）───────────────────────────────────────────────────────
 
-export type CreationSkip = "in-flight" | "exhausted" | "dedup-window" | null;
+export type CreationSkip = "in-flight" | "exhausted" | "dedup-window" | "subject-done" | null;
+
+// ★ cwi-final S2-1（audit3 P0-03 降級 / N-9）：業務科目級去重 —
+//   SENT/COMPLETED/SKIPPED/EXPIRED = 科目已處理（永久唔再出，唔受 7 日窗口影響）；
+//   CANCELLED 只有「業務上已解決」嘅 reason（人手/退訂/病人覆咗/已約/已到診）先算科目終態。
+const TERMINAL_FOR_SUBJECT = ["SENT", "COMPLETED", "SKIPPED", "EXPIRED"] as const;
+const TERMINAL_CANCEL = ["MANUAL", "OPT_OUT", "REPLIED", "BOOKED", "ARRIVED"];
 
 /**
- * 建 task 前查重（v3 口徑）：
- * - in-flight：同 rule + 同 conv/patient 已有 SUGGESTED（未處理建議喺度 — 唔重複出）
- * - exhausted：SENT 數 >= maxSends
- * - dedup-window（B-4②）：同 patientApricotId × 同 trigger 已有終態（SKIPPED/SENT/COMPLETED）
- *   喺 rule.dedupWindowDays（default 7 日）內 → 唔再出（跳過 7 日冷卻 / 已發 / 已覆）。
- *   跨 rule（同 trigger 唔同規則）都算 — 病人層去重優先於規則層。
+ * 建 task 前查重（cwi-final S2-1 口徑 — 業務科目）：
+ * - in-flight：① 同 rule × 同科目已有 SUGGESTED（未處理建議喺度）；② 同 rule 同對話已有未處理建議
+ * - subject-done：① 同 rule × 同科目已有終態（SENT/COMPLETED/SKIPPED/EXPIRED 或業務取消）
+ * - exhausted：③ SENT + COMPLETED 數 >= maxSends（病人覆咗 = 發咗）
+ * - dedup-window（B-4② / N-9）：④ 同 trigger 已有終態喺 rule.dedupWindowDays 內 —
+ *   病人層（有 patientApricotId）或對話層（冇 — N-9 修正）。跨 rule（同 trigger）都算。
  *   （B-4① 跨店 peer 比對喺 createTask — 要查對話活躍度。）
  */
 export async function shouldSkipCreation(
   rule: { id: string; trigger: string; maxSends: number; dedupWindowDays: number },
-  key: { conversationId: string | null; patientApricotId: string | null },
+  key: { conversationId: string | null; patientApricotId: string | null; subjectKey: string },
   now: Date
 ): Promise<CreationSkip> {
-  const or: Prisma.FollowupTaskWhereInput[] = [];
-  // ★ v3-fix（cwi-followup-v3 S5 T427）：in-flight/exhausted 只按**同對話**計 —
-  //   同病人跨對話（跨店）嘅 SUGGESTED 由 B-4① 處理（留最近活躍）；
-  //   若度計 patient 層，B-4① 會被永久遮蔽（「先到先贏」— 非 spec「留最近活躍」口徑）。
-  //   無 conversationId 嘅 call（純病人層）→ fallback patient scope（保守不變）。
-  if (key.conversationId) or.push({ conversationId: key.conversationId });
-  else if (key.patientApricotId) or.push({ patientApricotId: key.patientApricotId });
-  if (or.length === 0) return null;
-  const existing = await prisma.followupTask.findMany({
-    where: { ruleId: rule.id, status: { in: ["SUGGESTED", "SENT"] }, OR: or },
+  // ① 同一科目：已出過（任何終態）或者仲喺度 → 永遠唔再出（科目級，唔受 7 日窗口影響）
+  const sameSubject = await prisma.followupTask.findFirst({
+    where: {
+      ruleId: rule.id,
+      subjectKey: key.subjectKey,
+      OR: [
+        { status: { in: ["SUGGESTED", ...TERMINAL_FOR_SUBJECT] } },
+        { status: "CANCELLED", cancelReason: { in: TERMINAL_CANCEL } },
+      ],
+    },
     select: { status: true },
   });
-  if (existing.some((t) => t.status === "SUGGESTED")) return "in-flight";
-  const sentCount = existing.filter((t) => t.status === "SENT").length;
-  if (sentCount >= rule.maxSends) return "exhausted";
-  if (key.patientApricotId) {
-    const windowStart = new Date(now.getTime() - (rule.dedupWindowDays ?? 7) * DAY_MS);
-    const sameTriggerRuleIds = await prisma.followupRule.findMany({
-      where: { trigger: rule.trigger as FollowupTrigger },
-      select: { id: true },
-    });
-    // 病人層去重：同 trigger 所有規則（跨 rule）的終態喺窗口內 → 跳。
-    // ★ v3-fix（cwi-followup-v3 S5 T414a）：EXPIRED 入終態集 — §2.4「過咗就算」：
-    //   舊 visit（dueAt 已過）嘅 task 建出即過期，下个 scan EXPIRED 後若唔計終態會無限重建（churn — p4 T414a 冪等恆紅）。
-    const recent = await prisma.followupTask.findFirst({
-      where: {
-        patientApricotId: key.patientApricotId,
-        ruleId: { in: sameTriggerRuleIds.map((r) => r.id) },
-        status: { in: ["SKIPPED", "SENT", "COMPLETED", "EXPIRED"] },
-        OR: [{ handledAt: { gte: windowStart } }, { createdAt: { gte: windowStart } }],
-      },
-      select: { id: true },
-    });
-    if (recent) return "dedup-window";
+  if (sameSubject) return sameSubject.status === "SUGGESTED" ? "in-flight" : "subject-done";
+  // ② 同對話已有未處理建議（同 rule）→ 唔疊
+  if (key.conversationId) {
+    const open = await prisma.followupTask.findFirst({ where: { ruleId: rule.id, conversationId: key.conversationId, status: "SUGGESTED" }, select: { id: true } });
+    if (open) return "in-flight";
   }
+  // ③ maxSends：SENT + COMPLETED 都計（病人覆咗 = 發咗）
+  const sentOr: Prisma.FollowupTaskWhereInput[] = [];
+  if (key.patientApricotId) sentOr.push({ patientApricotId: key.patientApricotId });
+  else if (key.conversationId) sentOr.push({ conversationId: key.conversationId });
+  if (sentOr.length) {
+    const sent = await prisma.followupTask.count({ where: { ruleId: rule.id, status: { in: ["SENT", "COMPLETED"] }, OR: sentOr } });
+    if (sent >= rule.maxSends) return "exhausted";
+  }
+  // ④ 冷卻窗口（B-4②）：病人層（有 patientApricotId）或者對話層（冇 — N-9 修正）
+  const windowStart = new Date(now.getTime() - (rule.dedupWindowDays ?? 7) * DAY_MS);
+  const sameTriggerRuleIds = (await prisma.followupRule.findMany({ where: { trigger: rule.trigger as FollowupTrigger }, select: { id: true } })).map((r) => r.id);
+  const recent = await prisma.followupTask.findFirst({
+    where: {
+      ruleId: { in: sameTriggerRuleIds },
+      ...(key.patientApricotId ? { patientApricotId: key.patientApricotId } : { conversationId: key.conversationId }),
+      OR: [
+        { status: { in: [...TERMINAL_FOR_SUBJECT] } },
+        { status: "CANCELLED", cancelReason: { in: TERMINAL_CANCEL } },
+      ],
+      AND: [{ OR: [{ handledAt: { gte: windowStart } }, { createdAt: { gte: windowStart } }] }],
+    },
+    select: { id: true },
+  });
+  if (recent) return "dedup-window";
   return null;
 }
 
@@ -184,6 +197,8 @@ interface TaskDraft {
   patientApricotId: string | null;
   phoneHashes: string[];
   ruleId: string;
+  /** ★ cwi-final S2-1：業務科目（appt:/noshow:/tx:/recall:/quote:/idle:）— 必填，科目級去重靠佢 */
+  subjectKey: string;
   dueAt: Date;
   templateName: string;
   templateVars: Record<string, string | number | null> | null;
@@ -219,11 +234,16 @@ async function createTask(
   }
   const skip = await shouldSkipCreation(
     rule,
-    { conversationId: draft.conversationId, patientApricotId: draft.patientApricotId },
+    { conversationId: draft.conversationId, patientApricotId: draft.patientApricotId, subjectKey: draft.subjectKey },
     now
   );
   if (skip) {
     counters[skip] = (counters[skip] ?? 0) + 1;
+    return null;
+  }
+  // ★ cwi-final S2-1：建之前先計過期（同 §2.4 時效表同一條 suggestionExpiryAt）— 唔再建「一出世就過期」嘅行
+  if (suggestionExpiryAt({ dueAt: draft.dueAt, contextJson: (draft.contextJson ?? null) as Prisma.JsonValue | null, rule }).getTime() <= now.getTime()) {
+    counters.expiredAtCreate = (counters.expiredAtCreate ?? 0) + 1;
     return null;
   }
   // ★ B-4① 跨店/多號去重：同 patientApricotId × 同 trigger 已有 SUGGESTED peer（其他對話）
@@ -244,17 +264,20 @@ async function createTask(
     });
     if (peer?.conversationId) {
       const [peerConv, mine] = await Promise.all([
-        prisma.conversation.findUnique({ where: { id: peer.conversationId }, select: { lastMessageAt: true } }),
-        prisma.conversation.findUnique({ where: { id: draft.conversationId }, select: { lastMessageAt: true } }),
+        prisma.conversation.findUnique({ where: { id: peer.conversationId }, select: { lastMessageAt: true, status: true } }),
+        prisma.conversation.findUnique({ where: { id: draft.conversationId }, select: { lastMessageAt: true, status: true } }),
       ]);
       if (peerConv) {
         const mineTs = mine?.lastMessageAt?.getTime() ?? 0;
         const peerTs = peerConv.lastMessageAt.getTime();
-        if (peerTs >= mineTs) {
+        // ★ cwi-final S2-1 B-4①：peer 對話 RESOLVED 而我唔係 → 我贏（建議唔好搬去隱藏對話）
+        const peerResolved = peerConv.status === "RESOLVED";
+        const mineResolved = mine?.status === "RESOLVED";
+        if (!peerResolved && !mineResolved && peerTs >= mineTs) {
           counters["dedup-cross"] = (counters["dedup-cross"] ?? 0) + 1;
           return null;
         }
-        // 我哋更活躍 → 換掉 peer（留痕；兩個方向都計 dedup-cross — 均係跨店去重動作）
+        // 我哋贏（兩者皆 OPEN 時我哋更活躍；或 peer RESOLVED 我唔係）→ 換掉 peer（留痕；兩個方向都計 dedup-cross）
         counters["dedup-cross"] = (counters["dedup-cross"] ?? 0) + 1;
         await prisma.followupTask.update({
           where: { id: peer.id },
@@ -263,22 +286,34 @@ async function createTask(
       }
     }
   }
-  const task = await prisma.followupTask.create({
-    data: {
-      clinicId: draft.clinicId,
-      conversationId: draft.conversationId,
-      patientApricotId: draft.patientApricotId,
-      phoneHashes: draft.phoneHashes,
-      ruleId: draft.ruleId,
-      source: "RULE",
-      dueAt: draft.dueAt,
-      status: "SUGGESTED",
-      templateName: draft.templateName,
-      templateVars: (draft.templateVars ?? undefined) as Prisma.InputJsonValue | undefined,
-      contextJson: (draft.contextJson ?? undefined) as Prisma.InputJsonValue | undefined,
-      note: draft.note ?? null,
-    },
-  });
+  // ★ cwi-final S2-1：create 包 try/catch — 並行 scan 雙建撞 unique partial index
+  //   "FollowupTask_open_subject"（ruleId, subjectKey WHERE SUGGESTED）→ P2002 = 另一邊先建到 = in-flight
+  let task: { id: string; status: string; dueAt: Date };
+  try {
+    task = await prisma.followupTask.create({
+      data: {
+        clinicId: draft.clinicId,
+        conversationId: draft.conversationId,
+        patientApricotId: draft.patientApricotId,
+        phoneHashes: draft.phoneHashes,
+        ruleId: draft.ruleId,
+        subjectKey: draft.subjectKey,
+        source: "RULE",
+        dueAt: draft.dueAt,
+        status: "SUGGESTED",
+        templateName: draft.templateName,
+        templateVars: (draft.templateVars ?? undefined) as Prisma.InputJsonValue | undefined,
+        contextJson: (draft.contextJson ?? undefined) as Prisma.InputJsonValue | undefined,
+        note: draft.note ?? null,
+      },
+    });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      counters["in-flight"] = (counters["in-flight"] ?? 0) + 1;
+      return null;
+    }
+    throw e;
+  }
   counters.created = (counters.created ?? 0) + 1;
   // ★ v3：cron 零 outbound — 冇 L2 直發。SUGGESTED 等員工喺收件箱建議卡撳採用/跳過。
   return { id: task.id, status: task.status, dueAt: task.dueAt };
@@ -357,6 +392,8 @@ async function scanIdleConversations(
         patientApricotId: pinnedPatientOf(cv),
         phoneHashes: phoneHashes(contact.waId),
         ruleId: rule.id,
+        // ★ cwi-final S2-1：idle 科目含 lastInboundAt — 病人再講嘢 = 新科目（可再出）
+        subjectKey: `idle:${cv.id}:${(cv.lastInboundAt as Date).toISOString()}`,
         dueAt,
         templateName: rule.templateName,
         templateVars: null,
@@ -449,8 +486,8 @@ async function scanBeforeAppointment(
     if (appts === null) continue;
     const { byHash } = await loadClinicPairing(clinic.id);
     for (const a of appts) {
-      // MD §0.2：0/102 = 有效預約（待覆診）；改期（102）照提醒
-      if (a.bookingStatus !== 0 && a.bookingStatus !== 102) continue;
+      // MD §0.2 / cwi-final S2-1：只取**有效預約 status 0**（待覆診）— 102 = 被改期嘅舊單（W-8），唔提醒
+      if (a.bookingStatus !== 0) continue;
       const apptTime = new Date(hkApptTimeMs(a.date, a.start));
       if (apptTime <= now) continue; // 已過嘅預約唔提醒
       const dueAt = new Date(apptTime.getTime() - delayToMs(rule.delayValue, rule.delayUnit));
@@ -469,6 +506,8 @@ async function scanBeforeAppointment(
           patientApricotId: a.patientApricotId,
           phoneHashes: a.phoneHashes ?? [],
           ruleId: rule.id,
+          // ★ cwi-final S2-1：同預約只出一次（科目級）
+          subjectKey: `appt:${a.apricotApptId}`,
           dueAt,
           templateName: rule.templateName,
           templateVars: { apptDate: a.date, apptTime: a.start, providerName: a.providerName },
@@ -518,6 +557,8 @@ async function scanAfterNoShow(
           patientApricotId: a.patientApricotId,
           phoneHashes: a.phoneHashes ?? [],
           ruleId: rule.id,
+          // ★ cwi-final S2-1：同爽約只出一次（科目級）
+          subjectKey: `noshow:${a.apricotApptId}`,
           dueAt,
           templateName: rule.templateName,
           templateVars: { apptDate: a.date, apptTime: a.start, providerName: a.providerName },
@@ -542,8 +583,12 @@ export interface FollowupScanResult {
   created: number;
   expired: number;
   inFlight: number;
+  /** ★ cwi-final S2-1：科目級終態（同 rule × 同 subjectKey 已 SENT/COMPLETED/SKIPPED/EXPIRED/業務取消） */
+  subjectDone: number;
   exhausted: number;
   dedupWindow: number;
+  /** ★ cwi-final S2-1：建之前先計過期 — 「一出世就過期」嘅行唔再建 */
+  expiredAtCreate: number;
   dedupCross: number;
   optOut: number;
   noConversation: number;
@@ -676,6 +721,8 @@ async function scanAfterTreatment(
           patientApricotId: v.patientApricotId,
           phoneHashes: v.phoneHashes ?? [],
           ruleId: rule.id,
+          // ★ cwi-final S2-1：同 visit 只出一次（科目級）
+          subjectKey: `tx:${v.visitId}`,
           dueAt,
           templateName: rule.templateName,
           templateVars: { visitDate: v.visitDate },
@@ -743,6 +790,8 @@ async function scanRecallNoRepeat(
           patientApricotId: v.patientApricotId,
           phoneHashes: v.phoneHashes ?? [],
           ruleId: rule.id,
+          // ★ cwi-final S2-1：同病人同 lastVisitDate 只出一次（科目級）
+          subjectKey: `recall:${v.patientApricotId}:${v.visitDate}`,
           dueAt,
           templateName: rule.templateName,
           templateVars: { lastVisitDate: v.visitDate, intervalMonths: rule.delayValue },
@@ -794,7 +843,11 @@ async function scanQuotedNotBooked(
   const dueQuotes: WorkforceQuote[] = quotes.filter((q) => {
     if (q.status === "discarded") return false;
     if (q.status === "pending" && q.certainty !== "high") return false;
-    return new Date(`${q.sourceVisitDate}T00:00:00+08:00`).getTime() + delayMs <= now.getTime();
+    const svMs = new Date(`${q.sourceVisitDate}T00:00:00+08:00`).getTime();
+    if (svMs + delayMs > now.getTime()) return false; // 未到期
+    // ★ cwi-final S2-1：E 類上限 — sourceVisitDate 超過 delay + 14 日唔再建（同過期規則「建議日 + 14 日」一致）
+    if (now.getTime() - svMs > delayMs + 14 * DAY_MS) return false;
+    return true;
   });
   if (!dueQuotes.length) return;
   const patientIds = [...new Set(dueQuotes.map((q) => q.patientApricotId))];
@@ -867,6 +920,8 @@ async function scanQuotedNotBooked(
           patientApricotId: q.patientApricotId,
           phoneHashes: [], // 報價 lane 無 phoneHashes（患者經 pinned 配對）
           ruleId: rule.id,
+          // ★ cwi-final S2-1：同報價只出一次（科目級）
+          subjectKey: `quote:${q.id}`,
           dueAt,
           templateName: rule.templateName,
           // ★ v3 紅線：E 類訊息唔准重複報價金額 → templateVars 唔入 amount（template 已無 {{amount}}）
@@ -961,8 +1016,10 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
     created: counters.created ?? 0,
     expired,
     inFlight: counters["in-flight"] ?? 0,
+    subjectDone: counters["subject-done"] ?? 0,
     exhausted: counters.exhausted ?? 0,
     dedupWindow: counters["dedup-window"] ?? 0,
+    expiredAtCreate: counters.expiredAtCreate ?? 0,
     dedupCross: counters["dedup-cross"] ?? 0,
     optOut: counters.optOut ?? 0,
     noConversation: counters.noConversation ?? 0,
@@ -1039,13 +1096,15 @@ export async function checkCancellations(
           if (target && (target.bookingStatus === 1 || target.bookingStatus === 4)) return "ARRIVED";
         }
       }
-      // ③ BOOKED：task 之後新出現嘅有效預約（0/1/4/102）— 排除 task 自己跟嗰筆（contextJson.apptId）：
+      // ③ BOOKED：task 之後新出現嘅有效預約（0/1/4）— 102 = 被改期嘅舊單唔算新預約（cwi-final S2-1；新單本身係 0）；
+      //   排除 task 自己跟嗰筆（contextJson.apptId）：
       //   BEFORE_APPOINTMENT task 由嗰筆預約而建，佢自己 status 0 係預期（未到期），唔係「新 booking」
       if (onBooking) {
         const ctxApptId = ((task.contextJson ?? {}) as { apptId?: string }).apptId;
         const fresh = mine.find(
           (a) =>
             a.bookingStatus >= 0 &&
+            a.bookingStatus !== 102 &&
             (!ctxApptId || a.apricotApptId !== ctxApptId) &&
             new Date(hkApptTimeMs(a.date, a.start)) > task.createdAt
         );

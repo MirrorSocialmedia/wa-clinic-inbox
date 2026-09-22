@@ -6846,6 +6846,32 @@ q "DELETE FROM \"Contact\" WHERE id IN ('$I_CT1','$I_CT2')" >/dev/null 2>&1
 check "I sweep fixture 零殘留" "$(q "SELECT ((SELECT count(*) FROM \"Message\" WHERE \"conversationId\" IN ('$I_CONV1','$I_CONV2')) + (SELECT count(*) FROM \"Contact\" WHERE id IN ('$I_CT1','$I_CT2')))::text c" | jf c)" "0"
 [ "$I_FAIL" = 0 ] && pass "I 段完成：「最新一頁」真最新 50 + 三分支游標（T300–T302）" || fail "I 段有項失敗（見上 ❌）"
 
+# ══════════════ J. cwi-final S2-1（建議去重改「業務科目」subjectKey）T620–T740 ══════════════
+echo ""
+echo "[J/3] cwi-final S2-1: subjectKey 科目級去重 (T620-T740)"
+J_FAIL=0
+# in-process runFollowupScan（v3 慣例）+ DB 最終狀態斷言 — dev worker 的 cron scan 就算段內觸發，
+# 都會被 unique partial index + 科目級終態收斂到同一狀態（呢單要測嘅收斂性本身）。
+S21_OUT=$(pnpm -s tsx scripts/e2e-s21-t620-t740.ts 2>&1)
+S21_CODE=$?
+echo "$S21_OUT" | grep -vE '"level":(30|40)' | tail -40 | sed 's/^/    /'
+if [ "$S21_CODE" = "0" ] && echo "$S21_OUT" | grep -q "^T620-OK$"; then
+  pass "T620 同一 appt 只出一次（建→scan×3→0 新行 / COMPLETED→+8 日→0 / 未釘 A 類 skip→+10 分鐘→0 / 再講嘢→新 subject 出 / 102 改期舊單唔提醒 / E 類 delay+14d 上限）"
+else
+  fail "T620 科目級去重 e2e 失敗（exit=$S21_CODE，見上 ❌）"; J_FAIL=1
+fi
+if [ "$S21_CODE" = "0" ] && echo "$S21_OUT" | grep -q "^T740-OK$"; then
+  pass "T740 並行雙 runFollowupScan：每科目恰 1 行（P2002 unique partial index 防疊收斂）"
+else
+  fail "T740 並行去重 e2e 失敗（exit=$S21_CODE，見上 ❌）"; J_FAIL=1
+fi
+if [ "$S21_CODE" = "0" ] && echo "$S21_OUT" | grep -q "^S21-SWEEP-OK$"; then
+  pass "S21-SWEEP hermetic 清理零殘留（tasks/convs/contacts/rules + mock 檔）"
+else
+  fail "S21-SWEEP 清理失敗或有殘留"; J_FAIL=1
+fi
+[ "$J_FAIL" = 0 ] && pass "J 段完成：cwi-final S2-1 subjectKey 科目級去重（T620–T740）" || fail "J 段有項失敗（見上 ❌）"
+
 
 
 # ── summary ────────────────────────────────────────────────────────────

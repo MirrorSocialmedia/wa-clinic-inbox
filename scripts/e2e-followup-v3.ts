@@ -307,12 +307,18 @@ async function main(): Promise<void> {
 
   // 出廠規則（seed 6 條 — F 已剷）
   const ruleIds: Record<string, string> = {};
-  for (const trig of ["CONVERSATION_IDLE", "BEFORE_APPOINTMENT", "AFTER_NO_SHOW", "AFTER_TREATMENT", "RECALL_NO_REPEAT", "QUOTED_NOT_BOOKED"]) {
+  // ★ cwi-final S2-1（S0-8 ⑦）：B1 出廠規則已永久 disable（firstUseConfirmedAt NULL）→ 只驗存在、唔要求 enabled
+  {
+    const b1 = await prisma.followupRule.findFirst({ where: { trigger: "BEFORE_APPOINTMENT" as never } });
+    if (!b1) fail("出廠規則 BEFORE_APPOINTMENT 搵唔到（seed？）");
+    ruleIds["BEFORE_APPOINTMENT"] = b1.id;
+  }
+  for (const trig of ["CONVERSATION_IDLE", "AFTER_NO_SHOW", "AFTER_TREATMENT", "RECALL_NO_REPEAT", "QUOTED_NOT_BOOKED"]) {
     const r = await prisma.followupRule.findFirst({ where: { trigger: trig as never, enabled: true } });
     if (!r) fail(`出廠規則 ${trig} 搵唔到（seed？）`);
     ruleIds[trig] = r.id;
   }
-  check("SETUP 規則矩陣（A/B1/B2/C/D/E 六條 enabled）", true);
+  check("SETUP 規則矩陣（5 條 enabled + B1 存在 — S0-8 disable）", true);
 
   // mock fixture（clinical：X1 跨店 visits；followup：appointments 空）
   const d = dstr(-2);
@@ -673,14 +679,27 @@ async function main(): Promise<void> {
   {
     const runWorker = (env: NodeJS.ProcessEnv, waitMs: number): Promise<{ code: number | null; out: string; okString: boolean }> =>
       new Promise((resolve) => {
-        const child = spawn("npx", ["tsx", "src/workers/index.ts"], { cwd: process.cwd(), env, stdio: ["ignore", "pipe", "pipe"] });
+        // ★ cwi-final S2-1（T430d 假紅修復）：detached 開新 process group — 舊版 kill SIGTERM 只殺 npx wrapper，
+        //   tsx→node worker 留做孤兒（吊住 Redis cron queue 會搶後続 e2e 嘅 job，log 入死 pipe）。
+        const child = spawn("npx", ["tsx", "src/workers/index.ts"], { cwd: process.cwd(), env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+        const killGroup = () => {
+          try {
+            if (child.pid) process.kill(-child.pid, "SIGKILL"); // 整組（npx→tsx→node）
+          } catch {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              /* 已退 */
+            }
+          }
+        };
         let out = "";
-        const t = setTimeout(() => child.kill("SIGKILL"), waitMs);
+        const t = setTimeout(() => killGroup(), waitMs);
         const watch = (b: Buffer) => {
           out += b.toString();
           if (out.includes("all workers running")) {
             clearTimeout(t);
-            child.kill("SIGTERM");
+            killGroup();
           }
         };
         child.stdout.on("data", watch);
