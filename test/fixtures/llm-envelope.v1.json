@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "spec": "cwi-final S2-9 信封 test vector（wa-inbox ⇄ workforce 共用 — 兩 repo 同一份檔）",
+    "secret_b64": "Y3dpLXMyOWEtdGVzdC1rZXktMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMQ==",
+    "secret_note": "固定測試 key（只係 test vector，唔係生產密鑰；生產 = openssl rand -base64 48）",
+    "kid": "k1",
+    "context": "req:llm-extract",
+    "body": {
+      "notePlain": "fixture note（S2-9 test vector — 非真病人資料）：A1 做咗，B2 未做。",
+      "terms": [
+        {
+          "shorthand": "A1",
+          "nameCn": "測試項目A",
+          "nameEn": "Test A"
+        },
+        {
+          "shorthand": "B2",
+          "nameCn": "測試項目B",
+          "nameEn": null
+        }
+      ]
+    },
+    "generated_at": "2026-09-22T20:03:33.977Z",
+    "generated_by": "scripts/gen-llm-envelope-fixture.ts（wa-clinic-inbox）",
+    "usage": "open(secret_b64, envelope, context) 必須還原 body；context 改任何一字 → open throw"
+  },
+  "envelope": {
+    "v": 1,
+    "kid": "k1",
+    "ts": 1790107413977,
+    "nonce": "d3zKcWxiCSedHw8riBYGAw",
+    "iv": "2xE6/X4SHM9BTkZS",
+    "ct": "6znJDk9FNJvoEuhHP3OfH9WWfPNivcwOR3LhCiFPvz2+c9Cl9flyVmsruXheUo55HMEQ+1xx7baISBWGTDH7v/jI0fRYOAPSNy5+N2yAoPeIdY2vFP+qMxq0tB24cmV7BR3ktB672LJkcLlM2S577fdAa+5keRjjYl/fnSkgZs/pvdOMq35vR8/GOV0gY1ud+KEaRJxFVIoJ2073AbAtpTEl9nDjcFZRQBCM/slmvgwa//QRPEn+mEglVT03IcEBINxrcXzm7NS8O1rEQEfccRHjqjqBTIIX19nhXlBhzmUdtH4pasQ=",
+    "tag": "IU2D0+/YN9h/hqR8kRARvA=="
+  }
+}

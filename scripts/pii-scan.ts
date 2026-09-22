@@ -188,6 +188,9 @@ function scanLogs(): void {
     "/tmp/e2e-seed.log",
   ];
   let checked = 0;
+  // ★ cwi-final S2-9（D-2）：log 禁 notePlain — 報價原文變數名入 log = 有行 log dump 咗 note 內容
+  //   （S2-9 proxy route 鐵律：log 只准 metadata；word boundary 精確 match 防誤中更長 identifier）
+  const NOTE_PLAIN_LOG_RE = /\bnotePlain\b/;
   for (const f of logFiles) {
     let content = "";
     try {
@@ -197,6 +200,7 @@ function scanLogs(): void {
     }
     checked++;
     for (const label of matchPiiMarkers(content)) add("log", `${f}: 發現 "${label}"`);
+    if (NOTE_PLAIN_LOG_RE.test(content)) add("log", `${f}: 發現 "notePlain"（S2-9 報價原文落 log）`);
   }
   console.log(`[pii-scan] log: ${checked} log files scanned`);
 }

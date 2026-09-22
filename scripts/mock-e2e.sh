@@ -6968,6 +6968,43 @@ fi
 [ "$M_FAIL" = 0 ] && pass "M 段完成：cwi-final S2-8（T745）" || fail "M 段有項失敗（見上 ❌）"
 
 
+# ══════════════ N. cwi-final S2-9a（wa-inbox LLM proxy）T745–T749 + T623-W + 信封 vector ══════════════
+echo ""
+echo "[N/6] cwi-final S2-9a: wa-inbox LLM proxy（envelope AES-256-GCM + quote-llm + /api/internal/llm-extract）(T745-T749 + T623-W + vector)"
+N_FAIL=0
+# in-process 打 route（同 J/K/L/M 段慣例）：3100 dev server 嘅 env 冇 LLM_PROXY_*（起機 snapshot），
+# in-process 可以 hermetic pin + T749「同 process breaker」斷言要求同一 module instance。
+# INTERNAL_LLM_SECRET 由 .env.local 提供（gitignored，random — 唔 commit）；LLM_PROXY_ENABLED 預設 OFF（.env.example），
+# 本段在 script 內 pin =1。route 鐵律（零 prisma / 零 body log / 零 cache）= scripts/check-internal-no-persist.sh 靜態鎖。
+# 註：本段 T745 係 S2-9 spec 嘅 LLM proxy 編號（同 M 段 S2-8 嘅 T745a/b/c 唔同個測試 — spec 固定編號）。
+S29A_OUT=$(pnpm -s tsx scripts/e2e-s29a-t745-749.ts 2>&1)
+S29A_CODE=$?
+echo "$S29A_OUT" | grep -vE '"level":(30|40|50)' | tail -60 | sed 's/^/    /'
+for m in "T745-OK|T745 tag 改一 byte → 401 BAD_TAG + kid 錯 → 401 BAD_ENVELOPE（回應只回原因碼）" \
+         "T746-OK|T746 同一信封送兩次 → 第二次 409 REPLAY（Redis nonce 180s NX）" \
+         "T747-OK|T747 ts 早 2 分鐘 → 401 STALE" \
+         "S29A-VECTOR-OK|信封 vector：fixture open 返原文 + context 改一字 → throw（防兩邊實作漂移）" \
+         "T623W-OK|T623-W 打 route 前後 6 張業務表 count(*) 不變（route 零 DB 寫入）+ resp envelope open" \
+         "T748-OK|T748 CONCURRENCY=1 同時兩個 → 一個 429 BUSY + retryAfterSec=5（429 契約；workforce 重試喺 C6）" \
+         "T749-OK|T749 mock 上游 500×3 → llm_error×3 → breaker_open + shared breaker 仍 closed（R-29 隔離）" \
+         "S29A-SWEEP-OK|S29A-SWEEP 終態 6 表 count == 前態（全 run 零 DB 寫入）"; do
+  id="${m%%|*}"; desc="${m#*|}"
+  if [ "$S29A_CODE" = "0" ] && echo "$S29A_OUT" | grep -q "^$id$"; then pass "$desc"
+  else fail "$desc（exit=$S29A_CODE，見上 ❌）"; N_FAIL=1; fi
+done
+# 鐵律：洩露 probe marker（T623 埋喺 notePlain 入面）— 任何 log 零 hit。
+# S29A_OUT 攞住 in-process 全部 stdout（連 pino fd1 行）→ 即 route log 通道嘅完整捕獲。
+S29A_MARKER="S29A_LEAK_PROBE_7f3a"
+if echo "$S29A_OUT" | grep -qF "$S29A_MARKER"; then fail "T623-W marker 落咗 e2e stdout（in-process route log 洩露）"; N_FAIL=1
+else pass "T623-W marker 0 hit e2e stdout（in-process route log）"; fi
+MARK_HITS=$(grep -lF "$S29A_MARKER" /tmp/e2e-server.log /tmp/e2e-worker.log /tmp/e2e-worker2.log /tmp/e2e-worker-fail.log /tmp/e2e-migrate.log /tmp/e2e-seed.log 2>/dev/null | wc -l)
+[ "$MARK_HITS" = "0" ] && pass "T623-W marker 0 hit /tmp/e2e-*.log" || { fail "T623-W marker 喺 /tmp log 有 hit（grep $S29A_MARKER /tmp/e2e-*.log）"; N_FAIL=1; }
+# 對照：route 一定要 log 咗 metadata 行（llm-extract: done）— 唔係 log 通道死咗嗰種假綠
+if echo "$S29A_OUT" | grep -qF "llm-extract: done"; then pass "route metadata log 行在（llm-extract: done — 只 metadata，0 marker）"
+else fail "llm-extract: done log 行缺席（log 通道未工作 — 上面 0-hit 斷言無意義）"; N_FAIL=1; fi
+[ "$N_FAIL" = 0 ] && pass "N 段完成：cwi-final S2-9a wa-inbox LLM proxy（T745–T749 + T623-W + vector）" || fail "N 段有項失敗（見上 ❌）"
+
+
 # ── summary ────────────────────────────────────────────────────────────
 
 # ── summary ────────────────────────────────────────────────────────────

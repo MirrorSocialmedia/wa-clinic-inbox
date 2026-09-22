@@ -109,6 +109,12 @@ export interface AiChatOptions {
   temperature?: number;
   timeoutMs?: number;
   maxTokens?: number;
+  /**
+   * ★ cwi-final S2-9（D-2）：true = 本 call 唔記 shared breaker（breakerAllow / breakerRecord 都跳過）。
+   * 俾內部 proxy 層用（quote-llm 有自己獨立 breaker — R-29：proxy 連續失敗唔應該開晒
+   * 成個 web process 嘅 shared breaker 連累其他 LLM 功能）。
+   */
+  skipBreaker?: boolean;
 }
 
 export interface AiChatResult {
@@ -192,7 +198,7 @@ export async function chatWithFallback(
   opts: AiChatOptions
 ): Promise<AiChatResult> {
   if (!cfg.baseUrl) throw new AiCallError("VLLM_BASE_URL 未設定（AI degraded）");
-  if (!breakerAllow()) {
+  if (!opts.skipBreaker && !breakerAllow()) {
     throw new AiCallError("circuit breaker OPEN — AI skipped");
   }
 
@@ -206,7 +212,7 @@ export async function chatWithFallback(
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const r = await chatOnce(cfg, model, opts);
-        breakerRecord(true);
+        if (!opts.skipBreaker) breakerRecord(true);
         if (model !== cfg.primaryModel) {
           log.warn({ model, latencyMs: r.latencyMs }, "ai call succeeded on fallback model");
         }
@@ -221,6 +227,6 @@ export async function chatWithFallback(
       }
     }
   }
-  breakerRecord(false);
+  if (!opts.skipBreaker) breakerRecord(false);
   throw lastErr ?? new AiCallError("ai call failed (unknown)");
 }

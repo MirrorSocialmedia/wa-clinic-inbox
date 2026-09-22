@@ -87,7 +87,7 @@
     "e2e:booking-ui-contract": "tsx scripts/booking-ui-contract.ts",
     "weekly-report": "tsx scripts/weekly-report.ts",
     "pii-scan": "tsx scripts/pii-scan.ts",
-    "audit:gate": "pnpm audit --prod --audit-level=high",
+    "audit:gate": "pnpm audit --prod --audit-level=high && bash scripts/check-internal-no-persist.sh",
     "test:pii": "tsx scripts/pii-markers.test.ts",
     "mock-e2e": "bash scripts/mock-e2e.sh",
     "e2e-real-ai": "bash scripts/e2e-real-ai.sh",
