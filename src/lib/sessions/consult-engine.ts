@@ -190,7 +190,12 @@ export const PRICE_TERMS = ["幾錢", "幾多錢", "咩收費", "收費", "價�
 
 // ── 訊號偵測（純） ─────────────────────────────────────────────────────
 
-function hitAny(text: string, terms: string[]): boolean {
+/**
+ * 詞表命中（lowercase substring）。
+ * ★ cwi-final S2-7（B-6）：export 俾 pipeline 做 deterministic 痛症訊號判定
+ *   （`hitAny(lexiconCanonicalText, PAIN_SIGNAL_TERMS)` — 同 consult engine #1 同一份詞表/同一口徑）。
+ */
+export function hitAny(text: string, terms: string[]): boolean {
   const t = (text ?? "").toLowerCase();
   return terms.some((x) => x.length > 0 && t.includes(x.toLowerCase()));
 }

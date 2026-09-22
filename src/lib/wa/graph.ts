@@ -407,6 +407,8 @@ const MOCK_TEMPLATES: MessageTemplate[] = [
   { name: "new_arrival_intro", language: "en_US", category: "UTILITY", status: "PENDING" },
   { name: "checkup_promo_january", language: "en_US", category: "MARKETING", status: "REJECTED" },
   { name: "appt_reminder_zh", language: "zh_HK", category: "UTILITY", status: "APPROVED" },
+  // ★ cwi-final S2-5（T742）：MARKETING APPROVED — 過窗 template 計費真 category 路徑（billingCategory=MARKETING）
+  { name: "post_op_promo_zh", language: "zh_HK", category: "MARKETING", status: "APPROVED" },
 ];
 
 /**

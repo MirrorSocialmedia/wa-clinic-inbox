@@ -1166,7 +1166,8 @@ export function ChatPane(p: Props) {
             const inWindow = !!p.window?.open;
             const winH = p.window ? Math.max(0, Math.ceil((p.window.remainingMs ?? 0) / 3600000)) : 0;
             const noTpl = !s.templateName || s.templatePreview == null;
-            const unapproved = !noTpl && s.templateApproved === false;
+            // ★ cwi-final S2-5：本地 approved **或** Meta 未批都係「等審批」（engine 雙 gate 同一口徑）
+            const unapproved = !noTpl && (s.templateApproved === false || s.templateMetaApproved === false);
             const reason = followupReasonLine(s);
             return (
               <div className="mb-2 rounded-[26px] border-2 border-dashed border-brand/60 bg-panel p-3.5" data-e2e="fu-sugg-card">
@@ -1224,6 +1225,10 @@ export function ChatPane(p: Props) {
                     <span className="text-warn-text">已過窗 · 等 template 審批中（唔俾發）</span>
                   ) : (
                     <span className="text-t2">已過窗 · 只可發 template</span>
+                  )}
+                  {/* ★ cwi-final S2-5：MARKETING category = 收費較高 — 發前先講清楚 */}
+                  {s.templateWaCategory === "MARKETING" && (
+                    <span className="text-warn-text"> · 行銷類 template（收費較高）</span>
                   )}
                   {reason && <span className="text-t3"> · {reason}</span>}
                 </div>

@@ -21,14 +21,16 @@
  * - 發送只由 UI 觸發（POST /api/followups/tasks/:id adopt/send）→ 行 W 現有 outbound 機制；
  *   sentVia = AI_ADOPTED（永遠）→ 唔觸發 human cooldown（cooldown 只計 HUMAN_TYPED）。
  * - E 類訊息唔准重複報價金額（template 唔入 {{amount}}）。
- * - audit FOLLOWUP_SENT / FOLLOWUP_SCAN / FOLLOWUP_OPT_OUT / FOLLOWUP_REPLIED 零 PII；billingCategory = UTILITY。
+ * - audit FOLLOWUP_SENT / FOLLOWUP_SCAN / FOLLOWUP_OPT_OUT / FOLLOWUP_REPLIED 零 PII；
+ *   billingCategory：窗口內 = SERVICE；過窗 template = Meta 真 category（S2-5）。
+ * - B-6：C 類建議發出後標 conv.postOpFollowupAt（enqueue 成功後先設 — S2-6）；72h 內痛症訊號 → pipeline 強制 PAIN_TRIAGE（唔入 CONSULT）。
  *
  * 防呆（spec §5）：
  * - B-4 跨店/多號去重：同 patientApricotId × 同 trigger 跨 clinic → 只留最近活躍對話嘅建議；
  *   終態（SKIPPED/SENT/COMPLETED）喺 rule.dedupWindowDays（default 7 日）內 → 唔再出。
  * - B-5 A 類防騷擾：最後 intent ∈ {THANKS, CLOSING} 唔出；同對話連續兩條建議被跳過/冇回應 → 永久唔再出；
  *   對話 RESOLVED 唔出（scan 只掃 OPEN）。
- * - B-6：C 類建議發出後標 conv.postOpFollowupAt；72h 內痛症訊號 → pipeline 強制 PAIN_TRIAGE（唔入 CONSULT）。
+ * - B-6：C 類建議發出後標 conv.postOpFollowupAt（enqueue 成功後先設 — cwi-final S2-6）；72h 內痛症訊號 → pipeline 強制 PAIN_TRIAGE（唔入 CONSULT）。
  *
  * 配對（P0 多號 E.164）：Contact.waId → phoneHashes(waId) ↔ appointment.phoneHashes hasSome。
  * 配唔到對話 → 唔建 task（無 WA 對話可發，建咗都係永久死 task）。
@@ -40,7 +42,7 @@
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { Prisma, FollowupTrigger } from "@prisma/client";
+import { Prisma, FollowupTrigger, type Message } from "@prisma/client";
 import { phoneHashes } from "@/lib/phone-hash";
 import { hkDateOffset, hkTodayStr } from "@/lib/availability";
 import {
@@ -53,6 +55,8 @@ import {
   type WorkforceQuote,
 } from "@/lib/workforce/client";
 import { getWindowState } from "@/lib/wa/window";
+import { approvedTemplateList } from "@/lib/wa/approved-templates";
+import { billingCategoryForTemplate, type BillingCategory } from "@/lib/wa/billing";
 
 // ★ 延遲 import（同 booking/reminder.ts 口徑）：outboundQueue/publishNotify 拉起 Redis 連接 —
 //   unit test（零 Redis）import 呢個 module 時唔連坐。
@@ -130,6 +134,27 @@ export function renderFollowupText(text: string, vars: Record<string, string | n
     const v = vars[k];
     return v === null || v === undefined ? "" : String(v);
   });
+}
+
+/**
+ * ★ cwi-final S2-5：過窗 template `components.parameters` — 變數值按 template 變數次序。
+ * 次序 = registry `paramOrder`（C1 加嘅 String[]，審批時記）；空 → fallback 按 `text` 入面
+ * `{{var}}` 首次出現次序（舊行零遷移兼容）。缺變數 = 空字串（renderFollowupText 口徑）。
+ * 輸出 = Graph API 口徑 `[{ type: "text", text }]`（舊 raw string 口徑 Graph 會拒）。
+ */
+export function followupTemplateParamValues(
+  template: { text: string; paramOrder: string[] | null },
+  vars: Record<string, string | number | null | undefined>
+): { type: "text"; text: string }[] {
+  const order =
+    template.paramOrder && template.paramOrder.length > 0
+      ? template.paramOrder
+      : [...template.text.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]);
+  const seen = new Set<string>();
+  return order.filter((k) => (seen.has(k) ? false : (seen.add(k), true))).map((k) => ({
+    type: "text",
+    text: vars[k] === null || vars[k] === undefined ? "" : String(vars[k]),
+  }));
 }
 
 /** 候選對話 → 配對病人（pinned 優先；零 workforce call）。 */
@@ -1266,11 +1291,16 @@ export interface SendResult {
 /**
  * 發一個 follow-up 建議（v3：只由 UI 觸發 — 員工喺建議卡撳採用）。
  * 流程：狀態守門（SUGGESTED）→ 時效預檢（過期 → EXPIRED）→ 取消檢查（重跑）
- *   → 窗口判斷（開 = text / 過 = 必 approved template，未審批 → 唔真發、task 留 SUGGESTED）
- *   → Message QUEUED + task SENT 搶佔 → enqueue outbound + notify + audit。
- * 鐵律：唔 claim（assigneeId 零改動）；billingCategory = UTILITY；audit 零 PII；
+ *   → 窗口判斷（開 = text / 過 = 必 approved template — 雙審批：registry 本地 **且** Meta APPROVED；
+ *     未審批 → 唔真發、task 留 SUGGESTED）
+ *   → Message QUEUED + task SENT 原子搶佔（★ cwi-final S2-6：claim + create + sentMessageId 同一 $transaction）
+ *   → enqueue outbound + notify + audit。
+ * 鐵律：唔 claim（assigneeId 零改動）；audit 零 PII；
+ *   billingCategory（★ cwi-final S2-5）：窗口內 = SERVICE（人手窗口內回覆口徑）；
+ *   過窗 template = Meta 回傳真 category（billingCategoryForTemplate — MARKETING 就記 MARKETING）；
  *   sentVia 恒為 AI_ADOPTED（v3 冇 AI_AUTO — L2 自動發送已取消）。
- * ★ B-6：C 類（AFTER_TREATMENT）發出成功 → conv.postOpFollowupAt = now（開 72h 痛症讓路窗口）。
+ * ★ B-6：C 類（AFTER_TREATMENT）發出成功 → conv.postOpFollowupAt = now（開 72h 痛症讓路窗口）—
+ *   ★ cwi-final S2-6：enqueue 成功後先設（enqueue uncertain = 發送時間未知 → 窗口起點未知）。
  */
 /**
  * ★ cwi-followup-v3 B-9：template locale 解析 — Contact.locale === "en" 且 `<key>_en` 存在 → 用 _en 版本；
@@ -1303,8 +1333,7 @@ export async function sendFollowupTask(
     await prisma.followupTask.update({ where: { id: taskId }, data: { status: "EXPIRED", handledAt: now } });
     return { status: "EXPIRED", cancelReason: null, messageId: null, viaTemplate: false };
   }
-  const clinic = await prisma.clinic.findUnique({ where: { id: task.clinicId }, select: { id: true, code: true, name: true } });
-
+  const clinic = await prisma.clinic.findUnique({ where: { id: task.clinicId }, select: { id: true, code: true, name: true, waBusinessAccountId: true } });
   // ① 取消檢查（每次發送前重跑 — MD §4.4）
   const cancelReason = await checkCancellations(task, rule, clinic, now);
   if (cancelReason) {
@@ -1337,7 +1366,7 @@ export async function sendFollowupTask(
     return { status: "SKIPPED", cancelReason: "NO_TEMPLATE", messageId: null, viaTemplate: false };
   }
 
-  // ② 窗口判斷（MD §4.5）：窗口內 = free-form text；窗口過咗 = 只可 approved template
+  // ② 窗口判斷（MD §4.5）：窗口內 = free-form text（billing = SERVICE）；窗口過咗 = 只可 approved template
   const win = getWindowState(conv.lastInboundAt, now);
   // 變數來源：contextJson（顯示用結構化數據 — 建 task 時已零 PII）< templateVars（scan 精確變數）< 常規欄
   const vars: Record<string, string | number | null> = {
@@ -1350,58 +1379,88 @@ export async function sendFollowupTask(
   let viaTemplate = false;
   let msgType: "text" | "template" = "text";
   let templateMeta: Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput | undefined;
+  // ★ cwi-final S2-5：窗口內經呢條路發（員工撳「發送 template」但窗口其實開咗）= 窗口內回覆 → SERVICE
+  let billingCategory: BillingCategory = "SERVICE";
   if (!win.open) {
     if (!template.approved) {
-      // 🔴 安全設計：template 未審批 → 唔會真發（seed 全部 approved=false）。
+      // 🔴 安全設計：template 未審批（registry 本地）→ 唔會真發（seed 全部 approved=false）。
       // v3：task 留 SUGGESTED（審批後可再採用 — 唔係 terminal，唔計入 dedup 窗口）；UI 顯示「等 template 審批」。
       log.warn({ taskId, template: template.key }, "followup: 窗口過咗但 template 未審批 → 唔俾發（task 留 SUGGESTED）");
       return { status: "SKIPPED", cancelReason: "NO_TEMPLATE", messageId: null, viaTemplate: false };
     }
+    // ★ cwi-final S2-5：Meta 側審批（單一來源 approvedTemplateList — 回傳全部 APPROVED，category 由 caller 決定）：
+    //   registry 本地 approved **且** Meta 有同名 APPROVED template 先發；Meta 未批（PENDING/REJECTED/唔存在）→
+    //   等 template 審批（task 留 SUGGESTED — 審批後可再採用）。
+    const metaName = template.waTemplateName ?? template.key;
+    const metaList = await approvedTemplateList({ waBusinessAccountId: clinic?.waBusinessAccountId ?? null });
+    const metaTpl = metaList.find((t) => t.name === metaName);
+    if (!metaTpl) {
+      log.warn(
+        { taskId, template: template.key, metaName },
+        "followup: 窗口過咗但 Meta template 未審批（等 template 審批）→ 唔俾發（task 留 SUGGESTED）"
+      );
+      return { status: "SKIPPED", cancelReason: "NO_TEMPLATE", messageId: null, viaTemplate: false };
+    }
     viaTemplate = true;
     msgType = "template";
+    // ★ cwi-final S2-5：category = Meta 回傳嘅真 category（MARKETING 就記 MARKETING — 收費較高，UI 提示）；
+    //   billingCategory 同一真 category 映射（billingCategoryForTemplate：未知 → UTILITY fallback）。
+    billingCategory = billingCategoryForTemplate(metaTpl.category);
     templateMeta = {
-      name: template.waTemplateName ?? template.key,
+      name: metaName,
       language: template.language,
-      category: "UTILITY",
-      // 過窗 template 發送：body 預覽 = 渲染後文字（同 Phase B reminder 口徑）
-      components: [{ type: "body", parameters: [body] }],
+      category: metaTpl.category,
+      // 過窗 template 發送：body 預覽 = 渲染後文字（同 Phase B reminder 口徑）；
+      // components.parameters = 變數值按 template 變數次序（paramOrder；空 → text 內 {{var}} 出現次序）
+      //   { type: "text", text }（Graph 口徑 — 舊 raw string 會俾 Graph 拒）。
+      components: [{ type: "body", parameters: followupTemplateParamValues(template, vars) }],
     };
   }
 
-  // ③ Message QUEUED + task SENT 搶佔（併發冪等：先搶佔 SUGGESTED 先建 message）
-  const claimed = await prisma.followupTask.updateMany({
-    where: { id: taskId, status: "SUGGESTED" },
-    data: { status: "SENT", handledAt: now, handledBy: opts.staffId ?? null },
-  });
-  if (claimed.count !== 1) {
+  // ③ Message QUEUED + task SENT 搶佔（★ cwi-final S2-6 原子化：claim + message.create + sentMessageId
+  //    同一 $transaction — message.create 失敗 → 整體 rollback → task 留 SUGGESTED（修好可再採用），
+  //    根治「task 已 SENT 但 Message 唔存在」撕裂。併發冪等：只可搶 SUGGESTED；後到者回現狀。）
+  let msg: Message | null = null;
+  try {
+    msg = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.followupTask.updateMany({
+        where: { id: taskId, status: "SUGGESTED" },
+        data: { status: "SENT", handledAt: now, handledBy: opts.staffId ?? null },
+      });
+      if (claimed.count !== 1) return null; // 併發（兩員工同時撳）— 後到者退
+      const created = await tx.message.create({
+        data: {
+          conversationId: convId,
+          direction: "OUT",
+          channel: "API",
+          type: msgType,
+          body,
+          templateMeta,
+          status: "QUEUED",
+          sentByStaffId: opts.staffId ?? null,
+          // ★ v3：只由 UI 觸發 → 永遠 AI_ADOPTED（cooldown 只計 HUMAN_TYPED → 唔觸發）
+          aiAutoSent: false,
+          sentVia: "AI_ADOPTED",
+          // ★ cwi-final S2-5：窗口內 = SERVICE；過窗 template = Meta 真 category
+          billingCategory,
+          waTimestamp: now,
+        },
+      });
+      await tx.followupTask.update({ where: { id: taskId }, data: { sentMessageId: created.id } });
+      return created;
+    });
+  } catch (err) {
+    // transaction rollback（message.create 失敗等）→ task 留 SUGGESTED（狀態一致）— 照 throw 上層（API 500）。
+    log.error(
+      { taskId, err: err instanceof Error ? err.message : String(err) },
+      "followup: send transaction failed（rollback — task 留 SUGGESTED）"
+    );
+    throw err;
+  }
+  if (!msg) {
     // 併發（兩員工同時撳）— 後到者退
     const fresh = await prisma.followupTask.findUnique({ where: { id: taskId }, select: { status: true, sentMessageId: true } });
     return { status: (fresh?.status ?? "SENT") as SendResult["status"], cancelReason: null, messageId: fresh?.sentMessageId ?? null, viaTemplate: false };
-  }
-  const msg = await prisma.message.create({
-    data: {
-      conversationId: convId,
-      direction: "OUT",
-      channel: "API",
-      type: msgType,
-      body,
-      templateMeta,
-      status: "QUEUED",
-      sentByStaffId: opts.staffId ?? null,
-      // ★ v3：只由 UI 觸發 → 永遠 AI_ADOPTED（cooldown 只計 HUMAN_TYPED → 唔觸發）
-      aiAutoSent: false,
-      sentVia: "AI_ADOPTED",
-      // ★ 鐵律：billingCategory = UTILITY
-      billingCategory: "UTILITY",
-      waTimestamp: now,
-    },
-  });
-  await prisma.followupTask.update({ where: { id: taskId }, data: { sentMessageId: msg.id } });
-  // ★ B-6：C 類術後關懷建議發出 → 對話開 72h 窗口（痛症訊號讓路 PAIN_TRIAGE + 草稿零療程零報價）
-  if (rule?.trigger === "AFTER_TREATMENT") {
-    await prisma.conversation
-      .updateMany({ where: { id: convId }, data: { postOpFollowupAt: now } })
-      .catch(() => undefined);
   }
 
   // ★ cwi-final S2-3（行為決定）：員工採用發送 → RESOLVED 對話重開。
@@ -1432,8 +1491,10 @@ export async function sendFollowupTask(
   void emitFollowupChanged(convId, conv.clinicId, taskId, "SENT");
 
   // ④ outbound（W 現有機制：QUEUED → outbound worker → Graph）+ notify + audit
+  let enqueueOk = false;
   try {
     await lazyEnqueue(msg.id);
+    enqueueOk = true;
   } catch (err) {
     // ★ cwi-final S1-15 (P0-07)：enqueue uncertain — **唔標 FAILED**（job 可能已落隊列 — jobId 冪等；
     // 標 FAILED 會令 row 永遠 claim 唔到）。留 QUEUED → outbound-sweep 120s 後重加兜底（唔雙發）；
@@ -1442,6 +1503,14 @@ export async function sendFollowupTask(
       { taskId, err: err instanceof Error ? err.message : String(err) },
       "followup: enqueue uncertain — message stays QUEUED (sweep will requeue)"
     );
+  }
+  // ★ B-6 + cwi-final S2-6：C 類術後關懷建議發出 → 對話開 72h 窗口（痛症訊號讓路 PAIN_TRIAGE + 草稿零療程零報價）。
+  //   enqueue 成功後先設（S2-6）：enqueue uncertain = 發送時間未知 → 窗口起點未知（sweep 會補發；
+  //   72h 關懷窗略遲開可接受 — 窗口係 72 小時唔係 72 秒）。
+  if (enqueueOk && rule?.trigger === "AFTER_TREATMENT") {
+    await prisma.conversation
+      .updateMany({ where: { id: convId }, data: { postOpFollowupAt: now } })
+      .catch(() => undefined);
   }
   await prisma.$executeRaw`
     UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${convId}`;

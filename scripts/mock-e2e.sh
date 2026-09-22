@@ -6904,6 +6904,38 @@ fi
 [ "$K_FAIL" = 0 ] && pass "K 段完成：cwi-final S2-2+S2-3+S2-4（T621–T741）" || fail "K 段有項失敗（見上 ❌）"
 
 
+# ══════════════ L. cwi-final S2-5/S2-6/S2-7（過窗 template 雙審批 / engine 發送原子化 / 術後 72h 全部草稿）T742–T744 ══════════════
+echo ""
+echo "[L/5] cwi-final S2-5+S2-6+S2-7: 過窗 template 雙審批 / 發送原子化 / 術後 72h 覆蓋全部草稿 (T742-T744)"
+L_FAIL=0
+# in-process engine/pipeline + API（composer + tasks route）；T743 用 DB trigger 令 message.create 必 fail（真 rollback）。
+# 專屬 clinic E2ES23C-C（零其他 fixture）— dev worker cron scan/recheck 零干擾（腳本內註釋有全盤分析）。
+S23_OUT=$(pnpm -s tsx scripts/e2e-s23-t742-t743-t744.ts 2>&1)
+S23_CODE=$?
+echo "$S23_OUT" | grep -vE '"level":(30|40|50)' | tail -60 | sed 's/^/    /'
+if [ "$S23_CODE" = "0" ] && echo "$S23_OUT" | grep -q "^T742-OK$"; then
+  pass "T742 過窗 template 雙審批（本地∧Meta；Meta 未批→等審批唔發；MARKETING→真 category 計費 + paramOrder parameters + 窗內 SERVICE）"
+else
+  fail "T742 過窗 template 發送 e2e 失敗（exit=$S23_CODE，見上 ❌）"; L_FAIL=1
+fi
+if [ "$S23_CODE" = "0" ] && echo "$S23_OUT" | grep -q "^T743-OK$"; then
+  pass "T743 engine 發送原子化（message.create fail → transaction rollback → task 仍 SUGGESTED + 零 Message；修好可重採）"
+else
+  fail "T743 發送原子化 e2e 失敗（exit=$S23_CODE，見上 ❌）"; L_FAIL=1
+fi
+if [ "$S23_CODE" = "0" ] && echo "$S23_OUT" | grep -q "^T744-OK$"; then
+  pass "T744 術後 72h 覆蓋全部草稿（PAIN 讓路 PAIN_TRIAGE + deterministic 痛症訊號壓 consult + CG-010 全草稿 sweep + 窗內唔行報價鏈）"
+else
+  fail "T744 術後 72h e2e 失敗（exit=$S23_CODE，見上 ❌）"; L_FAIL=1
+fi
+if [ "$S23_CODE" = "0" ] && echo "$S23_OUT" | grep -q "^S23-SWEEP-OK$"; then
+  pass "S23-SWEEP hermetic 清理零殘留（tasks/convs/contacts/rules/tpls/doc/staff/clinic/company/trigger）"
+else
+  fail "S23-SWEEP 清理失敗或有殘留"; L_FAIL=1
+fi
+[ "$L_FAIL" = 0 ] && pass "L 段完成：cwi-final S2-5+S2-6+S2-7（T742–T744）" || fail "L 段有項失敗（見上 ❌）"
+
+
 # ── summary ────────────────────────────────────────────────────────────
 
 # ── summary ────────────────────────────────────────────────────────────

@@ -60,6 +60,8 @@ import { CONSULT_LLM_ACTIONS } from "@/lib/ai/consult-llm";
 import { getLexicon, applyLexicon, type LexiconEntry } from "@/lib/sessions/lexicon";
 import { matchRedFlagTerms, type RedFlagResult } from "@/lib/sessions/red-flags";
 import { triggerFloor } from "@/lib/sessions/consult-trigger";
+// ★ cwi-final S2-7（B-6）：deterministic 痛症訊號詞表（同 consult engine #1 同一份）+ hitAny（lexicon canonical 判定）
+import { PAIN_SIGNAL_TERMS, hitAny } from "@/lib/sessions/consult-engine";
 import {
   runConsultEngineTurn,
   runConsultLlmTurn,
@@ -606,13 +608,17 @@ export async function runInboundAi(input: {
 
   // ── ★ cwi-followup-v3 B-6：術後關懷窗（C 類跟進建議發出後 72h 內）──────────
   // 紅旗詞 → URGENT 全套（上面 rf fast path 已處理）；
-  // 痛症訊號（intent=PAIN）→ 強制 PAIN_TRIAGE 路徑，唔准入 CONSULT 銷售 session（壓 consultTrigger）。
+  // 痛症訊號 → 強制 PAIN_TRIAGE 路徑，唔准入 CONSULT 銷售 session（壓 consultTrigger）。
+  // ★ cwi-final S2-7：痛症判定唔淨靠 LLM intent — deterministic 詞表（PAIN_SIGNAL_TERMS，同 consult
+  //   engine #1 同源）對 lexicon canonical 文字判（例：LLM 話 QUESTION 但病人講緊「仲有啲痛」→ 照壓）。
+  const painSignalDet =
+    msg.type === "text" && msg.body ? hitAny(applyLexicon(msg.body, ptLex), PAIN_SIGNAL_TERMS) : false;
   const postOpCareWindow =
     !!conv.postOpFollowupAt && Date.now() - conv.postOpFollowupAt.getTime() <= POSTOP_CARE_WINDOW_MS;
-  if (postOpCareWindow && consultTrigger !== null && result.intent === "PAIN") {
+  if (postOpCareWindow && consultTrigger !== null && (result.intent === "PAIN" || painSignalDet)) {
     log.info(
-      { clinic: clinic.code, wamid: msg.waMessageId, trigger: consultTrigger },
-      "B-6: post-op care window (72h) + PAIN intent → suppress consult (forced PAIN_TRIAGE, no sales session)"
+      { clinic: clinic.code, wamid: msg.waMessageId, trigger: consultTrigger, byDeterministic: painSignalDet && result.intent !== "PAIN" },
+      "B-6/S2-7: post-op care window (72h) + pain signal（intent=PAIN ∨ deterministic）→ suppress consult (forced PAIN_TRIAGE, no sales session)"
     );
     consultTrigger = null;
   }
@@ -622,13 +628,15 @@ export async function runInboundAi(input: {
   //   有 PRICE doc → 決定性報價（範圍 + 影響因素 + disclaimer code 強制）；無 → 唔准報價（人手提示 + needsHuman）。
   //   price-guard：草稿定稿後、入庫前 3 條 deterministic 檢查（① 零引用幻覺價 ② 漏 disclaimer 自動補 ③ 金額出範圍）。
   //   純決定性層 — mock/real 同一行為；PAIN/URGENT/COMPLAINT（draft null）唔入呢段。
+  //   ★ cwi-final S2-7（B-6）：postOp 窗內**唔行**報價鏈（術後病人問價唔係銷售訊號 — 無決定性報價、
+  //   無 NO_PRICE_TEXT 轉人手；LLM 草稿照出，但下方 CG-010 全草稿 sweep 保證零療程零報價）。
   const priceTrace: {
     triggered: boolean;
     docId: string | null;
     guard: { blocked: boolean; disclaimerAppended: boolean; outOfRange: boolean };
   } = { triggered: false, docId: null, guard: { blocked: false, disclaimerAppended: false, outOfRange: false } };
   let citedPriceDoc: CatalogDoc | null = knowledge.picked.find((d) => d.kind === "PRICE") ?? null;
-  if (msg.type === "text" && msg.body && result.intent === "QUESTION" && result.draft !== null) {
+  if (msg.type === "text" && msg.body && result.intent === "QUESTION" && result.draft !== null && !postOpCareWindow) {
     const priceIntent = isPriceIntent(applyLexicon(msg.body, ptLex));
     priceTrace.triggered = priceIntent;
     if (priceIntent) {
@@ -820,6 +828,28 @@ export async function runInboundAi(input: {
         });
         result = { ...result, draft: cg.draft, needsHuman: true };
       }
+    }
+  }
+
+  // ── ★ cwi-final S2-7（B-6）：post-op 72h 覆蓋**全部**草稿 — CG-010 零療程零報價 ──
+  //   位置 = 所有草稿生成/改動路徑之後（④ main classify / ⑧ 報價鏈 / ⑪ consult LLM turn）+ ⑫ canDraft 之前：
+  //   窗內任何來源嘅 draft 一律過 CG-010（療程/報價/金額/症狀詞）；block → `draft: null, needsHuman: true`
+  //   （spec pseudocode 逐字 — draft 唔入庫、auto-reply 絕唔出療程/報價）。
+  //   唔入窗 → 零行為改動（postOpCareWindow=false 整段 skip）。
+  if (postOpCareWindow && result.draft) {
+    const cgAll = runClaimGuard({
+      draft: result.draft,
+      products: [],
+      hasBackendSlot: false,
+      priceDoc: null,
+      postOpCareWindow: true,
+    });
+    if (cgAll.blocked) {
+      log.info(
+        { clinic: clinic.code, wamid: msg.waMessageId, codes: cgAll.codes, first: cgAll.code },
+        "B-6/S2-7: post-op care window draft hit claim guard（CG-010 零療程零報價）→ draft 棄 + needsHuman"
+      );
+      result = { ...result, draft: null, needsHuman: true };
     }
   }
 

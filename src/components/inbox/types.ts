@@ -45,6 +45,10 @@ export interface FollowupSuggestion {
   dueAt: string;
   templateName: string | null;
   templateApproved: boolean | null;
+  /** ★ cwi-final S2-5：Meta 側審批（approvedTemplateList 單一來源；fail-soft = false）— null = 無 template */
+  templateMetaApproved: boolean | null;
+  /** Meta template 真 category（MARKETING → UI「行銷類 template（收費較高）」提示；null = 未匹配） */
+  templateWaCategory: string | null;
   templateLanguage: string;
   /** 已填變數嘅 template 預覽（窗口內 = composer 草稿底稿；過窗 = 只可發呢段） */
   templatePreview: string | null;

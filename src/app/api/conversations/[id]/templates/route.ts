@@ -46,7 +46,10 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   ]);
   if (!clinic) return NextResponse.json({ error: "clinic not found" }, { status: 404 });
 
-  const all = await approvedTemplateList(clinic);
+  // ★ cwi-final S2-5：shared approvedTemplateList 而家回傳全部 APPROVED（由 caller 決定）—
+  //   呢度（過窗 picker）caller 層 filter 返 UTILITY：v1 只發得起 reminder/confirm 兩款 builder，
+  //   MARKETING template 列咗都發唔出（send route 會 400 template_not_supported）— 唔好迷惑員工。
+  const all = (await approvedTemplateList(clinic)).filter((t) => t.category === "UTILITY");
   const reminderName = reminderTemplateName();
   const confirmName = confirmTemplateName();
 
