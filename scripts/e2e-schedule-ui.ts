@@ -33,6 +33,7 @@
  * Override flags（workforce mock）：.dev/workforce-mock-refresh-429.json / -409.json /
  *   -extra-providers.json。
  */
+import "./e2e-origin-shim";
 import { readFileSync, writeFileSync, rmSync, readdirSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import path from "node:path";

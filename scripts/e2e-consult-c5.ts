@@ -22,6 +22,7 @@
  * 用法（repo root）：pnpm tsx scripts/e2e-consult-c5.ts [--base http://127.0.0.1:3100]
  * 輸出：C5-OK (N pass) / C5-FAIL: <reason>
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";

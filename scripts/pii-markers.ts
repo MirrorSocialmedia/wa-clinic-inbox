@@ -48,6 +48,13 @@ export const PII_MARKERS: PiiMarker[] = [
   { label: "email", re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
   // ★ phoneNum 要精確匹配（帶引號）— 避免 substring 誤中我哋自己嘅 metadata key `phoneNumberId`
   { label: '"phoneNum"', re: /"phoneNum"/ },
+  // ★ cwi-final S3-5：HK 手機格式 — 852+8 位（完整 waId 格式）+ 9 位本地號碼（5/6/9 開頭）
+  //   （log/DB dump 一出現就係 PII；T635 門同口徑：grep -E '852[0-9]{8}' = 0）
+  //   註：spec 逐字 `\b[569]\d{7}\b`（8 位）係 off-by-one — HK 本地手機係 9 位；8 位 regex 會誤中
+  //   本 repo mock 資料 `mock-appt-<8位>`（T33 假紅）且漏真 9 位號碼 → 按 spec 意圖（HK 手機）
+  //   用 `[569]\d{8}`（9 位）。T635 門（852+8 位 log grep）不受影響。
+  { label: "hkPhone (852 + 8 digits)", re: /\b852\d{8}\b/ },
+  { label: "hkPhone (local 9-digit 5/6/9)", re: /\b[569]\d{8}\b/ },
 ];
 
 // 2) 決定性 bait（mock fixture 故意埋入 — 落地必須 0 hit）

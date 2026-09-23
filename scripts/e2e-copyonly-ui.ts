@@ -13,6 +13,7 @@
  * 斷言輸出（mock-e2e.sh grep 用）：
  *   COPYONLY-UI-OK / COPYONLY-UI-FAIL: <reason>
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";

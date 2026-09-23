@@ -14,6 +14,7 @@
  *
  * PII 鐵律：fixture 全 fake（fake waId 8 位、fake 姓名、固定 mock 文案）— 零真病人資料。
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";

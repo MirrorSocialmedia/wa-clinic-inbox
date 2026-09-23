@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { requireAuth, assertClinicAccess, scopedClinicSet } from "@/lib/rbac";
+import { hit } from "@/lib/rate-limit";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -48,6 +49,10 @@ interface MessageHit {
 
 export const GET = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
+  // ★ S3-6：search per staff 30/分鐘（全文搜尋 DB 成本 — 防爬）
+  if (!(await hit(`search:staff:${ctx.staff.id}`, 30, 60))) {
+    return NextResponse.json({ error: "too many attempts" }, { status: 429 });
+  }
   const url = new URL(req.url);
   const q = (url.searchParams.get("q") ?? "").trim();
   const type = url.searchParams.get("type") ?? "contact";

@@ -29,6 +29,7 @@
  * 輸出 markers（mock-e2e.sh K 段 grep）：T621-OK / T622-OK / T741-OK / S22-SWEEP-OK
  */
 process.env.WORKFORCE_MOCK = "1"; // in-process engine/opt-out 要食 mock（fetchAppointments 等）
+import "./e2e-origin-shim";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { io, type Socket } from "socket.io-client";

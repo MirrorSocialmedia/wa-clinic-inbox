@@ -25,6 +25,7 @@
  *
  * ★ PII 鐵律：斷言用 canary 病人資料做陷阱（t190）。
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";

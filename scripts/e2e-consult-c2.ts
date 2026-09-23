@@ -18,6 +18,7 @@
  *      shouldAutoResolve(opts.activeConsultSession=true) 純函數 false。
  * - 收尾 fixture sweep：waId e2ec2-% 冚家潔 + 產品 e2ec2% 刪 + residue 0 斷言。
  */
+import "./e2e-origin-shim";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { PrismaClient } from "@prisma/client";

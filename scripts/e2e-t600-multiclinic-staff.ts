@@ -21,6 +21,7 @@
  * 用法（repo root）：pnpm tsx scripts/e2e-t600-multiclinic-staff.ts
  * 輸出：T600-OK / T600-FAIL: <reason>
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";

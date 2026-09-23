@@ -43,6 +43,7 @@
  * 用法（repo root）：pnpm tsx scripts/e2e-consult-c6.ts [--base http://127.0.0.1:3100]
  * 輸出：C6-OK (N pass) / C6-FAIL: <reason>
  */
+import "./e2e-origin-shim";
 import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { PrismaClient } from "@prisma/client";

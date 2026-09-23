@@ -246,6 +246,9 @@ model StaffUser {
   // 見 src/lib/totp-enc.ts，key = TOTP_ENC_KEY）。NULL = 未啟用；啟用後 ADMIN 登入
   // 第二步要 TOTP code；STAFF 永遠 NULL（登入流程完全唔變）。
   totpSecretEnc String?
+  // ★ cwi-final S3-5：TOTP enroll 待確認密文（新 secret 先寫呢度 — confirm 過 code 先搬去
+  // totpSecretEnc；NULL = 冇進行中 enroll）。同 totpSecretEnc 同格式（AES-256-GCM，TOTP_ENC_KEY）。
+  totpPendingEnc String?
   // ★ H3：自動派單 round-robin 用（「上次被派時間」最耐嗰個先；NULL = 從未派）
   lastAssignedAt DateTime? @db.Timestamptz
   // ★ cwi-notify-v2-20260903：push 偏好（DB = server 推送之源；localStorage 只做即時 UI）。

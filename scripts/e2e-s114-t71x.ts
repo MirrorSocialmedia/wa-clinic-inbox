@@ -23,6 +23,7 @@
  *
  * ★ PII 鐵律：mock 訊息只係口語短句；斷言全部 metadata（DB 欄位 / gates / kind）。
  */
+import "./e2e-origin-shim";
 import { spawn, spawnSync, execSync } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync, readdirSync, openSync } from "node:fs";
 import path from "node:path";

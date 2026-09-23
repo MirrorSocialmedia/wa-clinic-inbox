@@ -16,6 +16,7 @@
  * 用法（repo root）：pnpm tsx scripts/e2e-t601-t607-adopt-edit.ts
  * 輸出：T601T607-OK / T601T607-FAIL: <reason>
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";

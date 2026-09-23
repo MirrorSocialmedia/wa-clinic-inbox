@@ -28,6 +28,7 @@ try {
   /* 靠 process env */
 }
 
+import "./e2e-origin-shim";
 import { prisma } from "../src/lib/prisma";
 import { io, type Socket } from "socket.io-client";
 import { Queue } from "bullmq";

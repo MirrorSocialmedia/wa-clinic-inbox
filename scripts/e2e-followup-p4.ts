@@ -32,6 +32,7 @@ try {
 } catch {
   /* 靠 process env */
 }
+import "./e2e-origin-shim";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";

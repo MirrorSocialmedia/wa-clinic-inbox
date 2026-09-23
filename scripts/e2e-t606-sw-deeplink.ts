@@ -18,6 +18,7 @@
  * 用法（repo root）：pnpm tsx scripts/e2e-t606-sw-deeplink.ts
  * 輸出：T606-OK / T606-FAIL: <reason>
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";

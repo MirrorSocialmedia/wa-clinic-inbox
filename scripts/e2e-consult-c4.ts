@@ -29,6 +29,7 @@
  * 冪等：開場 pre-sweep + 收場 end-sweep + fatal sweep（e2ec4 前綴全洗）。
  * 退出碼：0 = 全過；1 = 有 fail。
  */
+import "./e2e-origin-shim";
 import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { PrismaClient } from "@prisma/client";

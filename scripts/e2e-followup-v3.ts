@@ -36,6 +36,7 @@ try {
 } catch {
   /* 靠 process env */
 }
+import "./e2e-origin-shim";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";

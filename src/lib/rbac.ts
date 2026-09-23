@@ -309,6 +309,11 @@ export async function requireAuth(req: NextRequest): Promise<AuthContext> {
   if (await isSessionDenied(data.sid)) {
     throw new RbacError(401, "session logged out");
   }
+  // ★ cwi-final S3-5：強制 TOTP enroll 段 — enrollOnly session 除 /api/admin/totp/* 外一律 403
+  //   （enroll/confirm 兩 route 喺 allowlist；enroll 完 confirm 過 → 重登先有完整 session）。
+  if (data.enrollOnly && !req.nextUrl.pathname.startsWith("/api/admin/totp")) {
+    throw new RbacError(403, "totp enrollment required");
+  }
   return await toContext(data, res);
 }
 

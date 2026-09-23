@@ -18,18 +18,24 @@
  *     （Object.entries 保插入序）— 否則 403 格會變 404。
  *   - matrix 跑完即刻還原 TY.companyId（T631 嘅「改唔到 TY 設定」要先行先斷）。
  *
- * 用法：tsx scripts/e2e-authz-matrix.ts --phase=t630|t639|t632|t633
+ * 用法：tsx scripts/e2e-authz-matrix.ts --phase=t630|t639|t632|t633|t636|t634|t635
  *   - t630 = MATRIX + T631 + T638（需要 ALLOW_SCOPED_ADMIN=1）
  *   - t639 = flag-off 守衛（需要 ALLOW_SCOPED_ADMIN 未設）
  *   - t632 = S3-2 ④ 登出只登出當前機（per-session deny + per-device push 清理）
  *   - t633 = S3-2 ⑤⑥ 失效 ≤60s（scope 改動 → socket 斷 + 舊 session 401 + 停用 → SSR 307）
+ *   - t636 = S3-6 CSRF/Origin 403/415 + 同 IP 11 登入 429（普通 3100）
+ *   - t634 = S3-5 TOTP 重放/423 + 強制 enroll（restart 3100 帶 TOTP_ENFORCE_FROM → 斷言 → 還原）
+ *   - t635 = S3-5 log 私隱：852+8 位 grep = 0（e2e log + w3100 log）
  * fixture 全部 fixed cuid + finally 清理（T750 pattern）。
  */
 import fs from "node:fs";
 import path from "node:path";
+import { execSync, spawn } from "node:child_process";
 import { Prisma, PrismaClient, Role } from "@prisma/client";
 import * as argon2 from "argon2";
 import { io as socketIoClient } from "socket.io-client";
+import IORedis from "ioredis";
+import { totpCode } from "../src/lib/totp";
 
 // 遞迴搵 route.ts（免外部 glob 依賴 — repo 無 glob/@types/glob；行為 = globSync("src/app/api/**/route.ts")）
 function listRouteFiles(root: string): string[] {
@@ -50,12 +56,34 @@ try {
 } catch { /* .env 無就 skip（CI） */ }
 
 const BASE = process.env.T630_BASE ?? "http://127.0.0.1:3100"; // T639：3101 flag-off 實例
+
+// ★ cwi-final S3-6 harness 兼容（CSRF middleware 上線 — 裸 fetch 全數 403/415）：
+// global fetch shim：打 BASE/api/* 嘅非 GET/HEAD 請求自動補 `origin: BASE`（同站）
+// + 有 body 冇 content-type 時補 `application/json`。已自帶 origin/CT 嘅 call（T636 例外測試）原樣放行。
+// 覆蓋 api() / apiWithCookie() / loginAs() / 各 phase 裸 fetch — 逐 call 唔使改。
+const __origFetch = globalThis.fetch.bind(globalThis);
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  try {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+    if (typeof url === "string" && url.startsWith(BASE) && url.includes("/api/")) {
+      const m = (init?.method ?? "GET").toUpperCase();
+      if (m !== "GET" && m !== "HEAD") {
+        const h = new Headers(init?.headers);
+        if (!h.has("origin") && !h.has("sec-fetch-site")) h.set("origin", BASE);
+        if (!h.has("content-type") && init?.body !== undefined) h.set("content-type", "application/json");
+        init = { ...init, headers: h };
+      }
+    }
+  } catch { /* shim 唔好破 e2e — 靜默 */ }
+  return __origFetch(input, init);
+}) as typeof fetch;
 const PASS = "d1matrixpass123";
 // consult-settings "rules" 有效 value（rulesValueSchema：4 個 boolean 必填）— consult-settings PUT 格 + T631 用
 const RULES_VALUE = { ortho_appearance: false, ortho_compare: false, ortho_price: false, ortho_booking: false };
 // triage params（TriageParams：3 必填；其餘 default）— workflows PUT 格用（saveDraft 會 PARAMS_SCHEMAS 校驗）
 const TRIAGE_PARAMS = { humanCooldownMs: 1800000, confidenceFloor: 0.6, autoThanksReply: "t630 唔緊要，祝你早日康復！" };
 const prisma = new PrismaClient();
+const redis = new IORedis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379", { maxRetriesPerRequest: 2 });
 
 // ★ S3-3：G2 閘（ALLOW_SLOT_CLAIM）— server（Next dev base-server 裝載 .env）與本腳本讀同一個 .env，
 //   未設 = 關 → flows 格嘅 STAFF_TY（負責人）預期 409 SLOT_CLAIM_DISABLED；設 =1 → 422 window_closed
@@ -568,7 +596,11 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
   },
   "POST /api/admin/totp/enroll": {
     fixture: () => ({ url: "/api/admin/totp/enroll", method: "POST", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 200, ADMIN_ALL: 200 }, // 快照：enroll = 自助（無 scope 分拆；S3-5 會改 password+confirm）；teardown 刪 fixture 用戶
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 400, ADMIN_ALL: 400 }, // S3-5 兩段式：空 body = password 必填 → 400（validation-first）；ADMIN 200 全鏈喺 T50/T634
+  },
+  "POST /api/admin/totp/confirm": {
+    fixture: () => ({ url: "/api/admin/totp/confirm", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 400, ADMIN_ALL: 400 }, // S3-5 第二段：空 body = code 必填 → 400；confirm 200 全鏈喺 T50/T634
   },
 
   // ═══ S3-4：術語字典 ═══
@@ -1628,6 +1660,247 @@ async function t633() {
   }
 }
 
+// ── T636（S3-6：CSRF/Origin 403/415 + 同 IP 11 登入 429）────────────────────
+async function t636() {
+  console.log("\n═══ T636 — CSRF/Origin + 限流（S3-6）═══");
+  // 1. 跨站 Origin POST → 403（middleware 層 — auth 之前攔，唔使 cookie）
+  const r1 = await fetch(BASE + "/api/auth/change-password", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "http://evil.example" },
+    body: JSON.stringify({}),
+    signal: AbortSignal.timeout(30_000),
+  });
+  assertEq("T636 跨站 Origin POST = 403", r1.status, 403);
+  // 2. 同站 Origin + text/plain（跨站 form 攻擊載體）→ 415
+  const r2 = await fetch(BASE + "/api/auth/change-password", {
+    method: "POST",
+    headers: { "content-type": "text/plain", origin: BASE },
+    body: "abc",
+    signal: AbortSignal.timeout(30_000),
+  });
+  assertEq("T636 text/plain POST = 415", r2.status, 415);
+  // 3. 同 IP（固定 XFF bucket）11 次登入 → 第 11 次 429（IP 10/分鐘 sliding window）
+  const xff = "10.66.634.11";
+  await redis.del(`rl:login:ip:${xff}:${Math.floor(Date.now() / 60_000)}`); // hermetic：清本分鐘殘留
+  const statuses: number[] = [];
+  for (let i = 1; i <= 11; i++) {
+    const r = await fetch(BASE + "/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": xff },
+      body: JSON.stringify({ email: "t636.nobody@wa-clinic.local", password: "wrongpw123" }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    statuses.push(r.status);
+  }
+  assertEq("T636 同 IP 第 11 次登入 = 429", statuses[10], 429);
+  assertTrue("T636 前 10 次非 429（IP 上限 = 10/分鐘）", !statuses.slice(0, 10).includes(429), `statuses=${statuses.join(",")}`);
+}
+
+// ── T634（S3-5：TOTP 重放/423 + 強制 enroll — restart 3100 帶 TOTP_ENFORCE_FROM）──
+const T634 = {
+  a1: "t634a1a00000000000000000001", // replay 帳號（ADMIN，有 TOTP）
+  a2: "t634a2a00000000000000000002", // 423 帳號（ADMIN，有 TOTP）
+  sup: "t634supa00000000000000000003", // 強制 enroll（SUPERVISOR，無 TOTP）
+  a1Email: "t634.a1@wa-clinic.local",
+  a2Email: "t634.a2@wa-clinic.local",
+  supEmail: "t634.sup@wa-clinic.local",
+};
+const W3100_LOG = "/tmp/w3100-d3.log"; // D3 era 3100 主 log（T634 rotation 前後）
+const W3100_T634_LOG = "/tmp/w3100-d3-t634.log";
+
+/** T634 login 回應窄型（只需讀呢兩旗 — 避免 any；JSON.parse 實值可能多字段，窄型只收斷言用字段） */
+type T634LoginJson = { needEnroll?: boolean; totpRequired?: boolean };
+
+async function t634Login(email: string, totp: string | undefined, xff: string): Promise<{ status: number; json: T634LoginJson | null; cookie: string }> {
+  const res = await fetch(BASE + "/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-forwarded-for": xff },
+    body: JSON.stringify(totp ? { email, password: PASS, totp } : { email, password: PASS }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const text = await res.text();
+  let json: T634LoginJson | null = null; try { json = JSON.parse(text); } catch { /* */ }
+  return { status: res.status, json, cookie: (res.headers.get("set-cookie") ?? "").match(/wa_inbox_session=[^;]+/)?.[0] ?? "" };
+}
+
+/** T634：API 兩段式 enroll（login → enroll{password} → confirm{code}）→ 返 secret */
+async function t634EnrollAndConfirm(email: string, xff: string): Promise<string> {
+  const l = await t634Login(email, undefined, xff);
+  if (l.status !== 200 || !l.cookie) throw new Error(`t634 enroll login fail ${email} ${l.status} ${JSON.stringify(l.json)}`);
+  const enr = await fetch(BASE + "/api/admin/totp/enroll", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: l.cookie },
+    body: JSON.stringify({ password: PASS }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const ej = (await enr.json().catch(() => ({}))) as { secret?: string };
+  if (enr.status !== 200 || typeof ej?.secret !== "string" || !ej.secret) throw new Error(`t634 enroll fail ${email} ${enr.status} ${JSON.stringify(ej).slice(0, 120)}`);
+  const conf = await fetch(BASE + "/api/admin/totp/confirm", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: l.cookie },
+    body: JSON.stringify({ code: totpCode(ej.secret) }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (conf.status !== 200) throw new Error(`t634 confirm fail ${email} ${conf.status}`);
+  return ej.secret;
+}
+
+function pidsOn3100(): number[] {
+  // ★ 只列 LISTEN state — `lsof -ti:3100` 會連 established connection 都列（本 process 自己嘅
+  //   fetch keep-alive socket！）→ kill3100 會 SIGTERM 自己（2026-09-24 T634 實測自殺）。
+  try {
+    const out = execSync("lsof -ti:3100 -sTCP:LISTEN", { encoding: "utf8" }).trim();
+    return out ? out.split(/\s+/).map(Number) : [];
+  } catch { return []; }
+}
+
+async function kill3100(): Promise<void> {
+  for (const p of pidsOn3100()) { try { process.kill(p, "SIGTERM"); } catch { /* */ } }
+  // fallback：殺到 tsx 真 node server（cmdline " server.ts"）— 防 lsof 漏 LISTEN pid
+  try { execSync('pkill -f " server.ts" || true', { stdio: "ignore" }); } catch { /* */ }
+  for (let i = 0; i < 30; i++) {
+    if (pidsOn3100().length === 0) return;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  for (const p of pidsOn3100()) { try { process.kill(p, "SIGKILL"); } catch { /* */ } }
+  await new Promise((r) => setTimeout(r, 1000));
+}
+
+function start3100(logFile: string, extraEnv: Record<string, string>): void {
+  // 同 mock-e2e / restore-3100-d3.sh 同一啟動法：pnpm dev（= tsx server.ts）+ 16GB heap。
+  // （pnpm .bin/tsx 係 shell shim — realpath 唔到 dist；直接 pnpm dev 最穩）
+  const child = spawn("pnpm", ["dev"], {
+    cwd: process.cwd(),
+    env: { ...process.env, NODE_OPTIONS: "--max-old-space-size=16384", ...extraEnv },
+    stdio: ["ignore", fs.openSync(logFile, "a"), fs.openSync(logFile, "a")],
+    detached: true,
+  });
+  child.unref();
+}
+
+async function waitHealthz(timeoutMs: number): Promise<boolean> {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      const r = await fetch(BASE + "/healthz", { signal: AbortSignal.timeout(3_000) });
+      if (r.ok) return true;
+    } catch { /* 未起 */ }
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  return false;
+}
+
+async function t634() {
+  console.log("\n═══ T634 — TOTP 重放/423/強制 enroll（S3-5）═══");
+  const pw = await argon2.hash(PASS);
+  // hermetic：清上一 run 殘留（persistent DB — 留低 TOTP 會污染下輪）
+  for (const id of [T634.a1, T634.a2, T634.sup]) {
+    await prisma.auditLog.deleteMany({ where: { staffId: id } });
+    await prisma.alert.deleteMany({ where: { detail: { path: ["staffId"], equals: id } } });
+    await prisma.staffUser.deleteMany({ where: { id } });
+  }
+  await redis.del(`totpfail:${T634.a1}`, `totpfail:${T634.a2}`, `totp:last:${T634.a1}`, `totp:last:${T634.a2}`);
+  for (const [id, email, name, role] of [
+    [T634.a1, T634.a1Email, "T634 A1", "ADMIN"],
+    [T634.a2, T634.a2Email, "T634 A2", "ADMIN"],
+    [T634.sup, T634.supEmail, "T634 Sup", "SUPERVISOR"],
+  ] as const) {
+    await prisma.staffUser.upsert({
+      where: { id },
+      update: { active: true, role, scopeType: "ALL", scopeCompanyId: null, clinicId: null, passwordHash: pw },
+      create: { id, email, name, role, scopeType: "ALL", active: true, passwordHash: pw },
+    });
+  }
+
+  try {
+    // ── Part 1（普通 3100，enforce OFF）：重放 + 423 ─────────────────────
+    const sec1 = await t634EnrollAndConfirm(T634.a1Email, "10.67.1.1");
+    await t634EnrollAndConfirm(T634.a2Email, "10.67.1.2");
+
+    // 重放：同 code 用兩次 → 第二次 401（totp:last EX 120 — 同 step 碼值相同 → step <= last 拒）
+    const replayCode = totpCode(sec1);
+    const l1 = await t634Login(T634.a1Email, replayCode, "10.67.1.3");
+    assertEq("T634 首次登入（有效 code）= 200", l1.status, 200);
+    const l2 = await t634Login(T634.a1Email, replayCode, "10.67.1.4");
+    assertEq("T634 同 code 第二次 = 401（重放拒）", l2.status, 401);
+
+    // 423：錯 TOTP ×6 → 423（totpfail EX 900；第 5 次計數 = 5 → 起）
+    for (let i = 1; i <= 4; i++) {
+      const r = await t634Login(T634.a2Email, `00000${i}`, "10.67.1.5");
+      assertEq(`T634 錯 TOTP #${i} = 401`, r.status, 401);
+    }
+    const r5 = await t634Login(T634.a2Email, "000005", "10.67.1.6");
+    assertEq("T634 錯 TOTP #5 = 423（lockout 15 分鐘）", r5.status, 423);
+    const r6 = await t634Login(T634.a2Email, "000006", "10.67.1.7");
+    assertEq("T634 錯 TOTP #6 = 423", r6.status, 423);
+
+    // ── Part 2（T639 先例：restart 3100 帶 TOTP_ENFORCE_FROM=2026-01-01）──
+    console.log("  （T634 強制段：log rotation + restart 3100 帶 TOTP_ENFORCE_FROM=2026-01-01）");
+    if (fs.existsSync(W3100_LOG)) fs.renameSync(W3100_LOG, `${W3100_LOG}.pre-d3.${Date.now()}`); // 舊 log = pre-D3 code，T635 grep 要 hermetic
+    await kill3100();
+    start3100(W3100_T634_LOG, { TOTP_ENFORCE_FROM: "2026-01-01" });
+    if (!(await waitHealthz(120_000))) throw new Error("T634 強制段：3100 帶 TOTP_ENFORCE_FROM 120s 未起");
+    // 清 Part 1 留低嘅重放標記（Part 2 要即刻用有效 code — 唔使等 step 滾）
+    await redis.del(`totp:last:${T634.a1}`);
+
+    // SUPERVISOR 無 TOTP → enroll-only session（15 分鐘窗口，除 /api/admin/totp/* 外 403）
+    const supL = await t634Login(T634.supEmail, undefined, "10.67.2.1");
+    assertEq("T634 強制：SUPERVISOR 登入 = 200", supL.status, 200);
+    assertTrue("T634 強制：needEnroll:true", supL.json?.needEnroll === true, JSON.stringify(supL.json));
+    const g1 = await fetch(BASE + "/api/staff", { headers: { cookie: supL.cookie }, signal: AbortSignal.timeout(30_000) });
+    assertEq("T634 enroll-only：/api/staff = 403", g1.status, 403);
+    const g2 = await fetch(BASE + "/api/admin/staff", { method: "POST", headers: { "content-type": "application/json", cookie: supL.cookie }, body: "{}", signal: AbortSignal.timeout(30_000) });
+    assertEq("T634 enroll-only：/api/admin/staff POST = 403", g2.status, 403);
+    // 只可以 enroll（allowlist 例外）
+    const enr = await fetch(BASE + "/api/admin/totp/enroll", { method: "POST", headers: { "content-type": "application/json", cookie: supL.cookie }, body: JSON.stringify({ password: PASS }), signal: AbortSignal.timeout(30_000) });
+    assertEq("T634 enroll-only：/api/admin/totp/enroll = 200", enr.status, 200);
+    const ej = (await enr.json().catch(() => ({}))) as { secret?: string };
+    assertTrue("T634 enroll-only：enroll 返 secret", typeof ej?.secret === "string" && ej.secret.length > 0, JSON.stringify(ej).slice(0, 80));
+    // 已有 TOTP 嘅 ADMIN 唔受強制段影響（照常 2FA）
+    const a1l = await t634Login(T634.a1Email, totpCode(sec1), "10.67.2.2");
+    assertEq("T634 強制：已有 TOTP ADMIN 登入 = 200", a1l.status, 200);
+    const a1n = await t634Login(T634.a1Email, undefined, "10.67.2.3");
+    assertEq("T634 強制：已有 TOTP ADMIN 唔帶 code = 401 totpRequired", a1n.status, 401);
+    assertTrue("T634 強制：401 帶 totpRequired", a1n.json?.totpRequired === true, JSON.stringify(a1n.json));
+
+    // ── 還原（工單：還原 env + restart + healthz）────────────────────────
+    console.log("  （T634 還原：除 TOTP_ENFORCE_FROM + restart + healthz）");
+    await kill3100();
+    start3100(W3100_LOG, {});
+    if (!(await waitHealthz(120_000))) throw new Error("T634 還原：3100 120s 未起 — 手動處理！");
+    // 還原後抽測：enforce 已 OFF（SUPERVISOR 登入唔使 enroll）
+    const supAfter = await t634Login(T634.supEmail, undefined, "10.67.2.4");
+    assertTrue("T634 還原後：SUPERVISOR 登入唔再 needEnroll", supAfter.status === 200 && supAfter.json?.needEnroll !== true, `status=${supAfter.status} ${JSON.stringify(supAfter.json)}`);
+  } finally {
+    for (const id of [T634.a1, T634.a2, T634.sup]) {
+      await prisma.auditLog.deleteMany({ where: { staffId: id } });
+      await prisma.alert.deleteMany({ where: { detail: { path: ["staffId"], equals: id } } });
+      await prisma.staffUser.deleteMany({ where: { id } });
+    }
+    await redis.del(`totpfail:${T634.a1}`, `totpfail:${T634.a2}`, `totp:last:${T634.a1}`, `totp:last:${T634.a2}`);
+  }
+}
+
+// ── T635（S3-5：log 私隱 — HK 手機格式 852+8 位 grep = 0）────────────────────
+async function t635() {
+  console.log("\n═══ T635 — log 私隱：852+8 位 = 0（S3-5）═══");
+  // 口徑（工單 T635）：`grep -E '852[0-9]{8}' logs/*.log` = 0 — mock-e2e log + w3100 各 log（含 T634 rotation 前後）
+  const files = [
+    "/tmp/e2e-server.log",
+    "/tmp/e2e-worker.log",
+    "/tmp/e2e-worker2.log",
+    "/tmp/e2e-worker-fail.log",
+    W3100_LOG,
+    W3100_T634_LOG,
+    ...fs.readdirSync("/tmp").filter((f) => f.startsWith("w3100-d3.log.pre-d3.")),
+  ].map((f) => f.startsWith("/") ? f : path.join("/tmp", f));
+  const existing = files.filter((f) => fs.existsSync(f));
+  const out = execSync(`grep -hE '852[0-9]{8}' ${existing.map((f) => `'${f}'`).join(" ")} 2>/dev/null || true`, { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+  const hits = out.split("\n").filter((l) => l.trim()).length;
+  assertEq(`T635 log 零 HK 手機格式（852+8 位；${existing.length} 檔）`, hits, 0);
+  if (hits > 0) console.log(`  前 3 行：\n${hits && out.split("\n").slice(0, 3).join("\n")}`);
+}
+
 // ── main（CJS — tsx 無 type:module → 唔可以用 top-level await）────────────────
 async function main() {
   const phase = (process.argv.find((a) => a.startsWith("--phase=")) ?? "").split("=")[1] ?? "t630";
@@ -1649,6 +1922,28 @@ async function main() {
       await t633();
     } finally {
       await prisma.$disconnect();
+      await redis.quit().catch(() => undefined);
+    }
+  } else if (phase === "t636") {
+    try {
+      await t636();
+    } finally {
+      await prisma.$disconnect();
+      await redis.quit().catch(() => undefined);
+    }
+  } else if (phase === "t634") {
+    try {
+      await t634();
+    } finally {
+      await prisma.$disconnect();
+      await redis.quit().catch(() => undefined);
+    }
+  } else if (phase === "t635") {
+    try {
+      await t635();
+    } finally {
+      await prisma.$disconnect();
+      await redis.quit().catch(() => undefined);
     }
   } else {
     let fx: Fixtures;

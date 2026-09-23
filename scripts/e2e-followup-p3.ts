@@ -29,6 +29,7 @@ try {
 } catch {
   /* 靠 process env */
 }
+import "./e2e-origin-shim";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";

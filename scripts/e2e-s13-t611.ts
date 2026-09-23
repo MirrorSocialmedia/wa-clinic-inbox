@@ -23,6 +23,7 @@
  * 用法（repo root）：pnpm tsx scripts/e2e-s13-t611.ts
  * 輸出：T611-OK / T611-FAIL: <reason>（exit 1）
  */
+import "./e2e-origin-shim";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 

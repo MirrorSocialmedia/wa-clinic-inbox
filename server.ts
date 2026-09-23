@@ -48,6 +48,17 @@ app.prepare().then(() => {
     cors: process.env.SOCKET_CORS_ORIGIN
       ? { origin: process.env.SOCKET_CORS_ORIGIN }
       : undefined,
+    // ★ cwi-final S3-6：Socket.IO handshake origin 檢查（spec 逐字語義：無 origin 放行；
+    //   有 origin 必須 host === APP_HOST — 壞 origin fail-closed）
+    allowRequest: (req, cb) => {
+      const o = req.headers.origin;
+      if (!o) return cb(null, true);
+      try {
+        cb(null, new URL(o).host === process.env.APP_HOST);
+      } catch {
+        cb(null, false);
+      }
+    },
     // 唔存 query string / cookie 入 log（PII）
     transports: ["websocket", "polling"],
   });
@@ -126,8 +137,9 @@ app.prepare().then(() => {
     void handle(req, res);
   });
 
-  server.listen(port, () => {
-    log.info({ port, dev }, "wa-clinic-inbox server ready");
+  // ★ cwi-final S3-6：只綁 127.0.0.1（cloudflared 同機反代 — 唔暴露內網）
+  server.listen(port, "127.0.0.1", () => {
+    log.info({ port, dev, bind: "127.0.0.1" }, "wa-clinic-inbox server ready");
   });
 
   // Graceful shutdown（PM2 stop → SIGINT / kill → SIGTERM）：

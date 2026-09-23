@@ -30,6 +30,7 @@
  *
  * ★ PII 鐵律：mock 訊息係代碼字串；斷言全部 metadata（status / errorCode / alert / log 計數）。
  */
+import "./e2e-origin-shim";
 import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, existsSync, openSync, readlinkSync, closeSync } from "node:fs";
 import path from "node:path";

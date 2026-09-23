@@ -36,6 +36,10 @@ export interface SessionData {
   /** ★ cwi-final S3-2（A1）：session 唯一 id（per-device 撤銷用）— 登出只 deny 呢個 sid，其他機唔受影響。
    * 舊 session（冇 sid）照常有效（到期自然失效）。 */
   sid?: string;
+  /** ★ cwi-final S3-5：強制 TOTP enroll 段（ADMIN/SUPERVISOR 未 enroll + TOTP_ENFORCE_FROM 已到期）。
+   * 登入成功但 session 受限：除 /api/admin/totp/* 外一律 403（requireAuth）；TTL 固定 15 分鐘
+   * （enroll 窗口 — 過期要重新登入）。 */
+  enrollOnly?: boolean;
 }
 
 export const SESSION_COOKIE_NAME = "wa_inbox_session";
@@ -57,10 +61,15 @@ export const SESSION_TTL_SECONDS: Record<SessionRole, number> = {
 };
 const UNSEAL_TTL_SECONDS = Math.max(SESSION_TTL_SECONDS.STAFF, SESSION_TTL_SECONDS.ADMIN, SESSION_TTL_SECONDS.SUPERVISOR);
 
-/** session 有冇喺該 role 嘅有效期内（loginAt 起算；fail-closed：無 loginAt = 失效）。 */
-export function isSessionFresh(data: Pick<SessionData, "role" | "loginAt">): boolean {
+/** ★ S3-5：enrollOnly session 固定 15 分鐘窗口（enroll 完就應該登出/重登）。 */
+export const ENROLL_ONLY_TTL_MS = 15 * 60_000;
+
+/** session 有冇喺該 role 嘅有效期内（loginAt 起算；fail-closed：無 loginAt = 失效）。
+ * ★ S3-5：enrollOnly session 用固定 15 分鐘（role TTL 12h 唔适用 — enroll 窗口）。 */
+export function isSessionFresh(data: Pick<SessionData, "role" | "loginAt" | "enrollOnly">): boolean {
   if (typeof data.loginAt !== "number") return false;
-  return Date.now() - data.loginAt <= SESSION_TTL_SECONDS[data.role] * 1000;
+  const ttlMs = data.enrollOnly ? ENROLL_ONLY_TTL_MS : SESSION_TTL_SECONDS[data.role] * 1000;
+  return Date.now() - data.loginAt <= ttlMs;
 }
 
 function assertSecret(): string {

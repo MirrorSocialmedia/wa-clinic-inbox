@@ -23,6 +23,7 @@
  * 註：呢度 log draft 內容係本地 E2E console 輸出（測試報告用途），server/worker log 照舊
  *     metadata only（鐵律 1 由 mock-e2e T18/T26 獨立驗證）。
  */
+import "./e2e-origin-shim";
 import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 

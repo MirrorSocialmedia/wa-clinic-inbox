@@ -11,6 +11,7 @@
  * 輸出：T708-OK / T708-FAIL: <reason>
  * fixture：`t708` 前綴 id — 段尾 hermetic sweep（assert 零殘留）
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";

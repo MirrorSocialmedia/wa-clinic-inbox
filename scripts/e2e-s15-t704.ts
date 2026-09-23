@@ -20,6 +20,7 @@
  *   pnpm e2e:s15-t704
  * 輸出：T704-OK / T704-FAIL: <reason>
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import path from "node:path";
 import https from "node:https";

@@ -29,6 +29,7 @@
  *
  * ★ PII 鐵律：斷言本身就用 fixture 病人資料做 canary（t164 零 PII regex）。
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";

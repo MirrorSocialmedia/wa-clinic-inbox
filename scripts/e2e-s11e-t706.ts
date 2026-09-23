@@ -4,6 +4,7 @@
 // 每場景 = 用 page.route 將目標請求延遲 3s → 在 pending 期間換到對話 B →
 // 斷言 B 嘅 pane 唔含 A 嘅內容；等 delayed 回應落地後再斷一次。
 // 舊 code（無 guard / 無 key remount / 無 visible filter）：遲到回應會寫入 B 嘅 state → B pane 見到 A 嘅內容。
+import "./e2e-origin-shim";
 import { PrismaClient } from "@prisma/client";
 import { execSync } from "child_process";
 import { readFileSync, readdirSync } from "fs";

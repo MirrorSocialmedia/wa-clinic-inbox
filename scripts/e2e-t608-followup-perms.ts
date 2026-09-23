@@ -14,6 +14,7 @@
  * 輸出：T608-OK / T608-FAIL: <n>
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import "./e2e-origin-shim";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { PrismaClient } from "@prisma/client";

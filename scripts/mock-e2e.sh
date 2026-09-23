@@ -201,6 +201,55 @@ export MEDIA_ENC_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 TSX=./node_modules/.bin/tsx
 PORT="${PORT:-3100}"
 BASE="http://127.0.0.1:${PORT}"
+
+# ★ cwi-final S3-6 harness 兼容（CSRF middleware 上線 — 裸 curl 全數 403/415）：
+# curl wrapper：打 $BASE/api/* 嘅請求自動補（只補未自帶嘅）：
+# 1) `Origin: $BASE`（同站 — middleware originOk；EXEMPT 端點補咗都無害；GET 本身放行）
+# 2) 非 GET 冇 Content-Type → 補 `application/json`（防 curl -d 默認 form-urlencoded → 415）
+# 3) login 冇 XFF → 補獨立 bucket `10.63.<n>.55`（server 端 TRUST_PROXY=1 local-only —
+#    clientIp 信 XFF 第一值 → 每 login 獨立 bucket 避 IP 10/分鐘限流；口徑同 matrix 10.63.x.7）。
+# 自帶 Origin / XFF / CT 嘅 call（例外測試）原樣放行。
+E2E_XFF_SEQ=0
+next_xff() { E2E_XFF_SEQ=$(( (E2E_XFF_SEQ + 1) % 250 + 1 )); echo "10.63.${E2E_XFF_SEQ}.55"; }
+REAL_CURL="$(command -v curl)"
+curl() {
+  local url="" method="" prev="" has_origin=0 has_ct=0 has_xff=0 has_data=0 is_get=0 a
+  for a in "$@"; do
+    if [ "$prev" = "-H" ]; then
+      case "$a" in
+        Origin:*|origin:*) has_origin=1 ;;
+        Content-Type:*|content-type:*) has_ct=1 ;;
+        X-Forwarded-For:*|x-forwarded-for:*) has_xff=1 ;;
+      esac
+    fi
+    case "$a" in
+      -d|--data|--data-raw|--data-binary|--data-urlencode) has_data=1 ;;
+    esac
+    if [ "$prev" = "-X" ]; then
+      method="${a^^}"
+      case "$method" in GET|HEAD) is_get=1 ;; esac
+    fi
+    case "$a" in http://*|https://*) url="$a" ;; esac
+    prev="$a"
+  done
+  [ -n "$method" ] || { [ "$has_data" = 1 ] && method="POST"; }
+  local extra=()
+  if [[ "$url" == "$BASE"/api/* ]]; then
+    [ "$has_origin" = 1 ] || extra+=("-H" "Origin: $BASE")
+    if [ "$is_get" != 1 ] && [ -n "$method" ] && [ "$has_ct" = 0 ]; then
+      extra+=("-H" "Content-Type: application/json")
+    fi
+    if [[ "$url" == *"/api/auth/login"* ]] && [ "$has_xff" = 0 ]; then
+      extra+=("-H" "X-Forwarded-For: $(next_xff)")
+    fi
+  fi
+  if [ ${#extra[@]} -gt 0 ]; then
+    "$REAL_CURL" "${extra[@]}" "$@"
+  else
+    "$REAL_CURL" "$@"
+  fi
+}
+
 COOKIE_TKW=/tmp/e2e-cookie-tkw.txt
 COOKIE_MF=/tmp/e2e-cookie-mf.txt
 EPOCH=$(date +%s)
@@ -1635,14 +1684,26 @@ T50=0
 ADMIN_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$ADMIN_EMAIL'" | jf id)
 [ -n "$ADMIN_ID" ] || { echo "    ❌ T50 admin id 搵唔到"; T50=1; }
 # hermetic：清上一 run 殘留（persistent DB — 留低 totpSecretEnc 會鎖死下輪 T1c 登入；舊 alert 污染計數）
-q "UPDATE \"StaffUser\" SET \"totpSecretEnc\" = NULL WHERE id='$ADMIN_ID'" >/dev/null
+q "UPDATE \"StaffUser\" SET \"totpSecretEnc\" = NULL, \"totpPendingEnc\" = NULL WHERE id='$ADMIN_ID'" >/dev/null
 q "DELETE FROM \"Alert\" WHERE type='admin_new_ip_login'" >/dev/null 2>&1 || true
-# (1) enroll（ADMIN cookie；secret 加密落 DB；response 只此一次）
-ENR=$(curl -s -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/totp/enroll")
+q "DELETE FROM \"AuditLog\" WHERE action='TOTP_ENROLLED' AND \"entityId\"='$ADMIN_ID'" >/dev/null 2>&1 || true
+# Redis TOTP 計數（persistent — 跨 run 累積會令 (3) 錯 code 斷言 401 變 423）
+REDIS_URL=$(grep -oP "^REDIS_URL=\K.*" .env | head -1)
+node -e "const R=require('ioredis');const r=new R(process.argv[1]);r.del('totpfail:'+process.argv[2],'totp:last:'+process.argv[2]).then(()=>{r.disconnect();process.exit(0)}).catch(()=>process.exit(0))" "$REDIS_URL" "$ADMIN_ID" >/dev/null 2>&1 || true
+# (1) enroll（ADMIN cookie + password 再認證；新 secret 先落 totpPendingEnc — S3-5 兩段式）
+ENR=$(curl -s -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/totp/enroll" -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}")
 T50_SECRET=$(echo "$ENR" | grep -oE '"secret":"[^"]*"' | head -1 | cut -d'"' -f4)
 [ -n "$T50_SECRET" ] || { echo "    ❌ T50 enroll response 冇 secret：$(echo "$ENR" | head -c 120)"; T50=1; }
-DBENC=$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE id='$ADMIN_ID' AND \"totpSecretEnc\" IS NOT NULL" | jf c)
-check "T50 enroll → DB totpSecretEnc 非 NULL（AES-256-GCM 密文落庫）" "$DBENC" "1"
+DBPEND=$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE id='$ADMIN_ID' AND \"totpPendingEnc\" IS NOT NULL" | jf c)
+check "T50 enroll → DB totpPendingEnc 非 NULL（pending 未生效）" "$DBPEND" "1"
+# (1b) confirm（現算 code 驗 pending secret → 搬去 totpSecretEnc + AuditLog + Alert MEDIUM）
+T50_CONF=$(pnpm -s e2e:totp-code "$T50_SECRET")
+CONF=$(curl -s -o /tmp/e2e-t50-conf.txt -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/totp/confirm" -H 'Content-Type: application/json' -d "{\"code\":\"$T50_CONF\"}")
+check "T50 confirm 正確 code → 200" "$CONF" "200"
+DBENC=$(q "SELECT count(*)::text c FROM \"StaffUser\" WHERE id='$ADMIN_ID' AND \"totpSecretEnc\" IS NOT NULL AND \"totpPendingEnc\" IS NULL" | jf c)
+check "T50 confirm → DB totpSecretEnc 非 NULL + pending 已清（AES-256-GCM 密文落庫）" "$DBENC" "1"
+NAUDIT=$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE \"staffId\"='$ADMIN_ID' AND action='TOTP_ENROLLED'" | jf c)
+check "T50 confirm → AuditLog TOTP_ENROLLED row" "$NAUDIT" "1"
 if grep -qF "$T50_SECRET" /tmp/e2e-server.log 2>/dev/null; then
   echo "    ❌ T50 secret 出現在 server log（PII 鐵律違反）"; T50=1
 else
@@ -1670,7 +1731,14 @@ q "DELETE FROM \"AuditLog\" WHERE \"staffId\"='$ADMIN_ID' AND action='LOGIN'" >/
 # 雙保險：login 前再清一次該 type alert（抵受外部污染 — 例：手動清咗 LOGIN baseline 後
 # 早期 T1c login 開咗 alert 留落嚟 → 計數會 >1）。正常 run 呢條 DELETE 係 no-op。
 q "DELETE FROM \"Alert\" WHERE type='admin_new_ip_login'" >/dev/null 2>&1 || true
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_ADMIN" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\",\"totp\":\"$(pnpm -s e2e:totp-code "$T50_SECRET")\"}")
+# ★ S3-5 防重放：(4) 已用咗 step S 嘅 code（totp:last EX 120）— 若 (6) 仲喺同一 step，現算 code 同值 →
+#   會被當重放 401。迴圈等 step 滾過（code 變咗先算）— 最多 ~30s。
+for i in 1 2 3 4 5 6; do
+  T50_NEWCODE=$(pnpm -s e2e:totp-code "$T50_SECRET")
+  [ "$T50_NEWCODE" != "$T50_CODE" ] && break
+  sleep 5
+done
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_ADMIN" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\",\"totp\":\"$T50_NEWCODE\"}")
 check "T50 新 IP 登入 → 200" "$CODE" "200"
 # 斷言用「有冇 create」而唔係「未解決」— health cron（*/5m）會 auto-resolve 佢唔管嘅
 # 事件型 alert（admin_new_ip_login 唔喺 breach set）；hermetic setup 已清晒舊 row → count 恒 = 1
@@ -2940,6 +3008,21 @@ T80_SOCKUP=0
 for i in $(seq 1 40); do grep -q "SOCKET-CONNECTED" "$T80_SOCK" 2>/dev/null && { T80_SOCKUP=1; break; }; sleep 1; done
 [ "$T80_SOCKUP" = 1 ] && pass "T80 socket listener 已連" || { fail "T80 socket listener 未連"; R9=1; }
 sleep 2
+# ★ cwi-final D3 r7 hermetic（T80 flake 根因修 — r5/r6 雙實測 2026-09-24）：
+#   T78 收尾 pkill（本檔 :2949 既有模式）殺 main worker 時若正處理 AI 回覆 job →
+#   job 離隊 + 無 AiDraft → stuck-sweep（每 5 分鐘 tick，條件：IN+API+text<30min
+#   且無 draft 且 aiQueue 無 job）靜默重排（重排本身零 log 行）→ rt2 重跑 →
+#   重發 OUT 回覆 → message:new 落 T80 BEFORE→AFTER window（r5/r6 各 +1，DB+log 雙實證，WIP 零涉及）。
+#   法（D2 精神 = 消滅 sweep 候選）：window 前強制跑一次 runStuckSweep（e2e:cron stuck-sweep —
+#   等佢嘅 done 行先繼續）→ 候選全部排空並生成 draft → 下個 5 分鐘 tick 零候選 →
+#   window 內零靜默重排。下面 quiescence gate 等 drain 落定（超時照跑 — flake 唔好變硬傷）。
+SWD0=$(grep -c "stuck-sweep: done" /tmp/e2e-worker-rt2.log 2>/dev/null); SWD0=${SWD0:-0}
+pnpm -s e2e:cron stuck-sweep >/dev/null 2>&1 || true
+for T80_SWI in $(seq 1 30); do sleep 2; SWD1=$(grep -c "stuck-sweep: done" /tmp/e2e-worker-rt2.log 2>/dev/null); SWD1=${SWD1:-0}; [ "$SWD1" != "$SWD0" ] && break; done
+T80_QACT() { cat /tmp/e2e-worker.log /tmp/e2e-worker-rt2.log 2>/dev/null | grep -cE "inbound: message processed|outbound: sent|\"msg\":\"ai: " || true; }
+T80_A0=$(T80_QACT)
+for T80_QI in $(seq 1 12); do sleep 5; T80_A1=$(T80_QACT); [ "$T80_A1" = "$T80_A0" ] && break; T80_A0=$T80_A1; done
+sleep 2  # grace：在途 emit 落定
 T80_NEW_BEFORE=$(grep -c "SOCKET-EVENT message:new" "$T80_SOCK" 2>/dev/null); T80_NEW_BEFORE=${T80_NEW_BEFORE:-0}
 # trigger：T80 wamid 嘅 Message INSERT 強行 abort（模擬 transaction rollback）
 q "CREATE OR REPLACE FUNCTION e2e_t80_guard_fn() RETURNS trigger AS \$\$ BEGIN IF NEW.\"waMessageId\" LIKE 'wamid.E2E_T80%' THEN RAISE EXCEPTION 'e2e T80 forced rollback'; END IF; RETURN NEW; END; \$\$ LANGUAGE plpgsql" >/dev/null 2>&1 || fail "T80 guard function 建立失敗"
@@ -4812,13 +4895,37 @@ t146_call() { # t146_call <body-json> → 設 T146_R / T146_C
     return 0
   done
 }
+# a4 2026-09-24：T145/T147 同 endpoint 裸 curl 同暴露 loadManifest race（r4 實測 T147 撞冷編譯窗口 500 HTML）
+#   — 照 T146 先例加同口徑 flake-retry（只 retry flake 簽名；真 500 照 fail）
+t147_call() { # t147_call <body-json> → 設 T147_R / T147_C
+  local body="$1" i
+  for i in 1 2 3; do
+    T147_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "$body")
+    T147_C=$(tail -1 <<< "$T147_R")
+    if [ "$T147_C" = "500" ] && grep -qE 'Unexpected end of JSON input|<!DOCTYPE html>' <<< "$(sed '$d' <<< "$T147_R")"; then
+      echo "    (T147 dev manifest flake 500 → retry $i)"; sleep 2; continue
+    fi
+    return 0
+  done
+}
+
+t145_call() { # t145_call <body-json> → 設 T145_RES
+  local body="$1" i
+  for i in 1 2 3; do
+    T145_RES=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "$body")
+    if [ "$(tail -1 <<< "$T145_RES")" = "500" ] && grep -qE 'Unexpected end of JSON input|<!DOCTYPE html>' <<< "$(sed '$d' <<< "$T145_RES")"; then
+      echo "    (T145 dev manifest flake 500 → retry $i)"; sleep 2; continue
+    fi
+    return 0
+  done
+}
 
 if [ -z "$R14_D" ] || [ -z "$R14_D2" ]; then
   echo "    ❌ R14：mock 30 日內搵唔到兩個 open 日"; R14=1
 else
   # ── T145. 手動刷新 200 全鏈 + 寫入後 dayRefreshed hook ───────────────────
   T145_OLD=$(l2_max "$R14_D")
-  T145_RES=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}")
+  t145_call "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\"]}"
   T145_HTTP=$(tail -1 <<< "$T145_RES")
   T145_BODY=$(head -1 <<< "$T145_RES")
   sleep 1
@@ -4924,7 +5031,7 @@ T145TS
   T147_OLD=$(l2_max "$R14_D")
   T147_OLD2=$(l2_max "$R14_D2")
   echo "[\"$R14_D\"]" > .dev/workforce-mock-refresh-failday.json
-  T147_R=$(curl -s -w '\n%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\",\"$R14_D2\"]}")
+  t147_call "{\"clinicCode\":\"TKW\",\"dates\":[\"$R14_D\",\"$R14_D2\"]}"
   T147_BODY=$(head -1 <<< "$T147_R")
   check "T147 200" "$(tail -1 <<< "$T147_R")" "200"
   sleep 1
@@ -7006,6 +7113,12 @@ else fail "llm-extract: done log 行缺席（log 通道未工作 — 上面 0-hi
 
 
 # ── summary ────────────────────────────────────────────────────────────
+
+# ── T635. log 私隱：HK 手機格式零洩露（S3-5 — 全 run log grep）────────────────
+# 口徑（工單 T635）：`grep -E '852[0-9]{8}' logs/*.log` = 0 — server + 各 worker log（本次 run 全部）。
+# （patient waId = 8526001<epoch> — log 一出現就係 PII；S3-5 已剷 outbound/graph `to` + SENSITIVE_KEYS +12）
+T635_HITS=$(grep -hE '852[0-9]{8}' /tmp/e2e-server.log /tmp/e2e-worker.log /tmp/e2e-worker2.log /tmp/e2e-worker-fail.log 2>/dev/null | wc -l | tr -d ' ')
+check "T635 log 零 HK 手機格式（852+8 位）" "$T635_HITS" "0"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

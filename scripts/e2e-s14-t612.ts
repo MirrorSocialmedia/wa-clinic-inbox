@@ -23,6 +23,7 @@
  * 用法（repo root）：pnpm tsx scripts/e2e-s14-t612.ts
  * 輸出：T612-OK / T612-FAIL: <reason>（exit 1）
  */
+import "./e2e-origin-shim";
 import path from "node:path";
 import { createHmac } from "node:crypto";
 import { PrismaClient } from "@prisma/client";

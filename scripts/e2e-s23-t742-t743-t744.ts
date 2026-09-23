@@ -35,6 +35,7 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 process.env.WORKFORCE_MOCK = "1"; // in-process engine/pipeline 要食 workforce mock
+import "./e2e-origin-shim";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { phoneHashes } from "../src/lib/phone-hash";

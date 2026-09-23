@@ -24,6 +24,7 @@
  * 用法（repo root）：pnpm tsx scripts/e2e-s12-t700.ts
  * 輸出：T700-OK / T700-FAIL: <reason>（exit 1）
  */
+import "./e2e-origin-shim";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 

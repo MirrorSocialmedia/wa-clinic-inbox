@@ -22,6 +22,7 @@
  * 輸出：T754-OK / T754-FAIL: <n>
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import "./e2e-origin-shim";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";

@@ -4,6 +4,7 @@ import argon2 from "argon2";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, invalidateStaffSessions } from "@/lib/rbac";
+import { hit } from "@/lib/rate-limit";
 import { publishControl } from "@/lib/notify";
 import { handle, toResponse } from "@/lib/api-error";
 
@@ -29,6 +30,11 @@ const schema = z.object({
 
 export const POST = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
+  // ★ S3-6：change-password 5/15min（per staff — 改密碼係高價值操作）
+  if (!(await hit(`chpwd:staff:${ctx.staff.id}`, 5, 15 * 60))) {
+    log.warn({ staffId: ctx.staff.id }, "change-password: rate limited");
+    return NextResponse.json({ error: "too many attempts" }, { status: 429 });
+  }
   const parsed = schema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return toResponse(parsed.error);
   const { oldPassword, newPassword } = parsed.data;

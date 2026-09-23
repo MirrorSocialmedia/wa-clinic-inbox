@@ -70,7 +70,7 @@ export async function sendTextMessage(opts: {
     await new Promise((r) => setTimeout(r, delayMs));
     const wamid = process.env.WA_GRAPH_MOCK_WAMID || `mock-wamid-${randomBytes(10).toString("hex")}`;
     log.info(
-      { phoneNumberId, to, wamid, bodyLen: body.length, mock: true },
+      { phoneNumberId, wamid, bodyLen: body.length, mock: true },
       "graph: send text (MOCK)"
     );
     return { wamid, mocked: true };
@@ -113,7 +113,7 @@ export async function sendTextMessage(opts: {
   }
 
   const wamid = data.messages[0].id;
-  log.info({ phoneNumberId, to, wamid }, "graph: send text OK");
+  log.info({ phoneNumberId, wamid }, "graph: send text OK");
   return { wamid, mocked: false };
 }
 
@@ -148,7 +148,7 @@ export async function sendTemplateMessage(opts: {
     const wamid = `mock-wamid-${randomBytes(10).toString("hex")}`;
     // ★ PII：log 只 template 名/語言/變數個數 — 變數內容（日期/醫生）唔入 log
     log.info(
-      { phoneNumberId, to, wamid, templateName, language, paramCount: components[0]?.parameters.length ?? 0, mock: true },
+      { phoneNumberId, wamid, templateName, language, paramCount: components[0]?.parameters.length ?? 0, mock: true },
       "graph: send template (MOCK)"
     );
     return { wamid, mocked: true };
@@ -196,7 +196,7 @@ export async function sendTemplateMessage(opts: {
   }
 
   const wamid = data.messages[0].id;
-  log.info({ phoneNumberId, to, wamid, templateName }, "graph: send template OK");
+  log.info({ phoneNumberId, wamid, templateName }, "graph: send template OK");
   return { wamid, mocked: false };
 }
 
@@ -342,7 +342,7 @@ export async function sendFlowMessage(opts: {
     await new Promise((r) => setTimeout(r, 10));
     const wamid = `mock-wamid-${randomBytes(10).toString("hex")}`;
     log.info(
-      { phoneNumberId, to, wamid, flowId: flow.flow_id, mock: true },
+      { phoneNumberId, wamid, flowId: flow.flow_id, mock: true },
       "graph: send flow (MOCK)"
     );
     return { wamid, mocked: true };
@@ -386,7 +386,7 @@ export async function sendFlowMessage(opts: {
     throw new GraphError(res.status, data?.error?.code ?? null, `graph send flow HTTP ${res.status}`);
   }
   const wamid = data.messages[0].id;
-  log.info({ phoneNumberId, to, wamid }, "graph: send flow OK");
+  log.info({ phoneNumberId, wamid }, "graph: send flow OK");
   return { wamid, mocked: false };
 }
 

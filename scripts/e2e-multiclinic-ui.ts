@@ -19,6 +19,7 @@
  *
  * ★ PII 鐵律：fixture 全合成（E2E MC 前綴）。
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";

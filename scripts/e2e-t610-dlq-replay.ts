@@ -19,6 +19,7 @@ try {
   /* 靠 process env */
 }
 
+import "./e2e-origin-shim";
 import { execSync, spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { createHmac } from "node:crypto";

@@ -22,6 +22,7 @@
  * 輸出：T601-T607-OK / T601-T607-FAIL: <n>
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import "./e2e-origin-shim";
 import path from "node:path";
 import fs from "node:fs";
 import { createRequire } from "node:module";

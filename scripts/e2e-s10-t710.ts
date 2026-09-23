@@ -20,6 +20,7 @@
  * 用法（repo root）：pnpm tsx scripts/e2e-s10-t710.ts
  * 輸出：T710-OK / T710-FAIL: <reason>（exit 1）
  */
+import "./e2e-origin-shim";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { readFileSync } from "node:fs";

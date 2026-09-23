@@ -90,13 +90,26 @@ export function totpCode(secretB32: string, timeMs: number = Date.now()): string
  * 比較用 timing-safe（constant-time，防 timing side channel）。
  */
 export function verifyTotp(secretB32: string, code: string, timeMs: number = Date.now()): boolean {
+  return matchedTotpStep(secretB32, code, timeMs) !== null;
+}
+
+/**
+ * ★ cwi-final S3-5 防重放：code 實際匹配到嘅 step（30s 時間片編號）。
+ * 未匹配 → null；window 內多 step 命中（30s 邊界罕見）→ 返最大 step。
+ * login route 用佢對 `totp:last:<staffId>`：實際 step <= 上次已用 step → 拒（同 code 唔可以用第二次）。
+ */
+export function matchedTotpStep(secretB32: string, code: string, timeMs: number = Date.now()): number | null {
   const normalized = String(code).trim();
-  if (!/^\d{6}$/.test(normalized)) return false;
+  if (!/^\d{6}$/.test(normalized)) return null;
+  let matched: number | null = null;
   for (let step = -VERIFY_WINDOW; step <= VERIFY_WINDOW; step++) {
-    const expected = totpCode(secretB32, timeMs + step * PERIOD_SEC * 1000);
-    if (timingSafeStringEqual(expected, normalized)) return true;
+    const t = timeMs + step * PERIOD_SEC * 1000;
+    if (timingSafeStringEqual(totpCode(secretB32, t), normalized)) {
+      const s = Math.floor(t / 1000 / PERIOD_SEC);
+      if (matched === null || s > matched) matched = s;
+    }
   }
-  return false;
+  return matched;
 }
 
 function timingSafeStringEqual(a: string, b: string): boolean {

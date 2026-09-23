@@ -17,6 +17,7 @@
  * 輸出：T609-OK / T609-FAIL: <n>
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import "./e2e-origin-shim";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";

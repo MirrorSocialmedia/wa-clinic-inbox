@@ -193,7 +193,7 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     const payload = await buildMessageNewPayload(msg.id);
     await publishConvEvent(convRef(conv), "message:new", payload);
     log.info(
-      { clinic: clinic.code, messageId, wamid, to: contactRow.waId },
+      { clinic: clinic.code, messageId, wamid },
       "outbound: sent OK"
     );
   } catch (err) {

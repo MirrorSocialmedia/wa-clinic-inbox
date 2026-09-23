@@ -21,6 +21,7 @@
  * e2e harness：playwright/prisma 動態 payload 型太繁 → 本檔局部 any（src/ 零 any）
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import "./e2e-origin-shim";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";

@@ -8,6 +8,7 @@
 //  - A3 浮頂：convA 預設 lastMessageAt=now-4h → 舊 touch 用 GREATEST(last, waTs=now-3h)=now-3h；
 //    新 touch 用 GREATEST(last, now)=now → 列表浮頂（判別點）
 //  - A4/A5：before keyset（beforeId）同值邊界唔重唔漏
+import "./e2e-origin-shim";
 import { PrismaClient } from "@prisma/client";
 import { execSync } from "child_process";
 import { readFileSync } from "fs";

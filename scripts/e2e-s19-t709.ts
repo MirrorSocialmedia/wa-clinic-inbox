@@ -15,6 +15,7 @@
  * 輸出：T709-OK / T709-FAIL: <reason>
  * fixture：`t709` 前綴 id — 段尾 hermetic sweep（assert 零殘留）
  */
+import "./e2e-origin-shim";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";

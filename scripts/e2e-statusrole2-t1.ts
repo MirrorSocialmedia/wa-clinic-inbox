@@ -22,6 +22,7 @@
  * 輸出：STATUSROLE2-T1-OK / STATUSROLE2-T1-FAIL: <reason>
  * fixture：`sr2t1` 前綴 id + email — 段尾 hermetic sweep（assert 零殘留）
  */
+import "./e2e-origin-shim";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";

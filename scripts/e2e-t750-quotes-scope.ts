@@ -18,6 +18,7 @@
  * 輸出：T750-OK / T750-FAIL: <n>
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import "./e2e-origin-shim";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

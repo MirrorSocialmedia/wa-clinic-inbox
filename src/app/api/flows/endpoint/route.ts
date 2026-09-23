@@ -62,6 +62,7 @@ import {
 import { syncWindow, getSlots, hkTodayStr, hkDateOffset } from "@/lib/availability";
 import { getBookableSlots, claimSlot, filterBookableSlots, WorkforceApiError, refreshAvailability, slotClaimEnabled, type BookableDay, type BookableSlot } from "@/lib/workforce/client";
 import { getSlotFreshness, invalidateAvailabilityDay } from "@/lib/availability";
+import { hit, clientIpFromHeaders } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -112,6 +113,10 @@ function dateRangeError(date: string): string | null {
 }
 
 export async function POST(req: NextRequest) {
+  // ★ S3-6：flows/endpoint per-IP 60/分鐘（外部端點 — 限流防 Meta 重試風暴 / 惡意加密 bomb）
+  if (!(await hit(`flow:ip:${clientIpFromHeaders(req.headers)}`, 60, 60))) {
+    return err(429, "rate_limited");
+  }
   let key16: Buffer;
   let reqIvB64: string;
   let plain: DecryptedRequest;
@@ -157,6 +162,11 @@ export async function POST(req: NextRequest) {
 
     const action = plain.action;
     if (!action) return err(400, "bad_action");
+
+    // ★ S3-6：per flow_token 30/分鐘（防同 token 重放風暴 — 解密後先知 token）
+    if (plain.flow_token && !(await hit(`flow:token:${plain.flow_token}`, 30, 60))) {
+      return err(429, "rate_limited");
+    }
 
     // 2a) ping / error_notification：WhatsApp 平台層心跳／錯誤通知 — 無 flow_token 放行
     //     （靜態 data 回應：零 PII / 零寫入 / 零 DB — by design；screen 欄 = action 名自描述）

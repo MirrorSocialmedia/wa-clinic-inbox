@@ -19,6 +19,7 @@
  * - 截圖：/tmp/kairo-consult-c1-*.png（playwright + cookie session）
  * - 收尾 fixture sweep：waId 精確 IN 冚家潔 + 還原 aiMode + 刪 KnowledgeDoc（residue 0 斷言）
  */
+import "./e2e-origin-shim";
 import { spawn } from "node:child_process";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
