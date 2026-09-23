@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, configReadWhere } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -12,12 +12,13 @@ import { handle } from "@/lib/api-error";
 export const dynamic = "force-dynamic";
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  const ctx = await requireAdmin(req);
   const p = req.nextUrl.searchParams;
   const all = p.get("all") === "1";
 
+  // ★ cwi-final S3-1：clinicId in scope OR clinicId null（global admin = 全部）
   const alerts = await prisma.alert.findMany({
-    where: all ? {} : { resolvedAt: null },
+    where: { ...(all ? {} : { resolvedAt: null }), ...configReadWhere(ctx) },
     orderBy: [{ resolvedAt: "asc" }, { createdAt: "desc" }], // 未解決先（null 排頭），再新先
     take: 100,
   });

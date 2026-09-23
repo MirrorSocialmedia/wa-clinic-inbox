@@ -11,7 +11,7 @@
  *   API 只負責管理詞表 + 幫 UI 顯示 usable 狀態。
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope, configReadWhere } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import prisma from "@/lib/prisma";
 import { consultProductCreateSchema, isProductUsable } from "@/lib/sessions/consult-products";
@@ -60,8 +60,10 @@ export const GET = handle(async (req: NextRequest) => {
   const clinicId = req.nextUrl.searchParams.get("clinicId") ?? null;
   const workflow = req.nextUrl.searchParams.get("workflow") ?? null;
   const usableOnly = req.nextUrl.searchParams.get("usable") === "1";
+  // ★ cwi-final S3-1：帶 clinicId 參數 → assertConfigScope；無參數 → 全局行 + scope 內店行
+  if (clinicId) assertConfigScope(ctx, clinicId);
   const where: Record<string, unknown> = {
-    ...(clinicId ? { OR: [{ clinicId }, { clinicId: null }] } : {}),
+    ...(clinicId ? { OR: [{ clinicId }, { clinicId: null }] } : configReadWhere(ctx)),
     ...(workflow ? { workflow } : {}),
   };
   const rows = await prisma.consultProduct.findMany({
@@ -81,6 +83,8 @@ export const POST = handle(async (req: NextRequest) => {
     return NextResponse.json({ error: "validation failed", issues: parsed.error.issues }, { status: 400 });
   }
   const d = parsed.data;
+  // ★ cwi-final S3-1：clinicId 必喺 scope 內（null 全局 → global admin only）
+  assertConfigScope(ctx, d.clinicId);
   // STAFF 唔會到呢度（requireAdmin）；ADMIN 全店 — clinicId null = 全局由 body 決定。
   try {
     const product = await prisma.consultProduct.create({

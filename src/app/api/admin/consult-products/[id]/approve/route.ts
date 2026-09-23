@@ -9,7 +9,7 @@
  */
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import prisma from "@/lib/prisma";
 import { isProductUsable } from "@/lib/sessions/consult-products";
@@ -31,6 +31,8 @@ export const POST = handle(async (req: NextRequest, { params }: Params) => {
   }
   const existing = await prisma.consultProduct.findUnique({ where: { id } });
   if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：確認操作核對產品嘅店域（scoped ADMIN 唔可以確認外店／全局產品）
+  assertConfigScope(ctx, existing.clinicId);
 
   const updated = await prisma.consultProduct.update({
     where: { id },

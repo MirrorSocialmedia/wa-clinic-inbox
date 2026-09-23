@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import argon2 from "argon2";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, resolveClinicIds, type ScopeType } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 
 /**
@@ -75,7 +75,7 @@ function scopeSummaryFor(
 }
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  const ctx = await requireAdmin(req);
   const [users, clinics, staffClinicRows, companies, companyClinicRows] = await Promise.all([
     prisma.staffUser.findMany({
       orderBy: [{ role: "asc" }, { email: "asc" }],
@@ -113,8 +113,29 @@ export const GET = handle(async (req: NextRequest) => {
     arr.push(row.clinicId);
     staffClinics.set(row.staffId, arr);
   }
+  // ★ cwi-final S3-1：非 global ADMIN 只見到「目標員工範圍 ⊆ 我範圍」嘅 STAFF
+  //   （用 resolveClinicIds 逐個計 — 員工數少，可以 in-memory filter；spec 表格 S3-1）；
+  //   ADMIN／SUPERVISOR 目標唔回（只有集團管理員可以管理佢哋）。
+  let visibleUsers = users;
+  // ★ cwi-final S3-1：只限 scoped ADMIN（role=ADMIN 且 scope ≠ ALL）；SUPERVISOR（全店唯讀語義）維持現行。
+  if (ctx.staff.role === "ADMIN" && ctx.scopeType !== "ALL") {
+    const callerSet = new Set(ctx.scopedClinicIds);
+    const visible: typeof users = [];
+    for (const u of users) {
+      if (u.role !== "STAFF") continue; // ADMIN/SUPERVISOR 目標唔回
+      // scopeType null = 舊數據 = CLINICS（同 sessionScopeType fallback）
+      const targetIds = await resolveClinicIds({
+        scopeType: (u.scopeType ?? "CLINICS") as ScopeType,
+        scopeCompanyId: u.scopeCompanyId,
+        staffClinicIds: staffClinics.get(u.id) ?? [],
+      });
+      // fail-closed：空集合 / 任何店超出我範圍 → 唔回
+      if (targetIds.length > 0 && targetIds.every((c) => callerSet.has(c))) visible.push(u);
+    }
+    visibleUsers = visible;
+  }
   return NextResponse.json(
-    users.map((u) => ({
+    visibleUsers.map((u) => ({
       ...u,
       clinicCode: u.clinicId ? (clinicCodeMap.get(u.clinicId) ?? null) : null,
       ...scopeSummaryFor(
@@ -131,15 +152,49 @@ export const GET = handle(async (req: NextRequest) => {
 });
 
 export const POST = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  const ctx = await requireAdmin(req);
   const parsed = createSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return toResponse(parsed.error);
   const d = parsed.data;
+
+  // ★ cwi-final S3-1：scoped ADMIN（role=ADMIN 且 scope ≠ ALL）建立限制；SUPERVISOR 維持現行。
+  //   - 只可以建 STAFF（ADMIN / SUPERVISOR → 403）
+  //   - 目標 scope 唔可以係 ALL（集團權限只有集團管理員可給）
+  //   - CLINICS 模式：目標診所集合 ⊆ 自己 scope
+  //   - COMPANY 模式：只可以係自己 scope 嘅同一間公司
+  if (ctx.staff.role === "ADMIN" && ctx.scopeType !== "ALL") {
+    if (d.role !== "STAFF") {
+      return NextResponse.json({ error: "forbidden", message: "只可以建立 STAFF（ADMIN/SUPERVISOR 需要集團管理員）" }, { status: 403 });
+    }
+    const reqScopeType: "ALL" | "COMPANY" | "CLINICS" = d.scopeType ?? "CLINICS";
+    if (reqScopeType === "ALL") {
+      return NextResponse.json({ error: "forbidden", message: "唔可以建立 ALL 範圍嘅帳號" }, { status: 403 });
+    }
+    if (reqScopeType === "COMPANY") {
+      const callerRow = await prisma.staffUser.findUnique({ where: { id: ctx.staff.id }, select: { scopeCompanyId: true } });
+      if (callerRow?.scopeCompanyId !== d.scopeCompanyId) {
+        return NextResponse.json({ error: "forbidden", message: "只可以建立自己公司內嘅帳號" }, { status: 403 });
+      }
+    } else {
+      const callerSet = new Set(ctx.scopedClinicIds);
+      const clinicList = [...new Set([...(d.clinicIds ?? []), ...(d.clinicId ? [d.clinicId] : [])])];
+      if (clinicList.length === 0 || !clinicList.every((c) => callerSet.has(c))) {
+        return NextResponse.json({ error: "forbidden", message: "診所集合超出自己 scope" }, { status: 403 });
+      }
+    }
+  }
 
   // scope 解析：SUPERVISOR 恆 ALL（現行無 scope 概念）；default：STAFF→CLINICS、ADMIN→ALL
   const scopeType: "ALL" | "COMPANY" | "CLINICS" =
     d.role === "SUPERVISOR" ? "ALL" : d.scopeType ?? (d.role === "STAFF" ? "CLINICS" : "ALL");
   const scopeCompanyId = scopeType === "COMPANY" ? d.scopeCompanyId : null;
+
+  // ★ cwi-final S3-1 步驟 0（臨時守衛 — spec 碼逐字）：ALLOW_SCOPED_ADMIN 未開 → scoped ADMIN 一律 400
+  const effectiveRole = d.role;
+  const effectiveScopeType = scopeType;
+  if (effectiveRole === "ADMIN" && effectiveScopeType !== "ALL" && process.env.ALLOW_SCOPED_ADMIN !== "1") {
+    return NextResponse.json({ error: "SCOPED_ADMIN_DISABLED", message: "公司／指定診所範圍 ADMIN 要等權限修復（cwi-final S3-1）上線先開" }, { status: 400 });
+  }
 
   // CLINICS 模式嘅有效診所集合（clinicIds + 舊 clinicId 欄合併去重）
   let clinicList: string[] = [];

@@ -15,7 +15,7 @@
  * 鐵律提醒：usable 純由 enabled && approvedAt!=null 決定（isProductUsable 單一來源）。
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
@@ -30,10 +30,12 @@ interface Params {
 
 /** ★ C5（MD §8.1）：單一產品讀取（UI 表單 refresh / e2e 斷言）。ADMIN-only。 */
 export const GET = handle(async (req: NextRequest, { params }: Params) => {
-  await requireAdmin(req);
+  const ctx = await requireAdmin(req);
   const { id } = await params;
   const product = await prisma.consultProduct.findUnique({ where: { id } });
   if (!product) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以睇外店／全局產品
+  assertConfigScope(ctx, product.clinicId);
   return NextResponse.json({ product, usable: isProductUsable(product) });
 });
 
@@ -48,6 +50,9 @@ export const PUT = handle(async (req: NextRequest, { params }: Params) => {
   const d = parsed.data;
   const existing = await prisma.consultProduct.findUnique({ where: { id } });
   if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：existing.clinicId 同 body.clinicId（?? existing）雙核對
+  assertConfigScope(ctx, existing.clinicId);
+  assertConfigScope(ctx, d.clinicId ?? existing.clinicId);
 
   // 增量：未提供 = 保持原值（undefined 唔入 data）
   const data: Record<string, unknown> = {};
@@ -113,6 +118,8 @@ export const PATCH = handle(async (req: NextRequest, { params }: Params) => {
   }
   const existing = await prisma.consultProduct.findUnique({ where: { id } });
   if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以改外店／全局產品
+  assertConfigScope(ctx, existing.clinicId);
   if (existing.enabled === parsed.data.enabled) {
     // 冪等：狀態未變 → 唔寫 audit
     return NextResponse.json({ id, enabled: existing.enabled, usable: isProductUsable(existing), changed: false });

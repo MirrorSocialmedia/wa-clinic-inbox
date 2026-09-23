@@ -12,7 +12,7 @@
  *   （skeleton 只通用描述；審核靠 staff 人手 — API 零 AI 審批）。
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope, configReadWhere } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import prisma from "@/lib/prisma";
 import { getKnowledgeCatalog, previewCatalog } from "@/lib/knowledge/catalog";
@@ -26,9 +26,12 @@ export const dynamic = "force-dynamic";
 export const GET = handle(async (req: NextRequest) => {
   const ctx = await requireAdmin(req);
   const clinicId = req.nextUrl.searchParams.get("clinicId") ?? null;
+  // ★ cwi-final S3-1：帶 clinicId 參數 → assertConfigScope（scoped ADMIN 唔可以睇外店）；
+  //   無參數 → configReadWhere（全局行 + scope 內店行；global admin = 全部）
+  if (clinicId) assertConfigScope(ctx, clinicId);
   const scope = clinicId
     ? { OR: [{ clinicId }, { clinicId: null }] }
-    : { clinicId: null };
+    : configReadWhere(ctx);
   const rows = await prisma.knowledgeDoc.findMany({
     where: scope,
     orderBy: [{ kind: "asc" }, { title: "asc" }],
@@ -71,6 +74,8 @@ export const POST = handle(async (req: NextRequest) => {
     return NextResponse.json({ error: "validation failed", issues: parsed.error.issues }, { status: 400 });
   }
   const d = parsed.data;
+  // ★ cwi-final S3-1：clinicId 必喺 scope 內（null 全局行 → global admin only）
+  assertConfigScope(ctx, d.clinicId);
   // 權限：clinicId 必喺 staff scope 內（ADMIN 全店；STAFF 唔會到呢度 — requireAdmin）
   const doc = await prisma.knowledgeDoc.create({
     data: {

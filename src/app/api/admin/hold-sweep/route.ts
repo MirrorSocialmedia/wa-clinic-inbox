@@ -6,14 +6,15 @@
  * 冪等 — 重複觸發安全（cron 每 5 分鐘已經喺行）。
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/rbac";
+import { requireGlobalAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { sweepFlowHolds } from "@/lib/flows/hold-sweep";
 
 export const dynamic = "force-dynamic";
 
 export const POST = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  // ★ cwi-final S3-1：sweep 係全集團 hold 推進（無 clinicId 參數、與 cron 同源）— 只限 global admin
+  await requireGlobalAdmin(req);
   const r = await sweepFlowHolds();
   return NextResponse.json(r);
 });

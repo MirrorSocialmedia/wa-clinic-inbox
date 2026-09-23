@@ -11,7 +11,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAdminOrSupervisor } from "@/lib/rbac";
+import { requireAdminOrSupervisor, assertClinicAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { publishControl } from "@/lib/notify";
 import {
@@ -102,6 +102,8 @@ export const PATCH = handle(async (req: NextRequest) => {
     return NextResponse.json({ error: "bad_request", message: "body: { clinicId, category, level: L1-L4 }" }, { status: 400 });
   }
   const { clinicId, category, level } = body.data;
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以調外店 AI 級別（SUPERVISOR 全店語義 — assertClinicAccess 放行）
+  assertClinicAccess(ctx, clinicId);
 
   // 鐵律：URGENT_PAIN / COMPLAINT 永遠人手（API 擋 — UI 無掣 = 雙擋）
   if (LOCKED_CATEGORIES.includes(category)) {

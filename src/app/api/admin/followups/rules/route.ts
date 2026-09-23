@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, configReadWhere } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -13,10 +13,11 @@ import { handle } from "@/lib/api-error";
  */
 export const dynamic = "force-dynamic";
 
-export const GET = handle(async (_req: NextRequest) => {
-  await requireAdmin(_req);
+export const GET = handle(async (req: NextRequest) => {
+  const ctx = await requireAdmin(req);
   const [rules, templates] = await Promise.all([
-    prisma.followupRule.findMany({ orderBy: [{ enabled: "desc" }, { name: "asc" }] }),
+    // ★ cwi-final S3-1：全局規則 + scope 內店規則（global admin = 全部）
+    prisma.followupRule.findMany({ where: configReadWhere(ctx), orderBy: [{ enabled: "desc" }, { name: "asc" }] }),
     prisma.followupTemplate.findMany({ select: { key: true, approved: true } }),
   ]);
   const approvedMap = new Map(templates.map((t) => [t.key, t.approved]));

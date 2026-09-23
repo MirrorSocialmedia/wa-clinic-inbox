@@ -15,7 +15,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAdminOrSupervisor } from "@/lib/rbac"; // ★ cwi-routing-20260906 §8：SUPERVISOR 讀寫
+import { requireAdmin, assertConfigScope } from "@/lib/rbac"; // ★ cwi-final S3-1：SUPERVISOR 唔准 decide（requireAdmin）
 import { handle } from "@/lib/api-error";
 import { saveDraft, WorkflowError } from "@/lib/workflow/store";
 
@@ -30,11 +30,13 @@ const bodySchema = z.object({
 
 export const POST = handle(
   async (req: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
-    const ctx = await requireAdminOrSupervisor(req);
+    const ctx = await requireAdmin(req); // ★ cwi-final S3-1：SUPERVISOR 唔准 decide
     const { id } = await params;
 
     const card = await prisma.suggestionCard.findUnique({ where: { id } });
     if (!card) return NextResponse.json({ error: "not found" }, { status: 404 });
+    // ★ cwi-final S3-1：建議卡嘅店域必喺 scope 內（clinicId null 全局卡 → global admin only）
+    assertConfigScope(ctx, card.clinicId);
     if (card.status !== "PROPOSED") {
       return NextResponse.json({ error: "already_decided", status: card.status }, { status: 409 });
     }

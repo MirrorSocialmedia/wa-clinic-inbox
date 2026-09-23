@@ -21,7 +21,7 @@
  */
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import prisma from "@/lib/prisma";
 import { isProductUsable } from "@/lib/sessions/consult-products";
@@ -63,6 +63,8 @@ export const POST = handle(async (req: NextRequest) => {
   }
   const { workflow, demoQuestion } = parsed.data;
   const clinicId = parsed.data.clinicId ?? null;
+  // ★ cwi-final S3-1：預覽會拉產品/PRICE doc — 店域必喺 scope 內（null 全局 → global admin only）
+  assertConfigScope(ctx, clinicId);
   const question = demoQuestion ?? DEMO_QUESTIONS[workflow];
 
   // 1. 產品（鐵律：usable 先入 prompt；unapproved 計數俾 UI 顯示「未確認」警示）

@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
-import { requireAdmin, invalidateGroupCache, RbacError } from "@/lib/rbac";
+import { requireAdmin, isGlobalAdmin, invalidateGroupCache, RbacError } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { assertGroupMembersBound } from "@/lib/skill-groups";
 
@@ -51,6 +51,15 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
     }
     if (body.clinicIds !== undefined && clinicIds === null) {
       return NextResponse.json({ error: "bad_request", message: "clinicIds must be string[]" }, { status: 400 });
+    }
+    // ★ cwi-final S3-1：scoped ADMIN — 組嘅 SkillGroupClinic（改動後最終集合）全部要喺自己範圍內
+    if (ctx.staff.role === "ADMIN" && ctx.scopeType !== "ALL") {
+      const callerSet = new Set(ctx.scopedClinicIds);
+      const cur = await prisma.skillGroupClinic.findMany({ where: { groupId: id }, select: { clinicId: true } });
+      const final = clinicIds ?? cur.map((c) => c.clinicId);
+      if (final.some((c) => !callerSet.has(c))) {
+        return NextResponse.json({ error: "FORBIDDEN", message: "組嘅服務店必須喺自己範圍內" }, { status: 403 });
+      }
     }
 
     const r = await prisma.$transaction(async (tx) => {
@@ -118,6 +127,10 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
 export const DELETE = handle(async (req: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
     const ctx = await requireAdmin(req);
     const { id } = await params;
+    // ★ cwi-final S3-1：刪組 → global only（路由設定係集團級資源）
+    if (!isGlobalAdmin(ctx)) {
+      return NextResponse.json({ error: "FORBIDDEN", message: "刪組只限集團管理員" }, { status: 403 });
+    }
     const group = await prisma.skillGroup.findUnique({ where: { id } });
     if (!group) return NextResponse.json({ error: "not found" }, { status: 404 });
 

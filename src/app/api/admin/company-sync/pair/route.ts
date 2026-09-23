@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireGlobalAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { z } from "zod";
 
@@ -23,7 +23,7 @@ const Body = z.object({
 });
 
 export const POST = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  await requireGlobalAdmin(req);
   const parsed = Body.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json({ error: "invalid body: companyId + sourceId required" }, { status: 400 });

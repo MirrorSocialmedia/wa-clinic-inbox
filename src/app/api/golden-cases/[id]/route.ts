@@ -5,7 +5,7 @@
  * 零 PII：PUT 嘅 utterance/contextBefore 再過一次 deid（防人手編輯貼返 PII 入庫）。
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import prisma from "@/lib/prisma";
 import { deid, deidList } from "@/lib/golden/deid";
@@ -23,6 +23,8 @@ export const PUT = handle(async (req: NextRequest, { params }: Params) => {
   const { id } = await params;
   const existing = await prisma.goldenCase.findUnique({ where: { id } });
   if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以改外店／全局 case
+  assertConfigScope(ctx, existing.clinicId);
   const body = await req.json().catch(() => null);
   const parsed = updateGoldenSchema.safeParse(body);
   if (!parsed.success) {
@@ -56,6 +58,8 @@ export const DELETE = handle(async (_req: NextRequest, { params }: Params) => {
   const { id } = await params;
   const existing = await prisma.goldenCase.findUnique({ where: { id } });
   if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以刪外店／全局 case
+  assertConfigScope(ctx, existing.clinicId);
   await prisma.goldenCase.delete({ where: { id } });
   log.info({ staffId: ctx.staff.id, goldenCaseId: id }, "golden: deleted (審核丟)");
   return NextResponse.json({ ok: true });

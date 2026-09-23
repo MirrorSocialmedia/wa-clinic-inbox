@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope, configReadWhere } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { validateRuleBody, assertTargetsExist } from "@/lib/routing/rule-validate";
 import { getLexicon } from "@/lib/sessions/lexicon";
@@ -16,12 +16,19 @@ import { getLexicon } from "@/lib/sessions/lexicon";
  */
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  const ctx = await requireAdmin(req);
   const url = new URL(req.url);
   const clinicParam = url.searchParams.get("clinicId"); // null | "all" | <id>
 
   const where: Record<string, unknown> = {};
-  if (clinicParam && clinicParam !== "all") where.clinicId = clinicParam;
+  if (clinicParam && clinicParam !== "all") {
+    // ★ cwi-final S3-1：scoped ADMIN 唔可以睇外店規則
+    assertConfigScope(ctx, clinicParam);
+    where.clinicId = clinicParam;
+  } else {
+    // ★ cwi-final S3-1：無參數 / all → 全局規則 + scope 內店規則（global admin = 全部）
+    Object.assign(where, configReadWhere(ctx));
+  }
   const [rules, groups, staff, clinics] = await Promise.all([
     prisma.routingRule.findMany({ where, orderBy: [{ priority: "asc" }, { name: "asc" }] }),
     prisma.skillGroup.findMany({ select: { id: true, name: true, code: true, enabled: true } }),
@@ -90,6 +97,9 @@ export const POST = handle(async (req: NextRequest) => {
   }
   const targetErr = await assertTargetsExist(rule!);
   if (targetErr) return NextResponse.json({ error: "bad_request", message: targetErr }, { status: 400 });
+
+  // ★ cwi-final S3-1：新規則嘅店域必喺 scope 內（null 全局 → global admin only）
+  assertConfigScope(ctx, rule!.clinicId);
 
   // 同名 + 同 clinic 域 → 409（防意外重複規則）
   const dup = await prisma.routingRule.findFirst({

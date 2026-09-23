@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireGlobalAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -12,7 +12,7 @@ import { handle } from "@/lib/api-error";
 export const dynamic = "force-dynamic";
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  await requireGlobalAdmin(req);
   const companies = await prisma.company.findMany({
     orderBy: { code: "asc" },
     select: {

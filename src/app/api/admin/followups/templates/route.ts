@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, requireGlobalAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -23,7 +23,8 @@ export const GET = handle(async (req: NextRequest) => {
 });
 
 export const POST = handle(async (req: NextRequest) => {
-  const ctx = await requireAdmin(req);
+  // ★ cwi-final S3-1：template registry 係全局資源 → global admin only
+  const ctx = await requireGlobalAdmin(req);
   const body = (await req.json().catch(() => null)) as { key?: string; text?: string } | null;
   if (!body?.key) return NextResponse.json({ error: "key required" }, { status: 400 });
   const t = await prisma.followupTemplate.findUnique({ where: { key: body.key } });

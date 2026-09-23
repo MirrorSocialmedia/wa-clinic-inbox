@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import log from "@/lib/log";
 
@@ -18,6 +18,8 @@ export const POST = handle(async (req: NextRequest, ctx: { params: Promise<Recor
 
   const alert = await prisma.alert.findUnique({ where: { id } });
   if (!alert) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：核對 alert.clinicId 喺 scope（null 行 = 全局警報 → global only）
+  assertConfigScope(auth, alert.clinicId);
 
   if (!alert.resolvedAt) {
     await prisma.alert.update({ where: { id: alert.id }, data: { resolvedAt: new Date() } });

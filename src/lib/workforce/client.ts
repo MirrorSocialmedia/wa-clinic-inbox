@@ -792,9 +792,11 @@ export async function fetchTermMap(): Promise<TermMapResult> {
 
 /** 術語表寫（admin 頁；只詞表可改 — 解析規則唔可編輯）。 */
 export async function putTermMap(
-  terms: { shorthand: string; nameCn: string; nameEn?: string | null; usedFor?: string[]; active?: boolean }[]
+  terms: { shorthand: string; nameCn: string; nameEn?: string | null; usedFor?: string[]; active?: boolean }[],
+  staffId: string
 ): Promise<TermMapResult> {
-  return TermMapResponse.parse(await wfSend("PUT", `/api/external/v1/clinical-term-map`, {}, { terms }));
+  // ★ cwi-final S3-4（D-5）：x-staff-id header — CWM 側審計用（wfSend 已支援 headers — 同 claimSlot 用法）
+  return TermMapResponse.parse(await wfSend("PUT", `/api/external/v1/clinical-term-map`, {}, { terms }, { "x-staff-id": staffId }));
 }
 
 // ── cwi-followup-p4 S6：hub 健康警示（索引 job / 電話正規化率 — 零內容狀態）──

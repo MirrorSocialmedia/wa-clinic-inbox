@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
-import { requireAdmin, invalidateClinicScopeCache } from "@/lib/rbac";
+import { requireAdmin, requireGlobalAdmin, invalidateClinicScopeCache } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { autoSent24hByClinic } from "@/lib/ai/status";
 
@@ -32,10 +32,12 @@ const createSchema = z.object({
 });
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  const ctx = await requireAdmin(req);
 
   const [clinics, convCounts, contactCounts, auto24h] = await Promise.all([
     prisma.clinic.findMany({
+      // ★ cwi-final S3-1：非 global ADMIN 只見到自己 scope 內嘅店（SUPERVISOR 全店唯讀 — 維持現行）
+      where: ctx.staff.role === "ADMIN" && ctx.scopeType !== "ALL" ? { id: { in: ctx.scopedClinicIds } } : {},
       orderBy: { code: "asc" },
       // ★ cwi-hub-a：帶公司 code/name（UI 列表/表單顯示）
       include: { company: { select: { id: true, code: true, name: true } } },
@@ -67,7 +69,8 @@ export const GET = handle(async (req: NextRequest) => {
 });
 
 export const POST = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  // ★ cwi-final S3-1：建店 = 集團級操作（公司歸屬／分流 key）— 只限 global admin
+  await requireGlobalAdmin(req);
   const parsed = createSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return toResponse(parsed.error);
   // ★ cwi-hub-a：公司存在性驗證（唔會製造無公司診所 — NULL=0 不變式）

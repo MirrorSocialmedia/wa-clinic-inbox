@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { WORKFLOW_KEYS, type WorkflowKey } from "@/lib/workflow/definitions";
 import { revert, WorkflowError } from "@/lib/workflow/store";
@@ -23,6 +23,8 @@ export const POST = handle(async (req: NextRequest, ctx) => {
     throw new WorkflowError(404, `unknown workflow key: ${key}`);
   }
   const body = revertSchema.parse(await req.json());
+  // ★ cwi-final S3-1：回退目標店域必喺 scope 內（null 全局 → global admin only）
+  assertConfigScope(auth, body.clinicId);
   const { id, newVersion } = await revert(key as WorkflowKey, body.clinicId, body.toVersion, auth.staff.id);
   return NextResponse.json({ id, newVersion });
 });

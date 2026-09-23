@@ -11,7 +11,7 @@
  *        即時生效（engine 每 turn fresh load — 「AI 下一次回覆即刻生效」）。
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import prisma from "@/lib/prisma";
 import {
@@ -36,6 +36,8 @@ const VALUE_VALIDATORS: Record<ConsultSettingKey, (raw: unknown) => boolean> = {
 export const GET = handle(async (req: NextRequest) => {
   const ctx = await requireAdmin(req);
   const clinicId = req.nextUrl.searchParams.get("clinicId") ?? null;
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以讀外店設定（全局層任何 admin 可讀）
+  if (clinicId) assertConfigScope(ctx, clinicId);
   const effective = await loadConsultSettings(prisma, clinicId);
   const rows = await prisma.consultSetting.findMany({
     where: { key: { in: [...CONSULT_SETTING_KEYS] }, OR: [{ clinicId: null }, ...(clinicId ? [{ clinicId }] : [])] },
@@ -75,6 +77,8 @@ export const PUT = handle(async (req: NextRequest) => {
     return NextResponse.json({ error: "validation failed", message: `value shape invalid for key ${k}` }, { status: 400 });
   }
   const scopeClinic = typeof clinicId === "string" && clinicId.length > 0 ? clinicId : null;
+  // ★ cwi-final S3-1：null 全局層 → global admin only；店層 → 喺 scope 內
+  assertConfigScope(ctx, scopeClinic);
 
   // global 唯一守衛（PG NULL 唔受 unique 約束）— find-first 再 update/create
   let row = await prisma.consultSetting.findFirst({ where: { clinicId: scopeClinic, key: k }, select: { id: true } });

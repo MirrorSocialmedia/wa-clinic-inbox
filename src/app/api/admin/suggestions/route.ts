@@ -6,7 +6,7 @@
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdminOrSupervisor } from "@/lib/rbac"; // ★ cwi-routing-20260906 §8：SUPERVISOR 讀寫
+import { requireAdminOrSupervisor, configReadWhere } from "@/lib/rbac"; // ★ cwi-routing-20260906 §8：SUPERVISOR 讀寫
 import { handle } from "@/lib/api-error";
 
 export const dynamic = "force-dynamic";
@@ -15,9 +15,10 @@ const VALID = new Set(["PROPOSED", "APPROVED", "REJECTED"]);
 const RANK: Record<string, number> = { PROPOSED: 0, APPROVED: 1, REJECTED: 2 };
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdminOrSupervisor(req);
+  const ctx = await requireAdminOrSupervisor(req);
   const status = req.nextUrl.searchParams.get("status") ?? undefined;
-  const where = status && VALID.has(status) ? { status } : {};
+  // ★ cwi-final S3-1：讀 scope filter（SUPERVISOR/ALL = 全店；scoped ADMIN = 全局卡 + 自己 scope 內店卡）
+  const where = { ...(status && VALID.has(status) ? { status } : {}), ...configReadWhere(ctx) };
   const rows = await prisma.suggestionCard.findMany({
     where,
     orderBy: [{ status: "asc" }, { createdAt: "desc" }], // 粗排序；PROPOSED 喺前（同 status 內時間倒序）

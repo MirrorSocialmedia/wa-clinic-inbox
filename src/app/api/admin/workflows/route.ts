@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { SCHEMA_HINTS, WORKFLOW_KEYS, type WorkflowKey } from "@/lib/workflow/definitions";
 import { getActiveInfo } from "@/lib/workflow/store";
@@ -13,8 +13,10 @@ import { getActiveInfo } from "@/lib/workflow/store";
 export const dynamic = "force-dynamic";
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  const auth = await requireAdmin(req);
   const clinicId = req.nextUrl.searchParams.get("clinicId"); // null/undefined = 全局視角
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以睇外店視角
+  if (clinicId) assertConfigScope(auth, clinicId);
   const workflows = await Promise.all(
     WORKFLOW_KEYS.map(async (key: WorkflowKey) => {
       const info = await getActiveInfo(key, clinicId ?? null);

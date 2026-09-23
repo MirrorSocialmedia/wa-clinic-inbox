@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireGlobalAdmin } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { waMock } from "@/lib/wa/graph";
 import log from "@/lib/log";
@@ -44,7 +44,7 @@ function stepFail(step: string, httpStatus: number | null, error: string): NextR
 }
 
 export const POST = handle(async (req: NextRequest) => {
-  const ctx = await requireAdmin(req); // 無 session → 401；非 ADMIN → 403
+  const ctx = await requireGlobalAdmin(req); // ★ cwi-final S3-1：onboarding exchange = 集團級（WABA 綁定）— global admin only
   const parsed = bodySchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return toResponse(parsed.error);
   const { code, clinicId, phoneNumberId, wabaId, pin: bodyPin } = parsed.data;

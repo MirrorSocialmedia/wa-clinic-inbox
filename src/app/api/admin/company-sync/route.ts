@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireGlobalAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { syncCompaniesFromWorkforce } from "@/lib/company-sync";
 import { fetchCompanies } from "@/lib/workforce/client";
@@ -23,7 +23,7 @@ import { fetchCompanies } from "@/lib/workforce/client";
 export const dynamic = "force-dynamic";
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  await requireGlobalAdmin(req);
   const [lastRun, companies] = await Promise.all([
     prisma.companySyncRun.findFirst({ orderBy: { runAt: "desc" } }),
     prisma.company.findMany({
@@ -56,7 +56,7 @@ export const GET = handle(async (req: NextRequest) => {
 });
 
 export const POST = handle(async (req: NextRequest) => {
-  await requireAdmin(req);
+  await requireGlobalAdmin(req);
   const result = await syncCompaniesFromWorkforce();
   await prisma.companySyncRun.create({
     data: result.ok

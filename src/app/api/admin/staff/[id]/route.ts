@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import argon2 from "argon2";
 import prisma from "@/lib/prisma";
-import { requireAdmin, invalidateActiveCache, invalidateStaffSessions, resolveClinicIds } from "@/lib/rbac";
+import { requireAdmin, invalidateActiveCache, invalidateStaffSessions, resolveClinicIds, isGlobalAdmin, type ScopeType } from "@/lib/rbac";
 import { publishControl, publishConvEvent } from "@/lib/notify";
 import log from "@/lib/log";
 import { handle, toResponse } from "@/lib/api-error";
@@ -57,6 +57,11 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
     effectiveRole === "SUPERVISOR"
       ? "ALL"
       : fields.scopeType ?? (fields.role !== undefined ? (effectiveRole === "STAFF" ? "CLINICS" : "ALL") : (target.scopeType as "ALL" | "COMPANY" | "CLINICS"));
+
+  // ★ cwi-final S3-1 步驟 0（臨時守衛 — spec 碼逐字）：ALLOW_SCOPED_ADMIN 未開 → scoped ADMIN 一律 400
+  if (effectiveRole === "ADMIN" && effectiveScopeType !== "ALL" && process.env.ALLOW_SCOPED_ADMIN !== "1") {
+    return NextResponse.json({ error: "SCOPED_ADMIN_DISABLED", message: "公司／指定診所範圍 ADMIN 要等權限修復（cwi-final S3-1）上線先開" }, { status: 400 });
+  }
   const effectiveScopeCompanyId =
     effectiveScopeType === "COMPANY" ? (fields.scopeCompanyId ?? target.scopeCompanyId) : null;
   const scopeChanged =
@@ -93,6 +98,31 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
   if (clinicList.length > 0) {
     const found = await prisma.clinic.findMany({ where: { id: { in: clinicList } }, select: { id: true } });
     if (found.length !== clinicList.length) return NextResponse.json({ error: "clinic not found" }, { status: 400 });
+  }
+
+  // ★ cwi-final S3-1（spec 碼逐字 — effective* 計完之後）：非 global 嘅 staff 管理限制
+  const callerGlobal = isGlobalAdmin(admin);
+  if (!callerGlobal) {
+    if (self && (fields.role !== undefined || fields.scopeType !== undefined || fields.scopeCompanyId !== undefined || fields.clinicIds !== undefined || fields.clinicId !== undefined)) {
+      return NextResponse.json({ error: "FORBIDDEN", message: "唔可以改自己嘅角色或範圍" }, { status: 403 });
+    }
+    if (!self && target.role !== "STAFF") {
+      return NextResponse.json({ error: "FORBIDDEN", message: "只有集團管理員可以管理 ADMIN／SUPERVISOR" }, { status: 403 });
+    }
+    if (effectiveRole !== "STAFF" && !self) {
+      return NextResponse.json({ error: "FORBIDDEN", message: "唔可以將員工升做 ADMIN／SUPERVISOR" }, { status: 403 });
+    }
+    if (effectiveScopeType === "ALL") {
+      return NextResponse.json({ error: "FORBIDDEN", message: "唔可以設全集團範圍" }, { status: 403 });
+    }
+    const callerSet = new Set(admin.scopedClinicIds);
+    const [targetOld, targetNew] = await Promise.all([
+      resolveClinicIds({ scopeType: target.scopeType as ScopeType, scopeCompanyId: target.scopeCompanyId, staffClinicIds: (await prisma.staffClinic.findMany({ where: { staffId: id }, select: { clinicId: true } })).map((r) => r.clinicId) }),
+      resolveClinicIds({ scopeType: effectiveScopeType, scopeCompanyId: effectiveScopeCompanyId, staffClinicIds: clinicList }),
+    ]);
+    if (!self && [...targetOld, ...targetNew].some((c) => !callerSet.has(c))) {
+      return NextResponse.json({ error: "FORBIDDEN", message: "目標員工範圍超出你嘅範圍" }, { status: 403 });
+    }
   }
   const effectiveClinic = fields.clinicId === undefined ? target.clinicId : fields.clinicId;
   if (effectiveRole === "ADMIN" && effectiveScopeType === "ALL" && effectiveClinic) {
@@ -279,6 +309,21 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
 export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
   const admin = await requireAdmin(req);
   const { id } = await ctx.params;
+
+  // ★ cwi-final S3-1：非 global 同樣要「目標係 STAFF 且範圍 ⊆ 我範圍」（同 PUT 守門一致）
+  if (!isGlobalAdmin(admin)) {
+    const target = await prisma.staffUser.findUnique({ where: { id }, select: { role: true, scopeType: true, scopeCompanyId: true } });
+    if (target && target.role !== "STAFF") {
+      return NextResponse.json({ error: "FORBIDDEN", message: "只有集團管理員可以管理 ADMIN／SUPERVISOR" }, { status: 403 });
+    }
+    if (target) {
+      const callerSet = new Set(admin.scopedClinicIds);
+      const targetIds = await resolveClinicIds({ scopeType: target.scopeType as ScopeType, scopeCompanyId: target.scopeCompanyId, staffClinicIds: (await prisma.staffClinic.findMany({ where: { staffId: id }, select: { clinicId: true } })).map((r) => r.clinicId) });
+      if (targetIds.some((c) => !callerSet.has(c))) {
+        return NextResponse.json({ error: "FORBIDDEN", message: "目標員工範圍超出你嘅範圍" }, { status: 403 });
+      }
+    }
+  }
 
   if (admin.staff.id === id) {
     return NextResponse.json({ error: "唔可以刪除自己 — 用停用（active=false）" }, { status: 400 });

@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { validateRuleBody, assertTargetsExist } from "@/lib/routing/rule-validate";
 
@@ -17,6 +17,8 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
   const { id } = await params;
   const current = await prisma.routingRule.findUnique({ where: { id } });
   if (!current) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：現有店域必喺 scope 內（body.clinicId 經 validate 合併後同 rule.clinicId 雙核對）
+  assertConfigScope(ctx, current.clinicId);
 
   const raw = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   if (!raw) return NextResponse.json({ error: "bad_request" }, { status: 400 });
@@ -47,6 +49,8 @@ export const PATCH = handle(async (req: NextRequest, { params }: { params: Promi
   }
   const targetErr = await assertTargetsExist(rule!);
   if (targetErr) return NextResponse.json({ error: "bad_request", message: targetErr }, { status: 400 });
+  // ★ cwi-final S3-1：改動後嘅店域（body.clinicId ?? current.clinicId）
+  assertConfigScope(ctx, rule!.clinicId ?? current.clinicId);
 
   // 同名衝突（改 name / clinicId 時）
   if (rule!.name !== current.name || rule!.clinicId !== current.clinicId) {
@@ -96,6 +100,8 @@ export const DELETE = handle(async (req: NextRequest, { params }: { params: Prom
   const { id } = await params;
   const rule = await prisma.routingRule.findUnique({ where: { id } });
   if (!rule) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以刪外店／全局規則
+  assertConfigScope(ctx, rule.clinicId);
 
   await prisma.routingRule.delete({ where: { id } });
   await prisma.auditLog

@@ -25,7 +25,7 @@ const USED_FOR_LABEL: Record<string, string> = {
 };
 const USED_FOR_KEYS = Object.keys(USED_FOR_LABEL);
 
-export default function ClinicalTerms() {
+export default function ClinicalTerms({ canEdit = true }: { canEdit?: boolean }) {
   const [terms, setTerms] = useState<Term[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState<string | null>(null);
@@ -122,8 +122,12 @@ export default function ClinicalTerms() {
       <div>
         <h1 className="text-lg font-semibold text-t1">術語對照表</h1>
         <p className="text-[12px] text-t3 mt-1">
-          速記 → 標準名稱 · 用喺。醫師／護士可以加減詞；解析規則（牙位、金額、否定詞）唔可編輯，只有詞表可改。
+          速記 → 標準名稱 · 用喺。解析規則（牙位、金額、否定詞）唔可編輯，只有詞表可改。
         </p>
+        {/* ★ cwi-final S3-4（D-5）：非全集團 ADMIN → 唯讀態 + 灰字提示 */}
+        {!canEdit && (
+          <p className="text-[12px] text-t3 mt-1" data-e2e="ct-readonly-notice">只有集團管理員可以修改術語表</p>
+        )}
       </div>
 
       {loading ? (
@@ -140,7 +144,7 @@ export default function ClinicalTerms() {
                 <th className="px-3 py-2 font-medium">英文名（選填）</th>
                 <th className="px-3 py-2 font-medium">用喺</th>
                 <th className="px-3 py-2 font-medium w-16">啟用</th>
-                <th className="px-3 py-2 w-10" />
+                {canEdit && <th className="px-3 py-2 w-10" />}
               </tr>
             </thead>
             <tbody>
@@ -148,38 +152,58 @@ export default function ClinicalTerms() {
                 <tr key={t.id} className={`border-b border-line last:border-0 ${t.active ? "" : "opacity-50"}`} data-e2e={`ct-row-${t.shorthand}`}>
                   <td className="px-3 py-2 font-mono text-t1 whitespace-nowrap">{t.shorthand}</td>
                   <td className="px-3 py-2">
-                    <input
-                      className="w-full bg-transparent border border-transparent hover:border-line focus:border-brand focus:outline-none rounded px-1.5 py-0.5 text-t1"
-                      value={t.nameCn}
-                      onChange={(e) => patch(t.id, { nameCn: e.target.value })}
-                      data-e2e={`ct-namecn-${t.shorthand}`}
-                    />
+                    {canEdit ? (
+                      <input
+                        className="w-full bg-transparent border border-transparent hover:border-line focus:border-brand focus:outline-none rounded px-1.5 py-0.5 text-t1"
+                        value={t.nameCn}
+                        onChange={(e) => patch(t.id, { nameCn: e.target.value })}
+                        data-e2e={`ct-namecn-${t.shorthand}`}
+                      />
+                    ) : (
+                      <span>{t.nameCn}</span>
+                    )}
                   </td>
                   <td className="px-3 py-2">
-                    <input
-                      className="w-full bg-transparent border border-transparent hover:border-line focus:border-brand focus:outline-none rounded px-1.5 py-0.5 text-t2"
-                      value={t.nameEn ?? ""}
-                      placeholder="—"
-                      onChange={(e) => patch(t.id, { nameEn: e.target.value || null })}
-                      data-e2e={`ct-nameen-${t.shorthand}`}
-                    />
+                    {canEdit ? (
+                      <input
+                        className="w-full bg-transparent border border-transparent hover:border-line focus:border-brand focus:outline-none rounded px-1.5 py-0.5 text-t2"
+                        value={t.nameEn ?? ""}
+                        placeholder="—"
+                        onChange={(e) => patch(t.id, { nameEn: e.target.value || null })}
+                        data-e2e={`ct-nameen-${t.shorthand}`}
+                      />
+                    ) : (
+                      <span className="text-t2">{t.nameEn ?? "—"}</span>
+                    )}
                   </td>
                   <td className="px-3 py-2 space-x-2 whitespace-nowrap">
-                    {USED_FOR_KEYS.map((k) => (
-                      <label key={k} className="inline-flex items-center gap-1 text-t2 cursor-pointer">
-                        <input type="checkbox" checked={t.usedFor.includes(k)} onChange={() => toggleUsedFor(t, k)} className="accent-brand" />
-                        {USED_FOR_LABEL[k]}
-                      </label>
-                    ))}
+                    {USED_FOR_KEYS.map((k) =>
+                      canEdit ? (
+                        <label key={k} className="inline-flex items-center gap-1 text-t2 cursor-pointer">
+                          <input type="checkbox" checked={t.usedFor.includes(k)} onChange={() => toggleUsedFor(t, k)} className="accent-brand" />
+                          {USED_FOR_LABEL[k]}
+                        </label>
+                      ) : (
+                        <span key={k} className="inline-block text-t2">
+                          {t.usedFor.includes(k) ? USED_FOR_LABEL[k] : null}
+                        </span>
+                      )
+                    )}
                   </td>
                   <td className="px-3 py-2">
-                    <input type="checkbox" checked={t.active} onChange={(e) => patch(t.id, { active: e.target.checked })} className="accent-brand" data-e2e={`ct-active-${t.shorthand}`} />
+                    {canEdit ? (
+                      <input type="checkbox" checked={t.active} onChange={(e) => patch(t.id, { active: e.target.checked })} className="accent-brand" data-e2e={`ct-active-${t.shorthand}`} />
+                    ) : (
+                      <span className={t.active ? "text-ok-text" : "text-t3"}>{t.active ? "啟用" : "停用"}</span>
+                    )}
                   </td>
-                  <td className="px-3 py-2">
-                    <button onClick={() => remove(t.id)} className="text-t3 hover:text-danger-text" title="移除" data-e2e={`ct-del-${t.shorthand}`}>
-                      <Trash2 size={14} />
-                    </button>
-                  </td>
+                  {canEdit && (
+                    <td className="px-3 py-2">
+                      <button onClick={() => remove(t.id)} className="text-t3 hover:text-danger-text" title="移除" data-e2e={`ct-del-${t.shorthand}`}>
+                        <Trash2 size={14} />
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
               {terms.length === 0 && (
@@ -194,7 +218,8 @@ export default function ClinicalTerms() {
         </div>
       )}
 
-      {/* 加一個 */}
+      {/* 加一個（★ cwi-final S3-4（D-5）：唯讀態冇新增掣） */}
+      {canEdit && (
       <div className="bg-panel border border-dashed border-line rounded-xl p-3 space-y-2" data-e2e="ct-add">
         <div className="flex items-center gap-2 text-[12px] text-t3">
           <Plus size={14} /> 加一個術語
@@ -244,8 +269,10 @@ export default function ClinicalTerms() {
           ))}
         </div>
       </div>
+      )}
 
-      {/* 狀態 + 儲存 */}
+      {/* 狀態 + 儲存（唯讀態冇儲存掣） */}
+      {canEdit && (
       <div className="flex items-center justify-between gap-3">
         <div className="text-[12px]">
           {saveErr ? (
@@ -265,6 +292,7 @@ export default function ClinicalTerms() {
           <Save size={14} /> {saving ? "儲存中…" : "儲存改動"}
         </button>
       </div>
+      )}
     </div>
   );
 }

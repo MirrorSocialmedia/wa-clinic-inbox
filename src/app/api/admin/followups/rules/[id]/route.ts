@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -30,6 +30,8 @@ export const PATCH = handle(async (req, { params }) => {
   }
   const rule = await prisma.followupRule.findUnique({ where: { id } });
   if (!rule) return NextResponse.json({ error: "rule not found" }, { status: 404 });
+  // ★ cwi-final S3-1：規則 clinicId null（全局）→ global only；店規則 → 喺 scope 內
+  assertConfigScope(ctx, rule.clinicId);
 
   // ★ cwi-final S0-8（N-11）：B1 首啟用確認 — BEFORE_APPOINTMENT 規則第一次啟用（firstUseConfirmedAt
   //   為 null）必須帶確認（「確認診所冇其他渠道發預約提醒？」）→ 409；確認過一次以後唔再問。

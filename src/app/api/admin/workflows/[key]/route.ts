@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { WORKFLOW_KEYS, type WorkflowKey } from "@/lib/workflow/definitions";
 import { saveDraft, WorkflowError } from "@/lib/workflow/store";
@@ -24,6 +24,8 @@ export const PUT = handle(async (req: NextRequest, ctx) => {
     throw new WorkflowError(404, `unknown workflow key: ${key}`);
   }
   const body = putSchema.parse(await req.json());
+  // ★ cwi-final S3-1：草稿嘅店域必喺 scope 內（null 全局 → global admin only）
+  assertConfigScope(auth, body.clinicId);
   const { id, version } = await saveDraft(key as WorkflowKey, body.clinicId, body.params, auth.staff.id);
   return NextResponse.json({ id, version }, { status: 201 });
 });

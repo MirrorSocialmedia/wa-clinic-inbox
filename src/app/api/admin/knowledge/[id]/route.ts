@@ -4,7 +4,7 @@
  * DELETE：硬刪（rollback 靠 AuditLog meta 留痕 + 版本號；MD：可審計、可 rollback）。
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import prisma from "@/lib/prisma";
 import { knowledgeDocSchema, bustKnowledgeAfterChange } from "@/lib/knowledge/schema";
@@ -27,6 +27,9 @@ export const PUT = handle(async (req: NextRequest, { params }: Params) => {
   const d = parsed.data;
   const existing = await prisma.knowledgeDoc.findUnique({ where: { id } });
   if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：existing.clinicId 同 body.clinicId（?? existing）雙核對
+  assertConfigScope(ctx, existing.clinicId);
+  assertConfigScope(ctx, d.clinicId ?? existing.clinicId);
   const updated = await prisma.knowledgeDoc.update({
     where: { id },
     data: {
@@ -63,6 +66,8 @@ export const DELETE = handle(async (_req: NextRequest, { params }: Params) => {
   const { id } = await params;
   const existing = await prisma.knowledgeDoc.findUnique({ where: { id } });
   if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以刪外店／全局條目
+  assertConfigScope(ctx, existing.clinicId);
   await prisma.knowledgeDoc.delete({ where: { id } });
   await prisma.auditLog.create({
     data: {

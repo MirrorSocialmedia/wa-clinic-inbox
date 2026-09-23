@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
-import { requireAdmin, invalidateClinicScopeCache } from "@/lib/rbac";
+import { requireAdmin, requireGlobalAdmin, assertClinicAccess, invalidateClinicScopeCache } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 
 /**
@@ -31,7 +31,8 @@ const updateSchema = z.object({
 type Ctx = { params: Promise<{ id: string }> };
 
 async function updateClinic(req: NextRequest, ctx: Ctx) {
-  await requireAdmin(req);
+  // ★ cwi-final S3-1：店寫操作 = 集團級（公司歸屬／分流 key）— 只限 global admin
+  await requireGlobalAdmin(req);
   const { id } = await ctx.params;
   const parsed = updateSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return toResponse(parsed.error);
@@ -48,7 +49,42 @@ async function updateClinic(req: NextRequest, ctx: Ctx) {
     const company = await prisma.company.findUnique({ where: { id: data.companyId } });
     if (!company) return NextResponse.json({ error: "company not found" }, { status: 400 });
   }
+  // ★ cwi-final S3-1：關鍵欄改動（companyId / waPhoneNumberId / waBusinessAccountId / code）
+  //   → 就算 global admin 都要 AuditLog CLINIC_CRITICAL_CHANGE（meta 記舊值新值）+ Alert(HIGH)
+  const criticalKeys = ["companyId", "waPhoneNumberId", "waBusinessAccountId", "code"] as const;
+  const changedCritical: Record<string, { old: unknown; new: unknown }> = {};
+  if (criticalKeys.some((k) => k in data)) {
+    const oldRow = await prisma.clinic.findUnique({ where: { id } });
+    if (!oldRow) return NextResponse.json({ error: "not found" }, { status: 404 });
+    for (const k of criticalKeys) {
+      if (k in data && data[k] !== oldRow[k]) changedCritical[k] = { old: oldRow[k], new: data[k] };
+    }
+  }
   const clinic = await prisma.clinic.update({ where: { id }, data });
+  if (Object.keys(changedCritical).length > 0) {
+    await prisma.auditLog
+      .create({
+        data: {
+          staffId: null,
+          action: "CLINIC_CRITICAL_CHANGE",
+          entity: "Clinic",
+          entityId: id,
+          meta: { fields: changedCritical } as object,
+        },
+      })
+      .catch(() => undefined);
+    await prisma.alert
+      .create({
+        data: {
+          type: "clinic_critical_change",
+          severity: "HIGH",
+          clinicId: id,
+          clinicCode: clinic.code,
+          detail: { fields: Object.keys(changedCritical) } as object,
+        },
+      })
+      .catch(() => undefined);
+  }
   // ★ cwi-hub-a：公司歸屬改動 → COMPANY 範圍集合即時失效重算
   invalidateClinicScopeCache();
   return NextResponse.json(clinic);
@@ -58,8 +94,10 @@ export const PUT = handle(updateClinic);
 export const PATCH = handle(updateClinic);
 
 export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
-  await requireAdmin(req);
+  const adminCtx = await requireAdmin(req);
   const { id } = await ctx.params;
+  // ★ cwi-final S3-1：scope 核對（scoped ADMIN 唔可以睇外店；SUPERVISOR/ALL = 全店）
+  assertClinicAccess(adminCtx, id);
   const clinic = await prisma.clinic.findUnique({
     where: { id },
     include: { company: { select: { id: true, code: true, name: true } } },
@@ -69,7 +107,8 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
 });
 
 export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
-  await requireAdmin(req);
+  // ★ cwi-final S3-1：删店 = 集團級操作 — 只限 global admin
+  await requireGlobalAdmin(req);
   const { id } = await ctx.params;
 
   const [conversations, contacts, staff] = await Promise.all([

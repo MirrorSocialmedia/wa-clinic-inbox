@@ -296,6 +296,40 @@ export async function requireAdminOrSupervisor(req: NextRequest): Promise<AuthCo
   return ctx;
 }
 
+/** ★ cwi-final S3-1：集團級管理（員工／診所／公司／全局設定）— 只限 ALL scope ADMIN。 */
+export async function requireGlobalAdmin(req: NextRequest): Promise<AuthContext> {
+  const ctx = await requireAdmin(req);
+  if (ctx.scopeType !== "ALL") throw new RbacError(403, "global admin required");
+  return ctx;
+}
+
+export function isGlobalAdmin(ctx: Pick<AuthContext, "staff" | "scopeType">): boolean {
+  return ctx.staff.role === "ADMIN" && ctx.scopeType === "ALL";
+}
+
+/**
+ * 按 clinicId 寫設定：null（全局）要 global admin；有值要喺 scope 內。
+ * 更新／刪除要 call 兩次：existing.clinicId 同 body.clinicId。
+ */
+export function assertConfigScope(ctx: AuthContext, clinicId: string | null | undefined): void {
+  if (clinicId == null) {
+    if (!isGlobalAdmin(ctx)) throw new RbacError(403, "global config requires global admin");
+    return;
+  }
+  assertClinicAccess(ctx, clinicId);
+}
+
+/** 讀設定：全局行 + scope 內店行 */
+export function configReadWhere(ctx: AuthContext): { OR?: Array<Record<string, unknown>> } {
+  const set = scopedClinicSet(ctx);
+  if (set === null) return {};
+  return { OR: [{ clinicId: null }, { clinicId: { in: set } }] };
+}
+
+// ★ cwi-final S3-1 註（spec）：SUPERVISOR 嘅 scopedClinicSet = null（全店讀）但佢唔係 ADMIN，
+// isGlobalAdmin = false — 所以 SUPERVISOR 唔可以寫全局設定（admin/automation 例外：
+// SUPERVISOR 可調 AI 級別 — 只限具體 clinicId，唔准 clinicId 全局操作）。
+
 /**
  * clinic 過濾 query scope helper（cwi-hub-a-20260914 Part A — 範圍三維度收口）：
  *   where: { ...clinicScope(ctx) }

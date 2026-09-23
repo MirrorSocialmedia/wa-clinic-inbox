@@ -13,7 +13,13 @@ import { getAiStatusSnapshot } from "@/lib/ai/status";
 export const dynamic = "force-dynamic";
 
 export const GET = handle(async (req: NextRequest) => {
-  await requireAdmin(req); // STAFF / 未登入 → 401/403
+  const auth = await requireAdmin(req); // STAFF / 未登入 → 401/403
   const snapshot = await getAiStatusSnapshot();
+  // ★ cwi-final S3-1：scoped ADMIN 只見到自己 scope 內嘅店行（讀：clinicId in scope；
+  //   model/breaker/stats 係全局 metadata 冇店維度 — 維持照回）
+  if (auth.staff.role === "ADMIN" && auth.scopeType !== "ALL") {
+    const set = new Set(auth.scopedClinicIds);
+    snapshot.clinics = snapshot.clinics.filter((c) => set.has(c.id));
+  }
   return NextResponse.json(snapshot);
 });

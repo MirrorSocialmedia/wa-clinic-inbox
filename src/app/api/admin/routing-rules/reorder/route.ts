@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
@@ -26,8 +26,10 @@ export const POST = handle(async (req: NextRequest) => {
   // 同域全部規則 id 必須 = orderedIds（防跨域攪亂優先級）
   const domain = await prisma.routingRule.findMany({
     where: { clinicId },
-    select: { id: true, priority: true },
+    select: { id: true, priority: true, clinicId: true },
   });
+  // ★ cwi-final S3-1：逐條 assertConfigScope（scoped ADMIN 唔可以重排外店／全局域規則）
+  for (const r of domain) assertConfigScope(ctx, r.clinicId);
   const domainIds = new Set(domain.map((r) => r.id));
   const orderedSet = new Set(orderedIds as string[]);
   if (domain.length !== orderedIds.length || ![...orderedSet].every((id) => domainIds.has(id))) {

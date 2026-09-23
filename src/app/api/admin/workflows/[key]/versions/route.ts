@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/rbac";
+import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { WORKFLOW_KEYS, type WorkflowKey } from "@/lib/workflow/definitions";
 import { listVersions, WorkflowError } from "@/lib/workflow/store";
@@ -11,12 +11,14 @@ import { listVersions, WorkflowError } from "@/lib/workflow/store";
 export const dynamic = "force-dynamic";
 
 export const GET = handle(async (req: NextRequest, ctx) => {
-  await requireAdmin(req);
+  const auth = await requireAdmin(req);
   const { key } = (await ctx.params) as { key: string };
   if (!WORKFLOW_KEYS.includes(key as WorkflowKey)) {
     throw new WorkflowError(404, `unknown workflow key: ${key}`);
   }
   const clinicId = req.nextUrl.searchParams.get("clinicId");
+  // ★ cwi-final S3-1：scoped ADMIN 唔可以睇外店版本列
+  if (clinicId) assertConfigScope(auth, clinicId);
   const versions = await listVersions(key as WorkflowKey, clinicId ?? null);
   return NextResponse.json({ versions });
 });

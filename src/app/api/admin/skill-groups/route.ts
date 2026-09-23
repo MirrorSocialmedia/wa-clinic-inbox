@@ -81,6 +81,13 @@ export const POST = handle(async (req: NextRequest) => {
   if (body.clinicIds !== undefined && !createSchema.clinicIds(body.clinicIds)) {
     return NextResponse.json({ error: "bad_request", message: "clinicIds must be string[]" }, { status: 400 });
   }
+  // ★ cwi-final S3-1：scoped ADMIN — 新組服務店必須 ⊆ 自己 scope（SUPERVISOR 全店語義 — 唔郁）
+  if (ctx.staff.role === "ADMIN" && ctx.scopeType !== "ALL") {
+    const callerSet = new Set(ctx.scopedClinicIds);
+    if (Array.isArray(body.clinicIds) && body.clinicIds.length > 0 && !body.clinicIds.every((c) => callerSet.has(c))) {
+      return NextResponse.json({ error: "FORBIDDEN", message: "組嘅服務店必須喺自己範圍內" }, { status: 403 });
+    }
+  }
   const name = (body.name as string).trim();
 
   // code 自動生成：name → 大寫 alnum（中文 → 用拼音首碼太 heavy；用 G + 隨機尾碼保底）
