@@ -498,15 +498,34 @@ export async function ensurePushSubscription(): Promise<boolean> {
  * §3.6/§5 登出流程：先清 Web Push subscription（共用前台機鐵律 — client 層），
  * server logout route 另有 DB 兜底刪 → POST /api/auth/logout → 跳 /login。
  * NavRail（桌面 avatar menu）同 AccountCard（手機/管理頁）共用。
+ *
+ * ★ cwi-final S3-2（A1）：登出只登出當前機 — 先讀呢部機嘅 subscription endpoint，
+ * pushUnsubscribe 之後連 endpoint 一齊送畀 logout route（server 只刪呢部機嘅 push row；
+ * 其他機嘅 subscription 唔郁）。
  */
 export async function logoutWithPushCleanup(): Promise<void> {
+  // 先讀 endpoint（reg.pushManager.getSubscription）— logout body 要帶（A1 per-device 清理）
+  let endpoint: string | undefined;
+  try {
+    if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration().catch(() => null);
+      const sub = reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
+      endpoint = sub?.endpoint;
+    }
+  } catch {
+    /* 靜默 — 冇 SW/subscription 都照登出 */
+  }
   try {
     await pushUnsubscribe();
   } catch {
     /* 靜默 — server 兜底 */
   }
   try {
-    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ endpoint }),
+    }).catch(() => {});
   } catch {
     /* 靜默 */
   }

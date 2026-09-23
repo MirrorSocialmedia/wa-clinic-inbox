@@ -12,7 +12,7 @@
  * 入庫前 deid（src/lib/golden/deid.ts — 電話→<phone>、姓名→<name>、日期/金額保留）。
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { requireAuth, clinicScope } from "@/lib/rbac";
+import { requireAuth, clinicScope, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import prisma from "@/lib/prisma";
 import { deid, deidList } from "@/lib/golden/deid";
@@ -68,6 +68,7 @@ export const GET = handle(async (req: NextRequest) => {
 
 export const POST = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req); // STAFF 可加（MD F.5）
+  assertCanWriteConversation(ctx); // ★ cwi-final S3-3：SUPERVISOR 覆客 403（加入測試集 = 寫入）
   const body = await req.json().catch(() => null);
   const parsed = createGoldenSchema.safeParse(body);
   if (!parsed.success) {

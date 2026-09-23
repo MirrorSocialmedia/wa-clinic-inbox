@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertConversationAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { publishConvEvent, convRef, publishStaffNotify } from "@/lib/notify";
 import { pushToStaff } from "@/lib/push";
@@ -26,6 +26,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   await assertConversationAccess(auth, conv); // STAFF 別店 → 403
+  assertCanWriteConversation(auth); // ★ cwi-final S3-3：SUPERVISOR 覆客 403（app-handoff 寫 INTERNAL 備註 + touch 對話狀態）
 
   // 1) audit：APP_HANDOFF_CLICK（metadata only — 零電話/零內文）
   await prisma.auditLog.create({

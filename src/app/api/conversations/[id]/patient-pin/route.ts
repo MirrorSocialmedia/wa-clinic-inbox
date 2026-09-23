@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertConversationAccess } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { publishConvEvent, convRef } from "@/lib/notify";
 import { phoneHash } from "@/lib/phone-hash";
@@ -47,6 +47,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   const { conv, contact } = loaded;
   if (!contact) return NextResponse.json({ error: "contact not found" }, { status: 404 });
   await assertConversationAccess(auth, conv);
+  assertCanWriteConversation(auth); // ★ cwi-final S3-3：SUPERVISOR 覆客 403（釘病人 = 改病人資料）
 
   const hash = phoneHash(contact.waId);
   let matches;
@@ -107,6 +108,7 @@ export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {
   if (!loaded) return NextResponse.json({ error: "not found" }, { status: 404 });
   const { conv } = loaded;
   await assertConversationAccess(auth, conv);
+  assertCanWriteConversation(auth); // ★ cwi-final S3-3：SUPERVISOR 覆客 403（取消釘 = 改病人資料）
 
   if (conv.pinnedPatientApricotId) {
     await prisma.conversation.update({

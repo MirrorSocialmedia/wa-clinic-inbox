@@ -18,15 +18,18 @@
  *     （Object.entries 保插入序）— 否則 403 格會變 404。
  *   - matrix 跑完即刻還原 TY.companyId（T631 嘅「改唔到 TY 設定」要先行先斷）。
  *
- * 用法：tsx scripts/e2e-authz-matrix.ts --phase=t630|t639
+ * 用法：tsx scripts/e2e-authz-matrix.ts --phase=t630|t639|t632|t633
  *   - t630 = MATRIX + T631 + T638（需要 ALLOW_SCOPED_ADMIN=1）
  *   - t639 = flag-off 守衛（需要 ALLOW_SCOPED_ADMIN 未設）
+ *   - t632 = S3-2 ④ 登出只登出當前機（per-session deny + per-device push 清理）
+ *   - t633 = S3-2 ⑤⑥ 失效 ≤60s（scope 改動 → socket 斷 + 舊 session 401 + 停用 → SSR 307）
  * fixture 全部 fixed cuid + finally 清理（T750 pattern）。
  */
 import fs from "node:fs";
 import path from "node:path";
 import { Prisma, PrismaClient, Role } from "@prisma/client";
 import * as argon2 from "argon2";
+import { io as socketIoClient } from "socket.io-client";
 
 // 遞迴搵 route.ts（免外部 glob 依賴 — repo 無 glob/@types/glob；行為 = globSync("src/app/api/**/route.ts")）
 function listRouteFiles(root: string): string[] {
@@ -54,6 +57,11 @@ const RULES_VALUE = { ortho_appearance: false, ortho_compare: false, ortho_price
 const TRIAGE_PARAMS = { humanCooldownMs: 1800000, confidenceFloor: 0.6, autoThanksReply: "t630 唔緊要，祝你早日康復！" };
 const prisma = new PrismaClient();
 
+// ★ S3-3：G2 閘（ALLOW_SLOT_CLAIM）— server（Next dev base-server 裝載 .env）與本腳本讀同一個 .env，
+//   未設 = 關 → flows 格嘅 STAFF_TY（負責人）預期 409 SLOT_CLAIM_DISABLED；設 =1 → 422 window_closed
+//   （convLock.lastInboundAt = 2026-01-01 = 窗已過）。
+const FLOWS_EXPECT_STAFFTY = process.env.ALLOW_SLOT_CLAIM === "1" ? 422 : 409;
+
 // ── fixed cuid（24 lowercase alnum — cuid 形）────────────────────────────────
 const F = {
   staffTy: "t630stafftya000000000000001",
@@ -71,6 +79,11 @@ const F = {
   contactPre: "t630contactp000000000000001", // prefill fixture：Contact（F 店）
   convPre: "t630convp000000000000000001", // prefill fixture：Conversation（F 店 = STAFF_TY 外店）
   msgPre: "t630msgp000000000000000001", // prefill fixture：IN text Message
+  // ★ cwi-final S3-3：Send Lock / SUPERVISOR 寫入邊界 fixture
+  staffF: "t630stafffa0000000000000008", // F 店 STAFF（非負責人 — 423 格）
+  contactLock: "t630contactl000000000000001", // S3-3 fixture：Contact（F 店）
+  convLock: "t630convlock0000000000000001", // S3-3 fixture：Conversation（F 店，assignee = STAFF_TY，24h 窗已過）
+  bookLock: "t630booklock0000000000000001", // S3-3 fixture：BookingRequest（PENDING，F 店，convLock）
   alertF: "t630alertf0000000000000001",
   suggF: "t630sugf00000000000000001",
   followupRule: "t630rule2000000000000001", // 店規則（F 診所）
@@ -81,6 +94,7 @@ const F = {
 const TEST_EMAILS = [
   "t630.staff.ty@wa-clinic.local",
   "t630.staff.ymt@wa-clinic.local",
+  "t630.staff.f@wa-clinic.local",
   "t630.supervisor@wa-clinic.local",
   "t630.admin.all@wa-clinic.local",
   "t630.admin.compB@wa-clinic.local",
@@ -93,7 +107,7 @@ const TEST_EMAILS = [
   "t639.compstaff@wa-clinic.local",
 ];
 
-type Id = "STAFF_TY" | "STAFF_YMT" | "SUPERVISOR" | "ADMIN_ALL" | "ADMIN_COMPANY_B" | "UNAUTH";
+type Id = "STAFF_TY" | "STAFF_YMT" | "STAFF_F" | "SUPERVISOR" | "ADMIN_ALL" | "ADMIN_COMPANY_B" | "UNAUTH";
 
 interface Fixtures {
   clinicTY: { id: string };
@@ -573,16 +587,18 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 400 }, // 快照：S3-9（clinicId 參數）
   },
   "POST /api/bookings/[id]/confirm": {
-    fixture: () => ({ url: "/api/bookings/nope/confirm", method: "POST", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-3（send lock）
+    // ★ S3-3（D-11）：confirm 會發確認訊息 → 非負責人（包 ADMIN）423；STAFF_TY 係 F 店外店 = 403（clinic access 先於 send lock）
+    fixture: () => ({ url: `/api/bookings/${F.bookLock}/confirm`, method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_F: 423, SUPERVISOR: 403, ADMIN_COMPANY_B: 423, ADMIN_ALL: 423 }, // 4xx 全數喺 send lock/權限層（booking 照 PENDING — fingerprint 驗）
   },
   "POST /api/bookings/[id]/create": {
     fixture: () => ({ url: "/api/bookings/nope/create", method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
   },
   "POST /api/bookings/[id]/reschedule": {
-    fixture: () => ({ url: "/api/bookings/nope/reschedule", method: "POST", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-3（send lock）
+    // ★ S3-3（D-11）：reschedule 會重出 Flow（覆病人）→ 非負責人（包 ADMIN）423
+    fixture: () => ({ url: `/api/bookings/${F.bookLock}/reschedule`, method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_F: 423, SUPERVISOR: 403, ADMIN_COMPANY_B: 423, ADMIN_ALL: 423 },
   },
   "POST /api/bookings/[id]/rollback": {
     fixture: () => ({ url: "/api/bookings/nope/rollback", method: "POST", body: JSON.stringify({}) }),
@@ -601,12 +617,14 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
   },
   "PATCH /api/contacts/[id]": {
-    fixture: () => ({ url: "/api/contacts/nope", method: "PATCH", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-3（assertCanWriteConversation）
+    // ★ S3-3：SUPERVISOR 覆唔到客（稱呼/語言/labels）→ 403；STAFF_F（本店）寫入權 OK → 400 validation（labels 型錯）
+    fixture: () => ({ url: `/api/contacts/${F.contactLock}`, method: "PATCH", body: JSON.stringify({ labels: "notanarray" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_F: 400, SUPERVISOR: 403 }, // 4xx 全數喺權限/驗證層（contact 零改動 — fingerprint 驗）
   },
   "POST /api/conversations/[id]/app-handoff": {
-    fixture: () => ({ url: "/api/conversations/nope/app-handoff", method: "POST", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-3
+    // ★ S3-3：SUPERVISOR 覆唔到客 → 403（app-handoff 寫 INTERNAL 備註 + 對話狀態）
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/app-handoff`, method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_YMT: 403, SUPERVISOR: 403 },
   },
   "POST /api/conversations/[id]/assign": {
     fixture: () => ({ url: "/api/conversations/nope/assign", method: "POST", body: JSON.stringify({ toStaffId: null }) }), // 有效 body（toStaffId nullable）→ 404 喺 conv lookup
@@ -637,12 +655,16 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 404 },
   },
   "POST /api/conversations/[id]/flag": {
-    fixture: () => ({ url: "/api/conversations/nope/flag", method: "POST", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-3
+    // ★ S3-3：SUPERVISOR 覆唔到客 → 403（flag 寫 AutomationStat/投訴記帳）；
+    //   STAFF_TY = 負責人（寫入權 OK）→ 400（body {} 驗證）— 4xx 無寫入
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/flag`, method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 400, STAFF_YMT: 403, SUPERVISOR: 403 },
   },
   "POST /api/conversations/[id]/flows": {
-    fixture: () => ({ url: "/api/conversations/nope/flows", method: "POST", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-3（ADMIN 豁免刪）+ S3-8
+    // ★ S3-3（D-11）：ADMIN 豁免刪 — 非負責人（包 ADMIN）→ 423；
+    //   STAFF_TY = 負責人 → 過 send lock → G2 閘（409）或 24h 窗（422，lastInboundAt = 2026-01-01）
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/flows`, method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: FLOWS_EXPECT_STAFFTY, STAFF_F: 423, SUPERVISOR: 403, ADMIN_COMPANY_B: 423, ADMIN_ALL: 423 },
   },
   "GET /api/conversations/[id]/messages": {
     fixture: () => ({ url: "/api/conversations/nope/messages" }),
@@ -669,12 +691,14 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 404 },
   },
   "POST /api/conversations/[id]/patient-pin": {
-    fixture: () => ({ url: "/api/conversations/nope/patient-pin", method: "POST", body: JSON.stringify({ patientApricotId: "t630apr", patientName: "t630" }) }), // 有效 body → 404 喺 conv lookup
-    expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-3
+    // ★ S3-3：SUPERVISOR 覆唔到客 → 403（釘病人 = 改病人資料）；STAFF_YMT = F 店外店 → 403（access 先於 write）
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/patient-pin`, method: "POST", body: JSON.stringify({ patientApricotId: "t630apr", patientName: "t630" }) }),
+    expect: { UNAUTH: 401, STAFF_YMT: 403, SUPERVISOR: 403 },
   },
   "DELETE /api/conversations/[id]/patient-pin": {
-    fixture: () => ({ url: "/api/conversations/nope/patient-pin", method: "DELETE" }),
-    expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-3
+    // ★ S3-3：SUPERVISOR 覆唔到客 → 403（取消釘 = 改病人資料）
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/patient-pin`, method: "DELETE" }),
+    expect: { UNAUTH: 401, STAFF_YMT: 403, SUPERVISOR: 403 },
   },
   "GET /api/conversations/[id]/patient-record/note": {
     fixture: () => ({ url: "/api/conversations/nope/patient-record/note" }),
@@ -757,7 +781,7 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     // 有效 body + clinicId = F 店：STAFF（TY 外店）403；SUP/CB/ALL 201（建入 F 店 — teardown 按 clinicId 洗）
     // （invalid body {} = 全部 400 validation-first — 測唔到 scope 格，所以用有效 body）
     fixture: (f) => ({ url: "/api/golden-cases", method: "POST", body: JSON.stringify({ clinicId: f.clinicF.id, utterance: "t630 matrix", expectIntent: "OTHER" }) }),
-    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 201, ADMIN_COMPANY_B: 201, ADMIN_ALL: 201 },
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 201, ADMIN_ALL: 201 }, // ★ S3-3：SUPERVISOR 覆客 403（寫入邊界）
   },
   "GET /api/media/[file]": {
     fixture: () => ({ url: "/api/media/nope.png" }),
@@ -780,8 +804,10 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
   },
   "PATCH /api/notices": {
-    fixture: () => ({ url: "/api/notices", method: "PATCH", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401 }, // 快照：S3-3（assertCanWriteConversation）
+    // ★ S3-3：SUPERVISOR 唔准寫全店欄 → 403（寫入檢查先於 body 解析）；
+    //   STAFF_TY 寫入權 OK → 400（ids=[] 驗證 — 防 { } = 批量已讀真寫入）
+    fixture: () => ({ url: "/api/notices", method: "PATCH", body: JSON.stringify({ ids: [] }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 400, SUPERVISOR: 403 },
   },
   "GET /api/push/prefs": {
     fixture: () => ({ url: "/api/push/prefs" }),
@@ -885,6 +911,7 @@ async function setup(): Promise<Fixtures> {
   const emails: Record<string, string> = {
     [F.staffTy]: "t630.staff.ty@wa-clinic.local",
     [F.staffYmt]: "t630.staff.ymt@wa-clinic.local",
+    [F.staffF]: "t630.staff.f@wa-clinic.local", // ★ S3-3：F 店 STAFF（423 格）
     [F.supervisor]: "t630.supervisor@wa-clinic.local",
     [F.adminAll]: "t630.admin.all@wa-clinic.local",
     [F.adminCompB]: "t630.admin.compB@wa-clinic.local",
@@ -1021,6 +1048,31 @@ async function setup(): Promise<Fixtures> {
     create: { id: F.msgPre, conversationId: F.convPre, direction: "IN", channel: "API", type: "text", body: "t630 prefill fixture", status: "RECEIVED", waTimestamp: new Date("2026-01-01T00:00:00.000Z") },
   });
 
+  // ★ cwi-final S3-3 fixture：F 店 STAFF（非負責人）+ send-lock 對話/booking
+  //   （convLock：assignee = STAFF_TY，lastInboundAt = 2026-01-01 → 24h 窗已過；bookLock：PENDING）
+  await prisma.staffUser.upsert({
+    where: { id: F.staffF },
+    update: { role: "STAFF", scopeType: "CLINICS", scopeCompanyId: null, clinicId: F.clinicF, active: true, passwordHash: pw },
+    create: { id: F.staffF, email: "t630.staff.f@wa-clinic.local", name: "T630 STAFF F", role: "STAFF", scopeType: "CLINICS", clinicId: F.clinicF, active: true, passwordHash: pw },
+  });
+  await prisma.staffClinic.deleteMany({ where: { staffId: F.staffF } });
+  await prisma.staffClinic.create({ data: { staffId: F.staffF, clinicId: F.clinicF, isPrimary: true } });
+  await prisma.contact.upsert({
+    where: { id: F.contactLock },
+    update: {},
+    create: { id: F.contactLock, clinicId: F.clinicF, waId: "8526300002", labels: [] },
+  });
+  await prisma.conversation.upsert({
+    where: { id: F.convLock },
+    update: { assigneeId: F.staffTy, lastInboundAt: new Date("2026-01-01T00:00:00.000Z"), lastMessageAt: new Date("2026-01-01T00:00:00.000Z") },
+    create: { id: F.convLock, clinicId: F.clinicF, contactId: F.contactLock, assigneeId: F.staffTy, lastInboundAt: new Date("2026-01-01T00:00:00.000Z"), lastMessageAt: new Date("2026-01-01T00:00:00.000Z") },
+  });
+  await prisma.bookingRequest.upsert({
+    where: { id: F.bookLock },
+    update: { status: "PENDING" },
+    create: { id: F.bookLock, conversationId: F.convLock, clinicId: F.clinicF, flowToken: "t630booklocktok0000000001", providerApricotId: "t630prov0001", providerName: "T630 醫生", requestedDate: "2026-10-01" },
+  });
+
   // TY automation policy 快照（automation PATCH L2 之後還原）
   const tyPol = await prisma.automationPolicy.findUnique({ where: { clinicId_category: { clinicId: by("TY").id, category: "BOOKING_REQUEST" } } });
   tyPolicyOriginal = tyPol ? { level: tyPol.level } : null;
@@ -1048,6 +1100,7 @@ async function setup(): Promise<Fixtures> {
   const roleOf: Record<string, Id> = {
     [F.staffTy]: "STAFF_TY",
     [F.staffYmt]: "STAFF_YMT",
+    [F.staffF]: "STAFF_F",
     [F.supervisor]: "SUPERVISOR",
     [F.adminAll]: "ADMIN_ALL",
     [F.adminCompB]: "ADMIN_COMPANY_B",
@@ -1091,7 +1144,7 @@ async function setup(): Promise<Fixtures> {
 // ★ debug probe：setup 後即刻驗 5 個 cookie 有冇即刻死（定位 401 時間點）
 async function probeCookies() {
   console.log("\n═══ cookie probe（setup 後即刻）═══");
-  for (const id of ["STAFF_TY", "STAFF_YMT", "SUPERVISOR", "ADMIN_ALL", "ADMIN_COMPANY_B"] as Id[]) {
+  for (const id of ["STAFF_TY", "STAFF_YMT", "STAFF_F", "SUPERVISOR", "ADMIN_ALL", "ADMIN_COMPANY_B"] as Id[]) {
     const r = await api(id, "GET", "/api/staff");
     console.log(`  probe ${id}: ${r.status}（想 200）cookie=${(cookie[id] ?? "").slice(0, 30)}...`);
   }
@@ -1133,6 +1186,10 @@ async function teardown() {
     await prisma.goldenCase.deleteMany({ where: { id: F.goldenTy } });
     await prisma.message.deleteMany({ where: { id: F.msgPre } });
     await prisma.conversation.deleteMany({ where: { id: F.convPre } });
+    // ★ S3-3 fixture
+    await prisma.bookingRequest.deleteMany({ where: { id: F.bookLock } });
+    await prisma.conversation.deleteMany({ where: { id: F.convLock } });
+    await prisma.contact.deleteMany({ where: { id: F.contactLock } });
     await prisma.contact.deleteMany({ where: { waId: "8526300001" } });
     await prisma.workflowDefinition.deleteMany({ where: { id: F.publishDef } });
     await prisma.clinic.deleteMany({ where: { id: { in: [F.clinicF, F.clinicDispo] } } });
@@ -1379,6 +1436,198 @@ async function t639() {
   await prisma.staffUser.deleteMany({ where: { id: { in: [caller.id, r2.json?.id].filter(Boolean) } } });
 }
 
+// ── T632 / T633 共用：一次性 login helper（獨立 XFF bucket 避限流）──────────────
+async function loginAs(email: string, xff: string): Promise<string> {
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(BASE + "/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": xff },
+      body: JSON.stringify({ email, password: PASS }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const txt = await res.text();
+    const m = (res.headers.get("set-cookie") ?? "").match(/wa_inbox_session=[^;]+/);
+    if (res.status === 200 && m) return m[0];
+    lastErr = `${res.status} ${txt.slice(0, 120)}`;
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 3000)); // dev loadManifest race（已知 flake）
+  }
+  throw new Error(`T63x login fail ${email}（3 次）: ${lastErr}`);
+}
+
+function connectSocket(cookie: string, label: string) {
+  return new Promise<{ socket: ReturnType<typeof socketIoClient> }>((resolve, reject) => {
+    const socket = socketIoClient(BASE, {
+      // ★ 必須 websocket transport（Node polling 走 xmlhttprequest-ssl → Cookie 係 forbidden header 被丟）
+      transports: ["websocket"],
+      extraHeaders: { Cookie: cookie },
+      timeout: 10_000,
+      reconnection: false,
+    });
+    const t = setTimeout(() => reject(new Error(`${label} socket connect timeout`)), 15_000);
+    socket.on("connect", () => { clearTimeout(t); resolve({ socket }); });
+    socket.on("connect_error", (e) => { clearTimeout(t); reject(new Error(`${label} socket connect_error: ${e.message}`)); });
+  });
+}
+
+// ── T632（S3-2 ④：登出只登出當前機 + per-device push 清理）──────────────────────
+const T632 = {
+  staff: "t632staffa0000000000000001",
+  email: "t632.user@wa-clinic.local",
+  epA: "https://push.e2e.example/t632-ep-a-000000000001",
+  epB: "https://push.e2e.example/t632-ep-b-000000000001",
+  sub: { p256dh: "BNt632fakep256dhkey0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", auth: "t632fakeauth" },
+};
+
+async function t632() {
+  console.log("\n═══ T632 — 登出只登出當前機（S3-2 ④）═══");
+  const ty = await prisma.clinic.findUnique({ where: { code: "TY" }, select: { id: true } });
+  if (!ty) throw new Error("TY clinic 唔存在");
+  const pw = await argon2.hash(PASS);
+  // 冪等清場（上輪殘留）
+  await prisma.pushSubscription.deleteMany({ where: { staffId: T632.staff } });
+  await prisma.auditLog.deleteMany({ where: { staffId: T632.staff } });
+  await prisma.staffClinic.deleteMany({ where: { staffId: T632.staff } });
+  await prisma.staffUser.deleteMany({ where: { id: T632.staff } });
+  const staff = await prisma.staffUser.upsert({
+    where: { id: T632.staff },
+    update: { active: true, role: "STAFF", scopeType: "CLINICS", scopeCompanyId: null, clinicId: ty.id, passwordHash: pw },
+    create: { id: T632.staff, email: T632.email, name: "T632 User", role: "STAFF", scopeType: "CLINICS", clinicId: ty.id, active: true, passwordHash: pw },
+  });
+  await prisma.staffClinic.deleteMany({ where: { staffId: T632.staff } });
+  await prisma.staffClinic.create({ data: { staffId: T632.staff, clinicId: ty.id, isPrimary: true } });
+
+  try {
+    // A / B = 同帳號兩機（兩個 sid）
+    const cookieA = await loginAs(T632.email, "10.64.1.1");
+    const cookieB = await loginAs(T632.email, "10.64.1.2");
+
+    // 兩機各 subscribe 一個 endpoint
+    const sA = await apiWithCookie(cookieA, "POST", "/api/push/subscribe", { endpoint: T632.epA, keys: T632.sub, userAgent: "e2e-t632-A" });
+    assertEq("T632 A subscribe = 200", sA.status, 200);
+    const sB = await apiWithCookie(cookieB, "POST", "/api/push/subscribe", { endpoint: T632.epB, keys: T632.sub, userAgent: "e2e-t632-B" });
+    assertEq("T632 B subscribe = 200", sB.status, 200);
+    const nSub = await prisma.pushSubscription.count({ where: { staffId: staff.id, endpoint: { in: [T632.epA, T632.epB] } } });
+    assertEq("T632 兩條 subscription row", nSub, 2);
+
+    // B 機 socket 連緊（驗 A 登出唔會斷 B）
+    const { socket: sockB } = await connectSocket(cookieB, "T632-B");
+
+    // A 機登出（帶 endpoint）→ 只 A 失效
+    const lo = await apiWithCookie(cookieA, "POST", "/api/auth/logout", { endpoint: T632.epA });
+    assertEq("T632 A logout = 200", lo.status, 200);
+
+    const gA = await apiWithCookie(cookieA, "GET", "/api/staff");
+    assertEq("T632 A 舊 cookie = 401", gA.status, 401);
+    assertTrue("T632 A 401 body = session logged out", gA.json?.error === "session logged out", `got ${JSON.stringify(gA.json)}`);
+
+    const gB = await apiWithCookie(cookieB, "GET", "/api/staff");
+    assertEq("T632 B cookie 照有效 = 200", gB.status, 200);
+
+    // push：A row 刪 / B row 留
+    const nA = await prisma.pushSubscription.count({ where: { staffId: staff.id, endpoint: T632.epA } });
+    assertEq("T632 A push row 已刪", nA, 0);
+    const nB = await prisma.pushSubscription.count({ where: { staffId: staff.id, endpoint: T632.epB } });
+    assertEq("T632 B push row 保留", nB, 1);
+
+    // B socket 3s 內唔被斷（session:denied(A) 只斷 A 嘅 socket）
+    let bDisconnected = false;
+    sockB.on("disconnect", () => { bDisconnected = true; });
+    await new Promise((r) => setTimeout(r, 3000));
+    assertTrue("T632 B socket 唔受 A 登出影響", !bDisconnected);
+    sockB.disconnect();
+  } finally {
+    await prisma.pushSubscription.deleteMany({ where: { staffId: T632.staff } });
+    await prisma.auditLog.deleteMany({ where: { staffId: T632.staff } });
+    await prisma.staffClinic.deleteMany({ where: { staffId: T632.staff } });
+    await prisma.staffUser.deleteMany({ where: { id: T632.staff } });
+  }
+}
+
+// ── T633（S3-2 ⑤⑥：scope 改動 → 全部 session 失效 ≤60s + 停用 → SSR 拒）────────
+const T633 = {
+  admin: "t633admina0000000000000001",
+  staff: "t633staffa0000000000000002",
+  adminEmail: "t633.admin@wa-clinic.local",
+  staffEmail: "t633.user@wa-clinic.local",
+};
+
+async function t633() {
+  console.log("\n═══ T633 — 失效 ≤60s（S3-2 ⑤⑥）═══");
+  const [ty, ymt] = await Promise.all([
+    prisma.clinic.findUnique({ where: { code: "TY" }, select: { id: true } }),
+    prisma.clinic.findUnique({ where: { code: "YMT" }, select: { id: true } }),
+  ]);
+  if (!ty || !ymt) throw new Error("TY/YMT clinic 唔存在");
+  const pw = await argon2.hash(PASS);
+  for (const id of [T633.admin, T633.staff]) {
+    await prisma.auditLog.deleteMany({ where: { staffId: id } });
+    await prisma.staffClinic.deleteMany({ where: { staffId: id } });
+    await prisma.staffUser.deleteMany({ where: { id } });
+  }
+  await prisma.staffUser.upsert({
+    where: { id: T633.admin },
+    update: { active: true, role: "ADMIN", scopeType: "ALL", scopeCompanyId: null, clinicId: null, passwordHash: pw },
+    create: { id: T633.admin, email: T633.adminEmail, name: "T633 Admin", role: "ADMIN", scopeType: "ALL", active: true, passwordHash: pw },
+  });
+  await prisma.staffUser.upsert({
+    where: { id: T633.staff },
+    update: { active: true, role: "STAFF", scopeType: "CLINICS", scopeCompanyId: null, clinicId: ty.id, passwordHash: pw },
+    create: { id: T633.staff, email: T633.staffEmail, name: "T633 User", role: "STAFF", scopeType: "CLINICS", clinicId: ty.id, active: true, passwordHash: pw },
+  });
+  await prisma.staffClinic.deleteMany({ where: { staffId: T633.staff } });
+  await prisma.staffClinic.create({ data: { staffId: T633.staff, clinicId: ty.id, isPrimary: true } });
+
+  try {
+    const cookieA = await loginAs(T633.adminEmail, "10.64.2.1");
+    const cookieS = await loginAs(T633.staffEmail, "10.64.2.2");
+
+    // 1. staff socket 連上
+    const { socket: sock } = await connectSocket(cookieS, "T633-staff");
+
+    // 2. SSR 基線（active + 範圍內）= 200
+    const page0 = await fetch(BASE + "/inbox", { headers: { cookie: cookieS }, signal: AbortSignal.timeout(120_000), redirect: "manual" });
+    assertEq("T633 改前 /inbox SSR = 200", page0.status, 200);
+
+    // 3. scope 改動（TY → YMT）→ sessionsInvalidated + control broadcast → cutoff + 斷 socket
+    const put = await apiWithCookie(cookieA, "PUT", `/api/admin/staff/${T633.staff}`, { clinicIds: [ymt.id] });
+    assertEq("T633 scope 改動 PUT = 200", put.status, 200);
+    assertTrue("T633 回應 sessionsInvalidated = true", put.json?.sessionsInvalidated === true, `got ${JSON.stringify(put.json)}`);
+
+    // 4. socket 斷線（≤65s = spec 60s + 5s 餘量；正常路徑 control channel 即時斷）
+    const t0 = Date.now();
+    const disconnected = await new Promise<boolean>((resolve) => {
+      if (sock.disconnected) return resolve(true);
+      const t = setTimeout(() => resolve(false), 65_000);
+      sock.on("disconnect", () => { clearTimeout(t); resolve(true); });
+    });
+    const dtMs = Date.now() - t0;
+    assertTrue(`T633 socket 已斷（≤65s）`, disconnected, `65s 後仍然連緊`);
+    if (disconnected) console.log(`  （socket 喺 ${dtMs}ms 斷線）`);
+
+    // 5. 舊 session → 401 session invalidated（cutoff 已生效）
+    const gOld = await apiWithCookie(cookieS, "GET", "/api/staff");
+    assertEq("T633 舊 session API = 401", gOld.status, 401);
+    assertTrue("T633 401 body = session invalidated", gOld.json?.error === "session invalidated", `got ${JSON.stringify(gOld.json)}`);
+
+    // 6. 重新登入（新 loginAt > cutoff）→ 200 → 停用 → SSR 307（isStaffActive 層）
+    const cookieS2 = await loginAs(T633.staffEmail, "10.64.2.3");
+    const page1 = await fetch(BASE + "/inbox", { headers: { cookie: cookieS2 }, signal: AbortSignal.timeout(120_000), redirect: "manual" });
+    assertEq("T633 重登入後 /inbox SSR = 200", page1.status, 200);
+    const dis = await apiWithCookie(cookieA, "PUT", `/api/admin/staff/${T633.staff}`, { active: false });
+    assertEq("T633 停用 PUT = 200", dis.status, 200);
+    const page2 = await fetch(BASE + "/inbox", { headers: { cookie: cookieS2 }, signal: AbortSignal.timeout(120_000), redirect: "manual" });
+    assertEq("T633 停用後 /inbox SSR = 307", page2.status, 307);
+    assertTrue("T633 307 → /login", (page2.headers.get("location") ?? "").includes("/login"), `location=${page2.headers.get("location")}`);
+  } finally {
+    for (const id of [T633.admin, T633.staff]) {
+      await prisma.auditLog.deleteMany({ where: { staffId: id } });
+      await prisma.staffClinic.deleteMany({ where: { staffId: id } });
+      await prisma.staffUser.deleteMany({ where: { id } });
+    }
+  }
+}
+
 // ── main（CJS — tsx 無 type:module → 唔可以用 top-level await）────────────────
 async function main() {
   const phase = (process.argv.find((a) => a.startsWith("--phase=")) ?? "").split("=")[1] ?? "t630";
@@ -1386,6 +1635,18 @@ async function main() {
   if (phase === "t639") {
     try {
       await t639();
+    } finally {
+      await prisma.$disconnect();
+    }
+  } else if (phase === "t632") {
+    try {
+      await t632();
+    } finally {
+      await prisma.$disconnect();
+    }
+  } else if (phase === "t633") {
+    try {
+      await t633();
     } finally {
       await prisma.$disconnect();
     }

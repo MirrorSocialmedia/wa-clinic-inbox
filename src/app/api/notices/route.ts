@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, clinicScope, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, clinicScope, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
 
 /**
  * GET /api/notices — 本店未讀內部通知（AI Workflow T1 A2：媒體/急症升級/...）。
@@ -65,6 +65,8 @@ export const GET = handle(async (req: NextRequest) => {
 
 export const PATCH = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
+  // ★ cwi-final S3-3：SUPERVISOR → 403（SUPERVISOR 嘅已讀係 per-staff 語義（S1-12），唔准寫全店欄 StaffNotice.readAt）
+  assertCanWriteConversation(ctx);
   const body = (await req.json().catch(() => null)) as { ids?: unknown } | null;
   const ids = Array.isArray(body?.ids)
     ? (body!.ids as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 200)

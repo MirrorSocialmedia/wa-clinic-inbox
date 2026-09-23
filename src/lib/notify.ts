@@ -72,7 +72,9 @@ export type ControlMessage =
   //   （payload 零 PII：clinicCode/clinicId/date 都係營運元數據）
   | { cmd: "availability:busted"; clinicCode: string; clinicId: string; date: string }
   // ★ cwi-final S1-4：staff 範圍/技能組改動 → 清各 process 嘅 publishConvEvent scope cache（60s → 即刻）
-  | { cmd: "scope:changed" };
+  | { cmd: "scope:changed" }
+  // ★ cwi-final S3-2（A1）：登出當前機 → 斷呢個 sid 嘅 socket（per-session，唔係斷晒該 staff）
+  | { cmd: "session:denied"; sid: string };
 
 /**
  * 發控制指令（fire-and-forget）：Redis 故障時 log — API 側嘅 cache 失效已經做咗，

@@ -765,16 +765,21 @@ async function main(): Promise<void> {
         await publish(clinic, "message:new", messagePayload(convU, clinic, { unread: i, contact: false, body: `e2e-t188-${i}` }));
         await new Promise((r) => setTimeout(r, 120));
       }
-      const s5 = await waitForSpy(a.P, (s) => s.notifications.length >= 5, "t188 五條通知", 15_000);
-      if (s5.notifications.length !== 5) fail(`t188: 期望 5 通知（每條都出 — 通知唔受限流），actual=${s5.notifications.length}`);
-      if (!s5.notifications.every((n) => n.tag === convU)) fail(`t188: 全部 tag 應 = convU（tags=${JSON.stringify([...new Set(s5.notifications.map((n) => n.tag))])}）`);
+      // ★ cwi-final D2（2026-09-23 實測假紅）：計數只數 tag===convU 嘅通知 —
+      //   clinic 級 ambient 事件（如 unassigned-sla notice，tag=""）唔算入呢個 case 嘅合約
+      //   （T188 驗 = 「本 conv 5/5 全出 + 聲 1 次」）；fail 時 dump 全部通知（title/tag/viaSW）供診斷。
+      const tagged = (s: Awaited<ReturnType<typeof spy>>) => s.notifications.filter((n) => n.tag === convU);
+      const dumpS = (s: Awaited<ReturnType<typeof spy>>) => JSON.stringify(s.notifications.map((n) => ({ t: n.title, tag: n.tag, viaSW: n.viaSW })));
+      const s5 = await waitForSpy(a.P, (s) => tagged(s).length >= 5, "t188 五條 convU 通知", 15_000);
+      if (tagged(s5).length !== 5) fail(`t188: 期望 5 條 convU 通知（每條都出 — 通知唔受限流），tagged=${tagged(s5).length} total=${s5.notifications.length} spy=${dumpS(s5)}`);
+      if (!tagged(s5).every((n) => n.tag === convU)) fail(`t188: tagged 集合唔應該有非 convU tag（tags=${JSON.stringify([...new Set(tagged(s5).map((n) => n.tag))])}）`);
       if (chimePlays(s5) - chimePlays(baseT) !== 1) fail(`t188: 3s 窗內期望只響 1 次，Δ=${chimePlays(s5) - chimePlays(baseT)}（mediaPlays=${JSON.stringify(s5.mediaPlays)}）`);
       if (s5.ctxCreations !== 0) fail(`t188: v1 WebAudio beep 應該已退役（ctxCreations=${s5.ctxCreations}）`);
       // 間隔滿 3s → 第六條 → 再響
       console.log("  (t188 等 3.5s 全域音間隔過咗...)");
       await new Promise((r) => setTimeout(r, 3500));
-      const s6 = await publishAndRing(a.P, "t188 3.5s 後第六條", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 6, contact: false, body: "e2e-t188-6" })), (s) => s.notifications.length >= 6);
-      if (s6.notifications.length !== 6) fail(`t188: 期望 6 通知，actual=${s6.notifications.length}`);
+      const s6 = await publishAndRing(a.P, "t188 3.5s 後第六條", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 6, contact: false, body: "e2e-t188-6" })), (s) => tagged(s).length >= 6);
+      if (tagged(s6).length !== 6) fail(`t188: 期望 6 條 convU 通知，tagged=${tagged(s6).length} total=${s6.notifications.length} spy=${dumpS(s6)}`);
       if (chimePlays(s6) - chimePlays(baseT) !== 2) fail(`t188: 3.5s 後應再響（期望 Δ=2），actual Δ=${chimePlays(s6) - chimePlays(baseT)}`);
       console.log("NOTIFY-UI-OK");
     } else if (scenario === "t164") {

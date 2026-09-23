@@ -1,6 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
+import { logoutWithPushCleanup } from "@/lib/notify-client";
 import {
   ArrowLeft,
   BadgeDollarSign,
@@ -133,13 +134,9 @@ export function AdminShell({
           .filter((g) => g.items.length > 0)
       : allGroups;
 
+  // ★ cwi-final S3-2（A1）：改用 logoutWithPushCleanup（帶 endpoint 登出 — 只登當前機 + 只刪呢部機 push row）
   async function logout() {
-    try {
-      await fetch("/api/auth/logout", { method: "POST" });
-    } catch {
-      /* cookie 清唔清都得，一律去登入頁 */
-    }
-    window.location.href = "/login";
+    await logoutWithPushCleanup();
   }
 
   return (

@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import argon2 from "argon2";
 import prisma from "@/lib/prisma";
@@ -167,6 +168,8 @@ export const POST = handle(async (req: NextRequest) => {
     scopeType: user.scopeType as "ALL" | "COMPANY" | "CLINICS",
     scopeCompanyId: user.scopeCompanyId,
     loginAt: Date.now(),
+    // ★ cwi-final S3-2（A1）：session sid — 登出只 deny 呢個 session（其他機唔受影響）
+    sid: randomUUID(),
   });
 
   // ★ H-2 配套：AuditLog LOGIN（meta.ip）+ ADMIN 新 IP alert（fail-soft，唔阻登入）

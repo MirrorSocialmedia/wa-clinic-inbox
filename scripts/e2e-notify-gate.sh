@@ -73,6 +73,16 @@ run_notify_gate() {
   NFIX=$(q "SELECT count(*)::text c FROM \"Conversation\" WHERE id IN ('$CVU','$CVA','$CVM')" | jf c)
   check "N-0 fixture 對話 ×3（冪等）" "$NFIX" "3"
 
+  # ★ cwi-final D2 hermetic（T169 假紅實測 2026-09-23）：unassigned-sla cron（*/5 分）喺 tick 內發
+  #   clinic 級 notice:new（conversationId=null）→ shouldNotify 對 null conv 直接放行（S1-7 設計）
+  #   → T162/T167/T169 嘅 blanket 靜音斷言被 5 分鐘 tick 撞入 window 就假紅（本輪實測：TKW+MF 兩條
+  #   SLA 通知同毫秒落 T169 window）。源頭 = dev DB 長期累積嘅 overdue 未指派對話（T9 -25h /
+  #   T91/T92 / CV92/93* -16min 等 backdate fixture + 舊 run 殘留）。
+  #   法：N 段開工時將所有 sweep 候選（未指派 + 未標記 + 有 lastInboundAt，全 clinic —
+  #   ADMIN_ALL browser 訂閱所有店 room）標 slaNotifiedAt=now → sweep 對 N 段整段 run no-op
+  #   （段內新 inbound 只更新 lastInboundAt 唔會清旗 → 仍唔命中；本 suite 無 positive SLA 斷言）。
+  q "UPDATE \"Conversation\" SET \"slaNotifiedAt\"=now() WHERE \"assigneeId\" IS NULL AND status <> 'RESOLVED' AND \"slaNotifiedAt\" IS NULL AND \"lastInboundAt\" IS NOT NULL" >/dev/null 2>&1
+
   # ── scenario runner（瀏覽器級；dev 首載編譯慢 → script 內已 poll 等 DOM 120s） ──
   nn() { # nn <desc> <e2e:notify-ui args...>
     local desc="$1"; shift

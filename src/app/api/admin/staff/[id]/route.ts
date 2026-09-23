@@ -293,17 +293,29 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
     }
   }
 
+  // ★ cwi-final S3-2（⑤）：role/scope 改動 → 該 staff 所有舊 session 失效
+  //   （舊 session 嘅 role/scope 快照係舊嘅 — 必須重新登入先有到新權限；
+  //   control broadcast 同時斷已連 socket + 各 process 設 cutoff）。
+  let sessionsInvalidated = false;
+  if (scopeChanged) {
+    await invalidateStaffSessions(id);
+    publishControl({ cmd: "staff:sessions-invalidated", staffId: id });
+    sessionsInvalidated = true;
+    log.info({ staffId: id }, "staff: role/scope changed — all sessions invalidated (cutoff + control broadcast)");
+  }
+
   // ★ C-3 尾批：password reset → 舊 session 全部失效（同停用同水位）：
   //   1) 本 instance（API route 世界）cutoff → 舊 cookie 下一 request 即刻 401
   //   2) control broadcast → 持 io 嗰份 instance 設自己 cutoff + 斷已連 socket
   if (newPassword) {
     await invalidateStaffSessions(id);
     publishControl({ cmd: "staff:sessions-invalidated", staffId: id });
+    sessionsInvalidated = true;
     log.info({ staffId: id }, "staff: password reset — all sessions invalidated (cutoff + control broadcast)");
   }
 
   const { passwordHash: _ph, ...safe } = user;
-  return NextResponse.json({ ...safe, passwordReset: Boolean(newPassword) });
+  return NextResponse.json({ ...safe, passwordReset: Boolean(newPassword), sessionsInvalidated });
 });
 
 export const DELETE = handle(async (req: NextRequest, ctx: Ctx) => {

@@ -14,7 +14,7 @@
  * - t191：收件人解析 — 未指派 → 全店 STAFF（B+C）；已指派 → 只 B；
  *         ADMIN 跟 DB pushPrefs.adminMsgClinics（唔係 localStorage）
  * - t192：410/404 → subscription row 自動刪；200 → lastOkAt 更新
- * - t193：登出 → DB row 刪（server 兜底）→ 同 endpoint 換人登入重訂閱 → 新主收自己嘅 push
+ * - t193：登出帶 endpoint（S3-2 ④ per-device）→ 該 endpoint row 刪 → 同 endpoint 換人登入重訂閱 → 新主收自己嘅 push
  *
  * 用法（repo root）：
  *   pnpm e2e:push --scenario t190 --base http://127.0.0.1:3100 \
@@ -532,8 +532,9 @@ async function t193(): Promise<void> {
   const nB = await prisma.pushSubscription.count({ where: { staffId: staffB } });
   if (nB !== 1) fail(`t193: B 應該有 1 sub（actual=${nB}）`);
 
-  // 登出（server 兜底刪）
-  const out = await api(cookieB, "/api/auth/logout", {});
+  // 登出（S3-2 ④：client 帶當前機 endpoint → server 只刪該 endpoint row；
+  //   舊語義「server 兜底刪晒該 staff 全部 sub」已廢 — 見 docs/decisions/d11-admin-send-lock.md 同源 S3-2 spec）
+  const out = await api(cookieB, "/api/auth/logout", { endpoint: e.endpoint });
   if (out.status !== 200) fail(`t193: logout status=${out.status}`);
   const nB2 = await prisma.pushSubscription.count({ where: { staffId: staffB } });
   if (nB2 !== 0) fail(`t193: 登出後 B 應該 0 sub（actual=${nB2}）`);

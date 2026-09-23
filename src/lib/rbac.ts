@@ -1,8 +1,9 @@
 import { type NextRequest } from "next/server";
-import { getSession, type SessionData } from "@/lib/session";
+import { getSession, type SessionData, SESSION_TTL_SECONDS } from "@/lib/session";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { getRedis } from "@/lib/queue";
+import { publishControl } from "@/lib/notify";
 
 /**
  * WA Clinic Inbox — RBAC 基礎（框架 MD D10 / §6.4）
@@ -153,6 +154,40 @@ export async function isStaffSessionCurrent(data: Pick<SessionData, "staffId" | 
   return true;
 }
 
+// ── ★ cwi-final S3-2（A1）：per-session denylist（登出只登出當前機）──────────────
+// iron-session 係 stateless — 冇 server-side session store 可以刪；做法同 cutoff 同思路：
+// per-sid deny 記號（本地 Map + Redis sess:deny:<sid> EX ttl），requireAuth / SSR / socket
+// 三層都查。TTL = session 剩餘有效期（唔少於 60s — session 自己會過期，記號唔使住更耐）。
+const SESS_DENY_PREFIX = "sess:deny:";
+const deniedLocal = new Map<string, number>(); // sid → expireAt
+
+/** ★ A1：登出只令呢個 session（sid）失效 */
+export async function denySession(data: Pick<SessionData, "sid" | "role" | "loginAt">): Promise<void> {
+  if (!data.sid || typeof data.loginAt !== "number") return;
+  const ttlSec = Math.max(60, Math.ceil((data.loginAt + SESSION_TTL_SECONDS[data.role] * 1000 - Date.now()) / 1000));
+  deniedLocal.set(data.sid, Date.now() + ttlSec * 1000);
+  try {
+    await getRedis().set(`${SESS_DENY_PREFIX}${data.sid}`, "1", "EX", ttlSec);
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "rbac: session deny Redis 寫入失敗（local-only）");
+  }
+  publishControl({ cmd: "session:denied", sid: data.sid }); // hub 斷呢個 sid 嘅 socket（同 S1-4 嘅 `scope:changed` 同一 control channel）
+}
+
+export async function isSessionDenied(sid: string | undefined): Promise<boolean> {
+  if (!sid) return false;
+  const exp = deniedLocal.get(sid);
+  if (exp !== undefined) {
+    if (exp > Date.now()) return true;
+    deniedLocal.delete(sid);
+  }
+  try {
+    return (await getRedis().exists(`${SESS_DENY_PREFIX}${sid}`)) === 1;
+  } catch {
+    return false; // Redis 死：fail-open（同 cutoff 現行口徑；登出另有 cookie 清除）
+  }
+}
+
 // ── ★ cwi-hub-a-20260914（Part A）：公司層範圍解析 — 單一來源（MD A.2 鐵律）──────────────
 // 所有下游（列表/三計數/公海/派俾我/時間表/路由組/通知/用量統計）一律經呢組函數，
 // 唔准有第二處自己算 clinic 集合。scope 改動喺 login 寫入 session（snapshot 語義）；
@@ -269,6 +304,10 @@ export async function requireAuth(req: NextRequest): Promise<AuthContext> {
   // ★ C-3 尾批：password reset 後嘅舊 session → 401（同停用同水位）
   if (!(await isStaffSessionCurrent(data))) {
     throw new RbacError(401, "session invalidated");
+  }
+  // ★ cwi-final S3-2（A1）：呢個 session（sid）被登出 → 401（其他機嘅 session 唔受影響）
+  if (await isSessionDenied(data.sid)) {
+    throw new RbacError(401, "session logged out");
   }
   return await toContext(data, res);
 }

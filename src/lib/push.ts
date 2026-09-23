@@ -328,12 +328,14 @@ export function vapidPublicKey(): string | null {
   return process.env.VAPID_PUBLIC_KEY ?? null;
 }
 
-/** 登出清理：刪 staff 所有 subscription（共用前台機鐵律 — server 兜底）。 */
+/** 全量刪 staff 所有 subscription（共用前台機鐵律）。
+ * ★ cwi-final S3-2（A1）：登出 route 已收窄到 endpoint-scoped（只刪當前機）— 呢個函數保留俾
+ * 「停用帳號」/ ops 手動 sweep 用（現時無 caller；留低 = 安全後門，唔好当死代碼刪）。 */
 export async function deleteSubscriptionsForStaff(staffId: string): Promise<void> {
   try {
     const r = await prisma.pushSubscription.deleteMany({ where: { staffId } });
-    if (r.count > 0) log.info({ staffId, count: r.count }, "push: 登出清理 — 刪 subscription");
+    if (r.count > 0) log.info({ staffId, count: r.count }, "push: 全量刪 subscription（停用/sweep）");
   } catch (err) {
-    log.warn({ staffId, err: err instanceof Error ? err.message : String(err) }, "push: 登出清理失敗（靜默）");
+    log.warn({ staffId, err: err instanceof Error ? err.message : String(err) }, "push: 全量刪 subscription 失敗（靜默）");
   }
 }

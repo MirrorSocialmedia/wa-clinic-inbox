@@ -2,7 +2,7 @@ import type { Server as SocketIOServer, Socket } from "socket.io";
 import type { Redis } from "ioredis";
 import { getSocketSession, type SessionData } from "@/lib/session";
 import { resolveSessionScope } from "@/lib/rbac";
-import { isStaffActive, invalidateActiveCache, invalidateStaffSessions, isStaffSessionCurrent } from "@/lib/rbac";
+import { isStaffActive, invalidateActiveCache, invalidateStaffSessions, isStaffSessionCurrent, isSessionDenied } from "@/lib/rbac";
 import { CONTROL_CHANNEL, type ControlMessage, bustScopeCache } from "@/lib/notify";
 import { applyCacheBust } from "@/lib/cache-bust";
 import log from "@/lib/log";
@@ -39,6 +39,10 @@ const state: HubState = { io: null };
 
 /** staffId → 而家已連嘅 socketId 集合（停用時精準斷線用）。 */
 const staffSockets = new Map<string, Set<string>>();
+
+/** ★ cwi-final S3-2（A1）：sid → 已連 socketId 集合（登出當前機時精準斷呢個 session 嘅 socket；
+ * 其他機嘅 socket 唔受影響）。舊 session 冇 sid → 唔喺呢個 map（只受 staff 層斷線影響）。 */
+const sidSockets = new Map<string, Set<string>>();
 
 export function initHub(io: SocketIOServer): void {
   state.io = io;
@@ -87,6 +91,15 @@ export function initHub(io: SocketIOServer): void {
       staffSockets.set(session.staffId, ids);
     }
     ids.add(socket.id);
+    // ★ cwi-final S3-2（A1）：sid → socketId（登出時 disconnectSession 精準斷）
+    if (session.sid) {
+      let sids = sidSockets.get(session.sid);
+      if (!sids) {
+        sids = new Set();
+        sidSockets.set(session.sid, sids);
+      }
+      sids.add(socket.id);
+    }
     // ★ H2：per-staff room — notify:mention 定向推送用（只 @ 中嗰個人收）
     void socket.join(`staff:${session.staffId}`);
     // ★ 診斷（P0-3 sockets:0 排查）：註冊後 log 實際 map 狀態
@@ -129,6 +142,14 @@ export function initHub(io: SocketIOServer): void {
         set.delete(socket.id);
         if (set.size === 0) staffSockets.delete(session.staffId);
       }
+      // ★ A1：sid 映射同步清（登出斷線 / 自然斷線都係）
+      if (session.sid) {
+        const sset = sidSockets.get(session.sid);
+        if (sset) {
+          sset.delete(socket.id);
+          if (sset.size === 0) sidSockets.delete(session.sid);
+        }
+      }
     });
 
     // ★ cwi-inboxfix-20260905（MD I-10）：顯式重註冊 — client 喺 connect/reconnect 時 emit "register"。
@@ -167,6 +188,58 @@ export function initHub(io: SocketIOServer): void {
       log.info({ staffId: s.staffId, socketId: socket.id.slice(-8) }, "socket registered (explicit)");
     });
   });
+
+  // ── ★ cwi-final S3-2（A1）：60s 週期重驗（fail-closed 兜底）──────────────────
+  // socket 連上之後，若該 session 被 deny（登出）/ 被 cutoff（password reset）/ staff 被停用，
+  // 正常路徑係 control channel 即時斷線；呢度係 60s 兜底（Redis 死 / 斷線指令丟失時）。
+  // unref() — timer 唔會拖住 process 退出。
+  const revalidateTimer = setInterval(() => {
+    void (async () => {
+      const io = state.io;
+      if (!io) return;
+      for (const [staffId, ids] of [...staffSockets.entries()]) {
+        let staffOk = false;
+        try {
+          staffOk = await isStaffActive(staffId);
+        } catch {
+          staffOk = false; // fail-closed：查唔到 → 斷（同 middleware 一致）
+        }
+        if (!staffOk) {
+          const n = disconnectStaff(staffId);
+          if (n > 0) log.info({ staffId, sockets: n }, "socket: revalidate → staff disabled, disconnected");
+          continue;
+        }
+        // ★ socket.io v4：io.sockets 類型唔暴露迭代 — 用官方 io.in(ids).fetchSockets()
+        //   （只回傳而家仲連緊嘅 socket — staffSockets 殘留嘅已斷 id 自然過濾）
+        try {
+          const live = await io.in([...ids]).fetchSockets();
+          for (const socket of live) {
+            const session = socket.data.session as SessionData | undefined;
+            let ok = true;
+            if (!session) {
+              ok = false; // 冇 session 元數據（唔應該發生）→ fail-closed 斷
+            } else {
+              try {
+                if (!(await isStaffSessionCurrent(session))) ok = false;
+                else if (await isSessionDenied(session.sid)) ok = false;
+              } catch {
+                ok = false; // fail-closed：檢查拋錯 → 斷（重連時 middleware 會重驗）
+              }
+            }
+            if (!ok) {
+              log.info({ staffId, socketIdTail: socket.id.slice(-8) }, "socket: revalidate failed → disconnected");
+              socket.disconnect(true);
+            }
+          }
+        } catch (err) {
+          log.warn({ staffId, err: err instanceof Error ? err.message : String(err) }, "socket: revalidate fetchSockets failed");
+        }
+      }
+    })().catch((err) => {
+      log.warn({ err: err instanceof Error ? err.message : String(err) }, "socket: revalidate pass failed");
+    });
+  }, 60_000);
+  revalidateTimer.unref?.();
 }
 
 /**
@@ -216,6 +289,10 @@ export function initControlBridge(sub: Redis): void {
         // ★ cwi-refresh-20260831 §3：availability L2 該日 busted + 重填完 → 推 clinic room 俾 UI 即時重繪
         // （payload 零 PII：clinicCode/date 都係營運元數據）
         notifyClinic(data.clinicId, "availability:busted", { clinicCode: data.clinicCode, date: data.date });
+      } else if (data.cmd === "session:denied") {
+        // ★ cwi-final S3-2（A1）：登出當前機 → 只斷呢個 sid 嘅 socket（其他機唔受影響）
+        const n = disconnectSession(data.sid);
+        log.info({ sidTail: data.sid.slice(-6), sockets: n }, "control: session:denied applied (logout current machine)");
       }
     } catch (err) {
       log.warn(
@@ -253,6 +330,22 @@ export function disconnectStaff(staffId: string): number {
   io.in([...ids]).disconnectSockets(true);
   staffSockets.delete(staffId);
   if (n > 0) log.info({ staffId, sockets: n }, "socket: staff disconnected (account disabled)");
+  return n;
+}
+
+/**
+ * ★ cwi-final S3-2（A1）：強制斷指定 session（sid）嘅所有已連 socket（登出當前機時經
+ * control channel `session:denied` 調用）。同 disconnectStaff 同 pattern：先讀 count 先斷線。
+ * @returns 斷咗幾多 socket
+ */
+export function disconnectSession(sid: string): number {
+  const io = state.io;
+  const ids = sidSockets.get(sid);
+  if (!io || !ids || ids.size === 0) return 0;
+  const n = ids.size;
+  io.in([...ids]).disconnectSockets(true);
+  sidSockets.delete(sid); // disconnect handler 會同步再清一次（冪等）
+  if (n > 0) log.info({ sidTail: sid.slice(-6), sockets: n }, "socket: session disconnected (logout)");
   return n;
 }
 

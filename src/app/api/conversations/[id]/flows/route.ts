@@ -14,6 +14,7 @@ import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { sendLockResponse } from "@/lib/send-lock";
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { assignConversation } from "@/lib/assign";
@@ -52,20 +53,14 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   // ★ H1 Send Lock（MD §3.2）：同 free-form 同規則 — 負責人唔係自己 → 423（INTERNAL note route 冇呢個檢查）。
-  // cwi-h6-20260830：ADMIN 豁免（§8：ADMIN 可接手可覆可放手 — E2E T97）
-  if (ctx.staff.role !== "ADMIN" && conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
+  // ★ cwi-final S3-3（D-11）：ADMIN 豁免刪走 — 統一經 sendLockResponse（ADMIN 都要先撳〔接手〕；T97 口徑）
+  const locked = sendLockResponse(ctx, conv);
+  if (locked) {
     log.info(
       { clinicId: conv.clinicId, conversationId: conv.id, staffId: ctx.staff.id, assigneeId: conv.assigneeId },
       "flows: 423 SEND_LOCKED（assignee 係其他 staff）"
     );
-    return NextResponse.json(
-      {
-        error: "SEND_LOCKED",
-        message: "此對話已有負責人 — 你只可發內部備註，或撳〔接手〕轉交畀自己",
-        assigneeId: conv.assigneeId,
-      },
-      { status: 423 }
-    );
+    return locked;
   }
 
   // ★ H1：unassigned + 窗口開緊 → auto-claim（窗口過咗嘅 422 唔會 claim，同 send route 一致）

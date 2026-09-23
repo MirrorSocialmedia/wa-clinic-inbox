@@ -33,6 +33,9 @@ export interface SessionData {
   scopeCompanyId?: string | null;
   /** login 時間（epoch ms），session 過期檢查用 */
   loginAt: number;
+  /** ★ cwi-final S3-2（A1）：session 唯一 id（per-device 撤銷用）— 登出只 deny 呢個 sid，其他機唔受影響。
+   * 舊 session（冇 sid）照常有效（到期自然失效）。 */
+  sid?: string;
 }
 
 export const SESSION_COOKIE_NAME = "wa_inbox_session";

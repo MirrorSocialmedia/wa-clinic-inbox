@@ -13,6 +13,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { sendLockResponse } from "@/lib/send-lock";
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { enqueueOutboundSend } from "@/lib/queue";
@@ -43,13 +44,19 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   assertClinicAccess(ctx, booking.clinicId); // STAFF 別店 → 403
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
+  const conv = await prisma.conversation.findUnique({ where: { id: booking.conversationId } });
+  if (!conv) return NextResponse.json({ error: "conversation missing" }, { status: 500 });
+
+  // ★ cwi-final S3-3（D-11）：Send Lock 單一來源 — confirm 會發確認訊息（覆病人）→ 非負責人（包 ADMIN）→ 423
+  const locked = sendLockResponse(ctx, conv);
+  if (locked) return locked;
+
   if (booking.status !== "PENDING") {
     return NextResponse.json({ error: `booking already ${booking.status}` }, { status: 409 });
   }
 
-  const conv = await prisma.conversation.findUnique({ where: { id: booking.conversationId } });
   const clinic = await prisma.clinic.findUnique({ where: { id: booking.clinicId } });
-  if (!conv || !clinic) {
+  if (!clinic) {
     return NextResponse.json({ error: "conversation missing" }, { status: 500 });
   }
 

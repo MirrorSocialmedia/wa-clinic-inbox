@@ -174,7 +174,7 @@ export default function StaffAdmin() {
             body: JSON.stringify(payload),
           });
       const body = (await res.json().catch(() => null)) as
-        | { error?: string; issues?: { path: string; message: string }[] }
+        | { error?: string; issues?: { path: string; message: string }[]; sessionsInvalidated?: boolean }
         | null;
       if (!res.ok) {
         setError(
@@ -183,6 +183,10 @@ export default function StaffAdmin() {
             : (body?.error ?? `HTTP ${res.status}`)
         );
         return;
+      }
+      // ★ cwi-final S3-2（⑤）：role/scope 改動或 password reset → 目標員工舊 session 已失效 → 提示要重新登入
+      if (editing && body?.sessionsInvalidated) {
+        alert(`${editing.email} 嘅舊 session 已失效 — 佢需要重新登入先有到新權限。`);
       }
       closeForm();
       await load();
