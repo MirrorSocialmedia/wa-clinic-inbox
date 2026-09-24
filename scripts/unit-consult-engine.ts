@@ -193,9 +193,34 @@ console.log("\n[1] Transition table（MD §4.2 — 25 行 first match wins）");
   const r13 = consultTransition(base(), sig({ asksClinicalDetail: true }));
   check("#13 臨床（脫牙/骨釘/IPR/骨量）→ row 13 / CONSULTATION / ASK_FOR_CONSULTATION", r13.row === 13 && r13.stage === "CONSULTATION" && r13.action === "ASK_FOR_CONSULTATION", JSON.stringify(r13));
   // #14 DISCOVER 指名產品 + 問價
+  // ★ W-S4-6 (A9)：首輪（turnCount=0）永不 ANSWER_PRICE → 落 #16 ASK_DISCOVERY（先了解需求）
   const r14 = consultTransition(base(), sig({ asksPrice: true, namedProduct: "IGO" }));
-  check("#14 DISCOVER 指名產品+問價 → row 14 / ANSWER_PRICE", r14.row === 14 && r14.action === "ANSWER_PRICE" && r14.stage === "DISCOVER", JSON.stringify(r14));
-  const r14b = consultTransition(base({ stage: "EDUCATE" }), sig({ asksPrice: true, namedProduct: "IGO" }));
+  check("#14 A9：首輪指名產品+問價 → row 16 / ASK_DISCOVERY（唔報價）", r14.row === 16 && r14.action === "ASK_DISCOVERY" && r14.stage === "DISCOVER", JSON.stringify(r14));
+  // #14 turn 1 + minimum slots 齊 + 指名 + 問價 → 照答
+  const r14a = consultTransition(
+    base({ turnCount: 1, slots: { ...emptyOrthoSlots(), appearancePriority: "HIGH" } as ConsultSlots }),
+    sig({ asksPrice: true, namedProduct: "IGO" })
+  );
+  check("#14 turn 1 + slots 齊 + 指名+問價 → row 14 / ANSWER_PRICE", r14a.row === 14 && r14a.action === "ANSWER_PRICE" && r14a.stage === "DISCOVER", JSON.stringify(r14a));
+  // #14 turn 1 但 slots 未齊 + 指名 + 問價 → 唔答（#14 唔命中 → 落 #16）
+  const r14b0 = consultTransition(
+    base({ turnCount: 1, slots: { ...emptyOrthoSlots(), meta: { priceAskCount: 0 } } as ConsultSlots }),
+    sig({ asksPrice: true, namedProduct: "IGO" })
+  );
+  check("#14 turn 1 但 slots 未齊 + 指名+問價（priceAskCount=0）→ row 16 / ASK_DISCOVERY", r14b0.row === 16 && r14b0.action === "ASK_DISCOVERY", JSON.stringify(r14b0));
+  // #14b A9-REASK：turn 1 + priceAskCount>=1 + 問價（唔要求指名/slots）→ 照答範圍
+  const r14b1 = consultTransition(
+    base({ turnCount: 1, slots: { ...emptyOrthoSlots(), meta: { priceAskCount: 1 } } as ConsultSlots }),
+    sig({ asksPrice: true })
+  );
+  check("#14b A9-REASK：turn 1 + priceAskCount=1 + 問價 → row 141 / ANSWER_PRICE / ruleId A9-REASK", r14b1.row === 141 && r14b1.action === "ANSWER_PRICE" && r14b1.ruleId === "A9-REASK", JSON.stringify(r14b1));
+  // #14b A9-REASK 首輪唔觸發（turnCount=0 + priceAskCount 已 1 — 例：外部塞入）→ 外層首輪保護唔适用（唔係 ANSWER_PRICE）— 直接 #16
+  const r14b2 = consultTransition(
+    base({ turnCount: 0, slots: { ...emptyOrthoSlots(), meta: { priceAskCount: 1 } } as ConsultSlots }),
+    sig({ asksPrice: true })
+  );
+  check("#14b 首輪（turnCount=0）唔觸發 → row 16 / ASK_DISCOVERY", r14b2.row === 16 && r14b2.action === "ASK_DISCOVERY", JSON.stringify(r14b2));
+  const r14b = consultTransition(base({ stage: "EDUCATE", turnCount: 1, slots: { ...emptyOrthoSlots(), appearancePriority: "HIGH", meta: { priceAskCount: 2 } } as ConsultSlots }), sig({ asksPrice: true, namedProduct: "IGO" }));
   check("#14 非 DISCOVER 唔觸發（EDUCATE → stay）", r14b.row === -1, JSON.stringify(r14b));
   // #15 DISCOVER 要求比較
   const r15 = consultTransition(base(), sig({ askedComparison: true }));
@@ -258,7 +283,13 @@ console.log("\n[1b] first match wins — priority 交叉");
   const f = consultTransition(base(), sig({ highIntent: true, newObjection: "PRICE" }));
   check("高意向 > objection（#9 先）", f.row === 9, JSON.stringify(f));
   const g = consultTransition(base({ stage: "DISCOVER" }), sig({ asksPrice: true, namedProduct: "IGO", askedComparison: true }));
-  check("指名問價 > 比較（#14 先）", g.row === 14, JSON.stringify(g));
+  // ★ W-S4-6 (A9)：首輪唔報價 → 比較（#15）先食走（舊期望 row 14 = 舊 GC「第一輪報範圍」改期望）
+  check("A9 首輪：指名問價+比較 → row 15 / EDUCATE_COMPARE（#14 首輪唔命中）", g.row === 15 && g.action === "EDUCATE_COMPARE", JSON.stringify(g));
+  const g2 = consultTransition(
+    base({ stage: "DISCOVER", turnCount: 1, slots: { ...emptyOrthoSlots(), appearancePriority: "HIGH" } as ConsultSlots }),
+    sig({ asksPrice: true, namedProduct: "IGO", askedComparison: true })
+  );
+  check("指名問價 > 比較（#14 先 — turn 1 + slots 齊）", g2.row === 14 && g2.action === "ANSWER_PRICE", JSON.stringify(g2));
   const h = consultTransition(base({ stage: "CONSULTATION" }), sig({ acceptsConsultation: true, declinesConsultation: true }));
   check("接受 > 推搪（#21 先）", h.row === 21, JSON.stringify(h));
   const i = consultTransition(base({ turnCount: 8 }), sig({ highIntent: true }));

@@ -637,6 +637,10 @@ function RuleEditor({
             placeholder="例：多謝你嘅查詢！我哋會安排療程顧問跟進…"
             className="mt-1 w-full rounded-2xl border border-line bg-panel-2 px-4 py-2 text-sm text-t1 focus:outline-none focus:border-brand"
           />
+          {/* ★ W-S4-6 (A9) ⑥：template 內容要求提示（唔改 DB — 真人手改文字 = 老細側） */}
+          <span className="mt-1 block text-[11px] leading-snug text-t3">
+            呢段會接喺 AI 第一句問題之後 — 請寫成邀請句，唔好再問問題，例如：「如果方便，可以影張牙齒相或者傳 X 光片過嚟，等同事了解多啲你嘅情況🦷」
+          </span>
         </label>
 
         <div className="rounded-2xl border border-line bg-panel-2 p-3 space-y-2">

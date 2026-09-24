@@ -30,7 +30,7 @@
  *      row 16 出問題無價）→ 差異入 CEO 報告（非 code 缺陷）。
  *   D4 GC-16：mock CG-007 bait =「我哋可以俾 $500 做到。」（MD 示例 $15000 — 機制同：
  *      金額出範圍）；呢個 turn 無 PRICE citation（priceIntent=false）→ price-guard ①
- *      先擋（CG-007 出範圍邏輯 ③ 由 unit 獨立驗）→ NO_PRICE_TEXT。
+ *      先擋（CG-007 出範圍邏輯 ③ 由 unit 獨立驗）→ W-S4-6 (A9) fallback deterministic 安全句。
  *   D5 GC-20：m1 建 session → DB 直寫 lastInboundAt/lastMessageAt=25h 前 + 25h IN msg
  *      + e2e:ai-job requeue（真 pipeline 過窗）→ row 4 WINDOW_EXPIRED_HANDOFF。
  *      MD「我諗好喇，想約」加 FLOOR「箍牙」（mock trigger 需要 — 同 D1）。
@@ -48,7 +48,6 @@ import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { PrismaClient } from "@prisma/client";
 import { CLAIM_HUMAN_TEXT } from "../src/lib/ai/claim-guard";
-import { NO_PRICE_TEXT } from "../src/lib/ai/price-guard";
 import {
   consultTransition,
   chooseNextQuestion,
@@ -923,41 +922,53 @@ async function gc14a(): Promise<void> {
 }
 
 async function gc14b(): Promise<void> {
-  console.log("\n[GC-14b] 指名產品問價（I GO）→ KB 價格範圍");
+  console.log("\n[GC-14b] 指名產品問價（I GO）→ ★ W-S4-6 (A9)：首輪唔報價（row 16 + 費 note）→ 再追問 row 141 A9-REASK → KB 價格範圍");
   const wa = "e2ec6-gc14b";
   const m1 = await inbound(wa, "我想箍牙");
   await waitTurn(m1.convId, 1, 16);
   const m2 = await inbound(wa, "箍牙，I GO 最平幾錢？");
-  const t2 = await waitTurn(m2.convId, 2, 14);
-  check("m2 row 14 → ANSWER_PRICE（指名產品 + 問價）", ameta(t2.a).row === 14);
-  check("m2 ruleId = ORTHO-009", (t2.a.meta as Record<string, unknown>).ruleId === "ORTHO-009");
+  const t2 = await waitTurn(m2.convId, 2, 16);
+  check("m2 A9 首輪：row 16 ASK_DISCOVERY（唔報價；minSlots 未齊）", ameta(t2.a).row === 16 && t2.s.lastAction === "ASK_DISCOVERY", JSON.stringify({ row: ameta(t2.a).row, la: t2.s.lastAction }));
   const d2 = await poll("GC14b m2 draft", async () => draftOf(m2.msgId));
-  check("m2 draft = KB 價格範圍 30000–60000（精確）", d2?.draftText === D.answerPrice, d2?.draftText);
-  check("m2 draft 含 disclaimer「以到診評估為準」", (d2?.draftText ?? "").includes("以到診評估為準"));
+  check("m2 draft = 費 note + speed 問題（patientAskedPrice=true — 精確）", d2?.draftText === `Hello☺️ 多謝你查詢！收費會因應你嘅牙齒情況而唔同，想先了解多少少：${D.qSpeed}`, d2?.draftText);
+  check("m2 draft 零金額", !/\$\s?\d|\d{4,}\s*蚊/.test(d2?.draftText ?? ""), d2?.draftText);
+  const m3 = await inbound(wa, "箍牙，I GO 最平幾錢？");
+  const t3 = await waitTurn(m3.convId, 3, 141);
+  check("m3 再追問：row 141 A9-REASK → ANSWER_PRICE", ameta(t3.a).row === 141 && t3.s.lastAction === "ANSWER_PRICE", JSON.stringify({ row: ameta(t3.a).row, la: t3.s.lastAction }));
+  check("m3 ruleId = A9-REASK", (t3.a.meta as Record<string, unknown>).ruleId === "A9-REASK");
+  const d3 = await poll("GC14b m3 draft", async () => draftOf(m3.msgId));
+  check("m3 draft = KB 價格範圍 30000–60000（精確）", d3?.draftText === D.answerPrice, d3?.draftText);
+  check("m3 draft 含 disclaimer「以到診評估為準」", (d3?.draftText ?? "").includes("以到診評估為準"));
 }
 
 async function gc15(): Promise<void> {
-  console.log("\n[GC-15] 指名產品問價 → 無 preference 反問");
+  console.log("\n[GC-15] 指名產品問價（A9：turn 3 A9-REASK）→ 價格範圍無 preference 反問");
   const wa = "e2ec6-gc15";
   const m1 = await inbound(wa, "我想箍牙");
   await waitTurn(m1.convId, 1, 16);
-  const m2 = await inbound(wa, "箍牙，I GO 最平幾錢？");
-  const t2 = await waitTurn(m2.convId, 2, 14);
-  const d2 = await poll("GC15 m2 draft", async () => draftOf(m2.msgId));
-  check("m2 draft = 價格範圍（精確）", d2?.draftText === D.answerPrice, d2?.draftText);
-  check("m2 draft 無 preference 反問（無「想了解」/「想多了解下」）", !/(想了解|想多了解下)/.test(d2?.draftText ?? ""));
+  await inbound(wa, "箍牙，I GO 最平幾錢？");
+  await waitTurn(m1.convId, 2, 16);
+  const m3 = await inbound(wa, "箍牙，I GO 最平幾錢？");
+  const t3 = await waitTurn(m3.convId, 3, 141);
+  const d3 = await poll("GC15 m3 draft", async () => draftOf(m3.msgId));
+  check("m3 draft = 價格範圍（精確）", d3?.draftText === D.answerPrice, d3?.draftText);
+  check("m3 draft 無 preference 反問（無「想了解」/「想多了解下」）", !/(想了解|想多了解下)/.test(d3?.draftText ?? ""), d3?.draftText);
+  void t3;
 }
 
 async function gc16(): Promise<void> {
-  console.log("\n[GC-16] mock LLM 出範圍外金額 → price-guard BLOCK（A 安全級）");
+  console.log("\n[GC-16] mock LLM 出範圍外金額 → price-guard BLOCK（A 安全級）+ ★ W-S4-6 (A9) fallback 安全句");
   const wa = "e2ec6-gc16";
   const m1 = await inbound(wa, "我想箍牙，想知多啲 E2E-CG-007");
   const t1 = await waitTurn(m1.convId, 1, 16);
   const d1 = await poll("GC16 m1 draft", async () => draftOf(m1.msgId));
-  check("m1 draft = NO_PRICE_TEXT（price-guard 擋）", d1?.draftText === NO_PRICE_TEXT, d1?.draftText);
+  // ★ W-S4-6 (A9)：ASK_DISCOVERY 輪被 price-guard 擋 → fallback deterministic 安全句（唔再係 NO_PRICE_TEXT）
+  check("m1 draft = A9 fallback 安全句（appearance 問題 — 精確）", d1?.draftText === `Hello☺️ ${D.qAppearance}`, d1?.draftText);
+  check("m1 model = a9-safe-fallback", d1?.model === "a9-safe-fallback", String(d1?.model));
   check("m1 draft 零金額", !/\$\s?\d|\d{4,}\s*蚊/.test(d1?.draftText ?? ""));
   const tr = d1?.traceJson as { price?: { guard?: { blocked?: boolean } } } | null;
   check("m1 traceJson price guard blocked=true", tr?.price?.guard?.blocked === true, JSON.stringify(tr?.price)?.slice(0, 160));
+  void t1;
 }
 
 async function gc17(): Promise<void> {

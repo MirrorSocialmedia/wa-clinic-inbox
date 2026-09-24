@@ -45,6 +45,9 @@ export interface ConsultRuleRow {
 }
 
 export const CONSULT_RULE_ROWS: ConsultRuleRow[] = [
+  // ★ W-S4-6 (A9)：首輪唔報價（診所拍板 2026-09-17）— 鎖定（引擎層強制，唔係 rule 開關）。
+  //   rules.ortho_price 關咗 = 連第二次都唔答（#14/#14b 都 skip — 交人手）。
+  { key: null, label: "🔒 第一輪唔報價，先了解需求同牙齒情況；病人再追問先講範圍（診所拍板 2026-09-17）", ruleIds: [], locked: true },
   { key: "ortho_appearance", label: "病人重視外觀 → 介紹隱形方案（唔會指定邊款）", ruleIds: ["ORTHO-001", "ORTHO-002"], locked: false },
   { key: "ortho_compare", label: "病人問「有咩分別」→ 比較兩款隱形方案", ruleIds: ["ORTHO-003"], locked: false },
   { key: null, label: "病人問「邊款最適合我」→ 建議做評估，唔會答邊款", ruleIds: ["ORTHO-005"], locked: true },

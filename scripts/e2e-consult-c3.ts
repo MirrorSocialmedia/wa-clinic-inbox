@@ -14,7 +14,7 @@
  *   S9  #9 高意向 → BOOKING/COMPLETED/START_BOOKING（TKW legacy 無 booking session）
  *   S10 #10 objection FEAR → HANDLE_OBJECTION / S11 #11 邊款最適合 → CONSULTATION
  *   S12 #12 療程時間 → EDUCATE_DETAIL / S13 #13 臨床（脫牙）→ CONSULTATION
- *   S14 #14 指名產品問價（usable）→ ANSWER_PRICE；（未批准 iron rule）→ 唔入匹配 #16
+ *   S14 #14 指名產品問價 — ★ W-S4-6 (A9)：首輪 → #16 唔報價；再追問 → row 141 A9-REASK ANSWER_PRICE（未批准 iron rule → 唔入匹配）
  *   S15 #15 比較 → EDUCATE/EDUCATE_COMPARE
  *   S16 #16 DISCOVER slot 流（4 問 + 問完 stay）/ S17 #17 minimum slots 齊 → PRESENT_OPTIONS
  *   S18 #18 EDUCATE 比較完成 → PRESENT_OPTIONS / S19 #19 PRESENT clinical UNKNOWN → CONSULTATION
@@ -509,13 +509,18 @@ async function main(): Promise<void> {
     check("stage=CONSULTATION + lastAction=ASK_FOR_CONSULTATION", r.s.stage === "CONSULTATION" && r.s.lastAction === "ASK_FOR_CONSULTATION", JSON.stringify({ stage: r.s.stage, la: r.s.lastAction }));
   }
 
-  // ── S14 #14 指名產品問價（usable → ANSWER_PRICE / 未批准 → 唔入） ─────
-  console.log("\n[S14] #14 DISCOVER 指名產品問價（iron rule：只匹 usable）");
+  // ── S14 #14/#14b ★ W-S4-6 (A9)：指名產品問價 — 首輪唔報價（#16）；再追問 → row 141 A9-REASK ANSWER_PRICE ─────
+  console.log("\n[S14] #14/#14b A9：指名產品問價（iron rule：只匹 usable）— 首輪唔報價、再追問先講範圍");
   {
     const t0 = await inbound("e2ec3-s14a", "e2ec3隱適美箍牙幾錢？");
-    const r = await waitTurn(t0.convId, 1, 14);
-    check("usable 產品 + 問價 → ANSWER_PRICE（stage DISCOVER 不變）", r.s.lastAction === "ANSWER_PRICE" && r.s.stage === "DISCOVER", JSON.stringify({ la: r.s.lastAction }));
+    const r = await waitTurn(t0.convId, 1, 16);
+    check("A9 首輪：usable 產品 + 問價 → ASK_DISCOVERY（唔報價；stage DISCOVER 不變）", r.s.lastAction === "ASK_DISCOVERY" && r.s.stage === "DISCOVER", JSON.stringify({ la: r.s.lastAction }));
     check("intent 0.1（首次問價 Δ）+ priceAskCount=1", approx(r.s.purchaseIntent, 0.1) && (r.s.slots as { meta?: { priceAskCount?: number } })?.meta?.priceAskCount === 1, JSON.stringify({ intent: r.s.purchaseIntent, slots: r.s.slots }).slice(0, 150));
+    const t0b = await inbound("e2ec3-s14a", "e2ec3隱適美箍牙，幾錢？");
+    const r0b = await waitTurn(t0b.convId, 2, 141);
+    check("再追問（turn 2）→ row 141 A9-REASK ANSWER_PRICE（唔好扮唔知價）", r0b.s.lastAction === "ANSWER_PRICE" && r0b.s.stage === "DISCOVER", JSON.stringify({ la: r0b.s.lastAction }));
+    check("ruleId=A9-REASK", (r0b.a as { meta: { ruleId?: string } }).meta.ruleId === "A9-REASK", JSON.stringify((r0b.a as { meta: Record<string, unknown> }).meta).slice(0, 120));
+    check("第二句問價 Δ+0.15 → intent 0.25", approx(r0b.s.purchaseIntent, 0.25), String(r0b.s.purchaseIntent));
     const t1 = await inbound("e2ec3-s14b", "e2ec3未批准箍牙幾錢？");
     const r2 = await waitTurn(t1.convId, 1, 16);
     check("未批准產品（iron rule）唔入匹配 → 落返 #16 ASK_DISCOVERY", r2.s.lastAction === "ASK_DISCOVERY", JSON.stringify({ la: r2.s.lastAction }));

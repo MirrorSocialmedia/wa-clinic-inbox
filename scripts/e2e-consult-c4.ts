@@ -8,7 +8,7 @@
  * 覆蓋（fixture 前綴 e2ec4）— 真 pipeline（webhook → worker → engine → LLM mock → guards → draft）：
  *   M   主對話：slot 入 DB（extract）→ 下 turn 生效（askedSlot 推進唔重問）→ PRESENT_OPTIONS
  *       （approved 產品 e2ec4P 入草稿 + candidateCategory=CLEAR_ALIGNER）
- *   P   ANSWER_PRICE：PRICE doc「e2ec4 箍牙（矯齒）收費」8000–30000 → mock 草稿含範圍 + shortDisclaimer
+ *   P   ANSWER_PRICE（★ W-S4-6 A9）：首輪唔報價（warm-up 後 price turn = #16 + 費 note）；slot 齊後 turn 3 指名+問價 → #14 + 範圍 + shortDisclaimer
  *   X   extract 失敗降級（E2E-CONSULT-EXTRACT-FAIL）：draft 保留（降級 QUESTION 回覆）+
  *       state 不變（零 CONSULT_EXTRACT / slots {}）+ audit extractFailed + worker log
  *   CG1..CG9  每條 CG 一 turn（bait 句）：BLOCK → CLAIM_HUMAN_TEXT + audit CONSULT_CLAIM_GUARD_BLOCK
@@ -264,7 +264,9 @@ void (async () => {
     const w = await warmup("e2ec4-main", "我想箍牙");
     const dwRow = await prisma.aiDraft.findFirst({ where: { conversationId: w.convId, inReplyToMessageId: w.msgId } });
     collect(dwRow);
-    check("M-warmup R-7 first-reply 生效（model=routing-r7）", dwRow?.model === "routing-r7", String(dwRow?.model));
+    check("M-warmup R-7 first-reply 生效（★ W-S4-6 A9：model=routing-r7+consult — 合併 consult 首輪 discovery）", dwRow?.model === "routing-r7+consult", String(dwRow?.model));
+    const dwRowText = dwRow?.draftText ?? "";
+    check("M-warmup 合併草稿 = discovery 問題 + R-7 template", dwRowText.includes("想多了解下") && dwRowText.includes("X-ray"), dwRowText.slice(0, 120));
     const s0 = await activeSession(w.convId);
     check("M-warmup engine turn 1：session 建 + ASK_DISCOVERY（appearance）", s0?.lastAction === "ASK_DISCOVERY" && JSON.stringify(s0?.askedSlots) === JSON.stringify(["appearancePriority"]), JSON.stringify({ la: s0?.lastAction, asked: s0?.askedSlots }));
   }
@@ -295,17 +297,23 @@ void (async () => {
   }
 
   // ── P ANSWER_PRICE priceRange ───────────────────────────────────────
-  console.log("\n[P] ANSWER_PRICE：指名 approved 產品問價 → #14 + mock 草稿含 PRICE doc 範圍");
+  // ★ W-S4-6 (A9)：首輪唔報價 — warm-up 後第一條 price 訊息 = #16 ASK_DISCOVERY（mock 含費 note、零金額）；
+  //   填 speed slot 後 turn 3 指名+問價 → #14 ANSWER_PRICE（turnCount>=1 + minimumSlotsMet）+ PRICE doc 範圍。
+  console.log("\n[P] ANSWER_PRICE (A9)：首輪唔報價 → slot 齊 → turn 3 指名問價 → #14 + mock 草稿含 PRICE doc 範圍");
   {
     await warmup("e2ec4-price", "我想箍牙");
+    const t1 = await inbound("e2ec4-price", "我想快啲做完");
+    const r1 = await waitDraftAndAudit(t1.convId, t1.msgId, "CONSULT_ENGINE_TURN");
+    check("P t2：#16 ASK_DISCOVERY（speed 問題；speed slot 本輪入 DB）", r1.s.lastAction === "ASK_DISCOVERY", JSON.stringify({ la: r1.s.lastAction }));
+    check("P t2 費 note（patientAskedPrice=false — 首條 price 訊號係本輪？唔係 — 本輪冇問價 → 無 fee prefix）", !(r1.d?.draftText ?? "").includes("收費會因應"), String(r1.d?.draftText));
     const t = await inbound("e2ec4-price", "e2ec4隱適美箍牙幾錢？");
     const { d, s, a } = await waitDraftAndAudit(t.convId, t.msgId, "CONSULT_ENGINE_TURN");
     const dd = collect(d)!;
     const meta = a.meta as { row?: number };
-    check("P engine row 14 + lastAction=ANSWER_PRICE", meta.row === 14 && s.lastAction === "ANSWER_PRICE", JSON.stringify({ row: meta.row, la: s.lastAction }));
-    check("P draft 含範圍 8000–30000", dd.draftText.includes("8000–30000"), dd.draftText);
-    check("P draft 含 shortDisclaimer「以到診評估為準」（高價值口徑）", dd.draftText.includes("以到診評估為準"), dd.draftText);
-    check("P draft 唔含完整 disclaimer（高價值用 short）", !dd.draftText.includes("以上費用只係參考"), dd.draftText);
+    check("P t3 engine row 14 + lastAction=ANSWER_PRICE（A9：turn>=1 + slots 齊）", meta.row === 14 && s.lastAction === "ANSWER_PRICE", JSON.stringify({ row: meta.row, la: s.lastAction }));
+    check("P t3 draft 含範圍 8000–30000", dd.draftText.includes("8000–30000"), dd.draftText);
+    check("P t3 draft 含 shortDisclaimer「以到診評估為準」（高價值口徑）", dd.draftText.includes("以到診評估為準"), dd.draftText);
+    check("P t3 draft 唔含完整 disclaimer（高價值用 short）", !dd.draftText.includes("以上費用只係參考"), dd.draftText);
   }
 
   // ── X extract 失敗降級 ──────────────────────────────────────────────

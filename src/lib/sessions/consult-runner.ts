@@ -462,10 +462,13 @@ export interface ConsultLlmTurnInput {
   candidateCategory: string | null;
   /** #16 ASK_DISCOVERY 本輪要問嘅 slot key（chooseNextQuestion）— 問題文本由 consultDiscoveryQuestion 生。 */
   askedSlot: string | null;
-  /** 本輪引用嘅 PRICE doc（price chain — null = 無）；priceRange.shortDisclaimer 用 selectPriceDisclaimer 同源。 */
+  /** 本輪引用嘅 PRICE doc（price chain — null = 無）；priceRange.shortDisclaimer 用 selectPriceDisclaimer 同源。
+   *  ★ W-S4-6 (A9)：priceRange 只喺 ANSWER_PRICE 輪入 payload（其他 action 唔俾價錢資料）。 */
   priceDoc: { id: string; title: string; priceMin: number | null; priceMax: number | null; shortDisclaimer: string | null; disclaimer: string | null } | null;
-  /** worker ctxMessages（最近對話 — recentMessages(6) 截尾）。 */
-  ctxMessages: { direction: string; body: string | null }[];
+  /** worker ctxMessages（最近對話 — recentMessages(6) 截尾）。★ W-S4-7：waTimestamp 俾 prompt injection JSON 行。 */
+  ctxMessages: { direction: string; body: string | null; waTimestamp?: Date }[];
+  /** ★ W-S4-6 (A9)：pipeline priceTrace.triggered（本輪係咪價錢訊號）— patientAskedPrice 用。 */
+  priceIntent: boolean;
   /** ★ C5（MD §8.1 Tab 2 discovery）：醫生改過嘅發現問題文案（slot → text；缺省 = 出廠表）。 */
   questionOverrides?: Record<string, string> | null;
   /** ★ cwi-hubaudit S2（H-2）：持久化分岔點（預設 = prismaConsultStore；沙盤 = redisConsultStore）。 */
@@ -539,7 +542,7 @@ export async function runConsultLlmTurn(input: ConsultLlmTurnInput): Promise<Con
       extract = await consultExtractSlots({
         text: input.msg.body ?? "",
         workflow: input.workflow,
-        recent: input.ctxMessages,
+        recent: input.ctxMessages.map((m) => ({ direction: m.direction, body: m.body, ts: m.waTimestamp })),
       });
       out.calls += 1;
     } catch (err) {
@@ -579,13 +582,17 @@ export async function runConsultLlmTurn(input: ConsultLlmTurnInput): Promise<Con
         approvedWording: p.approvedWording,
         timeWording: p.timeWording,
       })),
-      priceRange: input.priceDoc
-        ? {
-            min: input.priceDoc.priceMin,
-            max: input.priceDoc.priceMax,
-            shortDisclaimer: selectPriceDisclaimer(input.priceDoc),
-          }
-        : null,
+      // ★ W-S4-6 (A9) ③：priceRange 只喺 ANSWER_PRICE 輪（其他 action 唔俾價錢資料）；
+      //   patientAskedPrice = extract.askedPrice ∨ priceIntent（pipeline priceTrace.triggered）。
+      priceRange:
+        input.action === "ANSWER_PRICE" && input.priceDoc
+          ? {
+              min: input.priceDoc.priceMin,
+              max: input.priceDoc.priceMax,
+              shortDisclaimer: selectPriceDisclaimer(input.priceDoc),
+            }
+          : null,
+      patientAskedPrice: extract.askedPrice === true || input.priceIntent === true,
       avoidPhrases: [...new Set(usable.flatMap((p) => p.avoidPhrases))],
       discoveryQuestion:
         input.action === "ASK_DISCOVERY" ? consultDiscoveryQuestion(input.workflow, input.askedSlot, input.questionOverrides ?? undefined) : null,

@@ -274,7 +274,16 @@ async function touchConversation(
   return (rows[0] as unknown as Conversation) ?? null;
 }
 
-async function notifyNewMessage(clinicId: string, conv: Conversation, msg: Message) {
+/**
+ * ★ W-S4-5 (A2)：`webPush:false` = 只發 Socket realtime（message:new），唔發 Web Push。
+ *   APP_ECHO（店員手機 App 覆）用呢個 — 店員手機 App 自己發出嘅訊息唔應該再 push 返佢。
+ */
+async function notifyNewMessage(
+  clinicId: string,
+  conv: Conversation,
+  msg: Message,
+  opts?: { webPush?: boolean }
+) {
   // ★ cwi-final S1-1b（T713 dev test hook）：模擬 notify 鏈路瞬時失敗（一次）— 驗證 try/catch
   //   containment（job 唔 fail）+ skipped 分支補做。dev-only（NODE_ENV 雙保險，同 media chaos hook 同風格）；
   //   觸發 = touch .dev/notify-chaos-fail（或 env NOTIFY_CHAOS_FAIL_FILE 指定路徑）→ 首次調用刪檔 + throw。
@@ -293,7 +302,10 @@ async function notifyNewMessage(clinicId: string, conv: Conversation, msg: Messa
   const payload = await buildMessageNewPayload(msg.id);
   await publishConvEvent(convRef(conv), "message:new", payload);
   // v2 Web Push（cwi-notify-v2）：tab 閂咗/鎖屏都收到 — payload 零 PII（kind/clinicShort/conversationId）
-  pushEvent({ kind: "message", clinicId, conversationId: conv.id });
+  // ★ W-S4-5 (A2)：APP_ECHO 唔發 push（opts.webPush === false）— realtime 照發（UI 氣泡要即刻更新）
+  if (opts?.webPush !== false) {
+    pushEvent({ kind: "message", clinicId, conversationId: conv.id });
+  }
 }
 
 // ── 各 field 處理 ────────────────────────────────────────────────────────
@@ -704,6 +716,9 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
             status: "SENT",
             // cwi-window-20260901（P1）：手機 App 回音唔經系統計費 → NONE
             billingCategory: "NONE",
+            // ★ W-S4-5 (A2)：店員手機 App 覆 = HUMAN_APP（free-text 欄；唔設 humanTookOver — 草稿照出，
+            //   只係 cooldown 當「近段有人工」壓 auto-send；auto-send-gate already-answered 已包 APP_ECHO）
+            sentVia: "HUMAN_APP",
             waTimestamp: waTs,
           },
         });
@@ -756,9 +771,10 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
     }
 
     // ★ cwi-final S1-1b：notify 係 best-effort bypass — 失敗唔准 job fail（訊息已安全落 DB）
+    // ★ W-S4-5 (A2)：webPush:false — echo 唔觸發 Web Push（Socket realtime 照發）
     if (result.convUpdated) {
       try {
-        await notifyNewMessage(clinic.id, result.convUpdated, result.msg);
+        await notifyNewMessage(clinic.id, result.convUpdated, result.msg, { webPush: false });
       } catch (err) {
         log.warn({ wamid, err: err instanceof Error ? err.message : String(err) }, "inbound: notifyNewMessage failed（best-effort — 唔 fail job）");
       }

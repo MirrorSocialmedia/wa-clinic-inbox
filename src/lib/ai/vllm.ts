@@ -182,8 +182,11 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
   } catch (err) {
     if (err instanceof AiCallError) throw err;
     const name = err instanceof Error ? err.name : "unknown";
-    const reason = name === "AbortError" ? `timeout ${timeoutMs}ms` : "network error";
-    throw new AiCallError(`ai ${reason} (model=${model})`);
+    // ★ W-S4-7：timeout（AbortError）標 isTimeout — chatWithFallback 見咗立即失敗（唔 retry 唔 fallback）
+    if (name === "AbortError") {
+      throw new AiCallError(`ai timeout ${timeoutMs}ms (model=${model})`, true);
+    }
+    throw new AiCallError(`ai network error (model=${model})`);
   } finally {
     clearTimeout(timer);
   }
@@ -191,6 +194,8 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
 
 /**
  * primary（重試 1 次）→ fallback（重試 1 次）→ 都失敗 = throw AiCallError。
+ * ★ W-S4-7：任一次 **timeout** = 立即 throw（唔 retry 唔 fallback — 避免 8s×2×2 疊加）；
+ *   非 timeout 錯誤照舊（primary 重試 → fallback）。
  * 成功 / 最終失敗都 record 去 breaker。
  */
 export async function chatWithFallback(
@@ -221,9 +226,15 @@ export async function chatWithFallback(
         lastErr =
           err instanceof AiCallError ? err : new AiCallError(err instanceof Error ? err.message : "unknown error");
         log.warn(
-          { model, attempt, err: lastErr.message },
+          { model, attempt, err: lastErr.message, timeout: lastErr.isTimeout === true },
           "ai call attempt failed"
         );
+        // ★ W-S4-7（模型 timeout 疊加）：timeout = 直接失敗 — 唔再 retry 同一 model、
+        //   唔再轉 fallback（避免 8s×2×2 疊加）；非 timeout 錯誤照舊（primary 重試 → fallback）。
+        if (lastErr.isTimeout === true) {
+          if (!opts.skipBreaker) breakerRecord(false);
+          throw lastErr;
+        }
       }
     }
   }

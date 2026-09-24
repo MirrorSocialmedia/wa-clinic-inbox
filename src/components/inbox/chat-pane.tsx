@@ -1041,7 +1041,8 @@ export function ChatPane(p: Props) {
                   </div>
                 )}
                 {isEcho && (
-                  <div className="text-[10px] text-ok-text font-medium mb-0.5">📱 App 發出</div>
+                  // ★ W-S4-5 (A2)：APP_ECHO 氣泡標「📱 手機 App」（店員手機 App 覆）
+                  <div className="text-[10px] text-ok-text font-medium mb-0.5">📱 手機 App</div>
                 )}
                 {isHistory && <div className="text-[10px] text-t3 mb-0.5">歷史訊息</div>}
                 {isFlow ? (

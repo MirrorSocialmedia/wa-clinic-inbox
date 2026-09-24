@@ -421,6 +421,12 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   //   ★ cwi-auditfix-20260908（B-3）：`routing.marked &&` — 未標記（CLINIC_POOL/組唔服務/唔當值）
   //   applyRouting 已回 rule:null，呢度雙重保險；配合 applyRoutingFirstReply 原子閘（每對話只一次）。
   if (routing.marked && routing.rule?.autoReplyTemplate) {
+    // ★ W-S4-6 (A9) ⑥：consult 首輪（ASK_DISCOVERY/ASK_FOR_CONSULTATION）→ 合併：
+    //   首輪草稿 = 需求問題（consult discovery）+ 病情邀請（R-7 template）；routedFirstReplyAt 原子閘保留（每對話一次）。
+    const composeWith =
+      consultOutcome?.action === "ASK_DISCOVERY" || consultOutcome?.action === "ASK_FOR_CONSULTATION"
+        ? (result.draft ?? null)
+        : null;
     await applyRoutingFirstReply({
       convId: conv.id,
       msgId: msg.id,
@@ -429,6 +435,7 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
       intent: result.intent,
       urgency: result.urgency,
       winOpen: win.open,
+      composeWith,
     });
   }
 

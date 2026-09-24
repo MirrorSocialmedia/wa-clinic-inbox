@@ -55,9 +55,10 @@ import {
 } from "@/lib/knowledge/retrieve";
 import { getKnowledgeCatalog, type CatalogDoc } from "@/lib/knowledge/catalog";
 import { isPriceIntent, buildPriceDraft, runPriceGuard, NO_PRICE_TEXT } from "@/lib/ai/price-guard";
+import { AiCallError } from "@/lib/ai/types";
 import { runClaimGuard } from "@/lib/ai/claim-guard";
 import { runOutboundGuards } from "@/lib/ai/outbound-guards";
-import { CONSULT_LLM_ACTIONS } from "@/lib/ai/consult-llm";
+import { CONSULT_LLM_ACTIONS, consultDiscoveryQuestion } from "@/lib/ai/consult-llm";
 import { getLexicon, applyLexicon, type LexiconEntry } from "@/lib/sessions/lexicon";
 import { matchRedFlagTerms, type RedFlagResult } from "@/lib/sessions/red-flags";
 import { triggerFloor } from "@/lib/sessions/consult-trigger";
@@ -414,8 +415,9 @@ export function livePersistPort(deps: LivePersistDeps): PersistPort {
     },
 
     async loadLastOutboundMeta({ convId }) {
-      // ★ consult v2.1 C1（§2.1 M-1）：cooldown 只計最後 OUT 係 HUMAN_TYPED（原 ai.worker.ts 逐字）。
+      // ★ consult v2.1 C1（§2.1 M-1）：cooldown 讀最後 OUT 嘅 sentVia（HUMAN_TYPED/HUMAN_APP 先觸發 — 判定喺 caller）。
       //   INTERNAL 備註（assign/transfer 自動落）唔係「覆病人」— 唔觸發冷靜期。
+      // ★ W-S4-5 (A2)：HUMAN_APP（手機 App 覆）同 HUMAN_TYPED 一樣算「近段有人工」。
       const lastOut = await prisma.message.findFirst({
         where: {
           conversationId: convId,
@@ -517,7 +519,7 @@ export function noopPersistPort(deps: { clinicCode: string }): SandboxPersistPor
  * 唔屬本函數（留喺 caller）：context 載入 / session 分流（C6/Part E 開 session + early return）/
  * R-7 template / draft 入庫（port.createDraft）/ AUTO 發送（attemptAutoSend）/ trace 寫 / socket 推。
  */
-export async function runInboundAi(input: {
+export interface InboundAiInput {
   clinic: Clinic;
   msg: {
     id: string;
@@ -538,7 +540,31 @@ export async function runInboundAi(input: {
   /** ★ cwi-final S4-2（job early-exit）：true = 跳過 consult LLM turn（§⑪）— 分類/摘要/路由/engine turn 照常。
    * worker：已有較新 IN 訊息 + 店 L2+ 時設 true（慳 GPU；較新 job 行足全流）。 */
   skipHeavy?: boolean;
-}): Promise<InboundAiOutcome> {
+}
+
+/**
+ * ★ W-S4-7（AI job 總時限）：`runInboundAi` 包 `withDeadline(AI_JOB_DEADLINE_MS ?? 45_000)`。
+ * 超時 = throw AiCallError → BullMQ retry → 耗盡行 S1-14 failed notice（ai.worker failed handler 已存在）。
+ * 語義：只限單次 job 處理嘅 wall-clock（同 stuck-sweep 唔衝突 — sweep 只補「零動靜」job；
+ * 超時 job 會 fail/retry 有動靜）；內部每次 LLM call 嘅自己 timeout 照舊生效。
+ * AI_JOB_DEADLINE_MS 只可 .env.local / process env（零 .env 實值 commit）。
+ */
+export async function runInboundAi(input: InboundAiInput): Promise<InboundAiOutcome> {
+  const deadlineMs = Number(process.env.AI_JOB_DEADLINE_MS ?? 45_000);
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) return runInboundAiInner(input);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new AiCallError(`ai job deadline exceeded (${deadlineMs}ms) — AI_JOB_DEADLINE_MS`)), deadlineMs);
+    if (typeof timer === "object" && "unref" in timer) (timer as { unref(): void }).unref();
+  });
+  try {
+    return await Promise.race([runInboundAiInner(input), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcome> {
   const { clinic, msg, conv, contact, ctxMessages, persist } = input;
   const { isMedia, consultStore } = input;
 
@@ -551,9 +577,13 @@ export async function runInboundAi(input: {
           question: msg.body,
           context: ctxMessages
             .slice(0, -1) // 觸發訊息本身唔入 context
-            .map((m) => m.body)
-            .filter((b): b is string => typeof b === "string" && b.trim().length > 0)
-            .slice(-3),
+            .filter((m) => typeof m.body === "string" && m.body.trim().length > 0)
+            .slice(-3)
+            .map((m) => ({
+              dir: (m.direction === "IN" ? "in" : "out") as "in" | "out",
+              ts: m.waTimestamp,
+              text: m.body as string,
+            })),
         }).catch((err) => {
           log.warn({ err: err instanceof Error ? err.message : String(err) }, "knowledge: fail-soft — 跳過 RAG");
           return { ran: false, picked: [], discarded: 0, skipped: "fail-soft", latencyMs: 0 };
@@ -640,8 +670,20 @@ export async function runInboundAi(input: {
     guard: { blocked: boolean; disclaimerAppended: boolean; outOfRange: boolean };
   } = { triggered: false, docId: null, guard: { blocked: false, disclaimerAppended: false, outOfRange: false } };
   let citedPriceDoc: CatalogDoc | null = knowledge.picked.find((d) => d.kind === "PRICE") ?? null;
-  if (msg.type === "text" && msg.body && result.intent === "QUESTION" && result.draft !== null && !postOpCareWindow) {
-    const priceIntent = isPriceIntent(applyLexicon(msg.body, ptLex));
+  // ★ W-S4-6 (A9) ①：報價鏈唔再搶 consult 話題（pipeline.ts:621 spec）—
+  //   consult 話題嘅價錢由 consult engine 決定（ANSWER_PRICE 先出範圍）；priceTrace.triggered 照計（trace/guard 用）。
+  //   citedPriceDoc 兩類話題都照常認定（ANSWER_PRICE 輪 priceRange + priceDocForTurn 用）。
+  const a9PriceIntent = msg.type === "text" && msg.body ? isPriceIntent(applyLexicon(msg.body, ptLex)) : false;
+  if (msg.type === "text" && msg.body && consultTrigger !== null) {
+    priceTrace.triggered = a9PriceIntent;
+    if (a9PriceIntent && !citedPriceDoc) {
+      // stage 1 冇揀到 PRICE → PRICE 目錄 keyword match 撳底（code 層、零 LLM）— 同非 consult 路徑同一口徑
+      const catalog = await getKnowledgeCatalog(conv.clinicId);
+      citedPriceDoc = matchPriceDocs(catalog, applyLexicon(msg.body, ptLex))[0] ?? null;
+    }
+    if (citedPriceDoc) priceTrace.docId = citedPriceDoc.id;
+  } else if (msg.type === "text" && msg.body && result.intent === "QUESTION" && result.draft !== null && !postOpCareWindow) {
+    const priceIntent = a9PriceIntent;
     priceTrace.triggered = priceIntent;
     if (priceIntent) {
       if (!citedPriceDoc) {
@@ -797,6 +839,8 @@ export async function runInboundAi(input: {
       priceDoc: citedPriceDoc,
       ctxMessages,
       questionOverrides: consultUi?.discoveryQuestionOverrides ?? null,
+      // ★ W-S4-6 (A9)：priceIntent = priceTrace.triggered（patientAskedPrice 用）
+      priceIntent: priceTrace.triggered,
       store: consultStore,
     });
     consultLlmCalls = llm.calls;
@@ -806,7 +850,9 @@ export async function runInboundAi(input: {
       let finalDraft: string = llm.draft;
       result = { ...result, draft: finalDraft, model: llm.model ?? result.model };
       // ② price-guard 重跑（deterministic — 先行；consult draft 取代咗舊 draft，原 guard 結果作廢）
-      const pg = runPriceGuard({ draft: finalDraft, priceDoc: citedPriceDoc, priceIntent: priceTrace.triggered });
+      // ★ W-S4-6 (A9) ④：priceDocForTurn 只喺 ANSWER_PRICE 輪 — 非 ANSWER_PRICE 輪 LLM 出金額 = 幻覺 → 擋。
+      const priceDocForTurn = consultOutcome?.action === "ANSWER_PRICE" ? citedPriceDoc : null;
+      const pg = runPriceGuard({ draft: finalDraft, priceDoc: priceDocForTurn, priceIntent: priceTrace.triggered });
       priceTrace.guard = { blocked: pg.blocked, disclaimerAppended: pg.disclaimerAppended, outOfRange: pg.outOfRange };
       if (pg.blocked) {
         finalDraft = pg.draft;
@@ -834,6 +880,21 @@ export async function runInboundAi(input: {
         });
         result = { ...result, draft: cg.draft, needsHuman: true };
       }
+    }
+    // ── ★ W-S4-6 (A9) ⑤：consult LLM 失敗／被擋嘅 fallback — deterministic 安全句 ──
+    //   唔再用 classify 草稿（可能含價錢）— 只喺 action ∈ {ASK_DISCOVERY, ASK_FOR_CONSULTATION}
+    //   且 llm.draft === null（失敗）或 price guard blocked 時用；其他 action 失敗照舊（保留 classify 草稿 + needsHuman）。
+    //   needsHuman 唔強制 — 呢句係安全句。
+    if (
+      (consultOutcome.action === "ASK_DISCOVERY" || consultOutcome.action === "ASK_FOR_CONSULTATION") &&
+      (llm.draft === null || priceTrace.guard.blocked)
+    ) {
+      const fallback = `Hello☺️ ${priceTrace.triggered ? "收費會因應你嘅牙齒情況而唔同，想先了解多少少：" : ""}${consultDiscoveryQuestion(consultTrigger as string, consultOutcome.transition?.askedSlot ?? null, consultUi?.discoveryQuestionOverrides ?? undefined) ?? "想了解下你主要想改善咩問題？"}`;
+      result = { ...result, draft: fallback, model: "a9-safe-fallback" };
+      log.info(
+        { clinic: clinic.code, wamid: msg.waMessageId, reason: llm.draft === null ? "llm-fail" : "price-guard-blocked" },
+        "consult: A9 fallback — deterministic 安全句（唔用 classify 草稿）"
+      );
     }
   }
 
@@ -936,12 +997,14 @@ export async function runInboundAi(input: {
     // 可選第八閘：未 claim 但真人啱啱插咗嘴（冷靜期 — ★ Phase D：params 由 WorkflowDefinition
     // 「triage」ACTIVE row 讀（三級 fallback + fail-soft；env AI_HUMAN_COOLDOWN_MS 保留做底））
     // ★ consult v2.1 C1（§2.1 M-1，MD §2.1 代碼）：cooldown 只計最後 OUT 係 HUMAN_TYPED（店員自己打字）。
+    // ★ W-S4-5 (A2)：加 HUMAN_APP（店員手機 App 覆）— 兩類「近段有人工」都壓 auto-send；
+    //   只入 blocks（canDraft 唔變 — 草稿照出俾店員睇）。
     const triageParams = await getParams("triage", conv.clinicId);
     const cooldownMs = triageParams.humanCooldownMs;
     const lastOut = await persist.loadLastOutboundMeta({ convId: conv.id });
     const humanCooldownActive =
       lastOut !== null &&
-      lastOut.sentVia === "HUMAN_TYPED" &&
+      (lastOut.sentVia === "HUMAN_TYPED" || lastOut.sentVia === "HUMAN_APP") &&
       Date.now() - lastOut.createdAt.getTime() < cooldownMs;
     if (humanCooldownActive) blocks.push("human-recent");
     // ★ Phase D 第九閘：confidence 低過 floor → low-confidence（floor 由 triage params 校）

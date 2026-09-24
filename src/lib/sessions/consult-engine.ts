@@ -471,10 +471,11 @@ function ruleCtxFromSignals(sig: ConsultSignals): RuleCtx {
 }
 
 /**
- * 主 transition 函數 — MD §4.2 25 行由上而下 first match wins。
+ * 主 transition 函數（inner）— MD §4.2 25 行由上而下 first match wins。
  * 純函數：session state + signals → 結果（零副作用）。
+ * ★ W-S4-6 (A9)：改名 consultTransitionInner — 外層 consultTransition 統一套「首輪保護」（見下方）。
  */
-export function consultTransition(
+function consultTransitionInner(
   session: ConsultSessionState,
   sig: ConsultSignals,
   opts: TransitionOpts = {}
@@ -595,8 +596,21 @@ export function consultTransition(
     });
   }
   // ── #14 DISCOVER 指名產品 + 問價（C5：ORTHO-009 關咗 → 唔命中） ──
-  if (stage === "DISCOVER" && sig.asksPrice && sig.namedProduct && !offRule("ORTHO-009")) {
+  if (
+    stage === "DISCOVER" &&
+    sig.asksPrice &&
+    sig.namedProduct &&
+    session.turnCount >= 1 &&
+    minimumSlotsMet(session.workflow, session.slots) &&
+    !offRule("ORTHO-009")
+  ) {
     return emit(14, { action: "ANSWER_PRICE", ruleId: "ORTHO-009", note: "named product + price" });
+  }
+  // ── #14b ★ W-S4-6 (A9)：病人第二次或之後問價（priceAskCount>=1 且非首輪）→ 照答範圍（唔好扮唔知價）──
+  //   唔要求 namedProduct/minimumSlots（再追價 = 病人已聽過 discovery 覆 — 答範圍係安全同預期行為）。
+  const a9PriceAskCount = session.slots.meta?.priceAskCount ?? 0;
+  if (stage === "DISCOVER" && sig.asksPrice && a9PriceAskCount >= 1 && session.turnCount >= 1 && !offRule("ORTHO-009")) {
+    return emit(141, { action: "ANSWER_PRICE", ruleId: "A9-REASK", note: "price re-asked after discovery turn" });
   }
   // ── #15 DISCOVER 要求比較（C5：ORTHO-003 關咗 → 唔命中） ──
   if (stage === "DISCOVER" && sig.askedComparison && !offRule("ORTHO-003")) {
@@ -655,6 +669,28 @@ export function consultTransition(
   }
   // ── 兜底：冇命中（stay） ──
   return emit(-1, { note: "no transition — stay" });
+}
+
+/**
+ * ★ W-S4-6 (A9)：首輪保護（出口統一）— consult session 第一條訊息（turnCount=0）永不 ANSWER_PRICE。
+ *   產品拍板 2026-09-17：首輪先了解需求同牙齒情況、唔報價；病人再追問先講範圍。
+ *   現行規則表 #14/#14b 已要求 turnCount>=1（turn 0 唔會出 ANSWER_PRICE）— 呢層係 defense-in-depth
+ *   （防未來規則改動漏首輪報價）；#9 高意向 → START_BOOKING 唔係 ANSWER_PRICE → 唔受影響。
+ *   remap：有得問嘅 slot → ASK_DISCOVERY（問下條）；問晒 → ASK_FOR_CONSULTATION。stage 保持原值。
+ */
+export function consultTransition(
+  session: ConsultSessionState,
+  sig: ConsultSignals,
+  opts: TransitionOpts = {}
+): TransitionResult {
+  const r = consultTransitionInner(session, sig, opts);
+  if (session.turnCount === 0 && r.action === "ANSWER_PRICE") {
+    const next = chooseNextQuestion(session.workflow, session.slots, session.askedSlots, opts?.discovery?.skipSlots);
+    return next
+      ? { ...r, action: "ASK_DISCOVERY", askedSlot: next, ruleId: "A9-FIRST-TURN", note: "A9: first turn never quotes" }
+      : { ...r, action: "ASK_FOR_CONSULTATION", ruleId: "A9-FIRST-TURN", note: "A9: first turn never quotes" };
+  }
+  return r;
 }
 
 // ── #23 idle expiry（純 — cron sweep 用） ─────────────────────────────

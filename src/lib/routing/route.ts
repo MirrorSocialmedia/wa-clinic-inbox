@@ -464,6 +464,10 @@ export async function applyRouting(input: RoutingInput): Promise<RoutingResult> 
  *
  * 只喺正常 draft 路徑調用（booking/PAIN session 有自己回覆路徑 — 唔會重複覆）。
  * 鐵律：URGENT_PAIN / COMPLAINT / HIGH 永不建（同 canDraft 同一水位）。
+ *
+ * ★ W-S4-6 (A9) ⑥：`composeWith`（consult 首輪 discovery 草稿）— 首輪草稿 = 「需求問題 + 病情邀請」
+ *   （template 接喺 AI 第一句問題之後；model = routing-r7+consult）。
+ *   真人手改 template 文字 = 老細側（admin UI 欄下只加提示，唔改 DB）。
  */
 export async function applyRoutingFirstReply(args: {
   convId: string;
@@ -473,6 +477,8 @@ export async function applyRoutingFirstReply(args: {
   intent: string;
   urgency: string;
   winOpen: boolean;
+  /** ★ W-S4-6 (A9)：consult 首輪 discovery 草稿（ASK_DISCOVERY/ASK_FOR_CONSULTATION）— null = 舊行為。 */
+  composeWith?: string | null;
 }): Promise<string | null> {
   const { rule } = args;
   if (!rule.autoReplyTemplate) return null;
@@ -501,8 +507,9 @@ export async function applyRoutingFirstReply(args: {
           data: {
             conversationId: args.convId,
             inReplyToMessageId: args.msgId,
-            draftText: rule.autoReplyTemplate,
-            model: "routing-r7",
+            // ★ W-S4-6 (A9)：composeWith 有值 → 首輪 = 需求問題 + 病情邀請（template）
+            draftText: args.composeWith ? `${args.composeWith}\n\n${rule.autoReplyTemplate}` : rule.autoReplyTemplate,
+            model: args.composeWith ? "routing-r7+consult" : "routing-r7",
             latencyMs: 0,
             intent: args.intent,
             mode: args.winOpen ? "NORMAL" : "COPY_ONLY",

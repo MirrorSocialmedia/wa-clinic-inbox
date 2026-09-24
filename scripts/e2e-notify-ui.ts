@@ -947,7 +947,13 @@ async function main(): Promise<void> {
       await publishUntilSeen(adm.P, "t169 P1 交付", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-notify-t169-p1" })), "e2e-notify-t169-p1");
       {
         const s = await spy(adm.P);
-        if (s.notifications.length > 0 || s.ctxCreations > 0 || s.mediaPlays.length > 0) fail(`t169 ADMIN 預設應該靜（spy=${JSON.stringify(s)}）`);
+        // ★ gen 3 E3（2026-09-25 r3 實測假紅）：unassigned-sla cron（*/5 分）clinic 級 ambient notice（tag=""）
+        //   撞 T169 window → blanket 靜音斷言假紅。同款先例：t162 B9（2026-09-21，只斷本 conv 訊息通知）+
+        //   t188 D2（2026-09-23，「unassigned-sla notice, tag='' 唔算入呢個 case 嘅合約」）— 呢兩處已 filter，
+        //   只有 t169 P1 漏。T169 P1 合約 = 對「message:new」靜 → 只斷 conv-scoped/訊息通知。
+        //   mediaPlays 同理撤（v2 聲同通知綁定 — t162 先例；cron push chime 屬 ambient 噪聲）。
+        const msgNotifs = s.notifications.filter((n) => n.tag === convU || (n.title ?? "").startsWith("新訊息"));
+        if (msgNotifs.length > 0 || s.ctxCreations > 0) fail(`t169 ADMIN 預設應該靜（msgNotifs=${JSON.stringify(msgNotifs)} spy=${JSON.stringify(s)}）`);
       }
       // Phase 2：設定面板 ADMIN section 存在
       await adm.P.locator('[aria-label="通知設定"]').first().click();

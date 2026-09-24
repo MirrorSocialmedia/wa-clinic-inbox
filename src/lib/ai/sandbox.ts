@@ -310,7 +310,11 @@ export async function runSandboxTurn(input: SandboxTurnInput): Promise<SandboxTu
   if (level === "L1") blocks.push("L1 — 只出草稿俾職員");
   if ((level === "L3" || level === "L4") && result.intent === "BOOKING_REQUEST")
     blocks.push("L3/L4 — 真 pipeline 開 booking slot-filling session（沙盤唔開）");
-  const willAutoSend = level === "L2" && blocks.length === 0 && result.draft !== null;
+  // ★ W-S4-7（P2-22）：沙盤「會唔會自動發」判定同 production 一致 —
+  //   用 runInboundAi 算好嘅 pipeline blocks（全部 gate 層：policy-L1 / no-draft / needsHuman / window /
+  //   assigned / resolved / conv-urgent / human-recent / low-confidence / guard:* / booking-freeform / consult-handoff）：
+  //   willAutoSend = pipeline blocks.length===0 && autoLevel!=="L1"（舊口徑 `level==="L2"` 會漏 L3/L4 行為差）。
+  const willAutoSend = outcome.blocks.length === 0 && level !== "L1";
 
   // ── 12. 草稿最終判定 + draftMode（★ S4：canDraft/draftMode 由 runInboundAi 算好 — 同 worker 同一判定點）──
   const finalDraft: string | null = canDraft ? result.draft : null;
@@ -397,7 +401,7 @@ export async function runSandboxTurn(input: SandboxTurnInput): Promise<SandboxTu
     n: 7, name: STEP_NAMES[7],
     status: willAutoSend ? "ok" : "paused",
     summary: willAutoSend
-      ? "L2 全綠 — 真 pipeline 會自動發（沙盤唔發）"
+      ? "L2 全綠 — 真 pipeline 會自動發（沙盤唔發）；實際發送時仲會檢查：有冇人接手／有冇較新訊息"
       : isBookingL34
         ? `${level} — booking slot-filling 軌（沙盤唔開 session）`
         : `${level} · 唔自動發：${blocks.slice(0, 2).join("；") || "無草稿"}`,

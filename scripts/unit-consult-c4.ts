@@ -294,6 +294,7 @@ console.log("\n[14] runConsultLlmTurn extract 失敗降級（state 不變 + audi
       askedSlot: "timeline",
       priceDoc: null,
       ctxMessages: [],
+      priceIntent: false,
     });
     check("extract 失敗 → extractFailed=true", res.extractFailed === true);
     check("extract 失敗 → draft=null（caller 保留原 draft）", res.draft === null);

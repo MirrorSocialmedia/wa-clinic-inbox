@@ -512,8 +512,10 @@ model Message {
   //   病人端照見；staff 標記「呢句當佢冇發過」+ UI 內部 tag + 更正草稿入口）。
   //   唔會通知 Meta — WhatsApp Cloud API 冇刪除已發訊息 endpoint。
   // ★ consult v2.1 C1（§2.1 M-1）：發送來源 — "AI_ADOPTED"（店員採用/改過草稿）| "AI_AUTO"（L2 自動發）
-  //   | "HUMAN_TYPED"（店員自己打字）| null（舊 row / template 發送 — 無標記）。
-  //   cooldown 閘只計 HUMAN_TYPED（MD §2.1：採用唔係「真人插嘴」— 死鎖根治）。
+  //   | "HUMAN_TYPED"（店員自己打字）| "HUMAN_APP"（店員手機 App 覆 — ★ W-S4-5 (A2)，APP_ECHO 回音）
+  //   | null（舊 row / template 發送 — 無標記）。
+  //   cooldown 閘計 HUMAN_TYPED + HUMAN_APP（MD §2.1：採用唔係「真人插嘴」— 死鎖根治；
+  //   手機 App 覆 = 真人喺度 → 近段壓 auto-send，但唔設 humanTookOver — 草稿照出）。
   sentVia        String?
   voidedAt       DateTime? @db.Timestamptz
   waTimestamp    DateTime @db.Timestamptz

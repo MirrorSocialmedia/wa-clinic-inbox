@@ -1,11 +1,11 @@
 /**
- * unit-prompts — Fix A（cwi-fix-20260825-f1）msgLine guard unit tests
+ * unit-prompts — msgLine unit tests
  *
  * 範圍（零 DB / 零網絡 — 只 pure 邏輯）：
  *   1. msgLine guard：channel=INTERNAL → `[internal-note]`（零內容出 prompt）
  *   2. msgLine guard：type=note → `[internal-note]`（第二重：就算 channel 唔係 INTERNAL）
- *   3. 回歸：普通 IN text 訊息 byte 格式唔變（[in] YYYY-MM-DD HH:MM body）
- *   4. 回歸：非 text 但非 note（media）照舊 `[type body]` 格式
+ *   3. 回歸：普通 IN text 訊息格式（★ W-S4-7 P2-09：一行一條 JSON.stringify({dir, ts, text})）
+ *   4. 回歸：非 text 但非 note（media）text 欄 `[type body]` 格式保留
  *
  * 用法（repo root）：pnpm test:unit-prompts
  * 退出碼：0 = 全過；1 = 有 fail
@@ -31,16 +31,17 @@ const base: AiContextMessage = {
   waTimestamp: ts,
 };
 
-console.log("[1] msgLine guard — Fix A：INTERNAL/note 零內容出 prompt");
+console.log("[1] msgLine guard — INTERNAL/note 零內容出 prompt");
 check(
   "channel=INTERNAL → [internal-note]（零內容）",
   msgLine({ ...base, channel: "INTERNAL", type: "note", body: "備註：投訴處理中 內部討論" }) ===
-    "[internal-note]",
+    JSON.stringify({ dir: "out", ts: null, text: "[internal-note]" }),
   msgLine({ ...base, channel: "INTERNAL", type: "note", body: "備註：投訴處理中 內部討論" })
 );
 check(
   "type=note（channel 唔係 INTERNAL 都擋 — 第二重）→ [internal-note]",
-  msgLine({ ...base, type: "note", body: "內部討論：投訴" }) === "[internal-note]",
+  msgLine({ ...base, type: "note", body: "內部討論：投訴" }) ===
+    JSON.stringify({ dir: "out", ts: null, text: "[internal-note]" }),
   msgLine({ ...base, type: "note", body: "內部討論：投訴" })
 );
 check(
@@ -48,24 +49,28 @@ check(
   !msgLine({ ...base, channel: "INTERNAL", type: "note", body: "投訴" }).includes("投訴")
 );
 
-console.log("[2] 回歸 — 正常訊息 byte 格式唔變");
+console.log("[2] 回歸 — ★ W-S4-7（P2-09）：一行一條 JSON.stringify({dir, ts, text})");
 check(
-  "IN text → [in] ts body",
-  msgLine(base) === "[in] 2026-08-25 10:20 你哋幾點開門",
+  "IN text → {dir:in, ts, text}",
+  msgLine(base) === JSON.stringify({ dir: "in", ts: "2026-08-25 10:20", text: "你哋幾點開門" }),
   msgLine(base)
 );
 check(
-  "OUT text → [out] ts body",
-  msgLine({ ...base, direction: "OUT" }) === "[out] 2026-08-25 10:20 你哋幾點開門",
+  "OUT text → {dir:out, ts, text}",
+  msgLine({ ...base, direction: "OUT" }) ===
+    JSON.stringify({ dir: "out", ts: "2026-08-25 10:20", text: "你哋幾點開門" }),
   msgLine({ ...base, direction: "OUT" })
 );
 check(
-  "非 text 非 note（media）→ [image body] 格式保留",
+  "非 text 非 note（media）→ text 欄 [image body] 格式保留",
   msgLine({ ...base, direction: "IN", type: "image", body: "photo.jpg" }) ===
-    "[in] 2026-08-25 10:20 [image photo.jpg]",
+    JSON.stringify({ dir: "in", ts: "2026-08-25 10:20", text: "[image photo.jpg]" }),
   msgLine({ ...base, direction: "IN", type: "image", body: "photo.jpg" })
 );
-check("text body=null → 空 tail 唔 crash", msgLine({ ...base, body: null }) === "[in] 2026-08-25 10:20");
+check(
+  "text body=null → text 空字串 唔 crash",
+  msgLine({ ...base, body: null }) === JSON.stringify({ dir: "in", ts: "2026-08-25 10:20", text: "" })
+);
 
 if (failures > 0) {
   console.error(`\nunit-prompts: ${failures} FAILED`);

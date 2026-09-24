@@ -89,8 +89,11 @@ export interface ClassifyAndDraftResult {
 
 /** AI call 失敗（超時 / 連唔到 / fallback 都失敗 / 輸出不合 schema）。 */
 export class AiCallError extends Error {
-  constructor(message: string) {
+  /** ★ W-S4-7：true = 請求 timeout（AbortError）— chatWithFallback 見咗立即失敗（唔 retry 唔 fallback）。 */
+  isTimeout?: boolean;
+  constructor(message: string, isTimeout?: boolean) {
     super(message);
     this.name = "AiCallError";
+    if (isTimeout !== undefined) this.isTimeout = isTimeout;
   }
 }

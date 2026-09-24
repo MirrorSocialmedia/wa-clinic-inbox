@@ -110,6 +110,8 @@ export const POST = handle(async (req: NextRequest) => {
     priceRange: priceDoc
       ? { min: priceDoc.priceMin, max: priceDoc.priceMax, shortDisclaimer: selectPriceDisclaimer(priceDoc) }
       : null,
+    // ★ W-S4-6 (A9)：preview 冇 priceTrace — 只由 extract.askedPrice 判
+    patientAskedPrice: extract.askedPrice === true,
     avoidPhrases: [...new Set(usable.flatMap((p) => p.avoidPhrases))],
     discoveryQuestion: null,
     recentMessages: [{ direction: "IN", body: question }],
