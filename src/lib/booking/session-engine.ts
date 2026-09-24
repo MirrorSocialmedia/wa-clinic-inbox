@@ -13,6 +13,7 @@
 import type { GetSlotsResult } from "@/lib/availability";
 import { slotAvailable } from "@/lib/availability";
 import type { SessionAiOutput, SessionSlots } from "@/lib/ai/session-types";
+import { runOutboundGuards } from "@/lib/ai/outbound-guards";
 import { SESSION_DEFAULTS, fillVars, type SessionParamsType } from "@/lib/workflow/definitions";
 
 // ★ Phase D：以下常數 = code defaults（保留 export — unit 測試相容）；
@@ -91,6 +92,10 @@ export function step(
     return end("HANDOFF", "收到，我哋職員好快覆你 🙏", [notify("病人要求真人／需要人手跟進（預約流程中）")], turns, session.slots);
   if (ai.action === "CANCEL")
     return end("CANCELLED", "冇問題，有需要隨時搵我哋預約 🙂", [], turns, session.slots);
+  // ★ cwi-final S4-4：OFF_TOPIC（問價錢/問地址/閒聊 — 預約 session 管唔到）→ 棄用 LLM tone + HANDOFF
+  //   （LLM reply 可能含價錢/時間/推銷 — 非 engine 文字唔准出；staff 接手答）
+  if (ai.action === "OFF_TOPIC")
+    return end("HANDOFF", p.handoffText, [notify("病人預約流程中離題（價錢/地址/閒聊）— 請人手接手")], turns, session.slots);
   if (turns >= p.maxTurns)
     return end("HANDOFF", p.handoffText, [notify("預約 session 輪數超限 — 請人手接手")], turns, session.slots);
 
@@ -261,6 +266,8 @@ export function askNext(
 /**
  * 出街文字組裝（事實鐵律兜底）：
  * llmReply 超 2 句 / 含數字時間（HH:mm）→ 棄用，只出 factText。
+ * ★ cwi-final S4-4：tone 文字（engine 句之外嘅 LLM 語氣）必過 runOutboundGuards（hasBackendSlot=false）—
+ *   金額/claim/時間宣告命中 → 棄 tone，只發 engine 句（factText 係 engine 用真 slot 砌嘅決定性句，唔入 guard）。
  */
 export function buildReply(llmReply: string | null, factText: string | null): string | null {
   let tone = typeof llmReply === "string" ? llmReply.trim() : "";
@@ -268,6 +275,16 @@ export function buildReply(llmReply: string | null, factText: string | null): st
   if (tone) {
     const sentences = tone.split(/[。！？!?\n]/).filter((s) => s.trim().length > 0);
     if (sentences.length > 2) tone = ""; // 超 2 句 → 棄用
+  }
+  if (tone) {
+    const g = runOutboundGuards({
+      draft: tone,
+      priceDoc: null,
+      priceIntent: false,
+      hasBackendSlot: false,
+      claimInput: { products: [], priceDoc: null }, // 無 consult products；booking session 嘅 factText 唔喺呢度 guard
+    });
+    if (!g.ok) tone = ""; // guard 唔過 → 只發 engine 句
   }
   const parts = [tone, factText ?? ""].filter((s) => s.trim().length > 0);
   return parts.length > 0 ? parts.join(" ") : null;

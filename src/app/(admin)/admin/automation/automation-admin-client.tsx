@@ -58,6 +58,7 @@ const INTENT_TIP: Record<string, string> = {
   COMPLAINT: "🚨 投訴 — 🔒 絕不自動發（要人講）",
   OUT_OF_SCOPE: "離題 — 唔屬診所範疇",
   OTHER: "其他 — 未分類",
+  PAIN_TRIAGE: "痛症問診（全部店預設開 — A12）：L2 = 開 / L1 = 關；global L1 全網 kill 優先",
 };
 
 function Trend({ rates }: { rates: (number | null)[] }) {
@@ -77,6 +78,8 @@ function Trend({ rates }: { rates: (number | null)[] }) {
 
 function LevelSelect({ clinicId, cat, value, disabled, onDone }: { clinicId: string; cat: string; value: string; disabled: boolean; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
+  // ★ cwi-final S4-3（A12）：PAIN_TRIAGE 只准 L1/L2（API 雙擋）
+  const options = cat === "PAIN_TRIAGE" ? ["L1", "L2"] : ["L1", "L2", "L3", "L4"];
   return (
     <select
       value={value}
@@ -103,9 +106,9 @@ function LevelSelect({ clinicId, cat, value, disabled, onDone }: { clinicId: str
       }}
       className={`text-xs rounded-full border border-line bg-panel px-2 py-1 ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
     >
-      {["L1", "L2", "L3", "L4"].map((l) => (
+      {options.map((l) => (
         <option key={l} value={l}>
-          {l}
+          {cat === "PAIN_TRIAGE" ? (l === "L1" ? "L1（關）" : "L2（開）") : l}
         </option>
       ))}
     </select>
@@ -132,17 +135,23 @@ export default function AutomationAdmin() {
 
   const killAll = useCallback(async () => {
     if (!data) return;
-    if (!window.confirm('全店降 L1（全部店預設級 "*"）？AI 立即退回只出草稿。')) return;
-    if (!window.confirm("再次確認：呢個動作會影響所有店嘅自動化行為，要繼續？")) return;
+    if (!window.confirm('全店降 L1（全部店預設級 "*"）？AI 立即退回只出草稿。痛症問診會一齊關閉（A12）。')) return;
+    if (!window.confirm("再次確認：呢個動作會影響所有店嘅自動化行為（包括痛症問診），要繼續？")) return;
     setKillBusy(true);
     try {
       const results = await Promise.all(
-        data.clinics.map((c) =>
-          fetch("/api/admin/automation", {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ clinicId: c.id, category: "*", level: "L1" }),
-          }).then(async (r) => ({ code: c.code, ok: r.ok }))
+        data.clinics.flatMap((c) =>
+          [
+            // ★ cwi-final S4-3（A12）：panic 雙寫 — "*"→L1 同 PAIN_TRIAGE→L1（痛症問診預設開，要明確關）
+            { clinicId: c.id, category: "*", level: "L1" },
+            { clinicId: c.id, category: "PAIN_TRIAGE", level: "L1" },
+          ].map((payload) =>
+            fetch("/api/admin/automation", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            }).then(async (r) => ({ code: c.code, ok: r.ok }))
+          )
         )
       );
       const bad = results.filter((r) => !r.ok).map((r) => r.code);

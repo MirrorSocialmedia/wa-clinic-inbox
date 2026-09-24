@@ -17,6 +17,7 @@ import { publishControl } from "@/lib/notify";
 import {
   asLevel,
   clearAutomationLevelCache,
+  clearPainTriageCache,
   globalCap,
   minLevel,
   resolveLevel,
@@ -27,8 +28,9 @@ import { adoptRate, isEligible, type StatLike } from "@/lib/ops/eligibility";
 
 export const dynamic = "force-dynamic";
 
-/** 矩陣列（MD 順序）— URGENT_PAIN / COMPLAINT 永遠人手（無開關）。 */
-const CATEGORIES = ["BOOKING_REQUEST", "QUESTION", "URGENT_PAIN", "COMPLAINT", "OUT_OF_SCOPE", "OTHER"] as const;
+/** 矩陣列（MD 順序）— URGENT_PAIN / COMPLAINT 永遠人手（無開關）。
+ * ★ cwi-final S4-3（A12）：PAIN_TRIAGE = 痛症問診開關（全店預設開；L1 = 關 — 只准 L1/L2）。 */
+const CATEGORIES = ["BOOKING_REQUEST", "QUESTION", "URGENT_PAIN", "COMPLAINT", "OUT_OF_SCOPE", "OTHER", "PAIN_TRIAGE"] as const;
 const LOCKED_CATEGORIES: readonly string[] = ["URGENT_PAIN", "COMPLAINT"];
 
 function automationAdminIds(): string[] {
@@ -69,6 +71,21 @@ export const GET = handle(async (req: NextRequest) => {
       const aiMode = c.aiMode === "AUTO" ? "AUTO" : "DRAFT";
       const cells: Record<string, unknown> = {};
       for (const cat of CATEGORIES) {
+        if (cat === "PAIN_TRIAGE") {
+          // ★ A12：痛症問診唔跟 intent 級別 — 冇 row = 開（L2 語義）；row L1 或 global cap L1 = 關（L1 語義）
+          const painRow = rows.find((r) => r.category === "PAIN_TRIAGE");
+          const painEnabled = (painRow ? painRow.level !== "L1" : true) && cap !== "L1";
+          cells["PAIN_TRIAGE"] = {
+            level: painEnabled ? "L2" : "L1",
+            locked: false,
+            painTriage: painEnabled,
+            stats: weeks.map((w) => ({ weekStart: w, draftCount: 0, adoptedAsIs: 0, adoptedEdited: 0, autoSent: 0, complaints: 0, rollbacks: 0 })),
+            adoptRateTrend: weeks.map(() => null),
+            eligible: false,
+            reasons: painEnabled ? ["A12：痛症問診預設開（全店）"] : ["痛症問診關閉（L1）"],
+          };
+          continue;
+        }
         const level = minLevel(resolveLevel(rows, cat, aiMode), cap);
         const last4 = weeks.map((w) => {
           const s = statsCell.get(`${c.id}|${cat}|${w}`);
@@ -109,6 +126,10 @@ export const PATCH = handle(async (req: NextRequest) => {
   if (LOCKED_CATEGORIES.includes(category)) {
     return NextResponse.json({ error: "locked_category", message: "URGENT_PAIN / COMPLAINT 永遠人手 — 無自動化開關" }, { status: 400 });
   }
+  // ★ cwi-final S4-3（A12）：PAIN_TRIAGE 只准 L1/L2（L2 = 開 / L1 = 關）— L3/L4 無語義
+  if (category === "PAIN_TRIAGE" && level !== "L1" && level !== "L2") {
+    return NextResponse.json({ error: "bad_request", message: "PAIN_TRIAGE level 只准 L1/L2（L2 = 開 / L1 = 關）" }, { status: 400 });
+  }
 
   // 開關人白名單（D-5「Kenneth 一個人」— env 留空 = 全部 ADMIN）
   const allow = automationAdminIds();
@@ -123,7 +144,11 @@ export const PATCH = handle(async (req: NextRequest) => {
     where: { clinicId, category: { in: [category, "*"] } },
     select: { category: true, level: true },
   });
-  const from = minLevel(resolveLevel(rows, category, clinic.aiMode === "AUTO" ? "AUTO" : "DRAFT"), globalCap());
+  // ★ A12：PAIN_TRIAGE 嘅 from = 問診開關語義（冇 row = 開 L2）— 唔行 intent 級別 resolveLevel
+  const from =
+    category === "PAIN_TRIAGE"
+      ? ((rows.find((r) => r.category === "PAIN_TRIAGE")?.level === "L1" || globalCap() === "L1") ? "L1" : "L2")
+      : minLevel(resolveLevel(rows, category, clinic.aiMode === "AUTO" ? "AUTO" : "DRAFT"), globalCap());
   const to = minLevel(asLevel(level) ?? "L1", globalCap());
 
   await prisma.automationPolicy.upsert({
@@ -141,6 +166,7 @@ export const PATCH = handle(async (req: NextRequest) => {
     },
   });
   clearAutomationLevelCache(); // MD 個 bustLevelCache() = 現有 export
+  clearPainTriageCache(); // ★ cwi-final S4-3：PAIN_TRIAGE row 改動即時生效（60s cache）
   publishControl({ cmd: "cache:bust", scope: "automation" }); // ★ Fix B（cwi-fix-20260825-f1）：worker 側即時失效（唔使等 5 分鐘 TTL）
 
   log.info(

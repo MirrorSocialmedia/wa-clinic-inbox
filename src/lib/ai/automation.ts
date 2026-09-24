@@ -60,11 +60,54 @@ export function clearAutomationLevelCache(): void {
   cache.clear();
 }
 
+// ── ★ A12（cwi-final S4-3）：痛症問診 kill switch（全店預設開 — 只受 global cap + 類別 row 控制）──
+const PAIN_TRIAGE_CACHE_TTL_MS = 60_000;
+interface PainTriageCacheRow {
+  at: number;
+  enabled: boolean;
+}
+const painTriageCache = new Map<string, PainTriageCacheRow>();
+
+/** test-only / control bust：清 pain triage cache（e2e 改 PAIN_TRIAGE row 唔使等 60 秒）。 */
+export function clearPainTriageCache(): void {
+  painTriageCache.clear();
+}
+
+/**
+ * ★ A12（2026-09-17 拍板）：痛症問診刻意對所有店開（包括 DRAFT／L1 店），唔跟逐店 intent 級別。
+ * 只受兩樣控制：① env AI_GLOBAL_MAX_LEVEL=L1（全網 kill）② 類別 PAIN_TRIAGE 嘅 policy row（L1 = 關）。
+ * 冇 row = 開。〔全店降 L1〕panic 同時寫 PAIN_TRIAGE→L1。
+ * 60 秒 in-memory cache（key = clinicId — 無 aiMode 維度：語義唔跟店模式）。
+ */
+export async function painTriageEnabled(clinicId: string): Promise<boolean> {
+  const hit = painTriageCache.get(clinicId);
+  if (hit && Date.now() - hit.at < PAIN_TRIAGE_CACHE_TTL_MS) return hit.enabled;
+  let enabled: boolean;
+  if (globalCap() === "L1") {
+    enabled = false;
+  } else {
+    const row = await prisma.automationPolicy.findUnique({
+      where: { clinicId_category: { clinicId, category: "PAIN_TRIAGE" } },
+      select: { level: true },
+    });
+    enabled = row ? row.level !== "L1" : true;
+  }
+  if (painTriageCache.size > 500) painTriageCache.clear(); // 防 leak（同 level cache 同式）
+  painTriageCache.set(clinicId, { at: Date.now(), enabled });
+  return enabled;
+}
+
 /**
  * pure 解析（unit test 用 — 零 DB）：exact > star > legacy。
  * @param rows 該店嘅 AutomationPolicy row（category 可含 exact 與 "*"）
  * @param category 請求嘅類（intent 名）
  * @param legacyAiMode clinic.aiMode（DRAFT / AUTO / null = 店唔存在 → L1 保守）
+ */
+/**
+ * ★ cwi-final S4-4：legacy aiMode=AUTO fallback 收窄 — 只 QUESTION / OTHER 返 L2，其餘 intent 返 L1。
+ * 舊語義（AUTO→全 intent L2）嘅假設係「AUTO 店 = 已審批全開」；audit3 拍板：冇明確 row 嘅 intent
+ * 唔應該有自動覆資格（保守方向）。S0-10 predeploy 已擋 aiMode=AUTO（新店唔會再係 AUTO）— 呢個改動
+ * 理論上零生產影響；mock/e2e 環境嘅 legacy AUTO case 已加顯式 AutomationPolicy row 覆蓋。
  */
 export function resolveLevel(
   rows: { category: string; level: string }[],
@@ -75,7 +118,7 @@ export function resolveLevel(
   const star = rows.find((r) => r.category === "*");
   const level = asLevel(exact?.level) ?? asLevel(star?.level);
   if (level) return level;
-  return legacyAiMode === "AUTO" ? "L2" : "L1";
+  return legacyAiMode === "AUTO" && (category === "QUESTION" || category === "OTHER") ? "L2" : "L1";
 }
 
 export async function getAutomationLevel(clinicId: string, category: string): Promise<AutomationLevel> {

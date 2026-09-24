@@ -69,6 +69,7 @@
     "test:unit-health-owned-types": "tsx scripts/unit-health-owned-types.ts",
     "test:unit-auto-release": "tsx scripts/unit-auto-release.ts",
     "test:unit-session-engine": "tsx scripts/unit-session-engine.ts",
+    "test:unit-outbound-guards": "tsx scripts/unit-outbound-guards.ts",
     "test:g2-gate": "tsx scripts/unit-g2-gate.ts",
     "test:unit-workflow-definitions": "tsx scripts/unit-workflow-definitions.ts",
     "test:unit-workflow-store": "tsx scripts/unit-workflow-store.ts",

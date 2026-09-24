@@ -18,7 +18,7 @@ import { PROMPT_CONTEXT_MESSAGES } from "@/lib/ai/prompts";
 import { buildAiContext } from "@/lib/ai/pipeline";
 import { runInboundAi, livePersistPort, type InboundConvRef, type DraftRow } from "@/lib/ai/pipeline";
 import { scrubAiSummary } from "@/lib/ai/scrub";
-import { getAutomationLevel } from "@/lib/ai/automation";
+import { getAutomationLevel, painTriageEnabled } from "@/lib/ai/automation";
 import { sendAutoIfStillEligible, type AutoSendSource } from "@/lib/ai/auto-send-gate";
 import type { SessionSlots } from "@/lib/ai/session-types";
 import { hkToday } from "@/lib/duty/client";
@@ -126,6 +126,10 @@ async function urgentEscalationAlreadyEmitted(convId: string, wamid: string | nu
 
 async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>> {
   const data = job.data;
+  // ★ cwi-final S4-4：COMPLAINT lexical 觸發（routing lexicon COMPLAINT 觸發詞）。
+  //   現 lexicon 結構 = {term, canonical} 映射，無結構化 COMPLAINT 觸發詞表 → 恒 false（spec：冇就先 urgent only）。
+  //   留 async signature 同接點一致（日後加詞表唔改 caller）。
+  const isComplaintLexical = async (_body: string | null, _clinicId: string): Promise<boolean> => false;
   // ★ seg3-fix (T13)：ai queue mirror job — 真 job 喺 ai-urgent lane（S1-14 獨立 lane 設計不變）；
   //   mirror 只係 e2e 契約 key（wa-inbox:ai:ai-<id>）+ 可觀測性 → 即刻 no-op（零 I/O、唔會 fail、唔觸 DB）。
   if (data?.urgentMirror) {
@@ -211,7 +215,17 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     where: { conversationId: conv.id, status: { in: ["ACTIVE", "CONFIRMING"] } },
     orderBy: { createdAt: "desc" },
   });
-  if (activeSession) {
+  // ★ cwi-final S4-4（audit3 P0-06）：booking session 進行中 urgent / complaint → session 即 HANDOFF。
+  //   唔 return — 行落一般 pipeline（出 urgent／complaint 處理，冇草稿）。
+  //   isComplaintLexical：routing lexicon 嘅 COMPLAINT 觸發詞 — 現 lexicon 結構（term→canonical）無 COMPLAINT
+  //   觸發詞表 → 跟 spec「冇就先 urgent only」口徑先恒返 false（日後加觸發詞表喺呢度讀）。
+  if (activeSession && (data.urgentHit || (await isComplaintLexical(msg.body, conv.clinicId)))) {
+    await prisma.bookingSession.update({ where: { id: activeSession.id }, data: { status: "HANDOFF" } });
+    log.info(
+      { sessionId: activeSession.id, wamid: msg.waMessageId, urgent: !!data.urgentHit },
+      "session: urgent/complaint mid-flow → HANDOFF（讓路，跌落普通 pipeline）"
+    );
+  } else if (activeSession) {
     if (conv.assigneeId !== null) {
       // 真人接手 = session 即讓路（同七閘 assigned 語義一致）
       await prisma.bookingSession.update({ where: { id: activeSession.id }, data: { status: "HANDOFF" } });
@@ -383,7 +397,9 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     !updatedConv.urgent &&
     !job.data.urgentHit &&
     // ★ cwi-final S4-2：job early-exit（同上）— 唔開新問診 session
-    !skipHeavy
+    !skipHeavy &&
+    // ★ cwi-final S4-3（A12 kill switch）：global cap L1 或 店 PAIN_TRIAGE row = L1 → 唔開問診
+    (await painTriageEnabled(conv.clinicId))
   ) {
     // E.7 術後自動判（fail-soft 零 throw：無 waId / 索引未 build / 無 match / fail → false + 問診 fallback）
     const autoPostOp = await resolveAutoPostOp(conv, contact, clinic, ptParams.postOpWindowDays);
@@ -695,6 +711,18 @@ async function handleSessionTurn(
   const sessionId = session.id;
   const slots0: SessionSlots = (session.slots as SessionSlots) ?? {};
 
+  // ★ cwi-final S4-3：每輪重查 BOOKING_REQUEST 級別 — 降級（非 L3/L4）→ HANDOFF（唔再行 booking flow，
+  //   唔花 LLM call；staff 接手）。首輪開 session 已查過級別（L3/L4 先開）— 呢度係「進行中降級」網。
+  const level = await getAutomationLevel(conv.clinicId, "BOOKING_REQUEST");
+  if (level !== "L3" && level !== "L4") {
+    await prisma.bookingSession.update({ where: { id: sessionId }, data: { status: "HANDOFF" } });
+    log.info(
+      { sessionId, level, wamid: msg.waMessageId },
+      "session: automation level downgraded（非 L3/L4）→ HANDOFF（metadata only）"
+    );
+    return { ok: true, session: sessionId, skipped: `level-${level}` };
+  }
+
   // 1. 最近 6 條 text 訊息 + 本店名單（含 apricotId）
   const recent = await prisma.message.findMany({
     where: {
@@ -724,7 +752,6 @@ async function handleSessionTurn(
   // 3. LLM（每條病人訊息一次 call）— 失敗：record + throw（BullMQ retry；
   //    retries 耗盡 = session 唔郁、唔覆 — 病人再講嘢會再觸發）
   const todayHk = hkToday();
-  const level = await getAutomationLevel(conv.clinicId, "BOOKING_REQUEST");
   const allComplete = Boolean(slots0.providerApricotId && slots0.date && slots0.time);
   const hasPartial = Boolean(slots0.providerApricotId || slots0.date || slots0.time);
   const aiOut = await classifySessionTurn({
@@ -747,7 +774,8 @@ async function handleSessionTurn(
   // ★ Phase D：engine 保持 pure — params 由 runner 讀落（getParams 三級 fallback + fail-soft）
   const stepCtx: StepCtx = {
     todayHk,
-    level: level === "L4" ? "L4" : "L3",
+    // ★ cwi-final S4-3：stepCtx 直接用真 level（開頭已重查 — 只係 L3/L4 先會走到呢度；唔再 L1→"L3" 映射）
+    level,
     providers,
     pinnedPatient: conv.pinnedPatientApricotId !== null,
     params: await getParams("booking-session", conv.clinicId),
@@ -1138,6 +1166,12 @@ async function handlePainTriageTurn(
   clinic: { id: string; code: string; name: string }
 ): Promise<Record<string, unknown>> {
   const sessionId = session.id;
+  // ★ cwi-final S4-3（A12 kill switch）：進行中問診 — global cap L1 或 店 PAIN_TRIAGE row = L1 →
+  //   session 即 HANDOFF（closeReason KILL_SWITCH），唔再問（spec 代碼；staff 接手）。
+  if (!(await painTriageEnabled(conv.clinicId))) {
+    await prisma.painTriageSession.update({ where: { id: session.id }, data: { status: "HANDOFF", closeReason: "KILL_SWITCH" } });
+    return { ok: true, painSession: session.id, skipped: "kill-switch" };
+  }
   const state0 = parsePainState(session.slots);
   const ptParams = await getParams("pain-triage", conv.clinicId);
   const lex = await getLexicon(conv.clinicId);

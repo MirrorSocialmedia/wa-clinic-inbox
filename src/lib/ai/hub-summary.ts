@@ -321,7 +321,7 @@ export async function buildHubSummary(ctx: AuthContext): Promise<HubSummary> {
     detail: { toneSetClinics: toneSet, toneTotal: clinics.length, priceGuardRules: 3, claimGuardRules: 9, highValueMissingDisclaimer: highValueMissing },
   };
 
-  // ── ⑦ 發唔發：全部 L1 / 部分 L2；警示 = L2 開但 eval 未跑 / recall < 100% ──
+  // ── ⑦ 發唔發：全部 L1 / 部分 L2 + ★ cwi-final S4-3（A12）痛症問診狀態；警示 = L2 開但 eval 未跑 / recall < 100% ──
   const evals = await loadLatestEvalReports();
   const l2Cells: { clinic: string; category: string }[] = [];
   for (const c of clinics) {
@@ -331,6 +331,14 @@ export async function buildHubSummary(ctx: AuthContext): Promise<HubSummary> {
     }
   }
   const levelLabel = l2Cells.length === 0 ? "全部 L1" : `部分 L2（${l2Cells.length} 格）`;
+  // ★ A12：痛症問診狀態（全店預設開 — 只受 global cap L1 / 店 PAIN_TRIAGE row L1 控制）
+  const cap = globalCap();
+  const painTriageOn = clinics.filter((c) => {
+    const row = (clinicPolicies.get(c.id) ?? []).find((r) => r.category === "PAIN_TRIAGE");
+    return (row ? row.level !== "L1" : true) && cap !== "L1";
+  }).length;
+  const painLabel =
+    cap === "L1" ? "痛症問診 關（全局 L1 kill）" : painTriageOn === clinics.length ? "痛症問診 開（全店）" : `痛症問診 部分（${painTriageOn}/${clinics.length}）`;
   const step7Warnings: string[] = [];
   if (l2Cells.length > 0) {
     // scope 內有 L2+ 嘅 clinic — 對返該 clinic 最新 eval 報告
@@ -345,10 +353,10 @@ export async function buildHubSummary(ctx: AuthContext): Promise<HubSummary> {
   const step7: HubStep = {
     n: 7,
     name: STEP_NAMES[6],
-    summary: levelLabel,
+    summary: `${levelLabel} · ${painLabel}`,
     warnings: step7Warnings,
     anchor: STEP_ANCHORS[6],
-    detail: { level: levelLabel, l2Cells: l2Cells.length, evalClinicsRan: [...evals.keys()].length },
+    detail: { level: levelLabel, l2Cells: l2Cells.length, evalClinicsRan: [...evals.keys()].length, painTriageOn: painTriageOn, painTriageTotal: clinics.length, globalCap: cap },
   };
 
   const { health, swVersion } = await buildHealthRow(clinics);

@@ -56,6 +56,7 @@ import {
 import { getKnowledgeCatalog, type CatalogDoc } from "@/lib/knowledge/catalog";
 import { isPriceIntent, buildPriceDraft, runPriceGuard, NO_PRICE_TEXT } from "@/lib/ai/price-guard";
 import { runClaimGuard } from "@/lib/ai/claim-guard";
+import { runOutboundGuards } from "@/lib/ai/outbound-guards";
 import { CONSULT_LLM_ACTIONS } from "@/lib/ai/consult-llm";
 import { getLexicon, applyLexicon, type LexiconEntry } from "@/lib/sessions/lexicon";
 import { matchRedFlagTerms, type RedFlagResult } from "@/lib/sessions/red-flags";
@@ -945,6 +946,24 @@ export async function runInboundAi(input: {
     if (humanCooldownActive) blocks.push("human-recent");
     // ★ Phase D 第九閘：confidence 低過 floor → low-confidence（floor 由 triage params 校）
     if (result.confidence < triageParams.confidenceFloor) blocks.push("low-confidence");
+    // ── ★ cwi-final S4-4 Guard 全覆蓋（blocks 層 — 喺 gate 之前生效；spec 代碼逐字）──────────────
+    //   所有「非 engine 產生」嘅自動發文字必過：price guard + claim guard + 時間宣告（free-form 無 backend slot）。
+    //   命中 → blocks `guard:<code>`（trace + AUTO 唔發 + e2e T657 斷言口徑）。
+    if (result.draft) {
+      const g = runOutboundGuards({
+        draft: result.draft,
+        priceDoc: citedPriceDoc,
+        priceIntent: priceTrace.triggered,
+        hasBackendSlot: false,
+        claimInput: {
+          products: [], // free-form 路徑冇 consult products（consult LLM 路徑有自己嗰段 CG）
+          priceDoc: citedPriceDoc ? { priceMin: citedPriceDoc.priceMin, priceMax: citedPriceDoc.priceMax } : null,
+        },
+      });
+      if (!g.ok) blocks.push(...g.codes.map((c) => `guard:${c}`));
+    }
+    if (result.intent === "BOOKING_REQUEST") blocks.push("booking-freeform"); // 自由文字預約回覆永遠唔自動發（要 session engine）
+    if (consultOutcome?.transition?.terminal === "HANDOFF") blocks.push("consult-handoff"); // P1-17
   }
 
   return {

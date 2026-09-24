@@ -233,6 +233,11 @@ export async function runConsultEngineTurn(input: ConsultTurnInput): Promise<Con
     }
 
     // ── 6. terminal action 對話層（轉既有 flow — 唔發明；副作用經 store — 沙盤 = no-op）──
+    // ★ cwi-final S4-4：terminal=HANDOFF（row 0/1/2/3/8 — 紅旗/痛症/投訴/叫人/PRICE×2）→ suppress free-form
+    //   draft（HANDOFF 已有 staff notice — 草稿由員工寫；0 auto）。
+    if (transition.terminal === "HANDOFF") {
+      suppressDraft = true;
+    }
     if (transition.action === "HANDOFF_HUMAN" && transition.terminal === "HANDOFF") {
       // URGENT_PAIN / COMPLAINT 自己條路已經發過 staffNotice — 唔重發
       if (intent !== "URGENT_PAIN" && intent !== "COMPLAINT") {

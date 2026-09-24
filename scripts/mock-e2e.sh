@@ -683,7 +683,9 @@ check "T18 log 抽查：server/worker log 無訊息原文（metadata only）" "$
 # ══════════════ Phase 2b：逐舖 AI 模式（DRAFT / AUTO） ══════════════
 
 # ── T19. AUTO 模式 BOOKING_REQUEST → 自動發送（全鏈實測） ─────────────────
-echo "[10/10] T19: AUTO mode auto-send (BOOKING_REQUEST)..."
+echo "[10/10] T19: AUTO mode auto-send (QUESTION — S4-4 起 booking free-form 唔 auto)"
+#   ★ cwi-final S4-4：BOOKING_REQUEST free-form 永唔 auto（booking-freeform 閘 — 新 S4-4 段專斷）
+#   → 全鏈 auto-send 驗證改用 QUESTION（legacy fallback QUESTION→L2 不變）。
 CODE=$(curl -s -o /tmp/e2e-t19-a.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH \
   "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"AUTO"}')
 check "T19 PATCH aiMode=AUTO → 200" "$CODE" "200"
@@ -692,7 +694,7 @@ check "T19 clinic.aiMode=AUTO 已持久化" "$MODE_T19" "AUTO"
 
 PATIENT_AUTO1="8526011${EPOCH}"
 WAMID_AUTO1="wamid.E2E_AUTO1_${EPOCH}"
-pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AUTO1" --text "想預約下週有冇位" --wamid "$WAMID_AUTO1" --name "E2E AUTO booking" >/dev/null || fail "T19 mock-inbound POST"
+pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_AUTO1" --text "想問下埋門時間" --wamid "$WAMID_AUTO1" --name "E2E AUTO question" >/dev/null || fail "T19 mock-inbound POST"
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$WAMID_AUTO1'" '[{"c":"1"}]' 15
 AUTO1_MSG_ID=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_AUTO1'" | jf id)
 AUTO1_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AUTO1'" | jf id)
@@ -786,9 +788,11 @@ OUT4=$(q "SELECT count(*)::text c FROM \"Message\" m WHERE m.\"conversationId\"=
 check "T22 DRAFT 舖：冇自動發（0 OUT 訊息）" "$OUT4" "0"
 
 # ── T23. AUTO 舖過 24h window → 唔自動發 + log ──────────────────────────
-echo "[10/10] T23: AUTO + window closed..."
+echo "[10/10] T23: AUTO + window closed (QUESTION — S4-4 fallback 收窄後)"
+#   ★ cwi-final S4-4：改用 QUESTION（legacy fallback QUESTION→L2）— 保持 window-closed 閘可達
+#   （BOOKING_REQUEST legacy 變 L1 會先被 policy-L1 擋，window 閘唔評估）。
 PATIENT_OLD="8526014${EPOCH}"
-OLD_OUT=$(pnpm -s e2e:ai-job old-inbound --clinic TKW --from "$PATIENT_OLD" --text "想預約下週" 2>/dev/null)
+OLD_OUT=$(pnpm -s e2e:ai-job old-inbound --clinic TKW --from "$PATIENT_OLD" --text "想問下埋門時間" 2>/dev/null)
 T23_CONV=$(echo "$OLD_OUT" | grep -oE 'CONV=[^ ]*' | cut -d= -f2)
 [ -n "$T23_CONV" ] || fail "T23 e2e-ai-job old-inbound"
 if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"conversationId\"='$T23_CONV'" '[{"s":"PROPOSED"}]' 30; then
@@ -2514,6 +2518,11 @@ echo "[AI-T1] T83: AUTO + assigned gate..."
 T83=0
 patch_aimode "$MF_CLINIC_ID" AUTO; CODE=$PAM_CODE
 check "T83 MF→AUTO" "$CODE" "200"
+# ★ cwi-final S4-4：legacy fallback 收窄（BOOKING_REQUEST AUTO→L1）— T83 要驗 assigned 閘，
+#   需 BOOKING_REQUEST=L2 先抵到 autoLevel 判斷（T84 開頭會 DELETE MF policy — hermetic 保持）
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-t83-mf-bk-${EPOCH}','$MF_CLINIC_ID','BOOKING_REQUEST','L2',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
 P_T83="8526101${EPOCH}"; WAMID_T83="wamid.E2E_T83_${EPOCH}"; C_T83="t83-c-${EPOCH}"; CONV_T83="t83-conv-${EPOCH}"
 q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$C_T83', '$MF_CLINIC_ID', '$P_T83', 'E2E T83', ARRAY[]::text[])" >/dev/null 2>&1
 q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\") VALUES ('$CONV_T83', '$MF_CLINIC_ID', '$C_T83', 'OPEN', '$NOWISO')" >/dev/null 2>&1
@@ -2529,8 +2538,9 @@ fi
 sleep 2
 OUT_T83=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T83' AND direction='OUT' AND channel<>'INTERNAL'" | jf c)
 check "T83 assigned：唔自動發（0 OUT 訊息）" "$OUT_T83" "0"
-grep -F "$WAMID_T83" /tmp/e2e-worker*.log 2>/dev/null | grep -q "not eligible" && pass "T83 AUTO fallback log（not eligible）" || { fail "T83 not eligible log"; T83=1; }
-grep -F "$WAMID_T83" /tmp/e2e-worker*.log 2>/dev/null | grep -q '"assigned"' && pass "T83 log reasons 見 assigned（Send Lock 語義補完）" || { fail "T83 assigned log"; T83=1; }
+grep -F "$WAMID_T83" /tmp/e2e-worker*.log 2>/dev/null | grep -q 'not eligible' && pass "T83 AUTO fallback log（not eligible）" || { fail "T83 not eligible log"; T83=1; }
+# ★ cwi-final S4-4：reasons = blocks.join("+")（S4-4 後 booking 草稿恒多 booking-freeform 等 block）→ 睇 reasons 字段含 assigned（唔再死盯 JSON 引號形式）
+grep -F "$WAMID_T83" /tmp/e2e-worker*.log 2>/dev/null | grep -qE 'reasons":"(assigned\+|assigned")' && pass "T83 log reasons 見 assigned（Send Lock 語義補完）" || { fail "T83 assigned log"; T83=1; }
 q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CONV_T83'" >/dev/null 2>&1
 q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T83'" >/dev/null 2>&1
 q "DELETE FROM \"Conversation\" WHERE id='$CONV_T83'" >/dev/null 2>&1
@@ -2548,6 +2558,11 @@ T84=0
 patch_aimode "$MF_CLINIC_ID" AUTO; CODE=$PAM_CODE
 check "T84 MF=AUTO（冪等）" "$CODE" "200"
 q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$MF_CLINIC_ID'" >/dev/null 2>&1
+# ★ cwi-final S4-4：legacy fallback 收窄（BOOKING_REQUEST AUTO→L1）— T84 base（reopenedFirstReply 閘）
+#   + T84B（第二句 BOOKING SENT_AUTO）需 BOOKING_REQUEST=L2 先抵到該閘（clear 後插入 — hermetic）
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-t84-mf-bk-${EPOCH}','$MF_CLINIC_ID','BOOKING_REQUEST','L2',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
 D10_AGO=$(date -u -d '10 days ago' +%Y-%m-%dT%H:%M:%S.%3NZ)
 D2_AGO=$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S.%3NZ)
 
@@ -2613,8 +2628,10 @@ else
 fi
 
 # ── T84B（新 case B）：第二句起（lastOutboundAt > reopenedAt）→ 閘唔生效 → 完全正常級別 ──
+# ★ cwi-final S4-4：BOOKING_REQUEST free-form 恒多 booking-freeform block（永唔 auto）→ 用 QUESTION probe
+#   驗證「第二句起閘失效 → 正常級別照 auto」（T84A 同文案但第二句 — 重點係 lastOutboundAt > reopenedAt）
 WAMID_T84B="wamid.E2E_T84B_${EPOCH}"
-pnpm -s mock-inbound message --clinic MF --from "$P_T84A" --text "想預約下週有冇位" --wamid "$WAMID_T84B" --name "E2E T84B second" >/dev/null || fail "T84B mock-inbound POST"
+pnpm -s mock-inbound message --clinic MF --from "$P_T84A" --text "你哋幾點閂門？" --wamid "$WAMID_T84B" --name "E2E T84B second" >/dev/null || fail "T84B mock-inbound POST"
 M_T84B=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T84B'" | jf id)
 if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$M_T84B'" '[{"s":"SENT_AUTO"}]' 30; then
   pass "T84B 第二句起：閘唔生效 → 正常級別 auto（SENT_AUTO）"
@@ -2729,7 +2746,7 @@ fi
 sleep 2
 OUT_T85=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_T85' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)
 check "T85 human-recent：cooldown 內 AI 唔搶咪（0 自動發 OUT）" "$OUT_T85" "0"
-grep -F "$WAMID_T85" /tmp/e2e-worker*.log 2>/dev/null | grep -q '"human-recent"' && pass "T85 log reasons 見 human-recent（30 分鐘冷靜期）" || { fail "T85 human-recent log"; T85=1; }
+grep -F "$WAMID_T85" /tmp/e2e-worker*.log 2>/dev/null | grep -qE 'reasons":"(human-recent\+|human-recent")' && pass "T85 log reasons 見 human-recent（30 分鐘冷靜期）" || { fail "T85 human-recent log"; T85=1; }
 q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CONV_T85'" >/dev/null 2>&1
 q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CONV_T85'" >/dev/null 2>&1
 q "DELETE FROM \"Conversation\" WHERE id='$CONV_T85'" >/dev/null 2>&1
@@ -7315,6 +7332,264 @@ nohup pnpm worker >/tmp/e2e-worker-s42r.log 2>&1 &
 S42R_READY=0
 for i in $(seq 1 45); do grep -q "waiting for jobs" /tmp/e2e-worker-s42r.log 2>/dev/null && { S42R_READY=1; break; }; sleep 1; done
 check "S4-2 標準 worker 還原（waiting for jobs）" "$S42R_READY" "1"
+
+# ════════════ S4-3/S4-4：kill switch 全覆蓋 + guard 全覆蓋（cwi-final E2 — T656/T657）══════════
+# S4-3 spec（行 2974-3018）：painTriageEnabled（global cap L1 / PAIN_TRIAGE row L1 → 關；冇 row = 開）
+#   + pain session kill-switch（進行中 → HANDOFF KILL_SWITCH）+ booking session 每輪重查降級 → HANDOFF。
+# S4-4 spec（行 3019-3072）：runOutboundGuards（blocks 層 guard:<code>）+ booking-freeform +
+#   consult-handoff（matrix c6 gc18 0-auto 斷言）+ booking session urgent → HANDOFF 0 auto。
+# 口徑：level 改動用 raw row + e2e-control-bust（admin API 白名單 Phase E 外唔確定 — 语义同 PATCH 一致：upsert + bust）。
+echo "[S4-3/4] kill switch + outbound guards (T656/T657)"
+
+# ── Phase 1：cap worker（AI_GLOBAL_MAX_LEVEL=L1）→ T656a ──────────────────────
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+AI_GLOBAL_MAX_LEVEL=L1 nohup pnpm worker >/tmp/e2e-worker-s43.log 2>&1 &
+S43_READY=0
+for i in $(seq 1 45); do grep -q "waiting for jobs" /tmp/e2e-worker-s43.log 2>/dev/null && { S43_READY=1; break; }; sleep 1; done
+check "S4-3 cap worker（AI_GLOBAL_MAX_LEVEL=L1）up" "$S43_READY" "1"
+
+# T656a. global cap L1 → 「牙痛」→ 0 auto（pain triage 開唔到）
+S43A_WA="8526140${EPOCH}"; S43A_W1="wamid.E2E_S43A_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S43A_WA" --text "牙痛" --wamid "$S43A_W1" --name "E2E S43A cap" >/dev/null 2>&1
+S43A_CONV=$(pc_conv_of "$S43A_WA" "$TKW_CLINIC_ID")
+[ -n "$S43A_CONV" ] || fail "T656a 搵唔到對話"
+sleep 15
+check "T656a cap L1：0 PainTriageSession（開唔到問診）" "$(q "SELECT count(*)::text c FROM \"PainTriageSession\" WHERE \"conversationId\"='$S43A_CONV'" | jf c)" "0"
+check "T656a cap L1：0 OUT（問診問題唔發 — 0 auto）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S43A_CONV' AND direction='OUT'" | jf c)" "0"
+check "T656a intent=PAIN（classify 照行 — 只係問診唔開）" "$(q "SELECT COALESCE(\"intent\",'NULL')::text i FROM \"Conversation\" WHERE id='$S43A_CONV'" | jf i)" "PAIN"
+
+# 還原標準 worker（無 cap env）
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-s43r.log 2>&1 &
+S43R_READY=0
+for i in $(seq 1 45); do grep -q "waiting for jobs" /tmp/e2e-worker-s43r.log 2>/dev/null && { S43R_READY=1; break; }; sleep 1; done
+check "S4-3 標準 worker 還原（waiting for jobs）" "$S43R_READY" "1"
+
+# ── Phase 2：PAIN_TRIAGE row 語義（MF DRAFT 店）──────────────────────────────
+# hermetic：確保 MF 無 PAIN_TRIAGE row（防上一 run 殘留）
+q "DELETE FROM \"AutomationPolicy\" WHERE \"clinicId\"='$MF_CLINIC_ID' AND category='PAIN_TRIAGE'" >/dev/null 2>&1
+
+# T656b. DRAFT 店冇 PAIN_TRIAGE row → 問診問題照發（A12 預設開）
+S43B_WA="8526141${EPOCH}"; S43B_W1="wamid.E2E_S43B_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic MF --from "$S43B_WA" --text "牙痛" --wamid "$S43B_W1" --name "E2E S43B default-on" >/dev/null 2>&1
+S43B_CONV=$(pc_conv_of "$S43B_WA" "$MF_CLINIC_ID")
+[ -n "$S43B_CONV" ] || fail "T656b 搵唔到對話"
+if wait_for "SELECT count(*)::text c FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$S43B_CONV' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30; then
+  pass "T656b DRAFT 店冇 row：問診 session ACTIVE（A12 預設開）"
+else
+  fail "T656b 問診 session 未開"
+fi
+check "T656b 問診第一問 auto 發出（A12 唔跟逐店級別）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S43B_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "1"
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$S43B_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"PainTriageSession\" WHERE \"conversationId\"='$S43B_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$S43B_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$S43B_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$S43B_WA'" >/dev/null 2>&1
+
+# T656c. PAIN_TRIAGE→L1 → 0 auto（問診唔開）
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-s43-pt-l1-${EPOCH}','$MF_CLINIC_ID','PAIN_TRIAGE','L1',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
+S43C_WA="8526142${EPOCH}"; S43C_W1="wamid.E2E_S43C_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic MF --from "$S43C_WA" --text "牙痛" --wamid "$S43C_W1" --name "E2E S43C row-off" >/dev/null 2>&1
+S43C_CONV=$(pc_conv_of "$S43C_WA" "$MF_CLINIC_ID")
+[ -n "$S43C_CONV" ] || fail "T656c 搵唔到對話"
+sleep 15
+check "T656c PAIN_TRIAGE=L1：0 PainTriageSession" "$(q "SELECT count(*)::text c FROM \"PainTriageSession\" WHERE \"conversationId\"='$S43C_CONV'" | jf c)" "0"
+check "T656c PAIN_TRIAGE=L1：0 OUT（0 auto）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S43C_CONV' AND direction='OUT'" | jf c)" "0"
+q "DELETE FROM \"AutomationPolicy\" WHERE id='e2e-s43-pt-l1-${EPOCH}'" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$S43C_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"PainTriageSession\" WHERE \"conversationId\"='$S43C_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$S43C_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$S43C_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$S43C_WA'" >/dev/null 2>&1
+
+# T656d. 進行中問診 + kill switch（row L1）→ HANDOFF KILL_SWITCH + 0 新 auto
+S43D_WA="8526143${EPOCH}"; S43D_W1="wamid.E2E_S43D_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic MF --from "$S43D_WA" --text "牙痛" --wamid "$S43D_W1" --name "E2E S43D mid-off" >/dev/null 2>&1
+S43D_CONV=$(pc_conv_of "$S43D_WA" "$MF_CLINIC_ID")
+[ -n "$S43D_CONV" ] || fail "T656d 搵唔到對話"
+if wait_for "SELECT count(*)::text c FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$S43D_CONV' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30; then
+  pass "T656d 問診 session ACTIVE（開機中）"
+else
+  fail "T656d 問診 session 未開（前置）"
+fi
+check "T656d 第一問已發（1 OUT）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S43D_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "1"
+# 進行中降 kill（admin 口徑 — raw row 同 PATCH 语义一致）
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-s43-pt-l1-${EPOCH}','$MF_CLINIC_ID','PAIN_TRIAGE','L1',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
+S43D_W2="wamid.E2E_S43D_2_${EPOCH}"
+pnpm -s mock-inbound message --clinic MF --from "$S43D_WA" --text "8分痛" --wamid "$S43D_W2" --name "E2E S43D reply" >/dev/null 2>&1
+if wait_for "SELECT \"status\"::text s, COALESCE(\"closeReason\",'NULL')::text r FROM \"PainTriageSession\" s WHERE s.\"conversationId\"='$S43D_CONV'" '[{"s":"HANDOFF","r":"KILL_SWITCH"}]' 30; then
+  pass "T656d kill switch：session → HANDOFF + closeReason=KILL_SWITCH"
+else
+  fail "T656d kill switch 未生效"
+fi
+check "T656d kill 後 0 新 auto（OUT 仍 1）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S43D_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "1"
+q "DELETE FROM \"AutomationPolicy\" WHERE id='e2e-s43-pt-l1-${EPOCH}'" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$S43D_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"PainTriageSession\" WHERE \"conversationId\"='$S43D_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$S43D_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$S43D_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$S43D_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$S43D_WA'" >/dev/null 2>&1
+
+# ── Phase 3：booking session 進行中降級 → HANDOFF（TKW AUTO）─────────────────
+# S4-2 cleanup 已刪佢哋嘅 L3 row — 呢度自建（EPOCH 隔離 + 尾清）
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-s43-tkw-bk-${EPOCH}','$TKW_CLINIC_ID','BOOKING_REQUEST','L3',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
+S43E_WA="8526144${EPOCH}"; S43E_W1="wamid.E2E_S43E_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S43E_WA" --text "想預約下週有冇位" --wamid "$S43E_W1" --name "E2E S43E booking" >/dev/null 2>&1
+S43E_CONV=$(pc_conv_of "$S43E_WA" "$TKW_CLINIC_ID")
+[ -n "$S43E_CONV" ] || fail "T656e 搵唔到對話"
+if wait_for "SELECT count(*)::text c FROM \"BookingSession\" s WHERE s.\"conversationId\"='$S43E_CONV' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30; then
+  pass "T656e booking session ACTIVE（L3 開機）"
+else
+  fail "T656e booking session 未開（前置）"
+fi
+check "T656e session 第一問已發（1 auto OUT）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S43E_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "1"
+# admin 降 L1（raw row + bust — 同 PATCH 语义）
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-s43-tkw-bk-${EPOCH}','$TKW_CLINIC_ID','BOOKING_REQUEST','L1',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
+S43E_W2="wamid.E2E_S43E_2_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S43E_WA" --text "要" --wamid "$S43E_W2" --name "E2E S43E reply" >/dev/null 2>&1
+if wait_for "SELECT \"status\"::text s FROM \"BookingSession\" s WHERE s.\"conversationId\"='$S43E_CONV'" '[{"s":"HANDOFF"}]' 30; then
+  pass "T656e 降 L1 後下一輪：session → HANDOFF（每輪重查）"
+else
+  fail "T656e 降級 HANDOFF 未生效"
+fi
+check "T656e 降級後 0 新 auto（OUT 仍 1）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S43E_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "1"
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$S43E_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"BookingSession\" WHERE \"conversationId\"='$S43E_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$S43E_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$S43E_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$S43E_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$S43E_WA'" >/dev/null 2>&1
+
+# ── Phase 4：T657 guard 全覆蓋（blocks 層 — traceJson.gates.blocks）─────────────
+# 7 intent GoldenCase：unit（scripts/unit-outbound-guards.ts）蓋 7/7；e2e 蓋 free-form draft 可達者
+# （BOOKING_REQUEST / QUESTION / OUT_OF_SCOPE）+ booking session urgent（0 auto）。consult-handoff 由
+# matrix c6 gc18（0 auto + HANDOFF notice）斷言。legacy fallback 收窄後 OUT_OF_SCOPE/BOOKING legacy=L1 →
+# 要 explicit L2 row 先抵到 blocks 層（QUESTION legacy=L2 照舊）。
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-s44-tkw-bk-${EPOCH}','$TKW_CLINIC_ID','BOOKING_REQUEST','L2',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-s44-tkw-q-${EPOCH}','$TKW_CLINIC_ID','QUESTION','L2',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-s44-tkw-ooo-${EPOCH}','$TKW_CLINIC_ID','OUT_OF_SCOPE','L2',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
+
+s44_wait_draft() { # $1=tag $2=in_msg_id
+  wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$2'" '[{"s":"PROPOSED"}]' 30
+}
+
+# T657a. BOOKING_REQUEST 含金額 → guard:PRICE + booking-freeform + 0 auto
+S44A_WA="8526150${EPOCH}"; S44A_W1="wamid.E2E_S44A_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S44A_WA" --text "想預約下週有冇位 E2E-GUARD-PRICE" --wamid "$S44A_W1" --name "E2E S44A" >/dev/null 2>&1
+S44A_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S44A_W1' AND direction='IN'" | jf id)
+if s44_wait_draft T657a "$S44A_IN"; then pass "T657a BOOKING 金額：draft PROPOSED（guard 擋咗 auto）"; else fail "T657a draft"; fi
+S44A_BLOCKS=$(q "SELECT (\"traceJson\"->'gates'->'blocks')::text b FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S44A_IN'" | jq -r '.[0].b // empty')
+echo "$S44A_BLOCKS" | grep -q "guard:PRICE" && pass "T657a blocks 含 guard:PRICE" || { fail "T657a blocks 缺 guard:PRICE"; echo "   blocks=$S44A_BLOCKS"; }
+echo "$S44A_BLOCKS" | grep -q "booking-freeform" && pass "T657a blocks 含 booking-freeform" || { fail "T657a blocks 缺 booking-freeform"; echo "   blocks=$S44A_BLOCKS"; }
+S44A_CONV=$(pc_conv_of "$S44A_WA" "$TKW_CLINIC_ID")
+check "T657a 0 auto（0 aiAutoSent OUT）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S44A_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+
+# T657b. BOOKING_REQUEST 含日期時間 → guard:CG-008 + guard:TIME_CLAIM_NO_ENGINE + booking-freeform
+S44B_WA="8526151${EPOCH}"; S44B_W1="wamid.E2E_S44B_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S44B_WA" --text "想預約下週有冇位 E2E-GUARD-TIME" --wamid "$S44B_W1" --name "E2E S44B" >/dev/null 2>&1
+S44B_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S44B_W1' AND direction='IN'" | jf id)
+if s44_wait_draft T657b "$S44B_IN"; then pass "T657b BOOKING 日期時間：draft PROPOSED"; else fail "T657b draft"; fi
+S44B_BLOCKS=$(q "SELECT (\"traceJson\"->'gates'->'blocks')::text b FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S44B_IN'" | jq -r '.[0].b // empty')
+echo "$S44B_BLOCKS" | grep -q "guard:CG-008" && pass "T657b blocks 含 guard:CG-008" || { fail "T657b blocks 缺 CG-008"; echo "   blocks=$S44B_BLOCKS"; }
+echo "$S44B_BLOCKS" | grep -q "guard:TIME_CLAIM_NO_ENGINE" && pass "T657b blocks 含 guard:TIME_CLAIM_NO_ENGINE" || { fail "T657b blocks 缺 TIME_CLAIM"; echo "   blocks=$S44B_BLOCKS"; }
+S44B_CONV=$(pc_conv_of "$S44B_WA" "$TKW_CLINIC_ID")
+check "T657b 0 auto" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S44B_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+
+# T657c. QUESTION 含日期時間 → guard:TIME_CLAIM_NO_ENGINE（legacy QUESTION=L2 照抵到 blocks）
+S44C_WA="8526152${EPOCH}"; S44C_W1="wamid.E2E_S44C_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S44C_WA" --text "想問下埋門時間 E2E-GUARD-TIME" --wamid "$S44C_W1" --name "E2E S44C" >/dev/null 2>&1
+S44C_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S44C_W1' AND direction='IN'" | jf id)
+if s44_wait_draft T657c "$S44C_IN"; then pass "T657c QUESTION 日期時間：draft PROPOSED"; else fail "T657c draft"; fi
+S44C_BLOCKS=$(q "SELECT (\"traceJson\"->'gates'->'blocks')::text b FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S44C_IN'" | jq -r '.[0].b // empty')
+echo "$S44C_BLOCKS" | grep -q "guard:TIME_CLAIM_NO_ENGINE" && pass "T657c blocks 含 guard:TIME_CLAIM_NO_ENGINE" || { fail "T657c blocks 缺 TIME_CLAIM"; echo "   blocks=$S44C_BLOCKS"; }
+S44C_CONV=$(pc_conv_of "$S44C_WA" "$TKW_CLINIC_ID")
+check "T657c 0 auto" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S44C_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+
+# T657d. QUESTION 含金額 → 上游 price chain 先攔（needsHuman + NO_PRICE_TEXT — blocks 層 guard:PRICE 唔見）
+S44D_WA="8526153${EPOCH}"; S44D_W1="wamid.E2E_S44D_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S44D_WA" --text "想問下埋門時間 E2E-PRICE-LEAK" --wamid "$S44D_W1" --name "E2E S44D" >/dev/null 2>&1
+S44D_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S44D_W1' AND direction='IN'" | jf id)
+if s44_wait_draft T657d "$S44D_IN"; then pass "T657d QUESTION 金額：draft PROPOSED（上游換人手版）"; else fail "T657d draft"; fi
+S44D_BLOCKS=$(q "SELECT (\"traceJson\"->'gates'->'blocks')::text b FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S44D_IN'" | jq -r '.[0].b // empty')
+echo "$S44D_BLOCKS" | grep -q "needsHuman" && pass "T657d blocks 含 needsHuman（上游 price chain 攔）" || { fail "T657d blocks 缺 needsHuman"; echo "   blocks=$S44D_BLOCKS"; }
+check "T657d 幻覺價唔出街（draft 無 \$999）" "$(q "SELECT CASE WHEN \"draftText\" LIKE '%999%' THEN 'leak' ELSE 'ok' END v FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S44D_IN'" | jf v)" "ok"
+S44D_CONV=$(pc_conv_of "$S44D_WA" "$TKW_CLINIC_ID")
+check "T657d 0 auto" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S44D_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+
+# T657e. OUT_OF_SCOPE 含金額 → guard:PRICE（explicit L2 row — legacy fallback 收窄後需明確行）
+S44E_WA="8526154${EPOCH}"; S44E_W1="wamid.E2E_S44E_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S44E_WA" --text "今日天氣點 E2E-GUARD-PRICE" --wamid "$S44E_W1" --name "E2E S44E" >/dev/null 2>&1
+S44E_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S44E_W1' AND direction='IN'" | jf id)
+if s44_wait_draft T657e "$S44E_IN"; then pass "T657e OUT_OF_SCOPE 金額：draft PROPOSED"; else fail "T657e draft"; fi
+S44E_BLOCKS=$(q "SELECT (\"traceJson\"->'gates'->'blocks')::text b FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S44E_IN'" | jq -r '.[0].b // empty')
+echo "$S44E_BLOCKS" | grep -q "guard:PRICE" && pass "T657e blocks 含 guard:PRICE" || { fail "T657e blocks 缺 guard:PRICE"; echo "   blocks=$S44E_BLOCKS"; }
+S44E_CONV=$(pc_conv_of "$S44E_WA" "$TKW_CLINIC_ID")
+check "T657e 0 auto" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S44E_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+
+# T657f. OUT_OF_SCOPE 含日期時間 → guard:CG-008 + guard:TIME_CLAIM_NO_ENGINE
+S44F_WA="8526155${EPOCH}"; S44F_W1="wamid.E2E_S44F_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S44F_WA" --text "今日足球賽幾點開波 E2E-GUARD-TIME" --wamid "$S44F_W1" --name "E2E S44F" >/dev/null 2>&1
+S44F_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S44F_W1' AND direction='IN'" | jf id)
+if s44_wait_draft T657f "$S44F_IN"; then pass "T657f OUT_OF_SCOPE 日期時間：draft PROPOSED"; else fail "T657f draft"; fi
+S44F_BLOCKS=$(q "SELECT (\"traceJson\"->'gates'->'blocks')::text b FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S44F_IN'" | jq -r '.[0].b // empty')
+echo "$S44F_BLOCKS" | grep -q "guard:CG-008" && pass "T657f blocks 含 guard:CG-008" || { fail "T657f blocks 缺 CG-008"; echo "   blocks=$S44F_BLOCKS"; }
+echo "$S44F_BLOCKS" | grep -q "guard:TIME_CLAIM_NO_ENGINE" && pass "T657f blocks 含 guard:TIME_CLAIM_NO_ENGINE" || { fail "T657f blocks 缺 TIME_CLAIM"; echo "   blocks=$S44F_BLOCKS"; }
+S44F_CONV=$(pc_conv_of "$S44F_WA" "$TKW_CLINIC_ID")
+check "T657f 0 auto" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S44F_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+
+# T657g. booking session 中 urgent（「聽日3點得唔得？塊面腫咗」）→ session HANDOFF + 0 auto
+q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-s44-tkw-bk-${EPOCH}','$TKW_CLINIC_ID','BOOKING_REQUEST','L3',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\",\"updatedAt\"=now()" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+sleep 5
+S44G_WA="8526156${EPOCH}"; S44G_W1="wamid.E2E_S44G_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S44G_WA" --text "想預約下週有冇位" --wamid "$S44G_W1" --name "E2E S44G" >/dev/null 2>&1
+S44G_CONV=$(pc_conv_of "$S44G_WA" "$TKW_CLINIC_ID")
+[ -n "$S44G_CONV" ] || fail "T657g 搵唔到對話"
+if wait_for "SELECT count(*)::text c FROM \"BookingSession\" s WHERE s.\"conversationId\"='$S44G_CONV' AND s.\"status\"='ACTIVE'" '[{"c":"1"}]' 30; then
+  pass "T657g booking session ACTIVE"
+else
+  fail "T657g booking session 未開（前置）"
+fi
+S44G_W2="wamid.E2E_S44G_2_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S44G_WA" --text "聽日3點得唔得？塊面腫咗" --wamid "$S44G_W2" --name "E2E S44G urgent" >/dev/null 2>&1
+if wait_for "SELECT \"status\"::text s FROM \"BookingSession\" s WHERE s.\"conversationId\"='$S44G_CONV'" '[{"s":"HANDOFF"}]' 30; then
+  pass "T657g session 中 urgent → session HANDOFF"
+else
+  fail "T657g urgent HANDOFF 未生效"
+fi
+check "T657g conv urgent=true + intent=URGENT_PAIN" "$(q "SELECT \"urgent\"::text u, COALESCE(\"intent\",'NULL')::text i FROM \"Conversation\" WHERE id='$S44G_CONV'" | node -e 'const l=require("fs").readFileSync(0,"utf8").trim();const j=JSON.parse(l);console.log(j[0].u==="true"&&j[0].i==="URGENT_PAIN"?"ok":"bad")')" "ok"
+check "T657g 0 新 auto（OUT 仍 1 — session 第一問）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S44G_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "1"
+check "T657g URGENT_ESCALATION notice 照出（人手接手有得跟）" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$S44G_CONV' AND kind='URGENT_ESCALATION'" | jf c)" "1"
+
+# ── S4-3/S4-4 cleanup：EPOCH row 全清 + 對話 sweep + 還原標準 worker ────────────────
+q "DELETE FROM \"AutomationPolicy\" WHERE id IN ('e2e-s43-tkw-bk-${EPOCH}','e2e-s44-tkw-bk-${EPOCH}','e2e-s44-tkw-q-${EPOCH}','e2e-s44-tkw-ooo-${EPOCH}','e2e-s43-pt-l1-${EPOCH}')" >/dev/null 2>&1
+pnpm -s tsx scripts/e2e-control-bust.ts automation >/dev/null 2>&1 || true
+for _wa in "8526140${EPOCH}" "8526142${EPOCH}" "8526143${EPOCH}" "8526144${EPOCH}" "8526150${EPOCH}" "8526151${EPOCH}" "8526152${EPOCH}" "8526153${EPOCH}" "8526154${EPOCH}" "8526155${EPOCH}" "8526156${EPOCH}"; do
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"PainTriageSession\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"BookingSession\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE \"waId\"='$_wa'" >/dev/null 2>&1
+done
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

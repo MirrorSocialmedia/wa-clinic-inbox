@@ -1000,6 +1000,13 @@ async function gc18(): Promise<void> {
   const n3 = await waitNotice(m3.convId, "HANDOFF_REQUEST");
   check("m3 HANDOFF_REQUEST 通知", n3 !== null);
   check("m3 purchaseIntent = 0.0（0.1 - 0.1 落底 clamp）", s3.purchaseIntent === 0, String(s3.purchaseIntent));
+  // ★ cwi-final S4-4 T657：GC-18 價錢異議兩次 → 0 auto（HANDOFF turn suppressDraft — 草稿由員工寫）+ HANDOFF notice（上）
+  //   3s settle：notice 喺 runner section 6 先落，draft 持久化喺 pipeline 之後 — 等 job 完整先斷言（防 false green）
+  await new Promise((r) => setTimeout(r, 3000));
+  const d3 = await draftOf(m3.msgId);
+  check("m3 HANDOFF turn 零草稿（S4-4 suppressDraft — 0 auto）", d3 === null, d3 ? `draft=${d3.status}` : "no draft");
+  const autoOut3 = await prisma.message.findFirst({ where: { conversationId: m3.convId, direction: "OUT", sentVia: "AI_AUTO" } });
+  check("m3 零 AI_AUTO OUT（0 auto）", autoOut3 === null, autoOut3?.id ?? "");
 }
 
 async function gc19a(ctx: Ctx): Promise<void> {

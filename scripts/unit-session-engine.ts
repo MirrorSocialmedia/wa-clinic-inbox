@@ -410,7 +410,11 @@ console.log("[12] automation resolveLevel / cap");
   check("star > legacy", resolveLevel([{ category: "*", level: "L4" }], "BOOKING_REQUEST", "DRAFT") === "L4");
   check("legacy DRAFT → L1", resolveLevel([], "BOOKING_REQUEST", "DRAFT") === "L1");
   check("legacy AUTO → L2", resolveLevel([], "QUESTION", "AUTO") === "L2");
-  check("壞 level 值 → 跌 legacy", resolveLevel([{ category: "BOOKING_REQUEST", level: "L9" }], "BOOKING_REQUEST", "AUTO") === "L2");
+  // ★ cwi-final S4-4：legacy AUTO fallback 收窄 — 只 QUESTION/OTHER → L2，其他 intent → L1（S0-10 已擋 AUTO，fallback 語義照改）
+  check("S4-4 legacy AUTO BOOKING_REQUEST → L1", resolveLevel([], "BOOKING_REQUEST", "AUTO") === "L1");
+  check("S4-4 legacy AUTO OTHER → L2", resolveLevel([], "OTHER", "AUTO") === "L2");
+  check("S4-4 legacy AUTO URGENT_PAIN → L1", resolveLevel([], "URGENT_PAIN", "AUTO") === "L1");
+  check("壞 level 值 → 跌 legacy", resolveLevel([{ category: "BOOKING_REQUEST", level: "L9" }], "BOOKING_REQUEST", "AUTO") === "L1");
   check("minLevel 壓頂", minLevel("L3", "L2") === "L2");
   check("asLevel 壞值 → null", asLevel("L9") === null && asLevel("L4") === "L4");
 

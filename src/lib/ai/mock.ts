@@ -88,8 +88,17 @@ function clinicName(input: ClassifyAndDraftInput): string {
   return input.clinic.name || "診所";
 }
 
-/** BOOKING_REQUEST 草稿 — 只係建議，staff 一鍵採用先入 composer。 */
+/** BOOKING_REQUEST 草稿 — 只係建議，staff 一鍵採用先入 composer。
+ * ★ cwi-final S4-4 T657 bait：E2E-GUARD-PRICE / E2E-GUARD-TIME — 非 QUESTION draft 含金額/日期時間
+ *   （blocks 層 runOutboundGuards 靶 — QUESTION 嘅金額由上游 price chain 先攔，非 QUESTION 唔行 price chain）。 */
 function bookingDraft(input: ClassifyAndDraftInput): string {
+  const body = lastInboundBody(input);
+  if (body.includes("E2E-GUARD-PRICE")) {
+    return "多謝你嘅預約請求！呢項費用大約係 $9999，直接嚟就得。";
+  }
+  if (body.includes("E2E-GUARD-TIME")) {
+    return "多謝你嘅預約請求！聽日 3 點有得，直接嚟就得。";
+  }
   const gc = input.clinic.greetingConfig ?? {};
   const hours = typeof gc.openingHours === "string" ? gc.openingHours : "";
   const hoursLine = hours ? `我哋嘅營業時間係：${hours}。` : "";
@@ -100,8 +109,15 @@ function bookingDraft(input: ClassifyAndDraftInput): string {
   );
 }
 
-/** OUT_OF_SCOPE 草稿。 */
+/** OUT_OF_SCOPE 草稿。★ cwi-final S4-4 T657 bait：同 bookingDraft 同式（blocks 層 guard 靶）。 */
 function outOfScopeDraft(input: ClassifyAndDraftInput): string {
+  const body = lastInboundBody(input);
+  if (body.includes("E2E-GUARD-PRICE")) {
+    return "多謝你嘅訊息！呢個問題超出了診所嘅服務範圍，如需要報價大約係 $9999。";
+  }
+  if (body.includes("E2E-GUARD-TIME")) {
+    return "多謝你嘅訊息！呢個問題超出了診所嘅服務範圍，聽日 3 點得閒可以直接嚟。";
+  }
   return `多謝你嘅訊息！呢個問題超出了 ${clinicName(input)} 嘅服務範圍，如有牙科相關查詢歡迎隨時問我哋。`;
 }
 
@@ -113,6 +129,10 @@ function outOfScopeDraft(input: ClassifyAndDraftInput): string {
  * 注意：token 題目唔准含價錢意圖詞（幾錢/收費/價錢/貴唔貴/幾多錢）— 否則報價鏈決定性 draft 先食咗。 */
 function questionDraft(input: ClassifyAndDraftInput): string {
   const body = lastInboundBody(input);
+  // ★ cwi-final S4-4 T657：時間宣告 bait（無金額 — 上游 price chain 唔郁，blocks 層 guard:TIME_CLAIM_NO_ENGINE 靶）
+  if (body.includes("E2E-GUARD-TIME")) {
+    return "多謝你嘅查詢！聽日 3 點有得，直接嚟就得。";
+  }
   if (body.includes("E2E-PRICE-LEAK")) {
     return "多謝你嘅查詢！照經驗嚟講大概 $999 左右，具體以到店為準。"; // 幻覺價（零 PRICE 引用）
   }
