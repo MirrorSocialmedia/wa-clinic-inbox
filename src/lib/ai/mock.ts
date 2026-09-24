@@ -69,6 +69,11 @@ const RE_OUT_OF_SCOPE = /股票|期貨|基金|crypto|加密貨幣|足球|天氣|
 
 /** 模擬網絡 + 推理延遲（短，E2E 唔使等） */
 const MOCK_LATENCY_MS = 15;
+// ★ cwi-final S4-2 test hook：AI_MOCK_DELAY_MS 拉長 mock LLM call（e2e S4-2 gate — 拉長「LLM 在途」
+// 窗口，e2e 先放 hold key / 做介入再等 job 行到 gate）。production 未設 = 0（零行為改變）。
+function mockCallDelayMs(): number {
+  return MOCK_LATENCY_MS + Math.max(0, parseInt(process.env.AI_MOCK_DELAY_MS ?? "0", 10) || 0);
+}
 
 function lastInboundBody(input: ClassifyAndDraftInput): string {
   for (let i = input.messages.length - 1; i >= 0; i--) {
@@ -134,10 +139,10 @@ export async function mockClassifyAndDraft(
   const t0 = Date.now();
   if (isAiMockFailEnabled()) {
     // 模擬 AI 斷線（GPU 機離線 / vLLM crash）— 唔含任何訊息內容
-    await sleep(MOCK_LATENCY_MS);
+    await sleep(mockCallDelayMs());
     throw new AiCallError("AI_MOCK_FAIL=1 — simulated AI outage");
   }
-  await sleep(MOCK_LATENCY_MS);
+  await sleep(mockCallDelayMs());
 
   const body = lastInboundBody(input);
   let result: Omit<ClassifyAndDraftResult, "model" | "latencyMs" | "tokens" | "sessionTrigger">;
@@ -267,10 +272,10 @@ function mockMatchProvider(body: string, providers: { apricotId: string; name: s
 
 export async function mockSessionTurn(input: SessionPromptInput): Promise<SessionAiOutput> {
   if (isAiMockFailEnabled()) {
-    await sleep(MOCK_LATENCY_MS);
+    await sleep(mockCallDelayMs());
     throw new AiCallError("AI_MOCK_FAIL=1 — simulated AI outage");
   }
-  await sleep(MOCK_LATENCY_MS);
+  await sleep(mockCallDelayMs());
 
   const body = lastInboundBodySession(input);
   const none: SessionSlots = { providerName: null, date: null, time: null, timeOfDay: null };
@@ -338,10 +343,10 @@ function lastInboundBodyPain(input: PainPromptInput): string {
 /** ★ Part E（cwi-paintriage-20260903）：PAIN_TRIAGE 抽槽決定性 mock。 */
 export async function mockPainTurn(input: PainPromptInput): Promise<PainAiOutput> {
   if (isAiMockFailEnabled()) {
-    await sleep(MOCK_LATENCY_MS);
+    await sleep(mockCallDelayMs());
     throw new AiCallError("AI_MOCK_FAIL=1 — simulated AI outage");
   }
-  await sleep(MOCK_LATENCY_MS);
+  await sleep(mockCallDelayMs());
 
   const body = lastInboundBodyPain(input);
   const upd: Partial<PainSlotsType> = {};

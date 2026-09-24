@@ -494,6 +494,11 @@ model Message {
   // ★ AI Workflow Phase C（cwi-sess-20260824-c1）：呢條 OUT 訊息屬邊個 slot-filling session
   //   （追溯 session 回覆用；null = 非 session 訊息。無 FK — session 行清唔會阻訊息 retention）。
   bookingSessionId String?
+  // ★ cwi-final S4-2（audit3 P0-01/P0-02）：AI／session 自動覆對應嘅 inbound Message.id。
+  //   原子閘 dedup key — partial unique index Message_ai_reply_once（WHERE "aiAutoSent" = true）
+  //   = 每條 inbound 只可被 AI 自動覆一次（concurrent 競態只成一件）。
+  //   partial index Prisma 表唔到 → migration cwi_final_s4_ai_gate 手寫。
+  replyToMessageId String?
   // ★ Phase B（cwi-tmpl-20260824-b1）：template 發送元數據（type="template" 先有）。
   // 結構：{ name, language, components }（components = [{type:"body",parameters:[...]}]）。
   // ★ PII：只有 template 名/語言/日期時間醫生診所變數 — 零病人自由文本。

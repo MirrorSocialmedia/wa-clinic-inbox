@@ -29,6 +29,7 @@ import { enqueueOutboundSend } from "@/lib/queue";
 import { publishConvEvent, convRef } from "@/lib/notify";
 import { afterBookingWrite } from "./booking-ops";
 import { buildRemarks, confirmMessageText } from "./booking-text";
+import { sendAutoIfStillEligible } from "@/lib/ai/auto-send-gate";
 import { WorkforceApiError, createBooking, defaultVisitReasonCode, fetchDictionaries } from "@/lib/workforce/client";
 
 const ENQUEUE_TIMEOUT_MS = 1500;
@@ -41,7 +42,7 @@ export type ConfirmResult =
   | {
       ok: true;
       apricotApptId: string;
-      autoMessage: { sent: true; messageId: string } | { sent: false; reason: "window_closed" | "queue_unavailable" };
+      autoMessage: { sent: true; messageId: string } | { sent: false; reason: "window_closed" | "queue_unavailable" | "gate_blocked" };
     }
   | {
       ok: false;
@@ -62,7 +63,7 @@ async function resolveDefaultVisitReasonId(): Promise<{ apricotId: string; code:
 export async function confirmBookingCore(
   bookingId: string,
   actor: ConfirmActor,
-  opts?: { visitReasonId?: string }
+  opts?: { visitReasonId?: string; /** ★ cwi-final S4-2：AI actor 必帶 — 觸發呢輪確認嘅病人訊息（gate 用） */ triggerMsgId?: string }
 ): Promise<ConfirmResult> {
   const booking = await prisma.bookingRequest.findUnique({ where: { id: bookingId } });
   if (!booking) return { ok: false, kind: "PRECONDITION", message: "not found", code: "not_found" };
@@ -223,6 +224,55 @@ export async function confirmBookingCore(
   }
 
   // ── 自動確認訊息（同 confirm route 語義）──────────────────────────
+  // ★ cwi-final S4-2：AI actor（L4 自動確認）必經原子閘（source=L4_CONFIRM / minLevel=L4 —
+  //   店 BOOKING_REQUEST level 達 L4 先自動發）。gate 放棄 = booking 已 CONFIRMED（workforce 外部
+  //   副作用不可回滾）— 唔自動發確認訊息，staff 手覆。STAFF 路徑零改動（人手動作唔經閘）。
+  if (actor.type === "AI") {
+    if (!opts?.triggerMsgId) {
+      // fail-closed：冇觸發訊息 → superseded/already-answered 查唔到 → 唔自動發
+      log.error(
+        { bookingId: booking.id, sessionId: actor.sessionId },
+        "bookings: create — AI confirm missing triggerMsgId（fail-closed：無 auto message）"
+      );
+      return { ok: true, apricotApptId, autoMessage: { sent: false, reason: "gate_blocked" } };
+    }
+    const r = await sendAutoIfStillEligible({
+      convId: conv.id,
+      clinicId: clinic.id,
+      triggerMsgId: opts.triggerMsgId,
+      levelCategory: "BOOKING_REQUEST",
+      minLevel: "L4",
+      text: confirmMessageText(booking),
+      source: "L4_CONFIRM",
+      bookingSessionId: actor.sessionId,
+    });
+    if (!r.sent) {
+      log.info(
+        { bookingId: booking.id, clinicId: clinic.id, sessionId: actor.sessionId, reason: r.reason },
+        "bookings: create — auto message skipped at send-time gate（booking CONFIRMED，staff 手覆）"
+      );
+      return { ok: true, apricotApptId, autoMessage: { sent: false, reason: "gate_blocked" } };
+    }
+    // enqueue uncertain → 留 QUEUED（S1-15 sweep 兜底 — 同下方 STAFF 路徑語義一致）
+    try {
+      await Promise.race([
+        enqueueOutboundSend(r.messageId),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
+      ]);
+    } catch (err) {
+      log.warn(
+        { bookingId: booking.id, messageId: r.messageId, err: err instanceof Error ? err.message : String(err), sessionId: actor.sessionId },
+        "bookings: create — auto message enqueue uncertain（QUEUED，sweep 兜底重加）"
+      );
+    }
+    // 註：gate tx 已 atomically 更新 lastMessageAt/lastOutboundText — 唔使重複 touch。
+    log.info(
+      { bookingId: booking.id, messageId: r.messageId, clinicId: clinic.id, sessionId: actor.sessionId },
+      "bookings: create — auto confirmation message queued (send-time gate)"
+    );
+    return { ok: true, apricotApptId, autoMessage: { sent: true, messageId: r.messageId } };
+  }
+
   const win = getWindowState(conv.lastInboundAt);
   if (!win.open) {
     log.info(
@@ -243,8 +293,8 @@ export async function confirmBookingCore(
         body: confirmMessageText(booking),
         status: "QUEUED",
         sentByStaffId: isStaff ? actor.staffId : null,
-        aiAutoSent: !isStaff, // ★ Phase C：AI 自動確認 = true
-        bookingSessionId: isStaff ? null : actor.sessionId, // ★ Phase C：追溯 session 回覆
+        aiAutoSent: !isStaff, // ★ Phase C：AI 自動確認 = true（呢段只 STAFF 到達 — AI 路徑上面已 return）
+        bookingSessionId: null, // STAFF-only path（AI actor 已喺上面 gate 路徑 return）
         // cwi-window-20260901（P1）：確認預約覆（窗口內）= SERVICE
         billingCategory: "SERVICE",
         waTimestamp: now,

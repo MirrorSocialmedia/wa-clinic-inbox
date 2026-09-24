@@ -1,5 +1,6 @@
 import { Queue, type QueueOptions } from "bullmq";
 import IORedis from "ioredis";
+export type { default as IORedis } from "ioredis"; // ★ cwi-final S4-2：ai.worker test hook 用（type-only re-export）
 import log from "@/lib/log";
 
 /**

@@ -534,6 +534,9 @@ export async function runInboundAi(input: {
   /** consult session 存儲（沙盤 = redisConsultStore；worker = undefined → prismaConsultStore 預設）。 */
   consultStore?: ConsultStore;
   persist: PersistPort;
+  /** ★ cwi-final S4-2（job early-exit）：true = 跳過 consult LLM turn（§⑪）— 分類/摘要/路由/engine turn 照常。
+   * worker：已有較新 IN 訊息 + 店 L2+ 時設 true（慳 GPU；較新 job 行足全流）。 */
+  skipHeavy?: boolean;
 }): Promise<InboundAiOutcome> {
   const { clinic, msg, conv, contact, ctxMessages, persist } = input;
   const { isMedia, consultStore } = input;
@@ -765,6 +768,8 @@ export async function runInboundAi(input: {
   let consultLlmCalls = 0;
   let extractFailed = false;
   if (
+    // ★ cwi-final S4-2：job early-exit — 已過時 job 唔好再花 GPU 喺 consult LLM（較新 job 處理）
+    !input.skipHeavy &&
     msg.type === "text" &&
     msg.body &&
     result.draft !== null &&

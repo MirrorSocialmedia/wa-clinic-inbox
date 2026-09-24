@@ -824,10 +824,10 @@ pnpm -s e2e:ai-job requeue --conversation "$AUTO1_CONV" --message "$AUTO1_MSG_ID
 sleep 8
 OUT6=$(q "SELECT count(*)::text c FROM \"Message\" m WHERE m.\"conversationId\"='$AUTO1_CONV' AND m.direction='OUT'" | jf c)
 check "T25 re-delivery 唔重發（OUT 訊息仍 =1，冪等）" "$OUT6" "1"
-if grep -q "idempotent skip" /tmp/e2e-worker*.log 2>/dev/null; then
-  pass "T25 idempotent skip log"
+if grep -q "AUTO send skipped at send-time gate" /tmp/e2e-worker*.log 2>/dev/null; then
+  pass "T25 send-time gate skip log（S4-2：re-delivery 被原子閘擋 — 冪等機制由 pre-check 移到 gate）"
 else
-  fail "T25 idempotent skip log"
+  fail "T25 send-time gate skip log"
 fi
 
 # ── T26. AUTO 發送 log PII 抽查（鐵律 1 擴展：含 Phase 2b 新 text） ────────
@@ -3767,10 +3767,29 @@ check "W1 publish v2 → 200" "$W_CODE" "200"
 pnpm -s mock-inbound message --clinic TKW --from "$W1_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W1_3_${EPOCH}" --name "E2E W1" >/dev/null 2>&1
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_3_${EPOCH}'" '[{"c":"1"}]' 15
 W1_MSG3=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_3_${EPOCH}'" | jf id)
-if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W1_MSG3'" '[{"s":"SENT_AUTO"}]' 30; then
-  pass "W1 msg3 SENT_AUTO（cooldown 0 publish 後即時生效 — 唔使重啟）"
+# ★ cwi-final S4-2 新 contract：humanTookOver（staff typed）係 sticky 旗 — cooldown 0 只解 workflow
+#   human-recent 閘；send-time 原子閘仍然擋 auto 到明確「交返 AI」（清 humanTookOver）。
+#   舊 contract（unassign + cooldown 0 → auto 恢復）被 S4-2 spec gate 取代。
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W1_MSG3'" '[{"s":"PROPOSED"}]' 45; then
+  pass "W1 msg3 PROPOSED（S4-2 gate：humanTookOver sticky — cooldown 0 唔恢復 auto）"
 else
-  fail "W1 msg3 未 SENT_AUTO（TTL/cache 唔係 0？）"; W_FAIL=1
+  fail "W1 msg3 未 PROPOSED（human-took-over gate 失靈？）"; W_FAIL=1
+fi
+if grep "skipped at send-time gate" "$WF_PATIENT_LOG" 2>/dev/null | grep -F "$W1_CONV" | grep -q "human-took-over"; then
+  pass "W1 msg3 gate log reason=human-took-over（metadata only）"
+else
+  fail "W1 msg3 gate log 缺 human-took-over"; W_FAIL=1
+fi
+
+# 交返 AI（C5 handback 效果：清 conv.humanTookOver）→ auto 恢復
+q "UPDATE \"Conversation\" SET \"humanTookOver\"=false WHERE id='$W1_CONV'" >/dev/null 2>&1
+pnpm -s mock-inbound message --clinic TKW --from "$W1_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W1_4_${EPOCH}" --name "E2E W1" >/dev/null 2>&1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_4_${EPOCH}'" '[{"c":"1"}]' 15
+W1_MSG4=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_4_${EPOCH}'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W1_MSG4'" '[{"s":"SENT_AUTO"}]' 30; then
+  pass "W1 msg4 SENT_AUTO（交返 AI 後 + cooldown 0 — TTL 0 publish 即時生效、唔使重啟）"
+else
+  fail "W1 msg4 未 SENT_AUTO（handback 失效？TTL/cache 唔係 0？）"; W_FAIL=1
 fi
 
 wf_revert triage "" 1
@@ -3788,15 +3807,15 @@ h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$W1_C
 check "W1 職員 send 2（重建 lastOut=HUMAN_TYPED）→ 2xx" "$([ "${H1_CODE:0:1}" = "2" ] && echo y || echo n)" "y"
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W1_CONV' AND direction='OUT' AND \"sentByStaffId\" IS NOT NULL AND status='SENT'" '[{"c":"2"}]' 30
 
-pnpm -s mock-inbound message --clinic TKW --from "$W1_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W1_4_${EPOCH}" --name "E2E W1" >/dev/null 2>&1
-wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_4_${EPOCH}'" '[{"c":"1"}]' 15
-W1_MSG4=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_4_${EPOCH}'" | jf id)
-if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W1_MSG4'" '[{"s":"PROPOSED"}]' 45; then
-  pass "W1 msg4 PROPOSED（revert 後 cooldown 30min 還原生效）"
+pnpm -s mock-inbound message --clinic TKW --from "$W1_WA" --text "牙唔啱食嘢" --wamid "wamid.E2E_W1_5_${EPOCH}" --name "E2E W1" >/dev/null 2>&1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_5_${EPOCH}'" '[{"c":"1"}]' 15
+W1_MSG5=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_W1_5_${EPOCH}'" | jf id)
+if wait_for "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$W1_MSG5'" '[{"s":"PROPOSED"}]' 45; then
+  pass "W1 msg5 PROPOSED（revert 後 cooldown 30min 還原生效）"
 else
-  fail "W1 msg4 未 PROPOSED（revert 未生效？）"; W_FAIL=1
+  fail "W1 msg5 未 PROPOSED（revert 未生效？）"; W_FAIL=1
 fi
-check "W1 msg4 無新 auto OUT（仍 2）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W1_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "2"
+check "W1 msg5 無新 auto OUT（仍 2：msg1 + msg4）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$W1_CONV' AND direction='OUT' AND \"aiAutoSent\"=true" | jf c)" "2"
 
 # ── W2. booking-session confirmText 改字 → golden 重跑新文案 + revert ──────────
 echo "[W/4] W2: confirmText 改字 → golden 3 訊息重跑新文案 + revert..."
@@ -7127,6 +7146,175 @@ else fail "llm-extract: done log 行缺席（log 通道未工作 — 上面 0-hi
 # （patient waId = 8526001<epoch> — log 一出現就係 PII；S3-5 已剷 outbound/graph `to` + SENSITIVE_KEYS +12）
 T635_HITS=$(grep -hE '852[0-9]{8}' /tmp/e2e-server.log /tmp/e2e-worker.log /tmp/e2e-worker2.log /tmp/e2e-worker-fail.log 2>/dev/null | wc -l | tr -d ' ')
 check "T635 log 零 HK 手機格式（852+8 位）" "$T635_HITS" "0"
+
+# ══════════════ S4-2：自動發送原子閘（cwi-final E1 — T650-T655 + T660）══════════════
+# Spec S4-2（行 2776-2974）：所有「冇人撳掣」auto-send 路徑必經 sendAutoIfStillEligible
+# （FOR UPDATE tx 原子閘）。test hook（mock-only，wamid key — SET 可先於 send = 零 race）：
+#   ai:hold:<wamid>     → job 停喺 gate 前（LLM/草稿之後）— 介入窗：assign/發送/丟棄草稿
+#   ai:mockfail:<wamid> → classify fail 一次（BullMQ retry 照行）— transient 斷線
+# 本段 worker 帶 AI_MOCK_DELAY_MS=1500（拉長 LLM 在途窗口）+ WA_GRAPH_MOCK_DELAY_MS=2500（T655 mid-Graph kill）。
+echo "[S4-2] auto-send atomic gate (T650-T655, T660)..."
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+AI_MOCK_DELAY_MS=1500 WA_GRAPH_MOCK_DELAY_MS=2500 nohup pnpm worker >/tmp/e2e-worker-s42.log 2>&1 &
+S42_READY=0
+for i in $(seq 1 45); do grep -q "waiting for jobs" /tmp/e2e-worker-s42.log 2>/dev/null && { S42_READY=1; break; }; sleep 1; done
+check "S4-2 worker（delay env）up（waiting for jobs）" "$S42_READY" "1"
+
+# 店準備：TKW AUTO（T19 已設，PATCH 冪等）+ BOOKING_REQUEST L3 policy（session 路徑）
+CODE=$(curl -s -o /tmp/e2e-s42-mode.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH \
+  "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"AUTO"}')
+check "S4-2 setup：TKW aiMode=AUTO（PATCH 冪等）" "$CODE" "200"
+S42_POL=$(q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-s42-tkw-l3','$TKW_CLINIC_ID','BOOKING_REQUEST','L3',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\" RETURNING \"id\"" | jf id)
+[ -n "$S42_POL" ] || fail "S4-2 setup：TKW L3 policy INSERT 失敗"
+S42_STAFF=$(q "SELECT su.id FROM \"StaffUser\" su JOIN \"StaffClinic\" sc ON sc.\"staffId\"=su.id WHERE sc.\"clinicId\"='$TKW_CLINIC_ID' AND su.\"role\"='STAFF' ORDER BY su.id LIMIT 1" | jf id)
+[ -n "$S42_STAFF" ] || fail "S4-2 setup：搵唔到 TKW STAFF user"
+S42_SLOT=$(pc_pick "$TKW_CLINIC_ID" "" 0)
+[ -n "$S42_SLOT" ] || S42_SLOT=$(pc_pick "$TKW_CLINIC_ID" "" 1)
+[ -n "$S42_SLOT" ] || fail "S4-2 setup：TKW 無 15:00 空槽（djb2 grid）"
+S42_P=${S42_SLOT%%|*}; S42_SUR=$(pc_surname "$S42_P")
+
+# ── T650. hold → staff assign → release → 0 自動發 + 草稿留 PROPOSED（D-6）────────────
+# ★ r2 修：PLAIN QUESTION 文字 → AI_DRAFT 路徑（hold hook 覆蓋；booking session 路徑由 PC-G4/T84C/T652 覆蓋）
+S42A_WA="8526130${EPOCH}"; S42A_W1="wamid.E2E_S42A_1_${EPOCH}"
+redis-cli SET "ai:hold:$S42A_W1" 1 >/dev/null
+pnpm -s mock-inbound message --clinic TKW --from "$S42A_WA" --text "想問下埋門時間" --wamid "$S42A_W1" --name "E2E S42A" >/dev/null 2>&1
+S42A_CONV=$(pc_conv_of "$S42A_WA" "$TKW_CLINIC_ID")
+S42A_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42A_W1' AND \"direction\"='IN'" | jf id)
+# job 喺 gate 前 hold（AI_MOCK_DELAY 1.5s 確保未過）→ 介入：staff 接手（assign）
+sleep 3
+q "UPDATE \"Conversation\" SET \"assigneeId\"='$S42_STAFF' WHERE id='$S42A_CONV'" >/dev/null 2>&1
+redis-cli DEL "ai:hold:$S42A_W1" >/dev/null
+sleep 12
+check "T650 assign 期間 gate 放棄：0 aiAutoSent OUT" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42A_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+check "T650 草稿留 PROPOSED（D-6：gate 放棄唔改草稿）" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42A_IN'" | jf s)" "PROPOSED"
+check "T650 無 AI_AUTO_SEND audit" "$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='AI_AUTO_SEND' AND \"meta\"->>'conversationId'='$S42A_CONV'" | jf c)" "0"
+
+# ── T651. hold → staff 已覆咗病人 → release → 0 自動發（already-answered）──────────────
+S42B_WA="8526131${EPOCH}"; S42B_W1="wamid.E2E_S42B_1_${EPOCH}"
+redis-cli SET "ai:hold:$S42B_W1" 1 >/dev/null
+pnpm -s mock-inbound message --clinic TKW --from "$S42B_WA" --text "想問下埋門時間" --wamid "$S42B_W1" --name "E2E S42B" >/dev/null 2>&1
+S42B_CONV=$(pc_conv_of "$S42B_WA" "$TKW_CLINIC_ID")
+S42B_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42B_W1' AND \"direction\"='IN'" | jf id)
+sleep 3
+# 介入：staff 手動覆咗（raw OUT — SENT + aiAutoSent=false）
+q "INSERT INTO \"Message\" (\"id\",\"conversationId\",\"direction\",\"channel\",\"type\",\"body\",\"status\",\"aiAutoSent\",\"sentByStaffId\",\"waMessageId\",\"billingCategory\",\"createdAt\",\"updatedAt\",\"waTimestamp\") VALUES ('e2e-s42b-staff-out-${EPOCH}','$S42B_CONV','OUT','API','text','staff 手覆：收到','SENT',false,'$S42_STAFF','wamid.S42B_STAFF_${EPOCH}','SERVICE',now(),now(),now())" >/dev/null 2>&1
+redis-cli DEL "ai:hold:$S42B_W1" >/dev/null
+sleep 12
+check "T651 staff 已覆 → gate 放棄：0 aiAutoSent OUT" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42B_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+check "T651 staff OUT 留喺度（SENT）" "$(q "SELECT \"status\"::text s FROM \"Message\" WHERE \"waMessageId\"='wamid.S42B_STAFF_${EPOCH}'" | jf s)" "SENT"
+check "T651 草稿留 PROPOSED" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42B_IN'" | jf s)" "PROPOSED"
+
+# ── T652. 兩訊息 200ms 差 → 恰 1 自動發（replyTo = 較新嗰條；舊 job = superseded）──────────
+S42C_WA="8526132${EPOCH}"; S42C_W1="wamid.E2E_S42C_1_${EPOCH}"; S42C_W2="wamid.E2E_S42C_2_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S42C_WA" --text "想問下埋門時間" --wamid "$S42C_W1" --name "E2E S42C" >/dev/null 2>&1
+sleep 0.2
+pnpm -s mock-inbound message --clinic TKW --from "$S42C_WA" --text "定係電話預約快啲？" --wamid "$S42C_W2" --name "E2E S42C" >/dev/null 2>&1
+S42C_CONV=$(pc_conv_of "$S42C_WA" "$TKW_CLINIC_ID")
+S42C_IN1=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42C_W1' AND \"direction\"='IN'" | jf id)
+S42C_IN2=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42C_W2' AND \"direction\"='IN'" | jf id)
+if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42C_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true AND \"status\"='SENT'" '[{"c":"1"}]' 60; then
+  pass "T652 恰 1 條自動發（兩訊息 200ms 差）"
+else
+  fail "T652 自動發數量 ≠1：$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42C_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf c)"
+fi
+check "T652 replyTo = 較新訊息（superseded 語義）" "$(q "SELECT (\"replyToMessageId\"='$S42C_IN2')::text v FROM \"Message\" WHERE \"conversationId\"='$S42C_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf v)" "true"
+check "T652 舊 job 草稿留 PROPOSED（S1-13 堆疊 stale）" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42C_IN1'" | jf s)" "PROPOSED"
+check "T652 新 job 回覆 = session reply（bookingSessionId 標記 — session 路徑無草稿）" "$(q "SELECT (\"bookingSessionId\" IS NOT NULL)::text v FROM \"Message\" WHERE \"conversationId\"='$S42C_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf v)" "true"
+
+# ── T653. mockfail-once → BullMQ retry → 仍恰 1（唔重發、唔漏發）───────────────────
+S42D_WA="8526133${EPOCH}"; S42D_W1="wamid.E2E_S42D_1_${EPOCH}"
+redis-cli SET "ai:mockfail:$S42D_W1" 1 >/dev/null
+pnpm -s mock-inbound message --clinic TKW --from "$S42D_WA" --text "想問下埋門時間" --wamid "$S42D_W1" --name "E2E S42D" >/dev/null 2>&1
+S42D_CONV=$(pc_conv_of "$S42D_WA" "$TKW_CLINIC_ID")
+S42D_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42D_W1' AND \"direction\"='IN'" | jf id)
+if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42D_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true AND \"status\"='SENT'" '[{"c":"1"}]' 90; then
+  pass "T653 transient fail → retry 成功（恰 1 自動發）"
+else
+  fail "T653 retry 後仍無自動發"
+fi
+S42D_FAILLOG=$(grep -c "ai job failed" /tmp/e2e-worker-s42.log 2>/dev/null)
+check "T653 attempt 1 fail 恰 1 次（log 'ai job failed'）" "$S42D_FAILLOG" "1"
+check "T653 草稿 SENT_AUTO（retry 後正常轉態）" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42D_IN'" | jf s)" "SENT_AUTO"
+
+# ── T654. hold → staff 丟棄草稿 → release → 0 自動發（draft-not-proposed；D-6 留 DISCARDED）
+S42E_WA="8526134${EPOCH}"; S42E_W1="wamid.E2E_S42E_1_${EPOCH}"
+redis-cli SET "ai:hold:$S42E_W1" 1 >/dev/null
+pnpm -s mock-inbound message --clinic TKW --from "$S42E_WA" --text "想問下埋門時間" --wamid "$S42E_W1" --name "E2E S42E" >/dev/null 2>&1
+S42E_CONV=$(pc_conv_of "$S42E_WA" "$TKW_CLINIC_ID")
+S42E_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42E_W1' AND \"direction\"='IN'" | jf id)
+S42E_DRAFT=""
+for _i in $(seq 1 30); do S42E_DRAFT=$(q "SELECT id FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42E_IN'" | jf id); [ -n "$S42E_DRAFT" ] && break; sleep 1; done
+[ -n "$S42E_DRAFT" ] || fail "T654 draft 未建（job 未到 hold 點？）"
+q "UPDATE \"AiDraft\" SET \"status\"='DISCARDED' WHERE id='$S42E_DRAFT'" >/dev/null 2>&1
+redis-cli DEL "ai:hold:$S42E_W1" >/dev/null
+sleep 12
+check "T654 staff 丟棄草稿 → 0 aiAutoSent OUT" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42E_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
+check "T654 草稿留 DISCARDED（gate 唔會還魂草稿）" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE id='$S42E_DRAFT'" | jf s)" "DISCARDED"
+
+# ── T655. kill worker mid-Graph → restart → 恰 1（SENT 或 UNKNOWN，永不 2）───────────
+S42F_WA="8526135${EPOCH}"; S42F_W1="wamid.E2E_S42F_1_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$S42F_WA" --text "想問下有冇位" --wamid "$S42F_W1" --name "E2E S42F" >/dev/null 2>&1
+S42F_CONV=$(pc_conv_of "$S42F_WA" "$TKW_CLINIC_ID")
+# 等 outbound 行緊 mock Graph（SENDING + 無 wamid，WA_GRAPH_MOCK_DELAY_MS=2500 窗口）
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42F_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true AND \"status\"='SENDING'" '[{"c":"1"}]' 60 || fail "T655 未捕到 SENDING 窗口"
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 2
+AI_MOCK_DELAY_MS=1500 WA_GRAPH_MOCK_DELAY_MS=2500 nohup pnpm worker >/tmp/e2e-worker-s42b.log 2>&1 &
+for i in $(seq 1 45); do grep -q "waiting for jobs" /tmp/e2e-worker-s42b.log 2>/dev/null && break; sleep 1; done
+# stalled job re-queue（BullMQ stalledInterval ~30s）→ 等 SENT/UNKNOWN 定案（唔好死 sleep 撞窗口）
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42F_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true AND \"status\" IN ('SENT','UNKNOWN')" '[{"c":"1"}]' 90 || fail "T655 90s 內未定案（SENT/UNKNOWN）"
+S42F_CNT=$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42F_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf c)
+S42F_ST=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE \"conversationId\"='$S42F_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf s)
+case "$S42F_CNT" in 1) pass "T655 kill mid-Graph 後恰 1 條自動覆（status=$S42F_ST）";; *) fail "T655 自動覆數量=$S42F_CNT（期望 1，永不 2）";; esac
+case "$S42F_ST" in SENT|UNKNOWN) ;; *) fail "T655 status=$S42F_ST（期望 SENT 或 UNKNOWN）";; esac
+
+# ── T660. 三訊息：hold jobs 1&2 → 只第 3 條 SENT_AUTO（superseded 連鎖）────────────────
+S42G_WA="8526136${EPOCH}"
+S42G_W1="wamid.E2E_S42G_1_${EPOCH}"; S42G_W2="wamid.E2E_S42G_2_${EPOCH}"; S42G_W3="wamid.E2E_S42G_3_${EPOCH}"
+redis-cli SET "ai:hold:$S42G_W1" 1 >/dev/null
+redis-cli SET "ai:hold:$S42G_W2" 1 >/dev/null
+pnpm -s mock-inbound message --clinic TKW --from "$S42G_WA" --text "想問下埋門時間" --wamid "$S42G_W1" --name "E2E S42G" >/dev/null 2>&1
+sleep 0.2
+pnpm -s mock-inbound message --clinic TKW --from "$S42G_WA" --text "想問下埋門時間" --wamid "$S42G_W2" --name "E2E S42G" >/dev/null 2>&1
+sleep 0.2
+pnpm -s mock-inbound message --clinic TKW --from "$S42G_WA" --text "想問下埋門時間" --wamid "$S42G_W3" --name "E2E S42G" >/dev/null 2>&1
+S42G_CONV=$(pc_conv_of "$S42G_WA" "$TKW_CLINIC_ID")
+S42G_IN1=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42G_W1' AND \"direction\"='IN'" | jf id)
+S42G_IN2=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42G_W2' AND \"direction\"='IN'" | jf id)
+S42G_IN3=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42G_W3' AND \"direction\"='IN'" | jf id)
+# ★ r2 修：DEL holds 前置（3 條 IN 已落庫 → superseded 判斷同 queue 排序無關，job1/2 隨時過 gate 都係 superseded）
+redis-cli DEL "ai:hold:$S42G_W1" "ai:hold:$S42G_W2" >/dev/null
+if wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42G_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true AND \"status\"='SENT'" '[{"c":"1"}]' 120; then
+  pass "T660 第 3 條 job 先過 gate（恰 1 自動發）"
+else
+  fail "T660 第 3 條未自動發"
+fi
+sleep 15
+check "T660 釋放 hold 後仍恰 1（jobs 1&2 = superseded）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42G_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf c)" "1"
+check "T660 replyTo = 第 3 條" "$(q "SELECT (\"replyToMessageId\"='$S42G_IN3')::text v FROM \"Message\" WHERE \"conversationId\"='$S42G_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf v)" "true"
+check "T660 draft1 留 PROPOSED" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42G_IN1'" | jf s)" "PROPOSED"
+check "T660 draft2 留 PROPOSED" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42G_IN2'" | jf s)" "PROPOSED"
+check "T660 draft3 SENT_AUTO" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42G_IN3'" | jf s)" "SENT_AUTO"
+
+# ── S4-2 cleanup：waId sweep + policy + 還原標準 worker ──────────────────────────
+redis-cli --scan --pattern 'ai:hold:*' 2>/dev/null | xargs -r redis-cli DEL >/dev/null 2>&1
+redis-cli --scan --pattern 'ai:mockfail:*' 2>/dev/null | xargs -r redis-cli DEL >/dev/null 2>&1
+for _wa in "8526130${EPOCH}" "8526131${EPOCH}" "8526132${EPOCH}" "8526133${EPOCH}" "8526134${EPOCH}" "8526135${EPOCH}" "8526136${EPOCH}"; do
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"BookingSession\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id IN (SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" ct ON ct.id=c.\"contactId\" WHERE ct.\"waId\"='$_wa')" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE \"waId\"='$_wa'" >/dev/null 2>&1
+done
+q "DELETE FROM \"AutomationPolicy\" WHERE id='e2e-s42-tkw-l3'" >/dev/null 2>&1
+# 還原標準 worker（無 delay env）— 剩 run 尾 + 下一 run hermetic 清場
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-s42r.log 2>&1 &
+S42R_READY=0
+for i in $(seq 1 45); do grep -q "waiting for jobs" /tmp/e2e-worker-s42r.log 2>/dev/null && { S42R_READY=1; break; }; sleep 1; done
+check "S4-2 標準 worker 還原（waiting for jobs）" "$S42R_READY" "1"
 
 # ── summary ────────────────────────────────────────────────────────────
 echo "════════════════════════════════════════════"

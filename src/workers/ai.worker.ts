@@ -1,5 +1,5 @@
 import { Worker, type Job } from "bullmq";
-import { aiQueue, aiUrgentQueue, enqueueOutboundSend, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { aiQueue, aiUrgentQueue, enqueueOutboundSend, getRedis, QUEUE_PREFIX, type IORedis } from "@/lib/queue";
 import { AI_CONCURRENCY, AI_URGENT_CONCURRENCY } from "./concurrency";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
@@ -11,6 +11,7 @@ import {
   classifySessionTurn,
   classifyPainTurn,
   recordAiCall,
+  AiCallError,
   type ClassifyAndDraftResult,
 } from "@/lib/ai";
 import { PROMPT_CONTEXT_MESSAGES } from "@/lib/ai/prompts";
@@ -18,6 +19,7 @@ import { buildAiContext } from "@/lib/ai/pipeline";
 import { runInboundAi, livePersistPort, type InboundConvRef, type DraftRow } from "@/lib/ai/pipeline";
 import { scrubAiSummary } from "@/lib/ai/scrub";
 import { getAutomationLevel } from "@/lib/ai/automation";
+import { sendAutoIfStillEligible, type AutoSendSource } from "@/lib/ai/auto-send-gate";
 import type { SessionSlots } from "@/lib/ai/session-types";
 import { hkToday } from "@/lib/duty/client";
 import { applyRoutingFirstReply } from "@/lib/routing/route";
@@ -165,6 +167,25 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   // H-3：contact 身份（profileName/waId）— aiSummary 落庫前 deterministic scrub（去識別化）用
   const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
 
+  // ★ cwi-final S4-2（job early-exit，慳 GPU）：已有較新 IN 訊息 且 店係 L2+ → 呢個 job 已過時 —
+  //   仍然行 classify（要摘要/urgent 落庫），但跳過 consult LLM 同新開 session（skipHeavy=true）。
+  //   較新訊息嘅 job 會用完整 context 行足全流；原子閘（superseded/already-answered）係最後防线。
+  //   店係 L1（DRAFT-only）→ 照舊行足（純草稿店每個 job 都要出 draft）。
+  let skipHeavy = false;
+  {
+    const newerInEarly = await prisma.message.findFirst({
+      where: {
+        conversationId: conv.id, direction: "IN", channel: "API",
+        OR: [{ createdAt: { gt: msg.createdAt } }, { createdAt: msg.createdAt, id: { gt: msg.id } }],
+      },
+      select: { id: true },
+    });
+    if (newerInEarly) {
+      const earlyLevel = await getAutomationLevel(conv.clinicId, "*");
+      skipHeavy = earlyLevel !== "L1";
+    }
+  }
+
   // ★ AI Workflow T1 (A2)：媒體訊息 → 內部通知軌（StaffNotice 落庫 + notice:new socket）。
   //   客戶端零 AI 回覆（canDraft 限 text + AUTO media 閘）；職員 bell 提示人工處理。
   //   R2 鐵律：commit-then-emit（create 已 commit 先發 socket）。
@@ -236,8 +257,16 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     // ★ Fix A（cwi-fix-20260825-f1）：INTERNAL 備註（type=note）絕不入 LLM prompt —
     //   msgLine 對非 text 類型會輸出 [type body]，唔 filter = 員工內部討論影響草稿/AUTO 覆文。
     //   （同 line ~350 cooldown query 嘅 channel:{not:"INTERNAL"} 同一語義 — 嗰度做咗呢度漏咗。）
-    where: { conversationId: conv.id, channel: { not: "INTERNAL" } },
-    orderBy: [{ waTimestamp: "desc" }, { createdAt: "desc" }], // 同秒 tie（WhatsApp ts 秒級）→ 落庫順序定，latest 必須係最新到
+    where: {
+      conversationId: conv.id,
+      channel: { not: "INTERNAL" },
+      voidedAt: null,
+      status: { notIn: ["FAILED", "CANCELLED", "UNKNOWN"] },
+      // ★ cwi-final S4-2（R-18）：context 上限用 createdAt 唔用 waTimestamp — 唔睇觸發訊息之後嘅嘢
+      createdAt: { lte: msg.createdAt },
+    },
+    // 同秒 tie（WhatsApp ts 秒級）→ id（cuid 可排序）定序，latest 必須係最新到
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: PROMPT_CONTEXT_MESSAGES,
   });
   // ★ cwi-hubaudit-20260915（S1 H-1）：ctx 組裝統一 buildAiContext（沙盤同一 function — 包含觸發訊息）。
@@ -251,6 +280,10 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   //   → 規則路由 → consult engine turn → consult LLM turn（+price/claim guard）→ canDraft → AUTO level+blocks
   //   全部共用；持久化/發送點全經 `PersistPort`（唯一 mode 分岔點 — livePersistPort 每段 = 原本檔對應
   //   段落逐字搬入，鐵律 1 行為零改動；沙盤 = noopPersistPort 零副作用）。
+  // ★ cwi-final S4-2 test hook：ai:mockfail:<msgId> → 模擬 transient AI 斷線（T653：fail 一次 → BullMQ retry 成功）
+  if (await testFailOnceIfSet(msg.waMessageId)) {
+    throw new AiCallError("AI_MOCK_FAIL_ONCE — simulated transient AI failure (e2e hook)");
+  }
   const inboundConvRef: InboundConvRef = {
     id: conv.id,
     clinicId: conv.clinicId,
@@ -284,6 +317,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     ctxMessages,
     isMedia,
     persist: port,
+    // ★ cwi-final S4-2：job early-exit — 跳過 consult LLM turn（分類/摘要/路由照常）
+    skipHeavy,
   });
   const {
     result,
@@ -316,7 +351,9 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     !activeSession &&
     // ★ cwi-final S1-14：急症對話（deterministic 紅旗 intake）唔開任何 session — 病人要嘅係即刻升級，唔係問診
     !updatedConv.urgent &&
-    !job.data.urgentHit
+    !job.data.urgentHit &&
+    // ★ cwi-final S4-2：job early-exit（已有較新 IN 訊息 + L2+ 店）— 唔開新 session（較新 job 處理）
+    !skipHeavy
   ) {
     const level = await getAutomationLevel(conv.clinicId, "BOOKING_REQUEST");
     if (level === "L3" || level === "L4") {
@@ -344,7 +381,9 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     !activePainSession &&
     // ★ cwi-final S1-14：急症對話唔開問診 session（同上）
     !updatedConv.urgent &&
-    !job.data.urgentHit
+    !job.data.urgentHit &&
+    // ★ cwi-final S4-2：job early-exit（同上）— 唔開新問診 session
+    !skipHeavy
   ) {
     // E.7 術後自動判（fail-soft 零 throw：無 waId / 索引未 build / 無 match / fail → false + 問診 fallback）
     const autoPostOp = await resolveAutoPostOp(conv, contact, clinic, ptParams.postOpWindowDays);
@@ -393,6 +432,8 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
     });
   }
   // ── 4.5 AUTO 模式 ─────
+  // ★ cwi-final S4-2 test hook：ai:hold:<msgId> → LLM/草稿之後停喺 gate 前（e2e 介入窗：assign/發送/丟棄草稿）
+  await testHoldIfSet(msg.waMessageId);
   // ★ Fix B（cwi-fix-20260825-f1）：自動覆資格由 resolver 決定（per intent），唔再直 key aiMode —
   //   儀表板逐類 L1/L2 先真正生效；〔全店降 L1〕panic（"*"→L1 policy）即真停自動覆。
   //   行為保證：冇 policy row 嘅店 = resolver fallback aiMode（AUTO→L2 / DRAFT→L1）→ byte 不變。
@@ -539,130 +580,92 @@ async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>
   return { ok: true, intent: result.intent, urgent: updatedConv.urgent, draft: draftId !== null, autoSent };
 }
 
-/**
- * AUTO 模式自動發送（Phase 2b）— 行既有 outbound chain，唔另開路徑。
- *
- * 冪等：同一 draft 只可對應一條 OUT 訊息（re-delivery / BullMQ retry 重跑唔會重發）。
- * 失敗降級：enqueue 失敗 → message 標 FAILED + draft 回退 PROPOSED（staff 可手動處理）。
- * AuditLog 必登（AI_AUTO_SEND）— metadata only，永不存訊息原文。
- *
- * @returns true = 已（或已經）自動發送；false = 降級（draft 仍 PROPOSED，staff 處理）
- */
-async function attemptAutoSend(args: {
-  conv: {
-    id: string;
-    clinicId: string;
-    contactId: string;
-    status: string;
-    lastInboundAt: Date | null;
-  };
-  clinic: { id: string; code: string };
-  draft: { id: string; draftText: string; status: string };
-  msg: { id: string; waMessageId: string | null };
-  result: ClassifyAndDraftResult;
-}): Promise<boolean> {
-  const { conv, clinic, draft, msg, result } = args;
-  const now = new Date();
-
-  // 冪等 guard：呢個 draft 已經發過 → skip
-  const existing = await prisma.message.findFirst({
-    where: { conversationId: conv.id, direction: "OUT", aiDraftId: draft.id },
-    select: { id: true },
-  });
-  if (existing) {
-    log.info(
-      { clinic: clinic.code, conversationId: conv.id, draftId: draft.id, messageId: existing.id },
-      "ai: AUTO send already exists — idempotent skip (no re-send)"
-    );
-    return true;
-  }
-
-  // 寫 OUT 訊息（QUEUED）— 完全跟 staff 發送同一條 outbound 鏈
-  const outMsg = await prisma.message.create({
-    data: {
-      conversationId: conv.id,
-      direction: "OUT",
-      channel: "API",
-      type: "text",
-      body: draft.draftText,
-      status: "QUEUED",
-      sentByStaffId: null,
-      aiAutoSent: true,
-      // ★ consult v2.1 C1（§2.1 M-1）：L2 自動發 = AI_AUTO（cooldown 閘唔計佢）
-      sentVia: "AI_AUTO",
-      aiDraftId: draft.id,
-      // cwi-window-20260901（P1）：AI 窗口內自動覆 = SERVICE（同人手窗口內回覆同類）
-      billingCategory: "SERVICE",
-      waTimestamp: now,
-    },
-  });
-
-  // 入 outbound queue（mock/real Graph、retries、rate limit 全部沿用）
+// ── ★ cwi-final S4-2 test hook（S4-2 gate e2e — mock mode only，production 零成本直接 return）─────────────
+// `ai:hold:<waMessageId>`：job 停喺 gate 前（LLM/草稿之後），e2e 先做介入（assign/發送/丟棄草稿）再 DEL key 放行 —
+//   測 send-time gate 對「LLM 期間員工接手」嘅競態。e2e 事前知 wamid → SET key 可先於 mock-inbound（零 race）。
+//   100ms 輪詢；120s self-protection timeout = 放行（唔 hang worker）。
+// `ai:mockfail:<waMessageId>`：呢個 msg 嘅 classify 只 fail 一次（命中即 DEL — BullMQ retry 照行）— T653 transient 斷線。
+// 兩者都 fail-soft：redis 錯 = 當未設（e2e infra 問題唔好拖死 worker）。
+async function testHoldIfSet(waMessageId: string | null): Promise<void> {
+  if (process.env.AI_MOCK !== "1") return;
+  if (!waMessageId) return;
+  let redis: IORedis;
   try {
-    await Promise.race([
-      enqueueOutboundSend(outMsg.id),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("enqueue timeout")), 1500)
-      ),
-    ]);
-  } catch (err) {
-    // ★ cwi-final S1-15 (P0-07)：enqueue timeout/失敗 = 結果未知 — **唔標 FAILED**、**唔 rollback draft**：
-    //   job 可能已經落咗隊列（jobId=messageId 冪等）— 標 FAILED 會令 row 永遠 claim 唔到（訊息丟失）。
-    //   留 QUEUED → outbound-sweep 120s 後重加兜底。fall through 成功路徑（draft SENT_AUTO + audit）
-    //   = 當「已發出」— 防 staff 再審批同一 draft 造成雙發；訊息實際狀態以 row 為準。
-    log.warn(
-      { clinic: clinic.code, conversationId: conv.id, messageId: outMsg.id, err: err instanceof Error ? err.message : String(err) },
-      "ai: AUTO send enqueue uncertain — message stays QUEUED (sweep will requeue); treated as sent"
-    );
+    redis = getRedis();
+  } catch {
+    return;
   }
+  const key = `ai:hold:${waMessageId}`;
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    let val: string | null;
+    try {
+      val = await redis.get(key);
+    } catch {
+      return; // fail-soft
+    }
+    if (val === null) return; // 放行
+    if (Date.now() > deadline) {
+      log.warn({ waMessageId }, "ai: hold timeout — release（worker self-protection）");
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
 
-  // enqueue 成功/uncertain → 留底 draft（SENT_AUTO，staff 之後可審計）+ AuditLog 必登（metadata only）
-  // ★ consult v2.1 C1（§2.1 M-1）：記實際發出文字 → 下輪 AI context（lastOutboundText）
-  await prisma.conversation
-    .update({ where: { id: conv.id }, data: { lastOutboundText: draft.draftText } })
-    .catch((err) => {
-      log.warn({ err: err instanceof Error ? err.message : String(err) }, "ai: lastOutboundText update failed（fail-soft）");
-    });
-  await prisma.aiDraft.update({
-    where: { id: draft.id },
-    data: { status: "SENT_AUTO", finalText: draft.draftText },
+async function testFailOnceIfSet(waMessageId: string | null): Promise<boolean> {
+  if (process.env.AI_MOCK !== "1") return false;
+  if (!waMessageId) return false;
+  let redis: IORedis;
+  try {
+    redis = getRedis();
+  } catch {
+    return false;
+  }
+  const key = `ai:mockfail:${waMessageId}`;
+  try {
+    const val = await redis.get(key);
+    if (val === null) return false;
+    await redis.del(key);
+    return true;
+  } catch {
+    return false; // fail-soft
+  }
+}
+
+/**
+ * ★ cwi-final S4-2（audit3 P0-01 / P0-02）：AUTO 模式自動發送 — 全經原子閘（sendAutoIfStillEligible）。
+ *
+ * 舊版嘅冪等 guard / QUEUED 寫入 / enqueue / draft 轉態 / audit 全部移入閘內同一 tx（FOR UPDATE 鎖
+ * Conversation + 重查所有 gate + partial unique index Message_ai_reply_once）— R-18：plain
+ * updateMany 擋唔到員工同一刻接手。
+ *
+ * @returns true = 已（或已經）自動發送；false = 降級（draft 仍 PROPOSED，staff 處理 — D-6）
+ */
+async function attemptAutoSend(args: { conv: { id: string; clinicId: string }; clinic: { code: string }; draft: { id: string; draftText: string }; msg: { id: string }; result: ClassifyAndDraftResult }): Promise<boolean> {
+  const r = await sendAutoIfStillEligible({
+    convId: args.conv.id, clinicId: args.conv.clinicId, triggerMsgId: args.msg.id,
+    levelCategory: args.result.intent, minLevel: "L2",
+    text: args.draft.draftText, source: "AI_DRAFT", draftId: args.draft.id,
   });
-  await prisma.auditLog
-    .create({
-      data: {
-        staffId: null,
-        action: "AI_AUTO_SEND",
-        entity: "Message",
-        entityId: outMsg.id,
-        meta: {
-          conversationId: conv.id,
-          messageId: outMsg.id,
-          draftId: draft.id,
-          intent: result.intent,
-          urgency: result.urgency,
-        } as Prisma.InputJsonValue,
-      },
-    })
-    .catch(() => undefined);
-
-  await prisma.$executeRaw`
-    UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
-
-  // ★ metadata only — 冇 body / draftText / summary
-  log.info(
-    {
-      clinic: clinic.code,
-      clinicId: clinic.id,
-      conversationId: conv.id,
-      messageId: outMsg.id,
-      draftId: draft.id,
-      intent: result.intent,
-      urgency: result.urgency,
-      replyWamid: msg.waMessageId,
-    },
-    "ai: AUTO send queued (outbound chain; draft=SENT_AUTO)"
-  );
+  if (!r.sent) {
+    log.info({ clinic: args.clinic.code, conversationId: args.conv.id, draftId: args.draft.id, reason: r.reason }, "ai: AUTO send skipped at send-time gate");
+    return false;
+  }
+  await enqueueUncertainOk(r.messageId);
   return true;
+}
+
+/**
+ * ★ cwi-final S1-15 (P0-07)：enqueue 結果未知（timeout/失敗）→ 留 QUEUED 俾 outbound-sweep 補發。
+ * jobId=messageId 冪等 — sweep 重加唔會雙發。唔標 FAILED、唔回退 draft（當「已發出」防 staff 雙審批）。
+ */
+async function enqueueUncertainOk(messageId: string): Promise<void> {
+  try {
+    await Promise.race([enqueueOutboundSend(messageId), new Promise<never>((_, rej) => setTimeout(() => rej(new Error("enqueue timeout")), 1500))]);
+  } catch (err) {
+    log.warn({ messageId, err: err instanceof Error ? err.message : String(err) }, "enqueue uncertain — left QUEUED for outbound-sweep");
+  }
 }
 
 // ── Phase C（cwi-sess-20260824-c1）：slot-filling session runner（C6.1）──────────────────
@@ -679,7 +682,7 @@ async function handleSessionTurn(
     turns: number;
     noProgress: number;
   },
-  msg: { id: string; waMessageId: string | null; type: string; waTimestamp: Date },
+  msg: { id: string; waMessageId: string | null; type: string; waTimestamp: Date; createdAt: Date },
   conv: {
     id: string;
     clinicId: string;
@@ -694,10 +697,14 @@ async function handleSessionTurn(
 
   // 1. 最近 6 條 text 訊息 + 本店名單（含 apricotId）
   const recent = await prisma.message.findMany({
-    where: { conversationId: conv.id, type: "text" },
-    // 同秒 tie（mock-inbound/WhatsApp ts 秒級）→ createdAt 定序 — 否則 lastInbound 非確定，
-    // e2e 實證 2026-08-25：同秒雙 IN → mock 分類錯訊息 → 時間選擇丟失
-    orderBy: [{ waTimestamp: "desc" }, { createdAt: "desc" }],
+    where: {
+      conversationId: conv.id,
+      type: "text",
+      // ★ cwi-final S4-2（R-18）：context 上限用 createdAt — 唔睇觸發訊息之後嘅嘢
+      createdAt: { lte: msg.createdAt },
+    },
+    // 同秒 tie（mock-inbound/WhatsApp ts 秒級）→ id（cuid 可排序）定序 — 否則 lastInbound 非確定
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: 6,
   });
   const recentMessages = [...recent].reverse().map((m) => ({
@@ -907,7 +914,7 @@ async function handleSessionTurn(
         }
         // AUTO_BOOK：confirm-core（失敗永不自動重試 — 鐵律）
         if (booking.status !== "PENDING") break; // 重跑 job：已確認 → 唔重複落單
-        const r = await confirmBookingCore(booking.id, { type: "AI", sessionId });
+        const r = await confirmBookingCore(booking.id, { type: "AI", sessionId }, { triggerMsgId: msg.id }); // ★ cwi-final S4-2：trigger = 呢輪病人訊息（L4 確認訊息經原子閘）
         if (r.ok) {
           // L4 自動落單成功：staff 通知（title 用 booking 欄砌，零病人資料）
           const m = booking.requestedDate.split("-");
@@ -953,9 +960,9 @@ async function handleSessionTurn(
     }
   }
 
-  // 7. replyText 非 null → sendSessionReply（行現有 outbound pipeline）
+  // 7. replyText 非 null → sendSessionReply（★ cwi-final S4-2：經原子閘 — trigger = 呢輪病人訊息）
   if (reply !== null) {
-    await sendSessionReply(sessionId, conv, reply, aiOut.action);
+    await sendSessionReply(sessionId, conv, reply, aiOut.action, msg.id);
   }
 
   // 8. log metadata only（零 reply 原文、零病人姓名）
@@ -975,101 +982,49 @@ async function handleSessionTurn(
 }
 
 /**
- * Session 回覆（C6.2）— 照 attemptAutoSend 個殼：
- * Message OUT（aiDraftId=null、bookingSessionId、aiAutoSent=true）+ outbound enqueue。
- * 冪等：同一 session 對同條訊息（waTimestamp ≥）已發過回覆 → skip（BullMQ retry 防雙發）。
- * ★ cwi-final S1-15 (P0-07)：enqueue timeout/失敗 = 結果未知 — 唔標 FAILED（row 留 QUEUED，
- * outbound-sweep 120s 後重加兜底）；照返 messageId = 當「已發出」，session 照常 patch。
- */
-/**
- * ★ MD C6.2：session reply — 照 attemptAutoSend 個殼（Message OUT + outbound enqueue）。
- * 冪等：job 級 jobId=`ai-${messageId}` 已保證同一訊息唔會處理兩次 — 唔做 DB 級 dedup
- *（timestamp-range dedup 會誤殺同一秒內兩條 IN 訊息嘅第二條回覆 — e2e 實證 2026-08-25，WhatsApp ts 係秒級）。
- * ★ cwi-final S1-15 (P0-07)：enqueue timeout/失敗 = 結果未知 — 唔標 FAILED（row 留 QUEUED —
- * job 可能已落隊列，jobId 冪等；outbound-sweep 重加兜底）；照返 messageId，session 照 patch。
+ * Session 回覆（C6.2 / Part E pain 共用殼）— ★ cwi-final S4-2：全經原子閘（sendAutoIfStillEligible）。
+ * FOR UPDATE 鎖 Conversation + 重查所有 gate + partial unique index（每條 inbound 只可被自動覆一次）—
+ * 解決咗舊 timestamp-range dedup 嘅同秒兩條 IN 誤殺問題（每條 inbound 各自 replyToMessageId）。
+ * 冪等：job 級 jobId=`ai-${messageId}` + gate P2002 雙重防雙發。
+ * ★ cwi-final S1-15 (P0-07)：enqueue 結果未知 → 留 QUEUED（outbound-sweep 兜底）。
  */
 async function sendSessionReply(
   sessionId: string,
-  conv: { id: string },
+  conv: { id: string; clinicId: string },
   text: string,
   action: string,
+  triggerMsgId: string,
   // ★ Part E（cwi-paintriage-20260903）：pain session 共用同一 outbound 殼 — bookingSessionId=null + 獨立 audit action
   opts?: { bookingSessionId?: string | null; auditAction?: string; logTag?: string }
 ): Promise<string | null> {
-  const bookingSessionId = opts?.bookingSessionId === null ? null : (opts?.bookingSessionId ?? sessionId);
-  const auditAction = opts?.auditAction ?? "AI_SESSION_REPLY";
+  const source: AutoSendSource = opts?.bookingSessionId === null ? "PAIN_SESSION" : "BOOKING_SESSION";
   const tag = opts?.logTag ?? "session";
-  // cwi-window-20260901（P2 / W-2）：過窗 → session reply 發唔出（會變 FAILED outbound）— skip 呢輪，
-  // session 照常（病人下條 inbound 會重新開窗接力）。
-  const freshConv = await prisma.conversation.findUnique({
-    where: { id: conv.id },
-    select: { lastInboundAt: true },
+  const bookingSessionId = opts?.bookingSessionId === null ? null : (opts?.bookingSessionId ?? sessionId);
+  // ★ S4-2 test hook（S4-2 gate e2e）：Redis key ai:hold:<triggerMsgId> 存在 = 停喺 gate 前（e2e 介入窗）
+  await testHoldIfSet(triggerMsgId);
+  const r = await sendAutoIfStillEligible({
+    convId: conv.id,
+    clinicId: conv.clinicId,
+    triggerMsgId,
+    source,
+    levelCategory: "BOOKING_REQUEST",
+    minLevel: "L3",
+    // PAIN_SESSION：pain 問診出口由 caller 預先判斷 enabled（A12 預設開）→ 跳過 level 檢查
+    levelPrechecked: source === "PAIN_SESSION",
+    bookingSessionId,
+    text,
   });
-  if (!getWindowState(freshConv?.lastInboundAt).open) {
-    log.warn({ sessionId, conversationId: conv.id }, `${tag}: reply skipped — window closed（無 outbound）`);
+  if (!r.sent) {
+    // ★ D-6：gate 放棄 = 唔改任何草稿狀態（session 無 draft 可改）；session 照 patch（caller 負責）
+    log.warn(
+      { sessionId, conversationId: conv.id, action, reason: r.reason },
+      `${tag}: reply skipped at send-time gate (no outbound)`
+    );
     return null;
   }
-  const now = new Date();
-  const outMsg = await prisma.message
-    .create({
-      data: {
-        conversationId: conv.id,
-        direction: "OUT",
-        channel: "API",
-        type: "text",
-        body: text,
-        status: "QUEUED",
-        sentByStaffId: null,
-        aiAutoSent: true,
-        // ★ consult v2.1 C1（§2.1 M-1）：session 自動覆 = AI_AUTO（cooldown 閘唔計佢）
-        sentVia: "AI_AUTO",
-        bookingSessionId,
-        // cwi-window-20260901（P1）：session 回覆（窗口內）= SERVICE
-        billingCategory: "SERVICE",
-        waTimestamp: now,
-      },
-    })
-    .catch((err: unknown) => {
-      // Message row 寫入失敗 → 冇 row 存在（唔係 enqueue 問題）— session 照 patch（病人下條訊息自然接力）
-      log.error(
-        { sessionId, conversationId: conv.id, err: err instanceof Error ? err.message : String(err) },
-        `${tag}: reply message.create failed（session 照常）`
-      );
-      return null;
-    });
-  if (!outMsg) return null;
-  try {
-    await Promise.race([
-      enqueueOutboundSend(outMsg.id),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), 1500)),
-    ]);
-  } catch (err) {
-    // ★ cwi-final S1-15 (P0-07)：enqueue uncertain — 唔標 FAILED（row 留 QUEUED — job 可能已落隊列，
-    // jobId=messageId 冪等）；outbound-sweep 120s 後重加兜底（唔雙發）。照返 messageId = 當「已發出」。
-    log.warn(
-      { sessionId, conversationId: conv.id, messageId: outMsg.id, err: err instanceof Error ? err.message : String(err) },
-      `${tag}: reply enqueue uncertain — message stays QUEUED (sweep will requeue)`
-    );
-  }
-  await prisma.auditLog
-    .create({
-      data: {
-        staffId: null,
-        action: auditAction,
-        entity: "Message",
-        entityId: outMsg.id,
-        // metadata only：sessionId + action（零 reply 原文）
-        meta: { conversationId: conv.id, sessionId, action },
-      },
-    })
-    .catch(() => undefined);
-  await prisma.$executeRaw`
-    UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
-  // ★ consult v2.1 C1（§2.1 M-1）：記實際發出文字 → 下輪 AI context
-  await prisma.conversation
-    .update({ where: { id: conv.id }, data: { lastOutboundText: text } })
-    .catch(() => undefined);
-  return outMsg.id;
+  await enqueueUncertainOk(r.messageId);
+  log.info({ sessionId, conversationId: conv.id, messageId: r.messageId, action }, `${tag}: reply queued via send-time gate`);
+  return r.messageId;
 }
 
 /**
@@ -1178,7 +1133,7 @@ async function handlePainTriageTurn(
     noProgress: number;
     autoPostOp: boolean;
   },
-  msg: { id: string; waMessageId: string | null; type: string; waTimestamp: Date; aiDraftId: string | null },
+  msg: { id: string; waMessageId: string | null; type: string; waTimestamp: Date; aiDraftId: string | null; createdAt: Date },
   conv: { id: string; clinicId: string; contactId: string; aiSummary: string | null },
   clinic: { id: string; code: string; name: string }
 ): Promise<Record<string, unknown>> {
@@ -1189,9 +1144,13 @@ async function handlePainTriageTurn(
 
   // 1. 最近 6 條 IN text（canonical = lexicon 正規化後 — 紅旗 match；原文 — impression 主訴，見 lexicon.ts 註）
   const recent = await prisma.message.findMany({
-    where: { conversationId: conv.id, direction: "IN", type: "text" },
-    // 同秒 tie → createdAt 定序（同 booking session 嘅非確定性修）
-    orderBy: [{ waTimestamp: "desc" }, { createdAt: "desc" }],
+    where: {
+      conversationId: conv.id, direction: "IN", type: "text",
+      // ★ cwi-final S4-2（R-18）：context 上限用 createdAt — 唔睇觸發訊息之後嘅嘢
+      createdAt: { lte: msg.createdAt },
+    },
+    // 同秒 tie → id（cuid 可排序）定序（同 booking session 嘅非確定性修）
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: 6,
   });
   const recentIn = [...recent].reverse().map((m) => m.body ?? "");
@@ -1377,9 +1336,9 @@ async function handlePainTriageTurn(
     await prisma.conversation.update({ where: { id: conv.id }, data: { aiSummary: summary } });
   }
 
-  // 7. replyText 非 null → 共用 session reply 殼（bookingSessionId=null；過窗 skip 喺殼內）
+  // 7. replyText 非 null → 共用 session reply 殼（★ cwi-final S4-2：經原子閘 — levelPrechecked；trigger = 呢輪病人訊息）
   if (reply !== null) {
-    await sendSessionReply(sessionId, conv, reply, aiOut.action, {
+    await sendSessionReply(sessionId, conv, reply, aiOut.action, msg.id, {
       bookingSessionId: null,
       auditAction: "AI_PAIN_SESSION_REPLY",
       logTag: "pain-triage",

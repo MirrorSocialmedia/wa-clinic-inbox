@@ -96,7 +96,9 @@ function parseAndValidate(content: string): {
   return {
     intent: o["intent"] as AiIntent,
     urgency: o["urgency"] as AiUrgency,
-    needsHuman: Boolean(o["needsHuman"]),
+    // ★ cwi-final S4-2（R-18）：needsHuman 缺/非法 → true（fail-closed — 保守方向：寧可出 draft 俾 staff 審批，
+    // 唔好因為 LLM 漏輸出一欄就自動發）。舊 Boolean(...) = 缺 → false = fail-open（P0 級漏洞）。
+    needsHuman: o["needsHuman"] === false ? false : true,
     confidence,
     summary,
     draft,

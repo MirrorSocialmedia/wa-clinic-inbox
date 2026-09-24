@@ -75,6 +75,38 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     return;
   }
 
+  // ★ cwi-final S4-2（outbound 二次閘）：aiAutoSent 訊息喺 claim SENDING 之後、Graph 之前再核
+  // 「仍冇人接手」— 補 send-time gate（FOR UPDATE 主防）到實際發出之間嘅窗口（outbound 排隊中
+  // 員工接手/發咗訊息/對話轉急症）。
+  // 放棄 = CANCELLED（AUTO_GATE_LATE）+ 草稿回退 PROPOSED（D-6：staff 仍可用）+ UI 事件。
+  if (msg.aiAutoSent) {
+    const c = await prisma.conversation.findUnique({
+      where: { id: msg.conversationId },
+      select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true, urgent: true, humanTookOver: true },
+    });
+    // 觸發之後有非 AI OUT（人手/系統）已覆 → 呢條 AI 覆多餘
+    const humanAfter = await prisma.message.findFirst({
+      where: { conversationId: msg.conversationId, direction: "OUT", id: { not: msg.id }, createdAt: { gt: msg.createdAt }, aiAutoSent: false, status: { notIn: ["FAILED", "CANCELLED"] } },
+      select: { id: true },
+    });
+    if (!c || c.assigneeId || c.urgent || c.humanTookOver || humanAfter) {
+      await prisma.message.update({ where: { id: msg.id }, data: { status: "CANCELLED", errorCode: "AUTO_GATE_LATE" } });
+      if (msg.aiDraftId) await prisma.aiDraft.updateMany({ where: { id: msg.aiDraftId, status: "SENT_AUTO" }, data: { status: "PROPOSED" } });
+      if (c) {
+        await publishConvEvent(convRef(c), "message:status", {
+          conversationId: c.id,
+          clinicId: c.clinicId,
+          // message:status zod 要 waMessageId 必填（QUEUED row 未發 = 用 row id 兜底，同 EMPTY_BODY 既有 pattern）
+          waMessageId: msg.waMessageId ?? msg.id,
+          status: "CANCELLED",
+          errorCode: "AUTO_GATE_LATE",
+        });
+      }
+      log.info({ messageId, conversationId: msg.conversationId, humanAfter: humanAfter?.id ?? null }, "outbound: AUTO gate late — CANCELLED（human took over during send）");
+      return;
+    }
+  }
+
   const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
   if (!conv) {
     throw new Error(`outbound: conversation missing for message ${messageId}`);
