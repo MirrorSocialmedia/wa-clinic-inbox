@@ -21,13 +21,25 @@ try {
 
 import "./e2e-origin-shim";
 import { execSync, spawnSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createHmac } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import prisma from "../src/lib/prisma";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// ★ cwi-final S3-9：healthz 詳細 body token gate — .env.local 取 HEALTHZ_TOKEN（gitignored）；
+// 未設時唔附加參數（gate 停用）。
+const HEALTHZ_QS = (() => {
+  try {
+    const m = readFileSync(path.join(ROOT, ".env.local"), "utf8").match(/^HEALTHZ_TOKEN=(.*)$/m);
+    const v = m?.[1]?.trim();
+    return v ? `?token=${v}` : "";
+  } catch {
+    return "";
+  }
+})();
 const PG_PORT = 15432;
 const PGDATA = path.join(ROOT, ".dev/pgdata");
 let failures = 0;
@@ -82,7 +94,7 @@ async function main(): Promise<void> {
     console.error("FATAL: PG 15432 未 running — abort（唔會 stop 任何嘢）");
     process.exit(1);
   }
-  const serverUp = sh("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3100/healthz").startsWith("2");
+  const serverUp = sh(`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3100/healthz${HEALTHZ_QS}`).startsWith("2");
   if (!serverUp) {
     console.error("FATAL: dev server 3100 /healthz 唔 2xx — abort");
     process.exit(1);

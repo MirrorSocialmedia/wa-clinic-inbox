@@ -51,6 +51,15 @@ const ENDPOINT_URL = `http://127.0.0.1:${PORT}/api/flows/endpoint`;
 const WEBHOOK_URL = `http://127.0.0.1:${PORT}/api/wa/webhook`;
 const SECRET = process.env.WA_APP_SECRET ?? "";
 
+// S3-8：flows/endpoint 簽名（同 webhook 同源 — HMAC(WA_APP_SECRET, raw body)）
+function flowSig(raw: string): string {
+  if (!SECRET) {
+    console.error("WA_APP_SECRET missing — 無法簽 flows/endpoint 請求");
+    process.exit(2);
+  }
+  return "sha256=" + createHmac("sha256", SECRET).update(raw).digest("hex");
+}
+
 // ── CLI parse ───────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const [cmd, ...rest] = argv;
@@ -134,7 +143,7 @@ async function step(): Promise<void> {
   const raw = JSON.stringify(body);
   const res = await fetch(ENDPOINT_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-hub-signature-256": flowSig(raw) },
     body: raw,
   });
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -285,7 +294,7 @@ async function stepx(): Promise<void> {
     initial_vector: iv.toString("base64"),
   };
   const raw = JSON.stringify(body);
-  const res = await fetch(ENDPOINT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: raw });
+  const res = await fetch(ENDPOINT_URL, { method: "POST", headers: { "Content-Type": "application/json", "x-hub-signature-256": flowSig(raw) }, body: raw });
   const text = await res.text();
 
   if (res.status >= 200 && res.status < 300 && (res.headers.get("content-type") ?? "").includes("text/plain")) {

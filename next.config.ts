@@ -22,6 +22,24 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        source: "/(.*)",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "Referrer-Policy", value: "same-origin" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Strict-Transport-Security", value: "max-age=31536000" },
+          // S3-9：CSP 先 report-only（dev HMR 有 inline/eval — enforce 會殺 playwright 段；
+          // 跑一日收集 violation 後先轉 Content-Security-Policy enforce）。
+          // Embedded Signup 頁需要 connect.facebook.net（spec 註）。
+          {
+            key: "Content-Security-Policy-Report-Only",
+            value:
+              "default-src 'self'; img-src 'self' blob: data:; connect-src 'self' wss: https://connect.facebook.net; " +
+              "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+          },
+        ],
+      },
+      {
         source: "/sw.js",
         headers: [
           { key: "Cache-Control", value: "no-cache, no-store, must-revalidate" },

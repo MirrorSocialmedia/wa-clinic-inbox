@@ -44,6 +44,17 @@ try {
   /* 靠 process env */
 }
 const BASE = process.env.BASE ?? "http://127.0.0.1:3100";
+// ★ cwi-final S3-9：healthz 詳細 body token gate — .env.local 取 HEALTHZ_TOKEN（gitignored）；
+// 未設時唔附加參數（gate 停用）。
+const HEALTHZ_QS = (() => {
+  try {
+    const m = readFileSync(path.join(REPO, ".env.local"), "utf8").match(/^HEALTHZ_TOKEN=(.*)$/m);
+    const v = m?.[1]?.trim();
+    return v ? `?token=${v}` : "";
+  } catch {
+    return "";
+  }
+})();
 const CA_PATH = "/tmp/e2e-push-tls/ca.pem";
 const WORKER_LOG = "/tmp/e2e-s115-worker.log";
 const WEB_LOG = "/tmp/e2e-s115-web.log";
@@ -248,7 +259,7 @@ function startWeb(extraEnv: Record<string, string>): void {
 
 async function webHealthy(): Promise<boolean> {
   try {
-    const res = await fetch(`${BASE}/healthz`);
+    const res = await fetch(`${BASE}/healthz${HEALTHZ_QS}`);
     return res.status === 200;
   } catch {
     return false;

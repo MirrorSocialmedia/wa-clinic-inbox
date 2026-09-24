@@ -26,16 +26,20 @@
  *   - t636 = S3-6 CSRF/Origin 403/415 + 同 IP 11 登入 429（普通 3100）
  *   - t634 = S3-5 TOTP 重放/423 + 強制 enroll（restart 3100 帶 TOTP_ENFORCE_FROM → 斷言 → 還原）
  *   - t635 = S3-5 log 私隱：852+8 位 grep = 0（e2e log + w3100 log）
+ *   - t637 = S3-8 flows/endpoint 簽名/傳輸碼（432 無簽名/421 decrypt/427 expired token）
  * fixture 全部 fixed cuid + finally 清理（T750 pattern）。
  */
 import fs from "node:fs";
 import path from "node:path";
+import http from "node:http";
+import { createHmac, randomBytes } from "node:crypto";
 import { execSync, spawn } from "node:child_process";
 import { Prisma, PrismaClient, Role } from "@prisma/client";
 import * as argon2 from "argon2";
 import { io as socketIoClient } from "socket.io-client";
 import IORedis from "ioredis";
 import { totpCode } from "../src/lib/totp";
+import { ensureKeypair, wrapAesKey, encryptGcm } from "../src/lib/flows/crypto";
 
 // 遞迴搵 route.ts（免外部 glob 依賴 — repo 無 glob/@types/glob；行為 = globSync("src/app/api/**/route.ts")）
 function listRouteFiles(root: string): string[] {
@@ -56,6 +60,18 @@ try {
 } catch { /* .env 無就 skip（CI） */ }
 
 const BASE = process.env.T630_BASE ?? "http://127.0.0.1:3100"; // T639：3101 flag-off 實例
+
+// ★ cwi-final S3-9：healthz 詳細 body token gate — .env.local 取 HEALTHZ_TOKEN（gitignored）；
+// 未設時唔附加參數（gate 停用）。
+const HEALTHZ_QS = (() => {
+  try {
+    const m = fs.readFileSync(path.resolve(process.cwd(), ".env.local"), "utf8").match(/^HEALTHZ_TOKEN=(.*)$/m);
+    const v = m?.[1]?.trim();
+    return v ? `?token=${v}` : "";
+  } catch {
+    return "";
+  }
+})();
 
 // ★ cwi-final S3-6 harness 兼容（CSRF middleware 上線 — 裸 fetch 全數 403/415）：
 // global fetch shim：打 BASE/api/* 嘅非 GET/HEAD 請求自動補 `origin: BASE`（同站）
@@ -266,8 +282,9 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401 }, // signature 錯 = 401（快速拒）
   },
   "POST /api/flows/endpoint": {
+    // S3-8：簽名強制（dev+prod）— 無 x-hub-signature-256 → 432（先於 body 驗證）
     fixture: () => ({ url: "/api/flows/endpoint", method: "POST", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 400 }, // 快照：S3-8 會改（432 簽名 / 421 解密 / 427 token）
+    expect: { UNAUTH: 432 }, // S3-8：無簽名 → 432（transport error；421 解密 / 427 token 見 T637）
   },
   "GET /api/flows/endpoint": {
     fixture: () => ({ url: "/api/flows/endpoint" }),
@@ -761,8 +778,9 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
   },
   "GET /api/duty-roster": {
+    // S3-9：scope 統一（param → assertClinicAccess 全 role 含 SUPERVISOR；無 param → scopedClinicSet[0]）
     fixture: () => ({ url: "/api/duty-roster?clinicId=TY" }), // clinicId 參數 = 店 CODE（唔係 id）— STAFF 參數必同自己店 code 一致；ADMIN 按 code 搵店
-    expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
+    expect: { UNAUTH: 401, STAFF_TY: 200, SUPERVISOR: 200, ADMIN_ALL: 200 }, // S3-9：SUPERVISOR + clinicId → assertClinicAccess 過 → 200
   },
   "POST /api/flows/holds/[id]/commit": {
     fixture: () => ({ url: "/api/flows/holds/nope/commit", method: "POST", body: JSON.stringify({}) }),
@@ -820,8 +838,9 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 404 },
   },
   "POST /api/messages/[id]/void": {
-    fixture: () => ({ url: "/api/messages/nope/void", method: "POST", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-9（assertConversationAccess 先行）
+    // S3-9：access check first — msgPre = IN 訊息 @ F 店（STAFF_TY 外店）→ 403（先於 void 業務驗證）
+    fixture: () => ({ url: `/api/messages/${F.msgPre}/void`, method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403 }, // S3-9：assertConversationAccess 先行 → 403（外店）
   },
   "POST /api/messages/send": {
     fixture: () => ({ url: "/api/messages/send", method: "POST", body: JSON.stringify({}) }),
@@ -851,8 +870,9 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
   },
   "POST /api/push/subscribe": {
+    // S3-7：endpoint vendor allowlist（fail-closed）— example.com 唔喺 allowlist → 400（本格 = allowlist 負例）
     fixture: () => ({ url: "/api/push/subscribe", method: "POST", body: JSON.stringify({ endpoint: "https://example.com/ep", keys: { p256dh: "x", auth: "y" }, user: "u" }) }),
-    expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 }, // 快照：S3-7（allowlist 會改 → 400）；teardown 清 PushSubscription
+    expect: { UNAUTH: 401, STAFF_TY: 400, ADMIN_ALL: 400 }, // S3-7：唔喺 vendor allowlist → 400（唔建行）；teardown 清 PushSubscription
   },
   "POST /api/push/test": {
     fixture: () => ({ url: "/api/push/test", method: "POST", body: JSON.stringify({}) }),
@@ -1506,8 +1526,8 @@ function connectSocket(cookie: string, label: string) {
 const T632 = {
   staff: "t632staffa0000000000000001",
   email: "t632.user@wa-clinic.local",
-  epA: "https://push.e2e.example/t632-ep-a-000000000001",
-  epB: "https://push.e2e.example/t632-ep-b-000000000001",
+  epA: "https://fcm.googleapis.com/fcm/send/t632epa0000000000000001", // S3-7：allowlist 內 fake endpoint（e2e 唔真 send push）
+  epB: "https://fcm.googleapis.com/fcm/send/t632epb0000000000000001",
   sub: { p256dh: "BNt632fakep256dhkey0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", auth: "t632fakeauth" },
 };
 
@@ -1782,7 +1802,7 @@ async function waitHealthz(timeoutMs: number): Promise<boolean> {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     try {
-      const r = await fetch(BASE + "/healthz", { signal: AbortSignal.timeout(3_000) });
+      const r = await fetch(BASE + "/healthz" + HEALTHZ_QS, { signal: AbortSignal.timeout(3_000) });
       if (r.ok) return true;
     } catch { /* 未起 */ }
     await new Promise((r) => setTimeout(r, 1_000));
@@ -1901,6 +1921,116 @@ async function t635() {
   if (hits > 0) console.log(`  前 3 行：\n${hits && out.split("\n").slice(0, 3).join("\n")}`);
 }
 
+// ── T637（S3-8：flows/endpoint 簽名強制 + 傳輸層代碼 432/421/427 + 24h 過期）────
+async function t637() {
+  console.log("\n═══ T637 — flows/endpoint 簽名 + 傳輸碼（S3-8）═══");
+  const waSec = process.env.WA_APP_SECRET ?? "";
+  if (!waSec) throw new Error("WA_APP_SECRET missing（.env）— T637 需要簽名");
+  const fSec = process.env.FLOW_JWT_SECRET ?? "";
+  if (fSec.length < 32) throw new Error("FLOW_JWT_SECRET missing（.env）— T637 需要偽造 expired token");
+
+  const sig = (raw: string) => "sha256=" + createHmac("sha256", waSec).update(raw).digest("hex");
+  const b64url = (b: Buffer) => b.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  // ★ 2026-09-24 D4：T637 signed POST 用 node:http 而唔係 fetch —
+  //   Node 22.22 內置 undici fetch 喺「有效 HMAC 簽名 header（71 字）+ ~500B body」組合下
+  //   對 Next dev server 會 deterministic 拋 client-side UND_ERR_REQ_CONTENT_LENGTH_MISMATCH
+  //   （server 無咩事：curl / node:http 同樣 request 回正常 432/421/427；小 body 或
+  //   無效簽名（server 快速 432）唔中招）。實測記錄見 /tmp/kairo-progress-cwi-stage3.md。
+  //   呢度測嘅係 server 傳輸行為 — node:http 係合法 client，行為更 deterministic。
+  const jpost = (obj: unknown, extra: Record<string, string> = {}) => {
+    const raw = JSON.stringify(obj);
+    const u = new URL(BASE + "/api/flows/endpoint");
+    return new Promise<Response>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: u.hostname,
+          port: u.port,
+          path: u.pathname,
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(raw),
+            origin: u.origin, // 對齊 e2e-origin-shim 語義（CSRF 對 /api/flows/endpoint 豁免，多一層保險）
+            "x-hub-signature-256": sig(raw),
+            ...extra,
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c: Buffer) => chunks.push(c));
+          res.on("end", () => resolve(new Response(Buffer.concat(chunks), { status: res.statusCode ?? 0 })));
+        },
+      );
+      req.setTimeout(15_000, () => req.destroy(new Error("T637 jpost timeout")));
+      req.on("error", reject);
+      req.write(raw);
+      req.end();
+    });
+  };
+  const errCode = async (r: Response) => ((await r.json().catch(() => ({}))) as { error?: string }).error ?? "?";
+
+  const kp = ensureKeypair();
+
+  // 1) 無簽名 → 432 invalid_signature
+  {
+    const r = await fetch(BASE + "/api/flows/endpoint", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(15_000),
+    });
+    assertEq("T637 無簽名 → 432", r.status, 432);
+    assertEq("T637 無簽名 code", await errCode(r), "invalid_signature");
+  }
+  // 2) 錯簽名 → 432
+  {
+    const r = await jpost({}, { "x-hub-signature-256": "sha256=" + "ab".repeat(32) });
+    assertEq("T637 錯簽名 → 432", r.status, 432);
+  }
+  // 3) 有效簽名 + garbage wrapped_key → 421 decrypt_failed
+  {
+    const iv = randomBytes(12);
+    const r = await jpost({
+      phone_number_id: "t637-fake-phone",
+      wa_id: "t637fake001",
+      data_exchange: { encrypted: { payload: "AAAA", iv: iv.toString("base64"), key_id: kp.kid, wrapped_key: randomBytes(256).toString("base64") } },
+    });
+    assertEq("T637 decrypt 失敗 → 421", r.status, 421);
+    assertEq("T637 decrypt code", await errCode(r), "decrypt_failed");
+  }
+  // 4) 有效簽名 + key_id 唔match → 421
+  {
+    const aesKey = randomBytes(16);
+    const iv = randomBytes(12);
+    const enc = encryptGcm(aesKey, iv, { action: "SCREEN_PROVIDER", flow_token: "x" });
+    const r = await jpost({
+      phone_number_id: "t637-fake-phone",
+      wa_id: "t637fake001",
+      data_exchange: { encrypted: { payload: enc.payload, iv: iv.toString("base64"), key_id: "deadbeef0000000000000000000000", wrapped_key: wrapAesKey(kp.publicPem, aesKey) } },
+    });
+    assertEq("T637 unknown key_id → 421", r.status, 421);
+  }
+  // 5) 有效簽名 + 有效 envelope + 偽造 expired token（exp = now-3600，FLOW_JWT_SECRET 簽）→ 427
+  //    （驗 24h exp 強制：HMAC 正確都唔救得 — fail-closed）
+  {
+    const now = Math.floor(Date.now() / 1000);
+    const header = b64url(Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })));
+    const body = b64url(Buffer.from(JSON.stringify({ convId: "t637-conv", clinicId: "t637-clinic", iat: now - 90_000, exp: now - 3600 })));
+    const expiredToken = `${header}.${body}.${createHmac("sha256", fSec).update(`${header}.${body}`).digest("base64url")}`;
+    const aesKey = randomBytes(16);
+    const iv = randomBytes(12);
+    const enc = encryptGcm(aesKey, iv, { action: "SCREEN_PROVIDER", flow_token: expiredToken });
+    const r = await jpost({
+      phone_number_id: "t637-fake-phone",
+      wa_id: "t637fake001",
+      data_exchange: { encrypted: { payload: enc.payload, iv: iv.toString("base64"), key_id: kp.kid, wrapped_key: wrapAesKey(kp.publicPem, aesKey) } },
+    });
+    assertEq("T637 expired token → 427", r.status, 427);
+    assertEq("T637 expired token code", await errCode(r), "invalid_flow_token");
+  }
+  console.log("T637 done");
+}
+
 // ── main（CJS — tsx 無 type:module → 唔可以用 top-level await）────────────────
 async function main() {
   const phase = (process.argv.find((a) => a.startsWith("--phase=")) ?? "").split("=")[1] ?? "t630";
@@ -1944,6 +2074,12 @@ async function main() {
     } finally {
       await prisma.$disconnect();
       await redis.quit().catch(() => undefined);
+    }
+  } else if (phase === "t637") {
+    try {
+      await t637();
+    } finally {
+      await prisma.$disconnect();
     }
   } else {
     let fx: Fixtures;

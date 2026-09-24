@@ -5,6 +5,10 @@
 set -u
 cd "$(dirname "$0")/.."
 BASE=http://127.0.0.1:3100
+# ★ cwi-final S3-9：healthz 詳細 body token gate — .env.local 取 HEALTHZ_TOKEN（gitignored）
+HEALTHZ_TOKEN="$(grep -oP '^HEALTHZ_TOKEN=\K.*' .env.local 2>/dev/null | tail -1)"
+HEALTHZ_QS=""
+[ -n "$HEALTHZ_TOKEN" ] && HEALTHZ_QS="?token=$HEALTHZ_TOKEN"
 Q=./node_modules/.bin/tsx
 TS() { date +%s%3N; }
 now() { date '+%H:%M:%S'; }
@@ -25,7 +29,7 @@ T1=$(TS); echo "t1=$(now) ($T1)"
 redis-cli shutdown nosave 2>/dev/null || true
 sleep 1
 redis-cli ping 2>&1 | head -1
-HZ=$(curl -s --max-time 8 "$BASE/healthz")
+HZ=$(curl -s --max-time 8 "$BASE/healthz$HEALTHZ_QS")
 echo "  healthz 停機中: $HZ"
 
 echo "═══ 3. 停機期間入站（webhook 會 hang — 背景等）═══"

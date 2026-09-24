@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { type NextRequest, NextResponse } from "next/server";
 import IORedis from "ioredis";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
@@ -20,6 +20,12 @@ import { checkMediaBoot } from "@/lib/wa/media";
  *   security（安全審計 C-1 boot assertion 曝光位 — 「未加密碟」冇得靜默）：
  *     diskEncrypted = production 時 DISK_ENCRYPTED=1 係咪設咗（true/false）；非 production = null（dev 唔計）
  *     mediaDir      = "ok" | "dev-fallback" | "error"（error = production 媒體落唔到碟）
+ *
+ * S3-9 token gate：
+ * - 公開（無 token）→ 只回 `{ ok }`（liveness；200/503 語義不變）
+ * - `?token=$HEALTHZ_TOKEN` 正確 → 詳細 body（db/redis/ai/security）
+ * - 帶 token 但唔正確 → 401（fail-closed）
+ * - HEALTHZ_TOKEN 未設（dev 便利）→ gate 停用，直接回詳細 body
  */
 export const dynamic = "force-dynamic"; // 唔好 static pre-render（build 時唔准打 DB/Redis）
 
@@ -66,7 +72,7 @@ async function checkAi(): Promise<AiHealth> {
 // 一次性 ERROR（boot assertion 曝光 — 每次 healthz hit 重打會爆 log；module-level flag）
 let securityErrorLogged = false;
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const [db, redis, ai, media] = await Promise.all([
     checkDb(),
     checkRedis(),
@@ -91,5 +97,20 @@ export async function GET() {
   if (!ok) {
     log.warn({ ...body }, "healthz: degraded");
   }
-  return NextResponse.json(body, { status: ok ? 200 : 503 });
+  const status = ok ? 200 : 503;
+
+  // S3-9 token gate：公開只回 { ok }（liveness）；詳細（security flags / queue）要 ?token
+  const tokenCfg = process.env.HEALTHZ_TOKEN ?? "";
+  const provided = req.nextUrl.searchParams.get("token") ?? "";
+  if (tokenCfg) {
+    if (provided) {
+      if (provided !== tokenCfg) {
+        return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+      }
+      return NextResponse.json(body, { status });
+    }
+    return NextResponse.json({ ok }, { status });
+  }
+  // gate 停用（HEALTHZ_TOKEN 未設）— dev 便利：直接詳細 body
+  return NextResponse.json(body, { status });
 }

@@ -26,6 +26,10 @@ export WA_MOCK=1
 TSX=./node_modules/.bin/tsx
 PORT="${PORT:-3100}"
 BASE="http://127.0.0.1:${PORT}"
+# ★ cwi-final S3-9：healthz 詳細 body token gate — .env.local 取 HEALTHZ_TOKEN（gitignored）
+HEALTHZ_TOKEN="$(grep -oP '^HEALTHZ_TOKEN=\K.*' .env.local 2>/dev/null | tail -1)"
+HEALTHZ_QS=""
+[ -n "$HEALTHZ_TOKEN" ] && HEALTHZ_QS="?token=$HEALTHZ_TOKEN"
 
 echo "════════════════════════════════════════════"
 echo " WA Clinic Inbox — Real-AI E2E (sglang)"
@@ -79,7 +83,7 @@ trap cleanup EXIT
 
 UP=0
 for i in $(seq 1 90); do
-  if curl -sf "$BASE/healthz" >/dev/null 2>&1; then UP=1; break; fi
+  if curl -sf "$BASE/healthz$HEALTHZ_QS" >/dev/null 2>&1; then UP=1; break; fi
   sleep 1
 done
 [ "$UP" = 1 ] || { echo "FATAL: server 90s 未起"; tail -30 /tmp/e2e-realai-server.log; exit 1; }

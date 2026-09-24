@@ -2,9 +2,12 @@
  * WhatsApp Flow data_exchange endpoint（MD §8.2 + cwi-r2 2026-08-27 生產真 spec 雙信封）
  *
  * WhatsApp（或 mock client）POST 過嚟 — **唔使 session auth**（同 webhook 一樣係
- * 外部端點）：身份靠 ① RSA 私鑰解鎖 ② flow_token JWT（簽 conversationId+clinicId，
+ * 外部端點）：身份靠 ⓪ x-hub-signature-256（S3-8，HMAC WA_APP_SECRET，同 webhook 一致）
+ * ① RSA 私鑰解鎖 ② flow_token JWT（簽 conversationId+clinicId，S3-8 加 24h exp，
  * 防別店/別對話用）③ FlowSession 狀態（SENT 先收）④ wa_id/phone_number_id 對照
  *（legacy 信封先有）。
+ *
+ * 傳輸層錯誤代碼（S3-8）：432 無/錯簽名；421 decrypt 失敗；427 token 無效/過期。
  *
  * ══ 雙信封（cwi-r2）══
  * **生產真 spec（Meta 2026 data endpoint）**：
@@ -63,6 +66,7 @@ import { syncWindow, getSlots, hkTodayStr, hkDateOffset } from "@/lib/availabili
 import { getBookableSlots, claimSlot, filterBookableSlots, WorkforceApiError, refreshAvailability, slotClaimEnabled, type BookableDay, type BookableSlot } from "@/lib/workforce/client";
 import { getSlotFreshness, invalidateAvailabilityDay } from "@/lib/availability";
 import { hit, clientIpFromHeaders } from "@/lib/rate-limit";
+import { verifyWaSignature } from "@/lib/wa-signature";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -117,6 +121,15 @@ export async function POST(req: NextRequest) {
   if (!(await hit(`flow:ip:${clientIpFromHeaders(req.headers)}`, 60, 60))) {
     return err(429, "rate_limited");
   }
+
+  // ★ S3-8：x-hub-signature-256 強制（dev+prod 一致 — mirror webhook fail-closed；
+  //   簽名係對 raw body 嘅 HMAC(WA_APP_SECRET) — 先讀 raw text 先可以驗簽再 parse）
+  const rawBody = await req.text();
+  if (!verifyWaSignature(rawBody, req.headers.get("x-hub-signature-256"), process.env.WA_APP_SECRET)) {
+    log.warn("flow endpoint: invalid x-hub-signature-256 → 432");
+    return err(432, "invalid_signature");
+  }
+
   let key16: Buffer;
   let reqIvB64: string;
   let plain: DecryptedRequest;
@@ -124,7 +137,13 @@ export async function POST(req: NextRequest) {
 
   try {
     // 1) 結構檢查 + 信封偵測
-    const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+    let body: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = rawBody ? JSON.parse(rawBody) : null;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
     if (!body) return err(400, "bad_request_shape");
 
     const enc = (body.data_exchange as { encrypted?: { payload?: string; iv?: string; key_id?: string; wrapped_key?: string } } | undefined)?.encrypted;
@@ -140,20 +159,29 @@ export async function POST(req: NextRequest) {
         plain = JSON.parse(decryptGcm(key16, body.initial_vector, body.encrypted_flow_data)) as DecryptedRequest;
       } catch {
         log.warn("flow endpoint: decrypt failed (prod)");
-        return err(400, "decrypt_failed");
+        return err(421, "decrypt_failed");
       }
       reqIvB64 = body.initial_vector;
     } else if (phoneId && waId && enc?.payload && enc.iv && enc.key_id && enc.wrapped_key) {
       // ── legacy 信封（mock client / 舊 canvas） ──
       envelope = "legacy";
+      // S3-8：production + 非 mock → legacy 信封 outright 拒（生產 Meta 只會用真 spec 信封；
+      // dev/e2e（WA_MOCK=1 或 NODE_ENV≠production）照舊放行）
+      if (process.env.NODE_ENV === "production" && process.env.WA_MOCK !== "1") {
+        log.warn({ phone: phoneId }, "flow endpoint: legacy envelope in production → 400");
+        return err(400, "legacy_envelope_not_allowed");
+      }
       const kp = ensureKeypair();
-      if (enc.key_id !== kp.kid) return err(400, "unknown_key_id");
+      if (enc.key_id !== kp.kid) {
+        log.warn({ phone: phoneId }, "flow endpoint: unknown key_id");
+        return err(421, "decrypt_failed");
+      }
       try {
         key16 = unwrapAesKey(kp.privatePem, enc.wrapped_key);
         plain = JSON.parse(decryptGcm(key16, enc.iv, enc.payload)) as DecryptedRequest;
       } catch {
         log.warn({ phone: phoneId }, "flow endpoint: decrypt failed (legacy)");
-        return err(400, "decrypt_failed");
+        return err(421, "decrypt_failed");
       }
       reqIvB64 = enc.iv;
     } else {
@@ -186,19 +214,19 @@ export async function POST(req: NextRequest) {
     const tokenPayload = plain.flow_token ? verifyFlowToken(plain.flow_token, secret) : null;
     if (!tokenPayload) {
       log.warn("flow endpoint: invalid flow_token");
-      return err(401, "invalid_flow_token");
+      return err(427, "invalid_flow_token");
     }
 
     // 3) FlowSession 對照（token 必須對應一個 SENT 中嘅 flow）
     const session = await prisma.flowSession.findUnique({ where: { flowToken: plain.flow_token! } });
     if (!session || session.status !== "SENT" || session.conversationId !== tokenPayload.convId || session.clinicId !== tokenPayload.clinicId) {
       log.warn({ convId: tokenPayload.convId }, "flow endpoint: flow_token 無對應 SENT session");
-      return err(401, "invalid_flow_token");
+      return err(427, "invalid_flow_token");
     }
 
     // 4) 對話 / 店 對照
     const conv = await prisma.conversation.findUnique({ where: { id: tokenPayload.convId } });
-    if (!conv || conv.clinicId !== tokenPayload.clinicId) return err(401, "invalid_flow_token");
+    if (!conv || conv.clinicId !== tokenPayload.clinicId) return err(427, "invalid_flow_token");
     const clinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId } });
     if (!clinic) return err(500, "misconfigured");
     const contact = await prisma.contact.findUnique({ where: { id: conv.contactId }, select: { waId: true, profileName: true } });

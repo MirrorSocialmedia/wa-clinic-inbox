@@ -62,6 +62,11 @@ export function ensureKeypair(dir: string = defaultKeysDir()): FlowKeypair {
   } catch {
     /* first boot → generate below */
   }
+  // S3-8：production 缺 keypair = 部署配置錯誤 → fail-fast（唔好 production 亂自動生成 —
+  // 生成咗新 kid 就同 WhatsApp 已註冊嘅公鑰唔同 = 真機全部 decrypt 失敗）
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(`FLOW_KEYPAIR_MISSING_IN_PRODUCTION: ${dir} 冇 keypair — 部署前必先生成/配 FLOW_KEYS_DIR`);
+  }
   const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
     modulusLength: 2048,
     publicKeyEncoding: { type: "spki", format: "pem" },
@@ -130,11 +135,19 @@ export interface FlowTokenPayload {
   clinicId: string;
   /** 每次發 Flow 唯一（防同對話第二個 flow 撞 @unique — 模擬 Meta token 嘅隨機性） */
   jti?: string;
+  /** S3-8：token 簽發時間（epoch sec） */
+  iat?: number;
+  /** S3-8：過期時間（epoch sec）= iat + 24h（fail-closed：冇 exp 一律拒） */
+  exp?: number;
 }
 
+/** S3-8：Flow token 有效期 = 24h */
+export const FLOW_TOKEN_TTL_SEC = 24 * 60 * 60;
+
 export function signFlowToken(p: FlowTokenPayload, secret: string): string {
+  const iat = Math.floor(Date.now() / 1000);
   const header = b64url(Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })));
-  const body = b64url(Buffer.from(JSON.stringify(p)));
+  const body = b64url(Buffer.from(JSON.stringify({ ...p, iat, exp: iat + FLOW_TOKEN_TTL_SEC })));
   const sig = crypto.createHmac("sha256", secret).update(`${header}.${body}`).digest("base64url");
   return `${header}.${body}.${sig}`;
 }
@@ -149,6 +162,8 @@ export function verifyFlowToken(token: string, secret: string): FlowTokenPayload
   try {
     const p = JSON.parse(fromB64url(parts[1]).toString("utf8")) as FlowTokenPayload;
     if (typeof p.convId !== "string" || typeof p.clinicId !== "string") return null;
+    // S3-8：24h 過期檢查 — 過期 / 冇 exp（舊格式）一律拒（fail-closed → 427）
+    if (typeof p.exp !== "number" || Date.now() / 1000 > p.exp) return null;
     return p;
   } catch {
     return null;

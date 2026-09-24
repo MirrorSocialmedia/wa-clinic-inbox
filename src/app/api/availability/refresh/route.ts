@@ -12,12 +12,13 @@
  * 429 { error, code:RATE_LIMITED, retryAfterSec } / 409 { code:APRICOT_BUSY } /
  * 404 { code:CLINIC_NOT_FOUND } / 403（STAFF 跨店 fail-closed；或 workforce scope 未加）/ 400
  *
- * Scope：STAFF 只可刷自己店（fail-closed，同 /api/flows/slots 一致）；ADMIN 任店。
- * 零 PII：response 只日期/狀態元數據。
+ * Scope：所有 role 統一 scope 解析（S3-9）— 帶 clinicCode → assertClinicAccess（fail-closed：
+ * STAFF 別店 / scoped ADMIN 外範圍店 → 403；ALL/SUPERVISOR 放行）；唔帶 → scopedClinicSet[0]
+ *（STAFF = 自己店；ALL/SUPERVISOR 無 scope 概念 → 400 required）。零 PII：response 只日期/狀態元數據。
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, scopedClinicSet } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { refreshAvailability, WorkforceApiError } from "@/lib/workforce/client";
 import { invalidateAvailabilityDay } from "@/lib/availability";
@@ -30,9 +31,26 @@ export const POST = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
   const body = (await req.json().catch(() => null)) as { clinicCode?: unknown; dates?: unknown } | null;
 
-  const clinicCode = typeof body?.clinicCode === "string" ? body.clinicCode.trim() : "";
+  const clinicCodeIn = typeof body?.clinicCode === "string" ? body.clinicCode.trim() : "";
   const dates = Array.isArray(body?.dates) ? (body?.dates as unknown[]) : [];
-  if (!clinicCode) return NextResponse.json({ error: "clinicCode required" }, { status: 400 });
+
+  // S3-9：scope 統一解析（all roles；移除 ctx.clinicId! 直用）
+  //   帶 clinicCode → assertClinicAccess（fail-closed：STAFF 別店 / scoped ADMIN 外範圍 → 403）；
+  //   唔帶 → scopedClinicSet(ctx)?.[0]（ALL/SUPERVISOR 無 scope 概念 → 400 required）
+  let clinicCode = clinicCodeIn;
+  if (!clinicCode) {
+    const set = scopedClinicSet(ctx);
+    if (!set || set.length === 0) {
+      return NextResponse.json({ error: "clinicCode required" }, { status: 400 });
+    }
+    const first = await prisma.clinic.findUnique({ where: { id: set[0] }, select: { code: true } });
+    if (!first) return NextResponse.json({ error: "clinic not found", code: "CLINIC_NOT_FOUND" }, { status: 404 });
+    clinicCode = first.code;
+  }
+  const target = await prisma.clinic.findUnique({ where: { code: clinicCode }, select: { id: true } });
+  if (!target) return NextResponse.json({ error: "clinic not found", code: "CLINIC_NOT_FOUND" }, { status: 404 });
+  assertClinicAccess(ctx, target.id);
+
   if (dates.length < 1 || dates.length > 7) {
     return NextResponse.json({ error: "dates: 1..7 YYYY-MM-DD" }, { status: 400 });
   }
@@ -42,18 +60,6 @@ export const POST = handle(async (req: NextRequest) => {
       return NextResponse.json({ error: "dates: 1..7 unique YYYY-MM-DD" }, { status: 400 });
     }
     uniq.add(d);
-  }
-
-  // STAFF 只可刷自己店（fail-closed — 同 /api/flows/slots 一致）
-  if (ctx.staff.role === "STAFF") {
-    const own = await prisma.clinic.findUnique({ where: { id: ctx.clinicId! } });
-    if (!own || own.code !== clinicCode) {
-      return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-    }
-  } else if (ctx.staff.role === "ADMIN") {
-    // ★ cwi-hub-a-20260914（Part A）：時間表 scope — scoped ADMIN（COMPANY/CLINICS）刷外範圍店 → 403
-    const target = await prisma.clinic.findUnique({ where: { code: clinicCode }, select: { id: true } });
-    if (target) assertClinicAccess(ctx, target.id);
   }
 
   let r: Awaited<ReturnType<typeof refreshAvailability>>;

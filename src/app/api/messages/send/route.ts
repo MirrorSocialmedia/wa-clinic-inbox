@@ -99,6 +99,36 @@ export const POST = handle(async (req: NextRequest) => {
   await assertConversationAccess(ctx, conv); // STAFF 砌別店 URL → 403
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
+  // ★ realtime-p0 R1 + S3-9：client 冪等 — 命中已存在 Message（同 clientMessageId
+  // **且同 conversation**）→ 回舊 row，唔入 queue、唔再計一次 auto-claim/draft link。
+  // S3-9：移到 Send Lock 之前 — replay 回原結果（唔會因 assignee 已變而被 423 擋住）。
+  if (parsed.data.clientMessageId) {
+    const existing = await prisma.message.findFirst({
+      where: { clientMessageId: parsed.data.clientMessageId, conversationId: conv.id },
+    });
+    if (existing) {
+      log.info(
+        {
+          clinicId: conv.clinicId,
+          conversationId: conv.id,
+          messageId: existing.id,
+          status: existing.status,
+          clientMessageId: parsed.data.clientMessageId,
+        },
+        "send: idempotent replay（clientMessageId 命中，唔入 queue）"
+      );
+      return NextResponse.json(
+        {
+          ok: true,
+          messageId: existing.id,
+          status: existing.status,
+          idempotentReplay: true,
+        },
+        { status: 200 }
+      );
+    }
+  }
+
   // ★ H1 Send Lock（MD §3.2）：對話有負責人時，只有負責人可以發 WhatsApp。
   // 其他店內員工 → 423 SEND_LOCKED（UI composer 轉內部備註模式；INTERNAL note route 冇呢個檢查）。
   // cwi-h6-20260830（T97）：ADMIN 要先接手（變 assignee）先可以覆 — 非負責人（包 ADMIN）照 423（T57 迴歸）。
@@ -229,36 +259,6 @@ export const POST = handle(async (req: NextRequest) => {
     conv.assigneeId = ctx.staff.id;
   }
 
-  // ★ realtime-p0 R1：client 冪等 — 命中已存在 Message（同 clientMessageId）→ 回舊 row，
-  // 唔入 queue、唔再計一次 auto-claim/draft link。放喺 423/window/auto-claim 之後：
-  // 首次被 423/422 拒時冇 Message 落庫 → replay 會再次經過同一條拒因（語義一致）。
-  if (parsed.data.clientMessageId) {
-    const existing = await prisma.message.findUnique({
-      where: { clientMessageId: parsed.data.clientMessageId },
-    });
-    if (existing) {
-      log.info(
-        {
-          clinicId: conv.clinicId,
-          conversationId: conv.id,
-          messageId: existing.id,
-          status: existing.status,
-          clientMessageId: parsed.data.clientMessageId,
-        },
-        "send: idempotent replay（clientMessageId 命中，唔入 queue）"
-      );
-      return NextResponse.json(
-        {
-          ok: true,
-          messageId: existing.id,
-          status: existing.status,
-          idempotentReplay: true,
-        },
-        { status: 200 }
-      );
-    }
-  }
-
   // ★ cwi-final S0-6 + F-1：composer 路徑 claim 前守門。
   //   位置：Send Lock／窗口檢查之後、replay 之後、建 Message 之前。
   //   ★ F-1：precheck 依賴 workforce（checkCancellations 會打 appointments feed）—
@@ -322,8 +322,8 @@ export const POST = handle(async (req: NextRequest) => {
     // ★ R1 race：兩個併發 POST 用同一 clientMessageId（雙 tab / 雙擊）— 一個先 commit，
     // 另一個 unique violation (P2002) → 當冪等 replay 回已 commit 嘅 row（200），唔回 500。
     if ((err as { code?: string } | null)?.code === "P2002" && parsed.data.clientMessageId) {
-      const existing = await prisma.message.findUnique({
-        where: { clientMessageId: parsed.data.clientMessageId },
+      const existing = await prisma.message.findFirst({
+        where: { clientMessageId: parsed.data.clientMessageId, conversationId: conv.id },
       });
       if (existing) {
         log.info(

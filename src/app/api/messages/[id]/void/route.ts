@@ -14,7 +14,8 @@ import { publishConvEvent, convRef } from "@/lib/notify";
  *   - UI 氣泡加「已作廢」內部 tag（只 staff 端可見口徑；病人端 WhatsApp 照舊顯示原文）。
  *
  * 只收 OUT/API 已發出訊息（SENT/DELIVERED/READ — 即 waMessageId 已有）；冪等（重複標記 200）。
- * RBAC：assertConversationAccess + 發送者本人 ∨ ADMIN。
+ * RBAC：S3-9 — 先 assertConversationAccess（訊息/對話存在性檢查之後、業務檢查之前）
+ *   + assertCanWriteConversation（SUPERVISOR 403）+ 發送者本人 ∨ ADMIN。
  * audit：MESSAGE_VOID（messageId + staffId）。
  * socket：message:status 帶 voidedAt（UI 即時加 tag；零內文）。
  */
@@ -28,6 +29,11 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const msg = await prisma.message.findUnique({ where: { id } });
   if (!msg) return NextResponse.json({ error: "not found" }, { status: 404 });
+  const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
+  if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // S3-9：access check 先行（先於 void 業務驗證 — 外店 staff 唔好靠業務錯誤洩訊息存在性）
+  await assertConversationAccess(auth, conv); // STAFF 別店 → 403
+  assertCanWriteConversation(auth); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
   if (msg.direction !== "OUT" || msg.channel !== "API") {
     return NextResponse.json({ error: "only outbound API messages can be voided" }, { status: 400 });
   }
@@ -35,10 +41,6 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   if (!msg.waMessageId) {
     return NextResponse.json({ error: "message not sent yet" }, { status: 409 });
   }
-  const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
-  if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
-  await assertConversationAccess(auth, conv); // STAFF 別店 → 403
-  assertCanWriteConversation(auth); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   if (msg.sentByStaffId && msg.sentByStaffId !== auth.staff.id && auth.staff.role !== "ADMIN") {
     return NextResponse.json({ error: "only the sender or an admin can void" }, { status: 403 });

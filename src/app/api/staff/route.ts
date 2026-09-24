@@ -1,14 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, scopedClinicSet } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 
 /**
  * GET /api/staff — 員工列表（側欄 assignee 選擇用）。
- * - ?clinicId= 指定店嘅 staff（ADMIN 可以揀任何店；STAFF 只能查自己綁定店之一，否則 → 403）
- * - 唔給 clinicId：全部 active staff — cwi-h6-20260830 權限矩陣 ASSIGN/RELEASE target = 任何
- *   active STAFF/ADMIN（包括完全外店），所以 picker 必須列齊（跨店由 assign 端
- *   assertCanAssign + assertConversationAccess 守，唔靠 picker 過濾）。
+ * - ?clinicId= 指定店嘅 staff（scope-aware — 外範圍 clinicId → 403 任何受限角色）
+ * - 唔給 clinicId：S3-9 — 按 scope filter（scopedClinicSet — STAFF 只見自己店 staff；
+ *   ALL/SUPERVISOR 無 scope 概念 → 全部 active staff）。
  * 只回 id / name / role / clinicId（assignee 用唔到其他欄位）
  */
 export const dynamic = "force-dynamic";
@@ -23,6 +22,10 @@ export const GET = handle(async (req: NextRequest) => {
     // ★ cwi-hub-a-20260914（Part A）：scope-aware — 外範圍 clinicId → 403（任何受限角色）
     assertClinicAccess(ctx, clinicParam);
     where.clinicId = clinicParam;
+  } else {
+    // S3-9：唔帶 clinicId → 按 scope filter（null = ALL/SUPERVISOR 全店）
+    const set = scopedClinicSet(ctx);
+    if (set) where.clinicId = { in: set };
   }
   const staff = await prisma.staffUser.findMany({
     where,

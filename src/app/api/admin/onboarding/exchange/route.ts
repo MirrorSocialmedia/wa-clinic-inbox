@@ -92,7 +92,7 @@ export const POST = handle(async (req: NextRequest) => {
   if (wabaId) {
     if (!mock) {
       try {
-        const res = await fetch(`${GRAPH_BASE}/${wabaId}/subscribed_apps`, {
+        const res = await fetch(`${GRAPH_BASE}/${encodeURIComponent(wabaId)}/subscribed_apps`, {
           method: "POST",
           headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
           signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
@@ -111,7 +111,7 @@ export const POST = handle(async (req: NextRequest) => {
   // ── Step 3: phone number register ────────────────────────────────────────────
   if (!mock) {
     try {
-      const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/register`, {
+      const res = await fetch(`${GRAPH_BASE}/${encodeURIComponent(phoneNumberId)}/register`, {
         method: "POST",
         headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
         body: JSON.stringify({ messaging_product: "whatsapp", pin }),

@@ -13,6 +13,8 @@
  *    呢邊係主動落單入口，照鐵律語義回 422 + 指引側欄釘舊客。）
  * - 時段 = schedule-board 撳落嘅 ONLINE 格（date + start + provider）；
  *   必係未來時段（今日已過 / 過期日 → 400 slot_in_past）。
+ * - S3-9：providerApricotId 必須經 ProviderClinic 屬該對話嘅店（唔屬 → 400
+ *   provider_not_at_clinic）；醫生名由 DB 讀（Provider.name，唔信 body.providerName）。
  * - visit reason = body 可選；唔帶 → BOOKING_DEFAULT_VISIT_REASON_CODE env 模式
  *   （跟 cwi-bkui 現狀 — board popover 唔設 picker）。
  *
@@ -42,7 +44,8 @@ export const dynamic = "force-dynamic";
 const ManualBody = z.object({
   conversationId: z.string().min(1),
   providerApricotId: z.string().min(1).max(200),
-  providerName: z.string().min(1).max(200),
+  // S3-9：名由 DB 讀（Provider.name）— body.providerName 只係 UI 兼容，唔再信任
+  providerName: z.string().min(1).max(200).optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
   visitReasonId: z.string().min(1).max(64).optional(),
@@ -70,12 +73,28 @@ export const POST = handle(async (req: NextRequest) => {
   if (!parsed.success) {
     return NextResponse.json({ error: "invalid body", details: parsed.error.flatten() }, { status: 400 });
   }
-  const { conversationId, providerApricotId, providerName, date, start, visitReasonId } = parsed.data;
+  const { conversationId, providerApricotId, date, start, visitReasonId } = parsed.data;
 
   const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   await assertConversationAccess(ctx, conv); // 別店 / 非授權對話 → 403
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
+
+  // S3-9：provider 必須經 ProviderClinic 屬該對話嘅店（fail-closed）；名由 DB 讀
+  const provider = await prisma.provider.findFirst({
+    where: {
+      apricotId: providerApricotId,
+      active: true,
+      clinics: { some: { clinicId: conv.clinicId } },
+    },
+  });
+  if (!provider) {
+    return NextResponse.json(
+      { error: "provider_not_at_clinic", message: "呢位醫生未綁定呢間店 — 唔可以喺呢度落單" },
+      { status: 400 }
+    );
+  }
+  const resolvedProviderName = provider.name;
 
   // Send Lock（MD §7 — 同 create/rollback/cancel）
   if (conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
@@ -153,7 +172,7 @@ export const POST = handle(async (req: NextRequest) => {
             clinicId,
             flowToken: `manual-${randomUUID()}`,
             providerApricotId,
-            providerName,
+            providerName: resolvedProviderName,
             requestedDate: date,
             requestedTime: start,
             precheckPassed: slotRow ? true : null,

@@ -152,6 +152,16 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
   //   （workforce ProviderHold + inbox FlowHoldEvent）→ 唔行 L2 precheck、唔建 BookingRequest
   //   （MD §5.3：Flow 提交成功 = 位已佔）。只收 session（冪等：重複 Complete 上面 COMPLETED 檢查已 skip）。
   if (reply.holdId !== undefined) {
+    // S3-8：cross-check holdId ↔ FlowHoldEvent(flowToken) — claimed 變體必須同真實 claim 記錄對上
+    //   （防 client 偽造 holdId 自描述 → 跳過 L2 precheck / BookingRequest 流程）
+    const hev = await prisma.flowHoldEvent.findUnique({ where: { flowToken: flow_token } });
+    if (!hev || hev.workforceHoldId !== reply.holdId) {
+      log.warn(
+        { conversationId, holdId: reply.holdId, eventHoldId: hev?.workforceHoldId ?? null },
+        "flow-reply: holdId mismatch（FlowHoldEvent 對唔到）— 拒 claimed 變體"
+      );
+      return { status: "rejected", reason: "hold_mismatch" };
+    }
     // 改期 context 旗標：T4 claim 唔行原子 102+新單 → 清旗標（防下一單新預約被劫）+ log 俾 staff 核舊單
     if (conv.reschedulingApptId && conv.pinnedPatientApricotId) {
       await prisma.conversation

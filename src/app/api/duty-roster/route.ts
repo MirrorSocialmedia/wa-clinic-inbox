@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, scopedClinicSet } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { fetchDutyRoster, hkToday, type DutyEntry } from "@/lib/duty/client";
 import log from "@/lib/log";
@@ -8,10 +8,11 @@ import log from "@/lib/log";
 /**
  * GET /api/duty-roster — 今日當值（MD §9.2 消費端）。
  *
- * Scope（fail-closed）：
- * - STAFF：只可攞自己店。`?clinicId=` 指定嘅 code 必須 = 自己店（否則 403）；
- *   唔帶 param = 自己店。
- * - ADMIN：`?clinicId=` 必帶（攞邊間店）。
+ * Scope（fail-closed；S3-9 統一全 role）：
+ * - 帶 `?clinicId=`（code）→ assertClinicAccess（STAFF 別店 / scoped ADMIN 外範圍 → 403；
+ *   ALL/SUPERVISOR 放行）。
+ * - 唔帶 → scopedClinicSet(ctx)?.[0]（STAFF = 自己店；ALL/SUPERVISOR 無 scope 概念 →
+ *   400 clinicId required — 唔好亂猜店）。
  * - date 選填（YYYY-MM-DD，預設今日 HK）。
  *
  * Fail-soft（iron rule：唔 crash inbox）：
@@ -42,26 +43,25 @@ export const GET = handle(async (req: NextRequest) => {
     date = hkToday();
   }
 
-  // scope 解析
-  let clinic: { id: string; code: string } | null;
-  if (ctx.staff.role === "STAFF") {
-    // 自己店 code（param 必須同自己店一致）
-    const own = await prisma.clinic.findUnique({ where: { id: ctx.clinicId! }, select: { id: true, code: true } });
-    if (!own) return NextResponse.json({ error: "clinic not found" }, { status: 404 });
-    if (clinicParam && clinicParam !== own.code) {
-      return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
-    }
-    clinic = own;
+  // scope 解析（S3-9：統一全 role — 移除 ctx.clinicId! 直用）
+  let clinic: { id: string; code: string };
+  if (clinicParam) {
+    // 帶 param：任何 role 都過 assertClinicAccess（STAFF 跨店 → 403；ALL/SUPERVISOR 放行；
+    // scoped ADMIN 外範圍 → 403）
+    const found = await prisma.clinic.findUnique({ where: { code: clinicParam }, select: { id: true, code: true } });
+    if (!found) return NextResponse.json({ error: "clinic not found" }, { status: 404 });
+    assertClinicAccess(ctx, found.id);
+    clinic = found;
   } else {
-    // ADMIN：必帶 clinicId
-    if (!clinicParam) {
+    // 唔帶 param：自己 scope 集合頭間店（STAFF = StaffClinic 集合；
+    // ALL/SUPERVISOR 無 scope 概念 → 400 clinicId required）
+    const set = scopedClinicSet(ctx);
+    if (!set || set.length === 0) {
       return NextResponse.json({ error: "clinicId required" }, { status: 400 });
     }
-    clinic = await prisma.clinic.findUnique({ where: { code: clinicParam }, select: { id: true, code: true } });
-    if (!clinic) return NextResponse.json({ error: "clinic not found" }, { status: 404 });
-    // ★ cwi-hub-a-20260914（Part A）：時間表 scope — scoped ADMIN（COMPANY/CLINICS）外範圍店 → 403
-    //   （STAFF 跨店讀保持 — cwi-sched T-B；SUPERVISOR 現行全店唯讀唔改）
-    if (ctx.staff.role === "ADMIN") assertClinicAccess(ctx, clinic.id);
+    const found = await prisma.clinic.findUnique({ where: { id: set[0] }, select: { id: true, code: true } });
+    if (!found) return NextResponse.json({ error: "clinic not found" }, { status: 404 });
+    clinic = found;
   }
 
   // fail-soft：client 永遠唔 throw（3s timeout / 404 / 壞 shape → null）

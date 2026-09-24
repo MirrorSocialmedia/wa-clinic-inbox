@@ -202,6 +202,12 @@ TSX=./node_modules/.bin/tsx
 PORT="${PORT:-3100}"
 BASE="http://127.0.0.1:${PORT}"
 
+# ★ cwi-final S3-9：healthz 詳細 body token gate — 從 .env.local 取 HEALTHZ_TOKEN（gitignored）；
+# 未設時唔附加參數（gate 停用，dev 便利）。
+HEALTHZ_TOKEN="$(grep -oP '^HEALTHZ_TOKEN=\K.*' .env.local 2>/dev/null | tail -1)"
+HEALTHZ_QS=""
+[ -n "$HEALTHZ_TOKEN" ] && HEALTHZ_QS="?token=$HEALTHZ_TOKEN"
+
 # ★ cwi-final S3-6 harness 兼容（CSRF middleware 上線 — 裸 curl 全數 403/415）：
 # curl wrapper：打 $BASE/api/* 嘅請求自動補（只補未自帶嘅）：
 # 1) `Origin: $BASE`（同站 — middleware originOk；EXEMPT 端點補咗都無害；GET 本身放行）
@@ -396,7 +402,7 @@ trap cleanup EXIT
 
 UP=0
 for i in $(seq 1 90); do
-  if curl -sf "$BASE/healthz" >/dev/null 2>&1; then UP=1; break; fi
+  if curl -sf "$BASE/healthz$HEALTHZ_QS" >/dev/null 2>&1; then UP=1; break; fi
   sleep 1
 done
 [ "$UP" = 1 ] || { echo "FATAL: server 90s 未起"; tail -30 /tmp/e2e-server.log; exit 1; }
@@ -534,7 +540,7 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/wa/webhook" \
 # {} 冇 field → worker 應記 log 唔崩；webhook 層仍 200
 check "T12 unknown/empty payload → webhook 200" "$CODE" "200"
 sleep 2
-curl -sf "$BASE/healthz" >/dev/null 2>&1 && pass "T12 worker/server 存活" || fail "T12 存活檢查"
+curl -sf "$BASE/healthz$HEALTHZ_QS" >/dev/null 2>&1 && pass "T12 worker/server 存活" || fail "T12 存活檢查"
 
 # ── T13. AI triage：URGENT_PAIN（鐵律 3：永不生成 draft） ───────────────
 echo "[10/10] T13-T17: AI triage..."
@@ -878,7 +884,9 @@ TOKEN_S12=$(node -e '
 const c = require("node:crypto");
 const b64url = (b) => Buffer.from(b).toString("base64url");
 const h = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-const p = b64url(JSON.stringify({ convId: process.argv[1], clinicId: process.argv[2] }));
+// S3-8：token 必帶 iat + exp = iat + 24h（verifyFlowToken fail-closed — 冇 exp 一律 427）
+const now = Math.floor(Date.now() / 1000);
+const p = b64url(JSON.stringify({ convId: process.argv[1], clinicId: process.argv[2], iat: now, exp: now + 24 * 60 * 60 }));
 const s = c.createHmac("sha256", process.argv[3]).update(h + "." + p).digest("base64url");
 console.log(h + "." + p + "." + s);
 ' "$CONV_S12" "$TKW_CLINIC_ID" "$FLOW_JWT_SECRET")
@@ -911,7 +919,7 @@ nohup pnpm dev >/tmp/e2e-server.log 2>&1 &
 SERVER_PID=$!
 UP=0
 for i in $(seq 1 90); do
-  if curl -sf "$BASE/healthz" >/dev/null 2>&1; then UP=1; break; fi
+  if curl -sf "$BASE/healthz$HEALTHZ_QS" >/dev/null 2>&1; then UP=1; break; fi
   sleep 1
 done
 [ "$UP" = 1 ] || { echo "FATAL: S0-12 server 重起失敗（ALLOW_SLOT_CLAIM=1）"; exit 1; }
@@ -933,7 +941,7 @@ CONV_P3=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"
 curl -s -o /tmp/e2e-flow-send.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST \
   "$BASE/api/conversations/$CONV_P3/flows" -H 'Content-Type: application/json' > /tmp/e2e-flow-code.txt
 [ "$(cat /tmp/e2e-flow-code.txt)" = "200" ] || { echo "    ❌ T27 發 Flow != 200"; T27=1; }
-TOKEN_P3=$(jf flowToken < /tmp/e2e-flow-send.json)
+TOKEN_P3=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$CONV_P3' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t) # S3-8：flowToken 唔再喺 response — DB 讀（session 係 response 前同步落庫）
 [ -n "$TOKEN_P3" ] || { echo "    ❌ T27 flowToken 空"; T27=1; }
 if ! wait_for "SELECT (count(*) > 0)::text c FROM \"Message\" WHERE \"conversationId\"='$CONV_P3' AND direction='OUT' AND type='interactive' AND status='SENT'" '[{"c":"true"}]' 30; then
   echo "    ❌ T27 interactive flow message 未 SENT（mock Graph）"
@@ -980,8 +988,8 @@ DBDATES=$(q "SELECT count(DISTINCT \"date\")::text c FROM \"AvailabilitySlot\" W
 step_flow "time" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCREEN_TIME --provider "$DOC_A" --date "$DATE_A"
 case "${F_DATA:-}" in *"$TIME_A"*) : ;; *) echo "    ❌ T27 SCREEN_TIME 冇包含 $TIME_A（data=${F_DATA:0:200}）"; T27=1 ;; esac
 step_flow "bad-token" --clinic TKW --conv "$CONV_P3" --token "$TOKEN_P3" --action SCREEN_PROVIDER --bad-token
-case "$F_HTTP" in 401|400) : ;; *) echo "    ❌ T27 壞 token 唔係 401/400（HTTP=$F_HTTP）"; T27=1 ;; esac
-[ "$T27" = 0 ] && pass "T27 workforce mock sync（slot 落庫 + heartbeat）+ Flow 3 步加密 round-trip（provider 3 人/date 過濾閉诊日/time 只空 slot/壞 token 401）" \
+case "$F_HTTP" in 427) : ;; *) echo "    ❌ T27 壞 token 唔係 427（HTTP=$F_HTTP）"; T27=1 ;; esac # S3-8：token 無效 → 427
+[ "$T27" = 0 ] && pass "T27 workforce mock sync（slot 落庫 + heartbeat）+ Flow 3 步加密 round-trip（provider 3 人/date 過濾閉诊日/time 只空 slot/壞 token 427）" \
   || fail "T27 Flow endpoint round-trip（見上 ❌）"
 
 # ── T28. 病人 Complete → BookingRequest PENDING + 綠色卡 + /bookings ──────────
@@ -1031,9 +1039,9 @@ PATIENT_RACE="8526032${EPOCH}"
 pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_RACE" --text "想預約" --wamid "wamid.E2E_RACE_${EPOCH}" --name "E2E race B" >/dev/null || T30=1
 CONV_RACE=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_RACE'" | jf id)
 curl -s -o /tmp/e2e-flow-a2.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_P3/flows" -H 'Content-Type: application/json'
-TOKEN_A2=$(jf flowToken < /tmp/e2e-flow-a2.json)
+TOKEN_A2=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$CONV_P3' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t) # S3-8：DB 讀（reused 時 latest = 舊 row，同 response 語義一致）
 curl -s -o /tmp/e2e-flow-b.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_RACE/flows" -H 'Content-Type: application/json'
-TOKEN_B=$(jf flowToken < /tmp/e2e-flow-b.json)
+TOKEN_B=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$CONV_RACE' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t) # S3-8：DB 讀
 [ -n "$TOKEN_A2" ] && [ -n "$TOKEN_B" ] || { echo "    ❌ T30 flow token 空"; T30=1; }
 # 同時 Complete（同一 slot）— ★ 只 wait 呢兩個 PID（裸 wait 會等住 server/worker 唔會出）
 (pnpm -s flow-client complete --clinic TKW --conv "$CONV_P3" --token "$TOKEN_A2" \
@@ -1074,12 +1082,12 @@ T34=0
 pnpm -s mock-inbound message --clinic MF --from "$PATIENT_MF" --text "預約" --wamid "wamid.E2E_MF_FLOW_${EPOCH}" --name "E2E MF flow" >/dev/null || T34=1
 sleep 1
 curl -s -o /tmp/e2e-flow-mf.json -b "$COOKIE_MF" -X POST "$BASE/api/conversations/$MF_CONV_ID/flows" -H 'Content-Type: application/json'
-TOKEN_MF=$(jf flowToken < /tmp/e2e-flow-mf.json)
+TOKEN_MF=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$MF_CONV_ID' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t) # S3-8：DB 讀
 [ -n "$TOKEN_MF" ] || { echo "    ❌ T34 MF flow token 空"; T34=1; }
 OUT=$(pnpm -s flow-client step --clinic TKW --conv "$MF_CONV_ID" --token "$TOKEN_MF" --action SCREEN_PROVIDER 2>&1 || true)
 F_HTTP=$(printf '%s' "$OUT" | grep -oE 'HTTP=[0-9]+' | head -1 | cut -d= -f2)
 echo "  [T34] cross-clinic token: HTTP=${F_HTTP:-?}"
-case "$F_HTTP" in 403|401) : ;; *) echo "    ❌ T34 別店 token 未被拒（raw=${OUT:0:300}）"; T34=1 ;; esac
+case "$F_HTTP" in 403) : ;; *) echo "    ❌ T34 別店 token 未被拒（raw=${OUT:0:300}）"; T34=1 ;; esac # S3-8：token 有效（427 檢查過）但 wa/phone 對唔到 → 403
 # (b) STAFF(MF) 撳 TKW booking confirm → 403
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" \
   -X POST "$BASE/api/bookings/$BOOK_WINNER/confirm" -H 'Content-Type: application/json')
@@ -1096,7 +1104,7 @@ PATIENT_DROP="8526033${EPOCH}"
 pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_DROP" --text "想預約" --wamid "wamid.E2E_DROP_${EPOCH}" --name "E2E drop" >/dev/null || T31=1
 CONV_DROP=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_DROP'" | jf id)
 curl -s -o /tmp/e2e-flow-drop.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_DROP/flows" -H 'Content-Type: application/json'
-TOKEN_DROP=$(jf flowToken < /tmp/e2e-flow-drop.json)
+TOKEN_DROP=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$CONV_DROP' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t) # S3-8：DB 讀
 [ -n "$TOKEN_DROP" ] || { echo "    ❌ T31 flow token 空"; T31=1; }
 pnpm -s flow-client step --clinic TKW --conv "$CONV_DROP" --token "$TOKEN_DROP" --action SCREEN_PROVIDER >/dev/null 2>&1 || T31=1
 pnpm -s flow-client step --clinic TKW --conv "$CONV_DROP" --token "$TOKEN_DROP" --action SCREEN_DATE --provider "$DOC_A" >/dev/null 2>&1 || T31=1
@@ -1118,7 +1126,7 @@ PATIENT_EXP="8526034${EPOCH}"
 pnpm -s mock-inbound message --clinic TKW --from "$PATIENT_EXP" --text "想預約" --wamid "wamid.E2E_EXP_${EPOCH}" --name "E2E expire" >/dev/null || T32=1
 CONV_EXP=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_EXP'" | jf id)
 curl -s -o /tmp/e2e-flow-exp.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$CONV_EXP/flows" -H 'Content-Type: application/json'
-TOKEN_EXP=$(jf flowToken < /tmp/e2e-flow-exp.json)
+TOKEN_EXP=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$CONV_EXP' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t) # S3-8：DB 讀
 pnpm -s flow-client complete --clinic TKW --conv "$CONV_EXP" --token "$TOKEN_EXP" \
   --provider "$DOC_A" --providerName "$NAME_A" --date "$DATE_C" --time "$TIME_C" \
   --wamid "wamid.E2E_EXP_DONE_${EPOCH}" >/dev/null 2>&1 || T32=1
@@ -3946,7 +3954,7 @@ AUTOMATION_ADMIN_STAFF_IDS="$EADM2_ID" nohup pnpm dev >/tmp/e2e-server-e.log 2>&
 SERVER_PID=$!
 EUP=0
 for i in $(seq 1 90); do
-  if curl -sf "$BASE/healthz" >/dev/null 2>&1; then EUP=1; break; fi
+  if curl -sf "$BASE/healthz$HEALTHZ_QS" >/dev/null 2>&1; then EUP=1; break; fi
   sleep 1
 done
 check "E0 server 重啟（AUTOMATION_ADMIN_STAFF_IDS=eadm2）" "$EUP" "1"
@@ -4453,7 +4461,7 @@ t98_setup_pat() { # t98_setup_pat <pat> <name> → 設 T98_CONV / T98_TOK（0/1�
   T98_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" | jf id)
   [ -n "$T98_CONV" ] || return 1
   curl -s -o /tmp/e2e-t98-flow.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$T98_CONV/flows" -H 'Content-Type: application/json'
-  T98_TOK=$(jf flowToken < /tmp/e2e-t98-flow.json)
+  T98_TOK=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$T98_CONV' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t) # S3-8：DB 讀
   [ -n "$T98_TOK" ] || return 1
   return 0
 }
@@ -4535,11 +4543,11 @@ if t98_setup_pat "8526903${EPOCH}" "E2E T98"; then
   else
     echo "    ❌ T98 submit_confirm fail（=${OUT%%$'\n'*}）"; T98=1
   fi
-  # (e) 壞 token → 401（生產信封認證）
+  # (e) 壞 token → 427（S3-8：token 無效/過期 = 傳輸層 427）
   OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T98_TOK" --action INIT --bad-token 2>&1 || true)
   case "$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)" in
-    HTTP=401*) pass "T98 壞 token → 401";;
-    *) echo "    ❌ T98 壞 token 應該 401（=$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)）"; T98=1;;
+    HTTP=427*) pass "T98 壞 token → 427";;
+    *) echo "    ❌ T98 壞 token 應該 427（=$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)）"; T98=1;;
   esac
   # (f) legacy 契約迴歸：同 token 舊 canvas 三 action 照行
   OUT=$(pnpm -s flow-client step --clinic TKW --conv "$T98_CONV" --token "$T98_TOK" --action SCREEN_PROVIDER 2>&1 || true)
@@ -4586,7 +4594,7 @@ t97_book_cycle() { # t97_book_cycle <pat> <suf> → 設 T97_BOOK_ID；回 0/1（
   local conv; conv=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" | jf id)
   [ -n "$conv" ] || { echo "    ❌ T97 $suf step=conv"; return 1; }
   curl -s -o /tmp/e2e-t97-flow-${suf}.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$conv/flows" -H 'Content-Type: application/json'
-  local tok; tok=$(jf flowToken < /tmp/e2e-t97-flow-${suf}.json)
+  local tok; tok=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$conv' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t) # S3-8：DB 讀
   [ -n "$tok" ] || { echo "    ❌ T97 $suf step=flowtoken（=$(head -c 200 /tmp/e2e-t97-flow-${suf}.json)）"; return 1; }
   pnpm -s flow-client complete --clinic TKW --conv "$conv" --token "$tok" --provider "$DOC_A" --providerName "$NAME_A" --date "$T97_S3D" --time "$T97_S3T" --wamid "wamid.E2E_T97_DONE_${suf}_${EPOCH}" >/dev/null 2>&1 || { echo "    ❌ T97 $suf step=complete"; return 1; }
   wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$conv'" '[{"s":"PENDING"}]' 45 || { echo "    ❌ T97 $suf step=pending（nfm_reply 未落單）"; return 1; }
@@ -4674,11 +4682,11 @@ if stepx_parse "$OUT" /tmp/e2e-t100-errnoti.json; then
 else
   echo "    ❌ T100 error_notification fail（=${OUT%%$'\n'*}）"; T100=1
 fi
-# (c) 迴歸：其他 action（INIT）無 token 照 401 invalid_flow_token（放行唔洩漏）
+# (c) 迴歸：其他 action（INIT）無 token 照 427 invalid_flow_token（S3-8；放行唔洩漏）
 OUT=$(pnpm -s flow-client stepx --clinic TKW --no-token --action INIT 2>&1 || true)
 case "$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)" in
-  HTTP=401*ERROR=invalid_flow_token) pass "T100 迴歸：INIT 無 token 照 401 invalid_flow_token";;
-  *) echo "    ❌ T100 迴歸：INIT 無 token 應該 401 invalid_flow_token（=$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)）"; T100=1;;
+  HTTP=427*ERROR=invalid_flow_token) pass "T100 迴歸：INIT 無 token 照 427 invalid_flow_token";;
+  *) echo "    ❌ T100 迴歸：INIT 無 token 應該 427 invalid_flow_token（=$(printf '%s\n' "$OUT" | grep -E '^HTTP=' | head -1)）"; T100=1;;
 esac
 # (d) 零 DB：ping / error_notification 前後 FlowSession / Conversation count 唔變
 T100_FS=$(q "SELECT count(*)::text c FROM \"FlowSession\"" | jf c)
@@ -4740,7 +4748,7 @@ else
     conv=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$pat'" | jf id)
     [ -n "$conv" ] || return 1
     curl -s -o "/tmp/e2e-t101-flow-$vp.json" -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$conv/flows" -H 'Content-Type: application/json'
-    tok=$(jf flowToken < "/tmp/e2e-t101-flow-$vp.json")
+    tok=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$conv' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t) # S3-8：DB 讀
     [ -n "$tok" ] || return 1
     printf -v "${vp}_CONV" '%s' "$conv"
     printf -v "${vp}_TOK" '%s' "$tok"

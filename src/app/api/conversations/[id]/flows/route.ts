@@ -6,6 +6,9 @@
  * - 24h 窗口：過窗 → 422 window_closed（提示用帶 Flow 嘅 template — MD §8.2.4）
  * - 冪等：對話已有 SENT FlowSession → 重用（200 reused=true，唔重發訊息）
  *
+ * S3-8：response 唔再洩 flowToken（security-sensitive — token 只經 WhatsApp Flow 通道送病人；
+ * 內部/測試需要時由 DB FlowSession(flowToken) 讀）。
+ *
  * Flow 內容（doctor/date/time）唔喺呢度 — 病人行 Flow 時先經
  * /api/flows/endpoint（data_exchange）逐步攞（precheck 原則）。
  */
@@ -92,7 +95,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     }
     return NextResponse.json({
       ok: true,
-      flowToken: r.flowToken,
+      // S3-8：flowToken 剷走（security-sensitive — 唔經 HTTP response 洩）
       messageId: r.messageId,
       reused: r.reused,
       status: "QUEUED",
