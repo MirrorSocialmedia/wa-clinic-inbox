@@ -13,6 +13,7 @@ import { startOutboundWorker } from "./outbound.worker";
 import { startAiWorker, startAiUrgentWorker } from "./ai.worker";
 import { startCronWorker } from "./cron.worker";
 import { startMediaWorker } from "./media.worker";
+import { startBookingWriteWorker } from "./booking-write.worker"; // ★ cwi-final S5-1（F1）
 import { cronQueue, getRedis } from "@/lib/queue";
 import { refreshAllClinics } from "@/lib/availability";
 import { CONTROL_CHANNEL, type ControlMessage, bustScopeCache } from "@/lib/notify";
@@ -144,6 +145,8 @@ async function main() {
   // ★ cwi-final S1-14：急症通道獨立 lane（concurrency 1 — 見 src/workers/concurrency.ts）
   await startAiUrgentWorker();
   await startMediaWorker();
+  // ★ cwi-final S5-1（F1）：booking-write — createBooking 異步寫 Apricot（concurrency 1）
+  await startBookingWriteWorker();
   await startCronWorker();
   await registerSchedulers();
   // ★ Fix B（cwi-fix-20260825-f1）：worker process 訂閱 control channel —

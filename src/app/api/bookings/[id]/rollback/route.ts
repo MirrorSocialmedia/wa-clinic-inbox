@@ -18,7 +18,7 @@ import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/l
 import { handle } from "@/lib/api-error";
 import { publishConvEvent, convRef } from "@/lib/notify";
 import { afterBookingWrite, rollbackWindowOpen } from "@/lib/booking/booking-ops";
-import { WorkforceApiError, removeBooking } from "@/lib/workforce/client";
+import { WorkforceApiError, WorkforceOutcomeUnknown, removeBooking } from "@/lib/workforce/client";
 import { bumpStat } from "@/lib/ops/automation-stats";
 
 export const dynamic = "force-dynamic";
@@ -71,6 +71,22 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     await removeBooking(booking.apricotApptId, { clinicCode: clinic.code, date: booking.requestedDate });
     removed = true;
   } catch (err) {
+    // ★ cwi-final S5-1：outcome unknown（timeout/結果未知）— 唔好盲斷「仲喺度」（可能已取消）
+    if (err instanceof WorkforceOutcomeUnknown) {
+      log.warn(
+        { bookingId: booking.id, clinicId: booking.clinicId, staffId: ctx.staff.id },
+        "bookings: rollback — workforce remove outcome unknown（保持 CONFIRMED）"
+      );
+      return NextResponse.json(
+        {
+          error: "RESULT_UNKNOWN",
+          manual: true,
+          message: "撤銷結果未確定（超時）— 請核對 Apricot 有冇取消成功再決定下一步",
+          apricotApptId: booking.apricotApptId,
+        },
+        { status: 502 }
+      );
+    }
     const status = err instanceof WorkforceApiError ? err.status : 502;
     log.warn(
       { bookingId: booking.id, clinicId: booking.clinicId, workforceStatus: status, staffId: ctx.staff.id },

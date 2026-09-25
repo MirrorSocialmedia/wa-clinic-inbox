@@ -25,3 +25,10 @@ export const AI_URGENT_CONCURRENCY = 1;
  * message row 先落 PENDING 先 enqueue），可以並行 — 3。
  */
 export const MEDIA_CONCURRENCY = 3;
+
+/**
+ * ★ cwi-final S5-1（F1）：booking-write worker — createBooking 異步寫 Apricot。
+ * concurrency 1：同店寫入嚴格串行（Apricot 冪等 key 已防重，但串行係更保守嘅口徑：
+ * 單一寫入點 → outcome 明確；調大要連 F 側冪等 SLA 一併評審 — 同 R8 觸發條件一樣）。
+ */
+export const BOOKING_WRITE_CONCURRENCY = 1;

@@ -1,12 +1,14 @@
 import { Queue, type QueueOptions } from "bullmq";
 import IORedis from "ioredis";
+import { existsSync } from "node:fs";
+import path from "node:path";
 export type { default as IORedis } from "ioredis"; // ★ cwi-final S4-2：ai.worker test hook 用（type-only re-export）
 import log from "@/lib/log";
 
 /**
  * WA Clinic Inbox — BullMQ 骨架（框架 MD §1/§2）
  *
- * 6 個 queue：
+ * 7 個 queue：
  * - inbound  : webhook event 解析（patient 訊息 / echo / history / status）
  * - outbound : 發訊息 + 重試 + status 回寫
  * - ai       : 意圖識別 + 草稿生成（Phase 2）
@@ -15,6 +17,8 @@ import log from "@/lib/log";
  * - cron     : 排程入口（空檔 refresh / bookings-expire / 健康自檢）
  * - media    : ★ Realtime P0 (R4) media 下載獨立隊列（inbound job 只落 row + enqueue，
  *              唔喺入面做 HTTP 下載 — 大 media 唔阻 per-conversation 順序）
+ * - booking-write: ★ cwi-final S5-1（F1）createBooking 異步寫 Apricot（concurrency 1 —
+ *              見 src/workers/concurrency.ts）— API 202 {state:"WRITING"} 先 enqueue
  *
  * connection：單一 shared ioredis（BullMQ 要求 maxRetriesPerRequest: null）。
  * 注意：healthz 用獨立 probe client（見 healthz route），唔共用呢個。
@@ -89,6 +93,8 @@ export const aiUrgentQueue = new Queue("ai-urgent", queueOptions());
 export const cronQueue = new Queue("cron", queueOptions());
 // ★ Realtime P0 (R4)：media 下載獨立隊列（concurrency 3 — 見 src/workers/media.worker.ts）
 export const mediaQueue = new Queue("media", queueOptions());
+// ★ cwi-final S5-1（F1）：booking-write — createBooking 異步寫 Apricot（worker concurrency 1）
+export const bookingWriteQueue = new Queue("booking-write", queueOptions());
 
 export const QUEUE_NAMES = {
   inbound: "inbound",
@@ -97,6 +103,7 @@ export const QUEUE_NAMES = {
   aiUrgent: "ai-urgent", // ★ cwi-final S1-14
   cron: "cron",
   media: "media",
+  bookingWrite: "booking-write", // ★ cwi-final S5-1（F1）
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -118,4 +125,42 @@ export async function enqueueOutboundSend(messageId: string): Promise<void> {
   const delayMs = Math.max(0, parseInt(process.env.ENQUEUE_DELAY_MS ?? "0", 10) || 0);
   if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
   await outboundQueue.add("send", { messageId }, { jobId: messageId });
+}
+
+// ── ★ cwi-final S5-1（F1）：booking-write job ─────────────────────────────────────
+
+/** booking-write job data（createBooking 所需嘅全部參數快照 — worker 唔需要再查 dictionaries） */
+export interface BookingWriteJobData {
+  bookingId: string;
+  actor: { type: "STAFF"; staffId: string } | { type: "AI"; sessionId: string };
+  visitReasonId: string;
+  visitReasonCode: string | null;
+  /** AI 路徑觸發訊息（自動確認訊息 sendAuto gate 用；STAFF 路徑 null） */
+  triggerMsgId: string | null;
+}
+
+/** queue 不可用（Redis 斷 / 起唔到 queue）— confirm-core 回 PRECONDITION QUEUE_UNAVAILABLE。 */
+export class QueueUnavailableError extends Error {
+  constructor() {
+    super("booking-write queue unavailable");
+    this.name = "QueueUnavailableError";
+  }
+}
+
+// ★ e2e test hook（T672）：模擬 queue 死 — flag 檔存在 → enqueueBookingWriteJob throw。
+//   只影響 enqueue 入口（dev-only；production 唔會有呢個檔）→ 零 prod 行為改變。
+export const BOOKING_WRITE_QUEUE_OFF_FLAG = ".dev/booking-write-queue-off.json";
+
+/**
+ * booking-write enqueue 統一入口：
+ * - jobId: bw-${bookingId}-${idemAttempt}-${claimNonce}（caller 提供 — 帶 claim nonce；
+ *   穩定 jobId 會被 BullMQ 預設 keepJobs={count:-1} 嘅已完成 hash 冪等掉 → retry no-op）
+ * - queue 不可用 → throw QueueUnavailableError（caller 負責 rollback writeState）
+ */
+export async function enqueueBookingWriteJob(data: BookingWriteJobData, jobId: string): Promise<void> {
+  if (existsSync(path.resolve(process.cwd(), BOOKING_WRITE_QUEUE_OFF_FLAG))) {
+    log.warn({ jobId }, "booking-write: queue off flag — 模擬 queue 死（e2e T672）");
+    throw new QueueUnavailableError();
+  }
+  await bookingWriteQueue.add("create", data, { jobId });
 }

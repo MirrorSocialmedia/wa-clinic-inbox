@@ -1,38 +1,24 @@
 /**
  * POST /api/bookings/[id]/create — 代落單（booking-ui D：卡上〔幫我喺 Apricot 落單〕）
  *
- * 狀態機：只 PENDING（其餘 409）。必要條件：
- * - 對話已釘住舊客（pinnedPatientApricotId — 藍掣只喺已釘住時出現；API 層再擋一道）
- * - visitReasonId（body 揀咗嘅 dictionaries apricotId；冇 body → env default code 解析）
- *
- * 成功（workforce 200）：
- * - BookingRequest → CONFIRMED + apricotApptId + visitReasonCode + handledBy/At
- * - AuditLog BOOKING_CREATE（meta 零 PII：只 id/date/code）
- * - 即時刷新三步（booking-ops：L2 invalidate → booking:updated + booking:changed CREATED）
- * - 自動確認訊息（同 confirm route 語義：窗口內 free-form；過窗 → 422 hint 用 template，
- *   booking 照樣 CONFIRMED — 人已喺 Apricot 落咗單）
- *
- * workforce 錯誤分支（MD §3 + 鐵律 6）：
- * - 409 SLOT_TAKEN → 409（卡紅字「時段啱啱滿咗」+ 〔重發 Flow〕）
- * - 422 NEW_PATIENT_DISABLED 等 → 422 人手指示 variant
- * - 503 WRITE_DISABLED / APRICOT_BUSY → 503 人手指示
- * - 502 APRICOT_ERROR / 其他 → 502 人手指示
+ * ★ cwi-final S5-1（F1）：async 化 — workforce 寫入搬去 booking-write worker（concurrency 1）：
+ * - 前置（404/403/423 Send Lock/400 no_pinned/409 非 PENDING）照舊同步；
+ * - 成功 = 202 { ok: true, state: "WRITING" }（claim + enqueue 成功）— CONFIRMED/UNKNOWN/FAILED
+ *   由 worker 落 writeState + booking:updated（UI 即時刷新）；
+ * - 失敗：409 write_in_progress（WRITING 中）/ 400 前置（visit reason 等）/ 503 QUEUE_UNAVAILABLE。
  *
  * 權限：assertClinicAccess + Send Lock（MD §7：代落單 = 向 Apricot 寫入 → 非負責人 423，
  * 同 rollback/cancel/reschedule 一致）。
- * 24h 窗口邏輯：窗口只影響「自動確認訊息」，唔影響落單本身（同 confirm 一致）。
+ * 24h 窗口邏輯：窗口只影響「自動確認訊息」（worker 側）— 過窗 = SYSTEM notice 提示 staff 覆。
  *
- * ★ Phase C（cwi-sess-20260824-c1）C5：workforce 寫入 + CONFIRMED + 審計 + 刷新 +
- *   自動確認訊息 已抽入 confirm-core（同 L4 AI 自動落單共用）。
- *   呢個 route 只餘 auth / RBAC / 423 Send Lock / PENDING + pinned 前置 / HTTP 映射 —
- *   response shape 一 byte 不變（前端零改動）。
+ * ★ Phase C（cwi-sess-20260824-c1）C5：前置校驗 + 條件 claim + enqueue 抽入 confirm-core
+ *   （同 L4 AI 自動落單共用）；呢個 route 只餘 auth / RBAC / 423 Send Lock / HTTP 映射。
  */
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { confirmMessageText } from "@/lib/booking/booking-text";
 import { confirmBookingCore } from "@/lib/booking/confirm-core";
 
 export const dynamic = "force-dynamic";
@@ -56,7 +42,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     return NextResponse.json({ error: "conversation missing" }, { status: 500 });
   }
 
-  // Send Lock（MD §7：代落單 = 向 Apricot 寫入，非負責人唔准）— ★ Phase C：423 留喺 route（唔搬入 core）
+  // Send Lock（MD §7：代落單 = 向 Apricot 寫入，非負責人唔准）
   if (conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
     log.info(
       { clinicId: booking.clinicId, conversationId: booking.conversationId, staffId: ctx.staff.id, assigneeId: conv.assigneeId },
@@ -79,7 +65,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   // body：{ visitReasonId?: string }（dictionaries item 嘅 apricotId）
   const body = (await req.json().catch(() => ({}))) as { visitReasonId?: string };
 
-  // ★ Phase C：共用 core（visit reason 解析 / workforce 寫入 / CONFIRMED / 審計 / 刷新 / 自動確認訊息）
+  // ★ Phase C + S5-1：共用 core（前置校驗 / visit reason 解析 / 條件 claim WRITING / enqueue booking-write）
   const result = await confirmBookingCore(
     id,
     { type: "STAFF", staffId: ctx.staff.id },
@@ -87,65 +73,20 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   );
 
   if (!result.ok) {
-    if (result.kind === "PRECONDITION") {
-      return NextResponse.json({ error: result.code, message: result.message }, { status: 400 });
-    }
-    if (result.kind === "SLOT_TAKEN") {
+    if (result.kind === "QUEUE_UNAVAILABLE") {
       return NextResponse.json(
-        { error: "SLOT_TAKEN", message: "時段啱啱滿咗", retryable: true },
-        { status: 409 }
-      );
-    }
-    if (result.kind === "MANUAL_REQUIRED") {
-      return NextResponse.json(
-        { error: result.code ?? "NEW_PATIENT_DISABLED", manual: true, message: result.message },
-        { status: 422 }
-      );
-    }
-    if (result.kind === "WRITE_DISABLED") {
-      return NextResponse.json(
-        { error: result.code ?? "WRITE_DISABLED", manual: true, message: "Workforce 寫入暫時停用 — 請人手喺 Apricot 落單" },
+        { error: "QUEUE_UNAVAILABLE", message: result.message, hint: "booking 保持 PENDING — 請稍後重試" },
         { status: 503 }
       );
     }
-    return NextResponse.json(
-      { error: "WORKFORCE_UNAVAILABLE", manual: true, message: "Workforce 落單失敗 — 請人手喺 Apricot 落單" },
-      { status: 502 }
-    );
+    // PRECONDITION：write_in_progress（WRITING 中 → 409）/ 其他前置 → 400
+    const status = result.code === "write_in_progress" ? 409 : 400;
+    return NextResponse.json({ error: result.code, message: result.message }, { status });
   }
 
-  // ── 成功分支（response 同舊版 byte-for-byte）────────────────────────
-  if (result.autoMessage.sent) {
-    return NextResponse.json({
-      ok: true,
-      confirmed: true,
-      apricotApptId: result.apricotApptId,
-      autoMessage: { sent: true, messageId: result.autoMessage.messageId },
-    });
-  }
-  if (result.autoMessage.reason === "window_closed") {
-    return NextResponse.json(
-      {
-        ok: true,
-        confirmed: true,
-        apricotApptId: result.apricotApptId,
-        autoMessage: {
-          sent: false,
-          reason: "window_closed",
-          hint: "24 小時客服窗口已過 — 請用帶確認內容嘅 utility template 覆病人",
-          suggestedText: confirmMessageText(booking),
-        },
-      },
-      { status: 422 }
-    );
-  }
+  // ── ★ S5-1：受理成功 — 寫入處理緊（結果經 booking:updated / 卡上 writeState 更新）──
   return NextResponse.json(
-    {
-      ok: true,
-      confirmed: true,
-      apricotApptId: result.apricotApptId,
-      autoMessage: { sent: false, reason: "queue_unavailable", hint: "請手動覆病人" },
-    },
-    { status: 503 }
+    { ok: true, state: "WRITING", bookingId: id, hint: "落單處理緊 — 結果會即時顯示喺預約卡" },
+    { status: 202 }
   );
 });

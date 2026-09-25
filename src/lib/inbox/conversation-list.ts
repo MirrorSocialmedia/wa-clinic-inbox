@@ -406,6 +406,10 @@ export async function toConversationDTOs(
           visitReasonCode: b.visitReasonCode,
           handledByStaffName: b.handledByStaffId ? (staffMap.get(b.handledByStaffId) ?? null) : null,
           handledAt: b.handledAt ? b.handledAt.toISOString() : null,
+          // ★ cwi-final S5-1（F1）：async 寫入狀態機（卡上 spinner / 未知黃 / 失敗 code 顯示）
+          writeState: b.writeState,
+          writeError: b.writeError,
+          writeAttemptAt: b.writeAttemptAt ? b.writeAttemptAt.toISOString() : null,
         };
       })() as BookingInfo | null,
       // providerslot-20260830 T3：Flow 硬保留 hold 卡（HELD / IN_APRICOT / COMMITTED）

@@ -947,49 +947,41 @@ async function handleSessionTurn(
           }
           break;
         }
-        // AUTO_BOOK：confirm-core（失敗永不自動重試 — 鐵律）
+        // AUTO_BOOK：confirm-core（★ cwi-final S5-1：async — 成功 = 202 WRITING，CONFIRMED/BOOKING_AUTO/確認訊息
+        //   全部由 booking-write worker 做；失敗永不自動重試 — 鐵律沿用）
         if (booking.status !== "PENDING") break; // 重跑 job：已確認 → 唔重複落單
         const r = await confirmBookingCore(booking.id, { type: "AI", sessionId }, { triggerMsgId: msg.id }); // ★ cwi-final S4-2：trigger = 呢輪病人訊息（L4 確認訊息經原子閘）
         if (r.ok) {
-          // L4 自動落單成功：staff 通知（title 用 booking 欄砌，零病人資料）
-          const m = booking.requestedDate.split("-");
-          const title = `AI 已自動落單 ${Number(m[1])}月${Number(m[2])}日 ${booking.requestedTime ?? ""} ${booking.providerName ?? ""}`
-            .replace(/\s+/g, " ")
-            .trim();
-          await prisma.staffNotice.create({
-            data: {
-              clinicId: conv.clinicId,
-              conversationId: conv.id,
-              kind: "BOOKING_AUTO",
-              title,
-              meta: { sessionId, bookingId: booking.id },
-            },
-          });
-          // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
-          const convRow = await prisma.conversation.findUnique({
-            where: { id: conv.id },
-            select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
-          });
-          if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: conv.id, kind: "BOOKING_AUTO" });
-        } else {
-          // 失敗：booking 保持 PENDING 卡 + 人手接手通知 + 病人中性感（唔講失敗原因）
-          await prisma.staffNotice.create({
-            data: {
-              clinicId: conv.clinicId,
-              conversationId: conv.id,
-              kind: "HANDOFF_REQUEST",
-              title: `AI 自動落單失敗（${r.kind}）— 請人手處理`,
-              meta: { sessionId, bookingId: booking.id },
-            },
-          });
-          // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
-          const convRow = await prisma.conversation.findUnique({
-            where: { id: conv.id },
-            select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
-          });
-          if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: conv.id, kind: "HANDOFF_REQUEST" });
-          if (reply === null) reply = "收到！職員會好快幫你確認 🙂";
+          // ★ S5-1：落單處理緊（WRITING）— booking-write worker 會做 BOOKING_AUTO notice + L4 確認訊息。
+          //   runner 唔發任何訊息（gate 會因 already-answered 擋住 — 防雙發）。
+          log.info(
+            { sessionId, conversationId: conv.id, bookingId: booking.id },
+            "session: AUTO_BOOK accepted — booking-write worker will finish（CONFIRMED/notice/確認訊息）"
+          );
+          break;
         }
+        if (r.kind === "PRECONDITION" && r.code === "write_in_progress") {
+          // job 重跑（write 處理緊）— 做咩（worker 結果為準）
+          log.info({ sessionId, conversationId: conv.id, bookingId: booking.id }, "session: AUTO_BOOK write_in_progress — skip（重跑）");
+          break;
+        }
+        // 失敗（QUEUE_UNAVAILABLE / 其他 PRECONDITION）：staff 接手通知 + 病人中性感（唔講失敗原因）
+        await prisma.staffNotice.create({
+          data: {
+            clinicId: conv.clinicId,
+            conversationId: conv.id,
+            kind: "HANDOFF_REQUEST",
+            title: `AI 自動落單失敗（${r.kind}）— 請人手處理`,
+            meta: { sessionId, bookingId: booking.id },
+          },
+        });
+        // ★ cwi-final S1-4：conv 參數缺 assignee/routed 欄 → 補五欄
+        const convRow = await prisma.conversation.findUnique({
+          where: { id: conv.id },
+          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+        });
+        if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: conv.id, kind: "HANDOFF_REQUEST" });
+        if (reply === null) reply = "收到！職員會好快幫你確認 🙂";
         break;
       }
     }

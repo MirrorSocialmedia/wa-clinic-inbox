@@ -23,7 +23,7 @@ import { phoneHash } from "@/lib/phone-hash";
 import { enqueueOutboundSend } from "@/lib/queue";
 import { afterBookingWrite } from "@/lib/booking/booking-ops";
 import { cancelMessageText } from "@/lib/booking/booking-text";
-import { WorkforceApiError, fetchAppointments, updateBookingStatus } from "@/lib/workforce/client";
+import { WorkforceApiError, WorkforceOutcomeUnknown, fetchAppointments, updateBookingStatus } from "@/lib/workforce/client";
 
 export const dynamic = "force-dynamic";
 
@@ -99,6 +99,17 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   try {
     await updateBookingStatus(apricotApptId, -7, { clinicCode: clinic.code, date: appt.date });
   } catch (err) {
+    // ★ cwi-final S5-1：outcome unknown（timeout/結果未知）— 唔好盲斷「未取消」（可能已取消）
+    if (err instanceof WorkforceOutcomeUnknown) {
+      log.warn(
+        { conversationId: conv.id, clinicId: conv.clinicId, staffId: ctx.staff.id },
+        "patient-appointments: cancel — workforce status update outcome unknown"
+      );
+      return NextResponse.json(
+        { error: "RESULT_UNKNOWN", manual: true, message: "取消結果未確定（超時）— 請核對 Apricot 有冇取消成功再決定下一步" },
+        { status: 502 }
+      );
+    }
     const status = err instanceof WorkforceApiError ? err.status : 502;
     log.warn(
       { conversationId: conv.id, clinicId: conv.clinicId, workforceStatus: status, staffId: ctx.staff.id },

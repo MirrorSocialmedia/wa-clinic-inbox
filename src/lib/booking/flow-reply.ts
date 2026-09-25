@@ -38,7 +38,7 @@ import { syncWindow, getSlots, hkDateOffset, slotAvailable } from "@/lib/availab
 import { phoneHash } from "@/lib/phone-hash";
 import { afterBookingWrite } from "@/lib/booking/booking-ops";
 import { rescheduledReply } from "@/lib/booking/booking-text";
-import { WorkforceApiError, fetchAppointments, rescheduleBooking } from "@/lib/workforce/client";
+import { WorkforceApiError, WorkforceOutcomeUnknown, fetchAppointments, rescheduleBooking } from "@/lib/workforce/client";
 
 export interface NfmReplyEnvelope {
   payload: string;
@@ -448,6 +448,33 @@ async function handleReschedule(p: {
     });
     newApptId = r.newApptId;
   } catch (err) {
+    // ★ cwi-final S5-1：改期結果未知（timeout/回應丟失）— 唔好盲斷「改期失敗」（可能已改成功）
+    if (err instanceof WorkforceOutcomeUnknown) {
+      log.warn(
+        { conversationId: conv.id, clinic: clinicCode, oldApptId, newDate: date },
+        "flow-reply: reschedule — outcome unknown → staff 核對 Apricot"
+      );
+      await prisma.staffNotice
+        .create({
+          data: {
+            clinicId: conv.clinicId,
+            conversationId: conv.id,
+            kind: "HANDOFF_REQUEST",
+            title: `改期結果未確定（超時）— 請核對 Apricot 單 ${oldApptId} 有冇改到 ${date} ${time}`,
+            meta: { oldApptId, newDate: date, newTime: time },
+          },
+        })
+        .catch(() => undefined);
+      const reply = "你嘅改期處理緊 — 請稍候，職員會核對後同你確認 🙏";
+      await failSessionAndResend(
+        session.id,
+        conv,
+        reply,
+        { clinic: clinicCode, oldApptId, newDate: date, reason: "reschedule_unknown" },
+        "reschedule_unknown"
+      );
+      return { status: "send_failed", reason: "reschedule_unknown" };
+    }
     const status = err instanceof WorkforceApiError ? err.status : 502;
     log.warn(
       { conversationId: conv.id, clinic: clinicCode, oldApptId, newDate: date, workforceStatus: status },

@@ -384,6 +384,11 @@ fi
 # ★ S0-12：第一程（T1–T27 + S12 flag-OFF case）必須閘 OFF — 即使外层 shell export 咗 ALLOW_SLOT_CLAIM 都強制 off
 #   （S12 段會 export =1 重起 server 食到 gate-ON）
 unset ALLOW_SLOT_CLAIM
+# ★ cwi-final S5-1（F1，2026-09-25）：booking-write timeout 縮到 e2e 尺度 —
+#   2s timeout / 200ms retry-delay（mock 寫全部即時，除 T670 用 write-slow flag 模擬超時）。
+#   module-level const：必須喺所有 pnpm dev/worker 起機前 export（後啟嘅 worker 重啟都食到）。
+export WORKFORCE_WRITE_TIMEOUT_MS=2000
+export WORKFORCE_WRITE_RETRY_DELAY_MS=200
 nohup pnpm dev >/tmp/e2e-server.log 2>&1 &
 SERVER_PID=$!
 nohup pnpm worker >/tmp/e2e-worker.log 2>&1 &
@@ -849,6 +854,7 @@ check "T26 AUTO 發送 log 無訊息原文（metadata only 鐵律）" "$LOGPII2"
 echo "[11/11] T27: workforce mock sync + Flow endpoint 3 步 round-trip..."
 rm -rf .dev/flow-keys
 rm -f .dev/workforce-mock-fill.json .dev/workforce-mock-fail.json .dev/workforce-mock-stale.json
+rm -f .dev/workforce-mock-write-slow.json .dev/booking-write-queue-off.json   # ★ cwi-final S5-1（F1）：T670/T672 旗 — hermetic 起點
 
 # 0) 觸發 workforce sync（cron 路徑：cronQueue → refreshAllClinics → getSlots 四層降級鏈；WORKFORCE_MOCK=1）
 pnpm -s e2e:cron sync-availability >/dev/null 2>&1 || fail "T27 e2e:cron enqueue"
@@ -2119,14 +2125,20 @@ h1_req "$COOKIE_H1B" POST "$BASE/api/bookings/$LOCK_BOOK_ID/create"
 check "T62b B（非負責人）代落單 → 423" "$H1_CODE" "423"
 grep -q '"error":"SEND_LOCKED"' "$H1_OUT" && pass "T62b 423 body = SEND_LOCKED" || { fail "T62b 423 body 錯"; H1=1; }
 grep -qF "\"assigneeId\":\"$TKW_STAFF_ID\"" "$H1_OUT" && pass "T62b 423 body 帶 assigneeId" || { fail "T62b 423 body 無 assigneeId"; H1=1; }
-# (b) A（負責人自己）唔會 423/500 — write-disabled flag 令 workforce 寫止住喺 503（booking 保持 PENDING，無 CONFIRMED/無訊息副作用）
+# (b) A（負責人自己）唔會 423/500 — ★ cwi-final S5-1 async：202 WRITING（受理）→ worker 寫 → write-disabled flag → 503 WRITE_DISABLED
+#     → writeState FAILED + writeError WRITE_DISABLED（booking 保持 PENDING，無 CONFIRMED/無訊息副作用）
 printf '{"clinicCode":"TKW"}' > .dev/workforce-mock-write-disabled.json
 h1_req "$COOKIE_TKW" POST "$BASE/api/bookings/$LOCK_BOOK_ID/create" '{"visitReasonId":"vr-0010"}'
-rm -f .dev/workforce-mock-write-disabled.json
 [ "$H1_CODE" != "423" ] && [ "$H1_CODE" != "500" ] && pass "T62b A（負責人）代落單唔係 423/500（actual=$H1_CODE）" || { fail "T62b A 代落單被 lock 或 500（actual=$H1_CODE）"; H1=1; }
-check "T62b A 落單 → 503 WRITE_DISABLED（mock flag 決定性）" "$H1_CODE" "503"
-grep -q '"error":"WRITE_DISABLED"' "$H1_OUT" && pass "T62b 503 body = WRITE_DISABLED" || { fail "T62b 503 body 錯"; H1=1; }
-check "T62b booking 保持 PENDING（503 無改狀態）" "$(q "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$LOCK_BOOK_ID'" | jf s)" "PENDING"
+check "T62b A 落單 → 202 WRITING（S5-1 async 受理）" "$H1_CODE" "202"
+# 等 worker 寫完（flag 存活到 FAILED 先清 — 防 worker 晚一步時 flag 已冇 → 假成功）
+_T62B_WS_SQL="SELECT COALESCE(\"writeState\",'') w FROM \"BookingRequest\" WHERE id='$LOCK_BOOK_ID'"
+wait_for "$_T62B_WS_SQL" '[{"w":"FAILED"}]' 30 \
+  || { fail "T62b A writeState 未 FAILED（最後=$(q "$_T62B_WS_SQL" | jf w)）"; H1=1; }
+rm -f .dev/workforce-mock-write-disabled.json
+check "T62b A writeState = FAILED（mock flag 決定性）" "$(q "SELECT \"writeState\"::text w FROM \"BookingRequest\" WHERE id='$LOCK_BOOK_ID'" | jf w)" "FAILED"
+check "T62b A writeError = WRITE_DISABLED" "$(q "SELECT \"writeError\"::text e FROM \"BookingRequest\" WHERE id='$LOCK_BOOK_ID'" | jf e)" "WRITE_DISABLED"
+check "T62b booking 保持 PENDING（async 寫失敗無改狀態）" "$(q "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$LOCK_BOOK_ID'" | jf s)" "PENDING"
 
 # ── T63. ★ 10 條 INTERNAL note → mock Graph 計數不變（物理隔離）────────────
 GRAPH_B=$(graph_count)
@@ -4639,7 +4651,8 @@ t97_book_cycle() { # t97_book_cycle <pat> <suf> → 設 T97_BOOK_ID；回 0/1（
   # 代落單前置（鐵律 A：pinned 舊客 + Send Lock：assignee=自己）
   q "UPDATE \"Conversation\" SET \"assigneeId\"='$TKW_STAFF_ID', \"pinnedPatientApricotId\"='e2e-t97-pat-${suf}', \"pinnedPatientName\"='E2E T97 ${suf}' WHERE id='$conv'" >/dev/null 2>&1
   local code; code=$(curl -s -o /tmp/e2e-t97-create-${suf}.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/$T97_BOOK_ID/create" -H 'Content-Type: application/json' -d '{"visitReasonId":"vr-0010"}')
-  [ "$code" = "200" ] || { echo "    ❌ T97 $suf step=create（HTTP=$code body=$(head -c 200 /tmp/e2e-t97-create-${suf}.json)）"; return 1; }
+  # ★ cwi-final S5-1（F1）：create = async — 202 WRITING 受理（worker 寫 Apricot → CONFIRMED）
+  [ "$code" = "202" ] || { echo "    ❌ T97 $suf step=create（HTTP=$code body=$(head -c 200 /tmp/e2e-t97-create-${suf}.json)）"; return 1; }
   wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$T97_BOOK_ID'" '[{"s":"CONFIRMED"}]' 20 || { echo "    ❌ T97 $suf step=confirmed"; return 1; }
   # create 成功（mock recordBooked 已寫 store）→ re-sync → rc 遞減
   q "UPDATE \"AvailabilitySlot\" SET \"syncedAt\"=\"syncedAt\"-interval '1 hour' WHERE \"clinicId\"='$TKW_CLINIC_ID'" >/dev/null
@@ -7746,6 +7759,187 @@ for _pre in t659a t659b t659c t659d t659e t659f t659g1 t659g2 t659g3 t659g4 t659
   q "DELETE FROM \"Conversation\" WHERE id='$_conv'" >/dev/null 2>&1
   q "DELETE FROM \"Contact\" WHERE id='${_pre}-c-${EPOCH}'" >/dev/null 2>&1
 done
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ★ cwi-final Stage 5 F1（S5-1 寫入 timeout+結果未知 / S5-6 確認雙擊 / S5-8① 排班表落單重複）
+#   T670 mock write-slow（100s）→ 2s write timeout → UNKNOWN → 重試同單號 → CONFIRMED（冪等重放）
+#   T671 UI 零「請人手喺 Apricot 落單」字眼（除 WRITE_DISABLED 分支）— grep 層斷言
+#   T672 同 requestId 連 call 2 次 → 1 次 createBooking（call log diff）；queue 死 → 200 ok:true
+#   T674 Promise.all 2 confirm → 恰 1 條 OUT + clientMessageId 非空（uuidv5 雙擊物理擋）
+#   注：T62b(b) 已改 async 斷言（202 → FAILED WRITE_DISABLED）；T97 create 斷言 200 → 202。
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── T670. S5-1：booking-write timeout → 結果未知（UNKNOWN）→ 重試同單號 ─────────
+echo "[S5-1] T670: write timeout → UNKNOWN → 重試同單號（冪等重放）..."
+T670=0
+T670_BID=""
+rm -f .dev/workforce-mock-write-slow.json  # hermetic 起點
+ROW=$(slot_query "")
+T670_D=$(echo "$ROW" | jf d); T670_T=$(echo "$ROW" | jf t)
+if [ -z "$T670_D" ]; then
+  fail "T670 slot_query 空（無可用 slot）"
+else
+  T670C="t670-c-${EPOCH}"; T670C_CONV="t670-conv-${EPOCH}"; T670C_WA="8526700${EPOCH}"
+  q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T670C', '$TKW_CLINIC_ID', '$T670C_WA', 'E2E T670', ARRAY[]::text[])" >/dev/null 2>&1
+  q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T670C_CONV', '$TKW_CLINIC_ID', '$T670C', 'OPEN', now(), now())" >/dev/null 2>&1
+  q "UPDATE \"Conversation\" SET \"pinnedPatientApricotId\"='e2e-t670-pat', \"pinnedPatientName\"='E2E T670 Pat' WHERE id='$T670C_CONV'" >/dev/null 2>&1
+  T670_RID=$(cat /proc/sys/kernel/random/uuid)
+  T670_BODY="{\"requestId\":\"$T670_RID\",\"conversationId\":\"$T670C_CONV\",\"providerApricotId\":\"$DOC_A\",\"date\":\"$T670_D\",\"start\":\"$T670_T\",\"visitReasonId\":\"vr-0010\"}"
+  # write-slow flag：mock「寫已落 store、回應遲 100s」→ 同 2s write timeout（WORKFORCE_WRITE_TIMEOUT_MS）race
+  printf '{"clinicCode":"TKW","delayMs":100000}' > .dev/workforce-mock-write-slow.json
+  CODE=$(curl -s -o /tmp/e2e-t670-1.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/manual" -H 'Content-Type: application/json' -d "$T670_BODY")
+  check "T670 人手落單 → 202 WRITING（async 受理）" "$CODE" "202"
+  T670_BID=$(q "SELECT id FROM \"BookingRequest\" WHERE \"flowToken\"='manual-$T670_RID'" | jf id)
+  [ -n "$T670_BID" ] && pass "T670 BookingRequest 已建（flowToken=manual-\${requestId}）" || { fail "T670 BookingRequest 未建"; T670=1; }
+  _T670_SQL="SELECT COALESCE(\"writeState\",'') w, COALESCE(\"writeError\",'') e, \"status\" s, COALESCE(\"apricotApptId\",'') a FROM \"BookingRequest\" WHERE id='$T670_BID'"
+  if wait_for "$_T670_SQL" '[{"w":"UNKNOWN","e":"timeout","s":"PENDING","a":""}]' 40; then
+    pass "T670 timeout → writeState=UNKNOWN + writeError=timeout + booking 保持 PENDING + 無 apricotApptId"
+  else
+    fail "T670 UNKNOWN 未達（last=$(q "$_T670_SQL")）"; T670=1
+  fi
+  check "T670 StaffNotice（UNKNOWN → 唔好人手落單）= 1" "$(q "SELECT count(*)::text n FROM \"StaffNotice\" WHERE \"conversationId\"='$T670C_CONV' AND kind='HANDOFF_REQUEST' AND \"title\" LIKE '%未確定 Apricot 有冇落到單%'" | jf n)" "1"
+  # 重試同單號：清 flag（mock 即時）→ 同一 requestId → 同一張卡（同一 idempotencyKey）→ CONFIRMED
+  rm -f .dev/workforce-mock-write-slow.json
+  CODE=$(curl -s -o /tmp/e2e-t670-2.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/manual" -H 'Content-Type: application/json' -d "$T670_BODY")
+  check "T670 重試同單號 → 202 WRITING（UNKNOWN 允許重試）" "$CODE" "202"
+  if wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$T670_BID'" '[{"s":"CONFIRMED"}]' 40; then
+    T670_APT=$(q "SELECT COALESCE(\"apricotApptId\",'') a FROM \"BookingRequest\" WHERE id='$T670_BID'" | jf a)
+    [ -n "$T670_APT" ] && pass "T670 重試 → CONFIRMED + apricotApptId=$T670_APT" || { fail "T670 重試 CONFIRMED 但 apricotApptId 空"; T670=1; }
+  else
+    fail "T670 重試未 CONFIRMED（last=$(q "SELECT \"status\"::text s, COALESCE(\"writeState\",'') w FROM \"BookingRequest\" WHERE id='$T670_BID'"))"; T670=1
+  fi
+  # mock store：該 slot 恰 1 條（首試 timeout 前寫已落 store；重試 = 冪等重放，零雙單）
+  _T670_STORE=$(node -e 'try{const s=require("fs").readFileSync(".dev/workforce-mock-booked.json","utf8");const n=JSON.parse(s).filter(x=>x.clinicCode==="TKW"&&x.providerApricotId==="'$DOC_A'"&&x.date==="'$T670_D'"&&x.start==="'$T670_T'").length;console.log(n)}catch(e){console.log("ERR")}' 2>/dev/null)
+  check "T670 mock store 該 slot 恰 1 條（冪等重放零雙單）" "$_T670_STORE" "1"
+  [ "$T670" = 0 ] && pass "T670 S5-1 寫入 timeout → 結果未知 → 重試同單號 全鏈" || fail "T670 有項失敗（見上 ❌）"
+fi
+# T670 cleanup：mock store 該 slot 移除 + BookingRequest
+node -e 'try{const fs=require("fs");const p=".dev/workforce-mock-booked.json";if(!fs.existsSync(p))process.exit(0);const arr=JSON.parse(fs.readFileSync(p,"utf8"));const next=arr.filter(x=>!(x.clinicCode==="TKW"&&x.providerApricotId==="'$DOC_A'"&&x.date==="'$T670_D'"&&x.start==="'$T670_T'"));fs.writeFileSync(p,JSON.stringify(next))}catch(e){}' 2>/dev/null
+[ -n "${T670_BID:-}" ] && q "DELETE FROM \"BookingRequest\" WHERE id='$T670_BID'" >/dev/null 2>&1
+
+# ── T671. S5-1：UI 零「請人手喺 Apricot 落單」字眼（除 WRITE_DISABLED 分支）────────
+echo "[S5-1] T671: UI 字眼 — grep 層斷言..."
+T671=0
+_T671_TOTAL=$(grep -c "請人手喺 Apricot 落單" src/components/inbox/booking-card.tsx 2>/dev/null)
+_T671_TOTAL=${_T671_TOTAL:-0}
+_T671_DISABLED=$(grep "請人手喺 Apricot 落單" src/components/inbox/booking-card.tsx 2>/dev/null | grep -c "Workforce 寫入暫時停用")
+_T671_DISABLED=${_T671_DISABLED:-0}
+check "T671 booking-card「請人手喺 Apricot 落單」總數 = WRITE_DISABLED 分支數" "$_T671_TOTAL" "$_T671_DISABLED"
+if [ "$_T671_DISABLED" = "1" ]; then
+  pass "T671 WRITE_DISABLED 分支保留人手指示（恰 1 處）"
+else
+  fail "T671 WRITE_DISABLED 分支數 = $_T671_DISABLED（預期 1）"; T671=1
+fi
+[ "$T671" = 0 ] && pass "T671 UI 無「請人手喺 Apricot 落單」字眼（除 WRITE_DISABLED 分支）" || fail "T671 有項失敗（見上 ❌）"
+
+# ── T672. S5-8①：排班表人手落單重複防護（requestId 冪等）+ queue 死 → 200 ─────────
+echo "[S5-8] T672: 同 requestId 重複 call → 1 次 createBooking；queue 死 → 200..."
+T672=0
+T672_BID=""; T672B_BID=""
+ROW=$(slot_query "")
+T672_D=$(echo "$ROW" | jf d); T672_T=$(echo "$ROW" | jf t)
+ROW=$(slot_query "AND NOT (s.\"date\"='$T672_D' AND s.\"startTime\"='$T672_T')")
+T672B_D=$(echo "$ROW" | jf d); T672B_T=$(echo "$ROW" | jf t)
+if [ -z "$T672_D" ] || [ -z "$T672B_D" ]; then
+  fail "T672 slot_query 空（不足 2 個 slot）"
+else
+  T672C="t672-c-${EPOCH}"; T672C_CONV="t672-conv-${EPOCH}"; T672C_WA="8526701${EPOCH}"
+  q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T672C', '$TKW_CLINIC_ID', '$T672C_WA', 'E2E T672', ARRAY[]::text[])" >/dev/null 2>&1
+  q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T672C_CONV', '$TKW_CLINIC_ID', '$T672C', 'OPEN', now(), now())" >/dev/null 2>&1
+  q "UPDATE \"Conversation\" SET \"pinnedPatientApricotId\"='e2e-t672-pat', \"pinnedPatientName\"='E2E T672 Pat' WHERE id='$T672C_CONV'" >/dev/null 2>&1
+  # (a) 同一 requestId 連 call 2 次 → 首次 202 → CONFIRMED；第二次 200 replay（零 workforce create）
+  T672_RID=$(cat /proc/sys/kernel/random/uuid)
+  T672_BODY="{\"requestId\":\"$T672_RID\",\"conversationId\":\"$T672C_CONV\",\"providerApricotId\":\"$DOC_A\",\"date\":\"$T672_D\",\"start\":\"$T672_T\",\"visitReasonId\":\"vr-0010\"}"
+  _CF_COUNT() { [ -f .dev/workforce-mock-calls.jsonl ] && grep -c '"method":"POST","path":"/api/external/v1/bookings"' .dev/workforce-mock-calls.jsonl 2>/dev/null | head -1; return 0; }
+  CF_B=$(_CF_COUNT); CF_B=${CF_B:-0}
+  CODE=$(curl -s -o /tmp/e2e-t672-1.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/manual" -H 'Content-Type: application/json' -d "$T672_BODY")
+  check "T672(a) 首次人手落單 → 202 WRITING" "$CODE" "202"
+  T672_BID=$(q "SELECT id FROM \"BookingRequest\" WHERE \"flowToken\"='manual-$T672_RID'" | jf id)
+  [ -n "$T672_BID" ] && pass "T672(a) BookingRequest 已建" || { fail "T672(a) BookingRequest 未建"; T672=1; }
+  wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$T672_BID'" '[{"s":"CONFIRMED"}]' 40 \
+    && pass "T672(a) worker 寫成 → CONFIRMED" || { fail "T672(a) 未 CONFIRMED（last=$(q "SELECT \"status\"::text s, COALESCE(\"writeState\",'') w, COALESCE(\"writeError\",'') e FROM \"BookingRequest\" WHERE id='$T672_BID'")）"; T672=1; }
+  CODE=$(curl -s -o /tmp/e2e-t672-2.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/manual" -H 'Content-Type: application/json' -d "$T672_BODY")
+  check "T672(a) 重複 call 同 requestId → 200（冪等 replay）" "$CODE" "200"
+  grep -q '"replayed":true' /tmp/e2e-t672-2.json && pass "T672(a) replay body 帶 replayed:true" || { fail "T672(a) replay body 無 replayed:true（$(head -c 200 /tmp/e2e-t672-2.json)）"; T672=1; }
+  CF_A=$(_CF_COUNT); CF_A=${CF_A:-0}
+  check "T672(a) 2 次 call → createBooking 恰 1 次（mock call log diff）" "$((CF_A - CF_B))" "1"
+  check "T672(a) 對話恰 1 條 OUT 確認訊息（replay 零雙發）" "$(q "SELECT count(*)::text n FROM \"Message\" WHERE \"conversationId\"='$T672C_CONV' AND \"direction\"='OUT'" | jf n)" "1"
+  # (b) 同 pinned 病人 + 同醫生 + 同日 + 同開始時間 已有 CONFIRMED → 新 requestId → 409 DUPLICATE_BOOKING
+  T672_RID2=$(cat /proc/sys/kernel/random/uuid)
+  CODE=$(curl -s -o /tmp/e2e-t672-3.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/manual" -H 'Content-Type: application/json' -d "{\"requestId\":\"$T672_RID2\",\"conversationId\":\"$T672C_CONV\",\"providerApricotId\":\"$DOC_A\",\"date\":\"$T672_D\",\"start\":\"$T672_T\",\"visitReasonId\":\"vr-0010\"}")
+  check "T672(b) 同病人同時段已有 CONFIRMED → 409 DUPLICATE_BOOKING" "$CODE" "409"
+  grep -q '"error":"DUPLICATE_BOOKING"' /tmp/e2e-t672-3.json && pass "T672(b) body = DUPLICATE_BOOKING" || { fail "T672(b) body 錯（$(head -c 200 /tmp/e2e-t672-3.json)）"; T672=1; }
+  CF_MID=$(_CF_COUNT); CF_MID=${CF_MID:-0}
+  check "T672(b) 重複單零 workforce call（diff = 0）" "$((CF_MID - CF_A))" "0"
+  # (c) queue 死 → 200 ok:true（queue_unavailable）+ booking 保持 PENDING（rollback writeState）
+  T672B_RID=$(cat /proc/sys/kernel/random/uuid)
+  printf '{"on":true}' > .dev/booking-write-queue-off.json
+  CODE=$(curl -s -o /tmp/e2e-t672-4.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/manual" -H 'Content-Type: application/json' -d "{\"requestId\":\"$T672B_RID\",\"conversationId\":\"$T672C_CONV\",\"providerApricotId\":\"$DOC_A\",\"date\":\"$T672B_D\",\"start\":\"$T672B_T\",\"visitReasonId\":\"vr-0010\"}")
+  rm -f .dev/booking-write-queue-off.json
+  check "T672(c) queue 死 → 200（唔再 503）" "$CODE" "200"
+  grep -q '"ok":true' /tmp/e2e-t672-4.json && grep -q '"queue_unavailable"' /tmp/e2e-t672-4.json && pass "T672(c) body ok:true + queue_unavailable（UI 成功語義）" || { fail "T672(c) body 錯（$(head -c 200 /tmp/e2e-t672-4.json)）"; T672=1; }
+  T672B_BID=$(q "SELECT id FROM \"BookingRequest\" WHERE \"flowToken\"='manual-$T672B_RID'" | jf id)
+  [ -n "$T672B_BID" ] && pass "T672(c) BookingRequest 已建（卡存在 — 可重試）" || { fail "T672(c) BookingRequest 未建"; T672=1; }
+  check "T672(c) booking 保持 PENDING + writeState 已 rollback NULL" "$(q "SELECT \"status\"||'/'||COALESCE(\"writeState\",'NULL') v FROM \"BookingRequest\" WHERE id='$T672B_BID'" | jf v)" "PENDING/NULL"
+  CF_Q=$(_CF_COUNT); CF_Q=${CF_Q:-0}
+  check "T672(c) queue 死零 workforce call（diff = 0）" "$((CF_Q - CF_MID))" "0"
+  # (d) queue 恢復後重試（同一 requestId）→ 202 → CONFIRMED
+  CODE=$(curl -s -o /tmp/e2e-t672-5.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/manual" -H 'Content-Type: application/json' -d "{\"requestId\":\"$T672B_RID\",\"conversationId\":\"$T672C_CONV\",\"providerApricotId\":\"$DOC_A\",\"date\":\"$T672B_D\",\"start\":\"$T672B_T\",\"visitReasonId\":\"vr-0010\"}")
+  check "T672(d) queue 恢復重試同單號 → 202" "$CODE" "202"
+  wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$T672B_BID'" '[{"s":"CONFIRMED"}]' 40 \
+    && pass "T672(d) 重試 → CONFIRMED" || { fail "T672(d) 未 CONFIRMED（last=$(q "SELECT \"status\"::text s, COALESCE(\"writeState\",'') w, COALESCE(\"writeError\",'') e FROM \"BookingRequest\" WHERE id='$T672B_BID'")）"; T672=1; }
+  [ "$T672" = 0 ] && pass "T672 S5-8① 排班表落單重複防護 + queue 死 200 全鏈" || fail "T672 有項失敗（見上 ❌）"
+fi
+# T672 cleanup：mock store 2 slot 移除 + BookingRequests
+node -e 'try{const fs=require("fs");const p=".dev/workforce-mock-booked.json";if(!fs.existsSync(p))process.exit(0);const arr=JSON.parse(fs.readFileSync(p,"utf8"));const keep=(x)=>x.clinicCode==="TKW"&&x.providerApricotId==="'$DOC_A'"&&((x.date==="'$T672_D'"&&x.start==="'$T672_T'")||(x.date==="'$T672B_D'"&&x.start==="'$T672B_T'"));fs.writeFileSync(p,JSON.stringify(arr.filter(x=>!keep(x))))}catch(e){}' 2>/dev/null
+[ -n "${T672_BID:-}" ] && q "DELETE FROM \"BookingRequest\" WHERE id='$T672_BID'" >/dev/null 2>&1
+[ -n "${T672B_BID:-}" ] && q "DELETE FROM \"BookingRequest\" WHERE id='$T672B_BID'" >/dev/null 2>&1
+
+# ── T674. S5-6：confirm 雙擊 / 並發 → 恰 1 條 OUT + clientMessageId（uuidv5 物理擋）──
+echo "[S5-6] T674: confirm 並發雙擊 → 1 條 OUT + clientMessageId..."
+T674=0
+T674_BID="e2e-t674-book-${EPOCH}"
+ROW=$(slot_query "")
+T674_D=$(echo "$ROW" | jf d); T674_T=$(echo "$ROW" | jf t)
+if [ -z "$T674_D" ]; then
+  fail "T674 slot_query 空"
+else
+  T674C="t674-c-${EPOCH}"; T674C_CONV="t674-conv-${EPOCH}"; T674C_WA="8526702${EPOCH}"
+  q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T674C', '$TKW_CLINIC_ID', '$T674C_WA', 'E2E T674', ARRAY[]::text[])" >/dev/null 2>&1
+  q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T674C_CONV', '$TKW_CLINIC_ID', '$T674C', 'OPEN', now(), now())" >/dev/null 2>&1
+  q "UPDATE \"Conversation\" SET \"pinnedPatientApricotId\"='e2e-t674-pat', \"pinnedPatientName\"='E2E T674 Pat' WHERE id='$T674C_CONV'" >/dev/null 2>&1
+  q "INSERT INTO \"BookingRequest\" (id, \"conversationId\", \"clinicId\", \"flowToken\", \"providerApricotId\", \"providerName\", \"requestedDate\", \"requestedTime\", \"status\") VALUES ('$T674_BID', '$T674C_CONV', '$TKW_CLINIC_ID', 'e2e-t674-flow-${EPOCH}', '$DOC_A', 'E2E T674 Dr', '$T674_D', '$T674_T', 'PENDING')" >/dev/null 2>&1
+  # 2 枝並發 confirm（同一 booking）
+  ( CODE=$(curl -s -o /tmp/e2e-t674-a.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/$T674_BID/confirm"); echo "$CODE" > /tmp/e2e-t674-a.code ) &
+  _T674_P1=$!
+  ( CODE=$(curl -s -o /tmp/e2e-t674-b.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/bookings/$T674_BID/confirm"); echo "$CODE" > /tmp/e2e-t674-b.code ) &
+  _T674_P2=$!
+  wait "$_T674_P1" "$_T674_P2"
+  CODE_A=$(cat /tmp/e2e-t674-a.code 2>/dev/null); CODE_B=$(cat /tmp/e2e-t674-b.code 2>/dev/null)
+  check "T674 並發 2 枝 confirm 都 → 200（冪等 — 唔係 409）" "${CODE_A:-ERR}/${CODE_B:-ERR}" "200/200"
+  _T674_SENT=$(grep -l '"sent":true' /tmp/e2e-t674-a.json /tmp/e2e-t674-b.json 2>/dev/null | wc -l | tr -d ' ')
+  check "T674 恰 1 枝 sent:true（贏家發訊息）" "$_T674_SENT" "1"
+  grep -q '"already":true' /tmp/e2e-t674-a.json /tmp/e2e-t674-b.json 2>/dev/null && pass "T674 輸家回 already:true（ALREADY 冪等）" || { fail "T674 無 already:true"; T674=1; }
+  check "T674 DB 恰 1 條 OUT + clientMessageId 非空" "$(q "SELECT (count(*) = 1 AND bool_or(\"clientMessageId\" IS NOT NULL AND \"clientMessageId\" <> ''))::text v FROM \"Message\" WHERE \"conversationId\"='$T674C_CONV' AND \"direction\"='OUT'" | jf v)" "true"
+  check "T674 booking CONFIRMED（條件 updateMany 贏家落定）" "$(q "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE id='$T674_BID'" | jf s)" "CONFIRMED"
+  # clientMessageId = uuidv5（格式 8-4-4-4-12 + version 5）
+  _T674_CMI=$(q "SELECT COALESCE(\"clientMessageId\",'') v FROM \"Message\" WHERE \"conversationId\"='$T674C_CONV' AND \"direction\"='OUT' LIMIT 1" | jf v)
+  case "$_T674_CMI" in
+    ????????-????-5???-????-????????????) pass "T674 clientMessageId = uuidv5 格式 ($_T674_CMI)" ;;
+    *) fail "T674 clientMessageId 唔係 uuidv5 格式（=$_T674_CMI）"; T674=1 ;;
+  esac
+  [ "$T674" = 0 ] && pass "T674 S5-6 confirm 雙擊/並發 → 恰 1 條 OUT + uuidv5 clientMessageId" || fail "T674 有項失敗（見上 ❌）"
+fi
+q "DELETE FROM \"BookingRequest\" WHERE id='$T674_BID'" >/dev/null 2>&1
+
+# T670/T672/T674 conv cleanup（hermetic：Message → StaffNotice → Conversation → Contact）
+for _pre in t670 t672 t674; do
+  q "DELETE FROM \"Message\" WHERE \"conversationId\"='${_pre}-conv-${EPOCH}'" >/dev/null 2>&1
+  q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='${_pre}-conv-${EPOCH}'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id='${_pre}-conv-${EPOCH}'" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE id='${_pre}-c-${EPOCH}'" >/dev/null 2>&1
+done
+rm -f .dev/workforce-mock-write-slow.json .dev/booking-write-queue-off.json  # 殘留旗清掉（防下一 run 污染）
 
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

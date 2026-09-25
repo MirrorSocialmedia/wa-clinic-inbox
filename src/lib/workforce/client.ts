@@ -27,10 +27,21 @@
  * ★ 鐵律：
  * - log 只 path + status（零 body）— WORKFORCE_API_KEY 永遠唔入 log；error 分類 code 只入
  *   WorkforceApiError.code（供路由分支），一樣唔入 log
- * - 3s timeout（同機 call，已係天荒地老）
+ * - timeout：讀 3s（WORKFORCE_TIMEOUT_MS 可覆）/ booking-write 90s（WORKFORCE_WRITE_TIMEOUT_MS 可覆）
  * - WORKFORCE_MOCK=1 → mock（§4：fixture 決定性，E2E/開發用）
  *
+ * ★ cwi-final S5-1（F1）：booking-write 結果未知（outcome unknown）：
+ * - 四條 Apricot booking 寫入（createBooking/updateBookingStatus/removeBooking/rescheduleBooking）
+ *   行 `bookingWrite` 分支：write timeout / 網絡錯（status 0）/ 500 / 502(非 MANUAL_RECONCILE)
+ *   → throw WorkforceOutcomeUnknown（「可能寫咗可能冇」— 上層唔好扮成功、唔好扮確定失敗）；
+ * - 409 IN_PROGRESS / 503 APRICOT_BUSY → 等 WORKFORCE_WRITE_RETRY_DELAY_MS（預設 5s）同 key 重試（≤3）→ 再唔得 UNKNOWN；
+ * - 502 MANUAL_RECONCILE / 409 IDEMPOTENCY_* / 409 SLOT_TAKEN / 422 / 503 WRITE_DISABLED / 400 / 403 / 404
+ *   = 確定性錯誤 → 原樣 throw WorkforceApiError（唔重試）；
+ * - 冪等安全：UNKNOWN 後重試用同一 idempotencyKey（workforce 冪等重放 → 同 apricotApptId）。
+ *
  * env：WORKFORCE_API_URL / WORKFORCE_API_KEY / WORKFORCE_MOCK
+ *      WORKFORCE_TIMEOUT_MS（預設 3000）/ WORKFORCE_WRITE_TIMEOUT_MS（預設 90000）/
+ *      WORKFORCE_WRITE_RETRY_DELAY_MS（預設 5000）
  *      BOOKING_DEFAULT_VISIT_REASON_CODE（預設 visit reason；空 = 無預設，UI/staff 必揀）
  */
 import { z } from "zod";
@@ -447,7 +458,52 @@ export class SlotClaimDisabledError extends WorkforceApiError {
   constructor(path: string) { super(403, path, "SLOT_CLAIM_DISABLED"); }
 }
 
-const WORKFORCE_TIMEOUT_MS = 3000;
+/**
+ * ★ cwi-final S5-1：booking-write 結果未知（outcome unknown）。
+ * 語義：「可能寫咗、可能冇寫」— 上層：
+ * - 唔可當成功（CONFIRMED 要 workforce 明確 200）；
+ * - 唔可盲當失敗（重試用同一 idempotencyKey — workforce 冪等重放安全）；
+ * - UI 提示「未確定 — 唔好人手落單，請撳〔重試（同一單號）〕」。
+ */
+export class WorkforceOutcomeUnknown extends Error {
+  constructor(
+    public readonly path: string,
+    cause?: unknown,
+  ) {
+    super(`workforce outcome unknown ${path}`);
+    this.name = "WorkforceOutcomeUnknown";
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+const WORKFORCE_TIMEOUT_MS = Math.max(1, Number(process.env.WORKFORCE_TIMEOUT_MS ?? 3000) || 3000);
+// ★ cwi-final S5-1：booking-write 長 timeout（Apricot 寫入可要幾十秒）+ 重試間隔（process start 快照；env 可覆）
+const WORKFORCE_WRITE_TIMEOUT_MS = Math.max(1, Number(process.env.WORKFORCE_WRITE_TIMEOUT_MS ?? 90_000) || 90_000);
+const WORKFORCE_WRITE_RETRY_DELAY_MS = Math.max(0, Number(process.env.WORKFORCE_WRITE_RETRY_DELAY_MS ?? 5000) || 5000);
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+class WfTimeoutError extends Error {
+  constructor(public readonly path: string, public readonly timeoutMs: number) {
+    super(`workforce timeout ${timeoutMs}ms ${path}`);
+    this.name = "WfTimeoutError";
+  }
+}
+
+/** Promise.race timeout — 超時 reject WfTimeoutError（底層 promise 繼續跑，零副作用問題：mock store 已先記） */
+async function withTimeout<T>(p: Promise<T>, ms: number, path: string): Promise<T> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, rej) => {
+        t = setTimeout(() => rej(new WfTimeoutError(path, ms)), ms);
+        t.unref?.();
+      }),
+    ]);
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
 
 // ── HTTP（real mode）─────────────────────────────────────────────────────
 
@@ -472,6 +528,8 @@ async function wfFetch(
   params: Record<string, string>,
   body?: unknown,
   extraHeaders?: Record<string, string>,
+  /** ★ cwi-final S5-1：booking-write 長 timeout（預設 = WORKFORCE_TIMEOUT_MS） */
+  timeoutMs?: number,
 ): Promise<unknown> {
   await cwmRateGate();
   const url = new URL(path, process.env.WORKFORCE_API_URL); // http://127.0.0.1:<port>
@@ -487,7 +545,7 @@ async function wfFetch(
         ...extraHeaders,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(WORKFORCE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs ?? WORKFORCE_TIMEOUT_MS),
     });
   } catch (err) {
     // timeout / DNS / 拒接 — log 只 path（零 body；err message 唔會含 key）
@@ -527,13 +585,91 @@ async function wfSend(
   params: Record<string, string>,
   body?: unknown,
   extraHeaders?: Record<string, string>,
+  opts?: { /** ★ cwi-final S5-1：Apricot booking 寫入 — 90s timeout + retry + outcome-unknown 分類 */ bookingWrite?: boolean },
 ) {
+  if (opts?.bookingWrite) {
+    return wfSendBookingWrite(method, path, params, body, extraHeaders);
+  }
   if (process.env.WORKFORCE_MOCK === "1") return mockFixture(path, params, method, body); // §4
   return wfFetch(method, path, params, body, extraHeaders);
 }
 
 /** test-only 出入口：mock 模式下直接打 workforce 端驗證（e.g. status 白名單）— 本 repo 測試用 */
 export const wfSendForTest = wfSend;
+
+// ── ★ cwi-final S5-1：booking-write 通道（timeout + retry + outcome-unknown 分類）────────────────
+
+/**
+ * booking-write 執行（mock 分支：先記 store = 寫已落，後 sleep = 模擬「回應收唔到」— T670；
+ * real 分支：wfFetch 帶 write timeout）。錯誤分類喺外层 wfSendBookingWrite。
+ */
+async function wfSendBookingWriteOnce(
+  method: "POST" | "PUT",
+  path: string,
+  params: Record<string, string>,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<unknown> {
+  if (process.env.WORKFORCE_MOCK === "1") {
+    const val = mockFixture(path, params, method, body); // 決定性錯誤（SLOT_TAKEN/WRITE_DISABLED/…）即刻 throw
+    const clinicCode = (body as { clinicCode?: unknown } | undefined)?.clinicCode ?? params.clinicCode ?? "";
+    const slowMs = mockWriteSlowDelayMs(typeof clinicCode === "string" ? clinicCode : "");
+    if (slowMs > 0) await sleep(slowMs); // 寫已落 store，回應「遲咗」— 由外层 race write timeout
+    return val;
+  }
+  return wfFetch(method, path, params, body, extraHeaders, WORKFORCE_WRITE_TIMEOUT_MS);
+}
+
+/**
+ * booking-write 主通道：
+ * - timeout / 網絡（status 0）/ 500 / 502(非 MANUAL_RECONCILE) → WorkforceOutcomeUnknown（安全方向）
+ * - 409 IN_PROGRESS / 503 APRICOT_BUSY → 等 WORKFORCE_WRITE_RETRY_DELAY_MS 同 key 重試（≤3）→ 再唔得 UNKNOWN
+ * - 確定性錯誤（SLOT_TAKEN / IDEMPOTENCY_* / MANUAL_RECONCILE / 422 / 400 / 403 / 404 / 503 WRITE_DISABLED…）→ 原樣 throw
+ */
+async function wfSendBookingWrite(
+  method: "POST" | "PUT",
+  path: string,
+  params: Record<string, string>,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<unknown> {
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    if (attempt > 0) {
+      log.info({ path, attempt, delayMs: WORKFORCE_WRITE_RETRY_DELAY_MS }, "workforce: booking-write retry（409 IN_PROGRESS / 503 APRICOT_BUSY）");
+      await sleep(WORKFORCE_WRITE_RETRY_DELAY_MS);
+    }
+    try {
+      return await withTimeout(
+        wfSendBookingWriteOnce(method, path, params, body, extraHeaders),
+        WORKFORCE_WRITE_TIMEOUT_MS,
+        path,
+      );
+    } catch (e) {
+      if (e instanceof WfTimeoutError) {
+        log.warn({ path, attempt, timeoutMs: e.timeoutMs }, "workforce: booking-write timeout → outcome unknown");
+        throw new WorkforceOutcomeUnknown(path, e);
+      }
+      if (e instanceof WorkforceApiError) {
+        const retriable = (e.status === 409 && e.code === "IN_PROGRESS") || (e.status === 503 && e.code === "APRICOT_BUSY");
+        if (retriable) {
+          if (attempt < 3) continue;
+          log.warn({ path, attempt, status: e.status, code: e.code }, "workforce: booking-write retries exhausted → outcome unknown");
+          throw new WorkforceOutcomeUnknown(path, e);
+        }
+        if (e.status === 0 || e.status === 500 || (e.status === 502 && e.code !== "MANUAL_RECONCILE")) {
+          log.warn({ path, attempt, status: e.status, code: e.code ?? null }, "workforce: booking-write 非確定性錯誤 → outcome unknown");
+          throw new WorkforceOutcomeUnknown(path, e);
+        }
+        throw e; // 確定性錯誤 — 原樣（路由按 code 分支）
+      }
+      // 其他（zod parse / 內部異常）— 回應唔符合 contract 或本地異常 → 安全方向當 UNKNOWN
+      log.warn({ path, attempt, err: e instanceof Error ? e.message : String(e) }, "workforce: booking-write 未預期錯誤 → outcome unknown");
+      throw new WorkforceOutcomeUnknown(path, e);
+    }
+  }
+  // 唔會到呢度（loop 內必 return/throw）
+  throw new WorkforceOutcomeUnknown(path, new Error("retries exhausted"));
+}
 
 // ── 公開 API ─────────────────────────────────────────────────────────────
 
@@ -611,7 +747,7 @@ export async function createBooking(p: {
     ...(p.remarks ? { remarks: p.remarks } : {}),
     patient: p.patient,
   };
-  const raw = await wfSend("POST", "/api/external/v1/bookings", {}, body);
+  const raw = await wfSend("POST", "/api/external/v1/bookings", {}, body, undefined, { bookingWrite: true }); // ★ cwi-final S5-1
   const res = BookingCreateResponse.parse(raw);
   // ★ cwi-refresh-20260831 §3：寫入成功 → 該日 L2 即時 bust + 重填（fail-soft — 永不 throw）
   if (res.dayRefreshed) await invalidateAvailabilityDay(p.clinicCode, p.date);
@@ -627,7 +763,10 @@ export async function updateBookingStatus(
   const raw = await wfSend(
     "PUT",
     `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/status`,
-    { status: String(status), date: p.date, clinicCode: p.clinicCode }
+    { status: String(status), date: p.date, clinicCode: p.clinicCode },
+    undefined,
+    undefined,
+    { bookingWrite: true }, // ★ cwi-final S5-1
   );
   const res = BookingStatusResponse.parse(raw);
   if (res.dayRefreshed) await invalidateAvailabilityDay(p.clinicCode, p.date);
@@ -642,7 +781,10 @@ export async function removeBooking(
   const raw = await wfSend(
     "PUT",
     `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/remove`,
-    { date: p.date, clinicCode: p.clinicCode }
+    { date: p.date, clinicCode: p.clinicCode },
+    undefined,
+    undefined,
+    { bookingWrite: true }, // ★ cwi-final S5-1
   );
   const res = BookingRemoveResponse.parse(raw);
   if (res.dayRefreshed) await invalidateAvailabilityDay(p.clinicCode, p.date);
@@ -676,7 +818,7 @@ export async function rescheduleBooking(
     ...(p.visitReasonId ? { visitReasonId: p.visitReasonId } : {}),
     ...(p.remarks ? { remarks: p.remarks } : {}),
   };
-  const raw = await wfSend("POST", `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/reschedule`, {}, body);
+  const raw = await wfSend("POST", `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/reschedule`, {}, body, undefined, { bookingWrite: true }); // ★ cwi-final S5-1
   const res = BookingRescheduleResponse.parse(raw);
   // reschedule 兩日都要：舊日 + 新日
   if (res.dayRefreshed) {
@@ -989,6 +1131,9 @@ export const MOCK_REFRESH_400_FLAG = ".dev/workforce-mock-refresh-400.json"; // 
 export const MOCK_REFRESH_FAILDAY_FLAG = ".dev/workforce-mock-refresh-failday.json"; // [date, ...] → 該日 ok:false（逐日失敗 UI）
 // 寫入 mock 回 dayRefreshed:false（T145：唔 bust 斷言）
 export const MOCK_DAYREFRESHED_OFF_FLAG = ".dev/workforce-mock-dayrefreshed-off.json"; // { on: true }
+// ★ cwi-final S5-1（T670）：mock write-slow 旗 — booking-write「寫已落 store、回應遲到」（模擬 Apricot 寫入慢/timeout）
+//   { clinicCode?, delayMs? }（delayMs 預設 100000）— e2e 設 WORKFORCE_WRITE_TIMEOUT_MS 遠小於 delayMs → UNKNOWN 路徑
+export const MOCK_WRITE_SLOW_FLAG = ".dev/workforce-mock-write-slow.json";
 const FIXTURE_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-availability.json");
 const FIXTURE_DICTIONARIES_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-dictionaries.json");
 const FIXTURE_PATIENT_LOOKUP_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-patient-lookup.json");
@@ -1463,6 +1608,13 @@ function mockWriteDisabled(path: string, clinicCode: string | undefined): void {
     log.info({ path, mock: true, status: 503 }, "workforce MOCK: WRITE_DISABLED");
     throw new WorkforceApiError(503, path, "WRITE_DISABLED");
   }
+}
+
+// ★ cwi-final S5-1（T670）：write-slow 延遲（0 = 唔慢）。flag 命中 → 返回 delayMs（預設 100000）。
+function mockWriteSlowDelayMs(clinicCode: string): number {
+  const f = readFlag<{ clinicCode?: string; delayMs?: number }>(MOCK_WRITE_SLOW_FLAG, (x) => !x.clinicCode || x.clinicCode === clinicCode);
+  if (!f) return 0;
+  return typeof f.delayMs === "number" && f.delayMs > 0 ? f.delayMs : 100_000;
 }
 
 function mockSlotTaken(path: string, b: MockBookingBody): void {

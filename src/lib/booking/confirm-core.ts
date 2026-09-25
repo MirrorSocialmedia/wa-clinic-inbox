@@ -1,55 +1,41 @@
 /**
  * ★ AI Workflow Phase C（cwi-sess-20260824-c1）：落單共用 core（C5 — L4 AI 同 staff 三掣共用同一份）。
  *
- * 由 POST /api/bookings/[id]/create route 原封搬以下段落（route 剩返 auth/RBAC/423 Send Lock/HTTP 映射）：
- * visit reason 解析（連 dictionaries 回查）+ createBooking call + WorkforceApiError 分類
- * + 成功後 bookingRequest.update（CONFIRMED + apricotApptId + visitReasonCode + handledBy/At + autoBooked）
- * → AuditLog → afterBookingWrite → publishConvEvent(convRef(convRow), "booking:updated") → 窗口內自動確認訊息（outbound enqueue）。
+ * ★ cwi-final S5-1（F1）：async 化 — createBooking 搬去 booking-write worker（concurrency 1）：
+ * - core 只做前置校驗 + visit reason 解析 + **條件 claim**（PENDING + writeState null/FAILED/UNKNOWN
+ *   → WRITING，count≠1 = write_in_progress）+ enqueue booking-write job（jobId 冪等）；
+ * - API 回 202 {state:"WRITING"}；CONFIRMED / UNKNOWN / FAILED + 審計 + StaffNotice + 確認訊息
+ *   全部由 worker 做（src/workers/booking-write.worker.ts）— worker 失敗 = 落 writeState，唔 throw。
+ * - 冪等：idemAttempt 唔會自動加一（重試 = 同一試次）→ idempotencyKey = wa-inbox-${id}-${idemAttempt}-${slotHash}
+ *   重試唔變 → workforce 冪等重放 → 同 apricotApptId（mock 同）；clientMessageId = uuidv5 同值。
  *
- * actor 差異（core 內 switch）：
+ * actor 差異（job data 帶住，worker 內 switch）：
  * | | STAFF | AI |
  * |---|---|---|
- * | AuditLog action | BOOKING_CREATE（照舊） | AI_AUTO_BOOKING（staffId=null，meta 加 sessionId） |
+ * | AuditLog action | BOOKING_CREATE | AI_AUTO_BOOKING（staffId=null，meta 加 sessionId） |
  * | handledByStaffId | staffId | null |
  * | autoBooked | false | true（Phase E rollback 統計鈎） |
- * | 確認訊息 sentByStaffId | staffId | null + aiAutoSent=true + bookingSessionId |
+ * | 確認訊息 sentByStaffId | staffId | null + aiAutoSent=true + bookingSessionId（sendAutoIfStillEligible gate） |
  *
  * 簽名偏離（記錄）：
- * - 成功回 autoMessage: { sent: true, messageId } | { sent: false, reason: "window_closed" | "queue_unavailable" }
- *   （MD 簽名只 autoMessageSent: boolean — 不足以映射 route 三枝 200/422/503 response）
- * - 失敗加 code?: string（route 422/503/400 response 需要 workforce 錯誤碼 / 400 error key）
+ * - 成功回 { ok: true, state: "WRITING" }（同步成功分支已搬去 worker — MD 簽名嘅 autoMessage 改由
+ *   route 層映射 202 / worker 側 StaffNotice 覆蓋）
+ * - 失敗：QUEUE_UNAVAILABLE（route 映射：create 503 / manual 200 ok:true）/ PRECONDITION（code 供路由分支）
  *
- * ★ 失敗時 AI 路徑由 runner 降級（CREATE_CARD + StaffNotice）— core 永不自動重試（鐵律沿用）。
+ * ★ 失敗時 AI 路徑由 runner 降級（StaffNotice + 中性覆）— core 永不自動重試（鐵律沿用）。
  * ★ PII：log metadata only（booking/clinic id、workforce status/code、actor id）— 零訊息原文。
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { getWindowState } from "@/lib/wa/window";
-import { enqueueOutboundSend } from "@/lib/queue";
-import { publishConvEvent, convRef } from "@/lib/notify";
-import { afterBookingWrite } from "./booking-ops";
-import { buildRemarks, confirmMessageText } from "./booking-text";
-import { sendAutoIfStillEligible } from "@/lib/ai/auto-send-gate";
-import { WorkforceApiError, createBooking, defaultVisitReasonCode, fetchDictionaries } from "@/lib/workforce/client";
-
-const ENQUEUE_TIMEOUT_MS = 1500;
-/** 預約時長（分鐘）— Flow 唔收時長；固定 15 分鐘（TODO：上線前同老細確認逐舖時長） */
-const DEFAULT_DURATION_MIN = 15;
+import { enqueueBookingWriteJob, QueueUnavailableError } from "@/lib/queue";
+import { defaultVisitReasonCode, fetchDictionaries } from "@/lib/workforce/client";
 
 export type ConfirmActor = { type: "STAFF"; staffId: string } | { type: "AI"; sessionId: string };
 
 export type ConfirmResult =
-  | {
-      ok: true;
-      apricotApptId: string;
-      autoMessage: { sent: true; messageId: string } | { sent: false; reason: "window_closed" | "queue_unavailable" | "gate_blocked" };
-    }
-  | {
-      ok: false;
-      kind: "SLOT_TAKEN" | "MANUAL_REQUIRED" | "WRITE_DISABLED" | "WORKFORCE_DOWN" | "PRECONDITION";
-      message: string;
-      code?: string;
-    };
+  | { ok: true; state: "WRITING" }
+  | { ok: false; kind: "QUEUE_UNAVAILABLE"; message: string }
+  | { ok: false; kind: "PRECONDITION"; message: string; code: string };
 
 /** env default code（如 0010）→ dictionaries apricotId（createBooking 要 apricotId） */
 async function resolveDefaultVisitReasonId(): Promise<{ apricotId: string; code: string } | null> {
@@ -60,10 +46,17 @@ async function resolveDefaultVisitReasonId(): Promise<{ apricotId: string; code:
   return item ? { apricotId: item.apricotId, code: item.code } : null;
 }
 
+/**
+ * ★ cwi-final S5-1（F1）：claim 前置校驗 + 條件 WRITING + enqueue booking-write。
+ * 冪等：claim 係條件 updateMany（雙擊/並發第二枝 count=0 → write_in_progress）；
+ * enqueue jobId = bw-${bookingId}-${idemAttempt}-${claimNonce} — BullMQ 預設 keepJobs={count:-1} 會保留
+ * 已完成 job 嘅 hash → 穩定 jobId 令 retry enqueue 被當重複 no-op（booking 卡死 WRITING，T670 實測）；
+ * 真正去重 = 條件 claim（雙擊第二次 claim 失敗 → write_in_progress，唔會雙 enqueue）。
+ */
 export async function confirmBookingCore(
   bookingId: string,
   actor: ConfirmActor,
-  opts?: { visitReasonId?: string; /** ★ cwi-final S4-2：AI actor 必帶 — 觸發呢輪確認嘅病人訊息（gate 用） */ triggerMsgId?: string }
+  opts?: { visitReasonId?: string; /** AI actor 必帶 — 觸發呢輪確認嘅病人訊息（worker gate 用） */ triggerMsgId?: string }
 ): Promise<ConfirmResult> {
   const booking = await prisma.bookingRequest.findUnique({ where: { id: bookingId } });
   if (!booking) return { ok: false, kind: "PRECONDITION", message: "not found", code: "not_found" };
@@ -84,7 +77,7 @@ export async function confirmBookingCore(
       code: "no_pinned_patient",
     };
 
-  // ── visit reason 解析（STAFF：body 揀咗嘅；AI：env default code）──
+  // ── visit reason 解析（STAFF：body 揀咗嘅；AI：env default code）— 快照落 job data（worker 唔再查 dictionaries）──
   let visitReasonId = typeof opts?.visitReasonId === "string" ? opts.visitReasonId.trim() : "";
   let visitReasonCode: string | null = null;
   if (visitReasonId) {
@@ -116,217 +109,53 @@ export async function confirmBookingCore(
       code: "time_unresolved",
     };
 
-  // ★ 代落單（workforce 冪等 key = 本 BookingRequest 行 — retry 唔會雙單）
-  const now = new Date();
   const isStaff = actor.type === "STAFF";
   const actorMeta = isStaff ? { staffId: actor.staffId } : { sessionId: actor.sessionId };
-  let apricotApptId: string;
-  try {
-    const created = await createBooking({
-      idempotencyKey: `wa-inbox-${booking.id}`,
-      clinicCode: clinic.code,
-      providerApricotId: booking.providerApricotId,
-      date: booking.requestedDate,
-      start: booking.requestedTime,
-      durationMin: DEFAULT_DURATION_MIN,
-      visitReasonId,
-      remarks: buildRemarks(booking.chiefComplaint, visitReasonCode),
-      patient: { patientApricotId: conv.pinnedPatientApricotId },
-    });
-    apricotApptId = created.apricotApptId;
-  } catch (err) {
-    // log 只 path + status（鐵律）— 錯誤碼只入 result 供 caller 分支
-    const status = err instanceof WorkforceApiError ? err.status : 502;
-    const code = err instanceof WorkforceApiError ? err.code : undefined;
-    log.warn(
-      { bookingId: booking.id, clinicId: booking.clinicId, workforceStatus: status, code, ...actorMeta },
-      "bookings: create — workforce write failed"
-    );
-    if (status === 409) return { ok: false, kind: "SLOT_TAKEN", message: "時段啱啱滿咗" };
-    if (status === 422)
-      return {
-        ok: false,
-        kind: "MANUAL_REQUIRED",
-        code: code ?? "NEW_PATIENT_DISABLED",
-        message:
-          code === "NEW_PATIENT_WRITE_DISABLED" || code === "NEW_PATIENT_DISABLED"
-            ? "Apricot 未開新客代落單 — 請人手喺 Apricot 落單，然後撳〔已人手落單〕"
-            : "Workforce 拒絕 — 請人手喺 Apricot 落單",
-      };
-    if (status === 503)
-      return { ok: false, kind: "WRITE_DISABLED", code, message: "Workforce 寫入暫時停用 — 請人手喺 Apricot 落單" };
-    return { ok: false, kind: "WORKFORCE_DOWN", message: "Workforce 落單失敗 — 請人手喺 Apricot 落單" };
-  }
 
-  // ── 成功：CONFIRMED + 審計 + 即時刷新三步 ─────────────────────────
-  await prisma.bookingRequest.update({
-    where: { id: booking.id },
-    data: {
-      status: "CONFIRMED",
-      apricotApptId,
-      visitReasonCode,
-      handledByStaffId: isStaff ? actor.staffId : null,
-      handledAt: now,
-      // ★ Phase C：L4 AI 自動落單標記（staff 三掣 / 普通 Flow 路徑 = false）
-      autoBooked: !isStaff,
+  // ── ★ 條件 claim：PENDING + writeState ∈ {null, FAILED, UNKNOWN} → WRITING（雙擊/並發第二枝 count=0）──
+  const claim = await prisma.bookingRequest.updateMany({
+    where: {
+      id: booking.id,
+      status: "PENDING",
+      OR: [{ writeState: null }, { writeState: { in: ["FAILED", "UNKNOWN"] } }],
     },
+    data: { writeState: "WRITING", writeAttemptAt: new Date(), writeError: null },
   });
-  await prisma.auditLog
-    .create({
-      data: {
-        staffId: isStaff ? actor.staffId : null, // AI 自動 = null（無 staff 參與）
-        action: isStaff ? "BOOKING_CREATE" : "AI_AUTO_BOOKING",
-        entity: "BookingRequest",
-        entityId: booking.id,
-        // 零 PII：只 booking/clinic/conversation id + Apricot 單號 + visit reason code（AI 加 sessionId）
-        meta: {
-          conversationId: booking.conversationId,
-          clinicId: booking.clinicId,
-          apricotApptId,
-          visitReasonCode,
-          date: booking.requestedDate,
-          ...(isStaff ? {} : { sessionId: actor.sessionId }),
-        },
-      },
-    })
-    .catch(() => undefined);
+  if (claim.count !== 1) {
+    log.info({ bookingId: booking.id, clinicId: booking.clinicId, ...actorMeta }, "bookings: create — write_in_progress（claim 唔到）");
+    return { ok: false, kind: "PRECONDITION", message: "落單處理緊 — 請等結果", code: "write_in_progress" };
+  }
 
-  await afterBookingWrite(booking.clinicId, [booking.requestedDate], booking.conversationId, "CREATED", booking.requestedDate);
-
-  const staffName = isStaff
-    ? ((await prisma.staffUser.findUnique({ where: { id: actor.staffId }, select: { name: true } }))?.name ?? null)
-    : null;
-
-  // ★ cwi-final S1-4：booking 無 assignee/routed 欄 → 補五欄
-  const convRow = await prisma.conversation.findUnique({
-    where: { id: booking.conversationId },
-    select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
-  });
-  if (convRow) {
-    await publishConvEvent(convRef(convRow), "booking:updated", {
-      conversationId: booking.conversationId,
-      clinicId: booking.clinicId,
-      booking: {
-        id: booking.id,
-        providerName: booking.providerName,
-        requestedDate: booking.requestedDate,
-        requestedTime: booking.requestedTime,
-        timeOfDay: booking.timeOfDay,
-        precheckPassed: booking.precheckPassed,
-        status: "CONFIRMED",
-        createdAt: booking.createdAt,
-        apricotApptId,
+  // ── enqueue booking-write job ──
+  // ★ jobId 帶 claim nonce（原因見文件頭：穩定 jobId + keepJobs=-1 → retry enqueue no-op）
+  const claimNonce = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  try {
+    await enqueueBookingWriteJob(
+      {
+        bookingId: booking.id,
+        actor: isStaff ? { type: "STAFF", staffId: actor.staffId } : { type: "AI", sessionId: actor.sessionId },
+        visitReasonId,
         visitReasonCode,
-        handledByStaffName: staffName,
-        handledAt: now.toISOString(),
+        triggerMsgId: opts?.triggerMsgId ?? null,
       },
-    });
-  }
-
-  // ── 自動確認訊息（同 confirm route 語義）──────────────────────────
-  // ★ cwi-final S4-2：AI actor（L4 自動確認）必經原子閘（source=L4_CONFIRM / minLevel=L4 —
-  //   店 BOOKING_REQUEST level 達 L4 先自動發）。gate 放棄 = booking 已 CONFIRMED（workforce 外部
-  //   副作用不可回滾）— 唔自動發確認訊息，staff 手覆。STAFF 路徑零改動（人手動作唔經閘）。
-  if (actor.type === "AI") {
-    if (!opts?.triggerMsgId) {
-      // fail-closed：冇觸發訊息 → superseded/already-answered 查唔到 → 唔自動發
-      log.error(
-        { bookingId: booking.id, sessionId: actor.sessionId },
-        "bookings: create — AI confirm missing triggerMsgId（fail-closed：無 auto message）"
-      );
-      return { ok: true, apricotApptId, autoMessage: { sent: false, reason: "gate_blocked" } };
-    }
-    const r = await sendAutoIfStillEligible({
-      convId: conv.id,
-      clinicId: clinic.id,
-      triggerMsgId: opts.triggerMsgId,
-      levelCategory: "BOOKING_REQUEST",
-      minLevel: "L4",
-      text: confirmMessageText(booking),
-      source: "L4_CONFIRM",
-      bookingSessionId: actor.sessionId,
-    });
-    if (!r.sent) {
-      log.info(
-        { bookingId: booking.id, clinicId: clinic.id, sessionId: actor.sessionId, reason: r.reason },
-        "bookings: create — auto message skipped at send-time gate（booking CONFIRMED，staff 手覆）"
-      );
-      return { ok: true, apricotApptId, autoMessage: { sent: false, reason: "gate_blocked" } };
-    }
-    // enqueue uncertain → 留 QUEUED（S1-15 sweep 兜底 — 同下方 STAFF 路徑語義一致）
-    try {
-      await Promise.race([
-        enqueueOutboundSend(r.messageId),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
-      ]);
-    } catch (err) {
-      log.warn(
-        { bookingId: booking.id, messageId: r.messageId, err: err instanceof Error ? err.message : String(err), sessionId: actor.sessionId },
-        "bookings: create — auto message enqueue uncertain（QUEUED，sweep 兜底重加）"
-      );
-    }
-    // 註：gate tx 已 atomically 更新 lastMessageAt/lastOutboundText — 唔使重複 touch。
-    log.info(
-      { bookingId: booking.id, messageId: r.messageId, clinicId: clinic.id, sessionId: actor.sessionId },
-      "bookings: create — auto confirmation message queued (send-time gate)"
+      `bw-${booking.id}-${booking.idemAttempt}-${claimNonce}`,
     );
-    return { ok: true, apricotApptId, autoMessage: { sent: true, messageId: r.messageId } };
-  }
-
-  const win = getWindowState(conv.lastInboundAt);
-  if (!win.open) {
-    log.info(
-      { bookingId: booking.id, clinicId: booking.clinicId, ...actorMeta },
-      "bookings: create — window closed, template required（booking 已 CONFIRMED）"
-    );
-    return { ok: true, apricotApptId, autoMessage: { sent: false, reason: "window_closed" } };
-  }
-
-  let msg;
-  try {
-    msg = await prisma.message.create({
-      data: {
-        conversationId: conv.id,
-        direction: "OUT",
-        channel: "API",
-        type: "text",
-        body: confirmMessageText(booking),
-        status: "QUEUED",
-        sentByStaffId: isStaff ? actor.staffId : null,
-        aiAutoSent: !isStaff, // ★ Phase C：AI 自動確認 = true（呢段只 STAFF 到達 — AI 路徑上面已 return）
-        bookingSessionId: null, // STAFF-only path（AI actor 已喺上面 gate 路徑 return）
-        // cwi-window-20260901（P1）：確認預約覆（窗口內）= SERVICE
-        billingCategory: "SERVICE",
-        waTimestamp: now,
-      },
-    });
   } catch (err) {
-    // Message row 寫入失敗 → 冇 row（唔係 enqueue 問題）— staff 手動覆
+    // queue 唔可用（Redis 斷 / flag hook）→ rollback writeState（card 可以正常重試）
+    await prisma.bookingRequest
+      .updateMany({
+        where: { id: booking.id, status: "PENDING", writeState: "WRITING" },
+        data: { writeState: null, writeAttemptAt: null },
+      })
+      .catch(() => undefined);
+    const queueDown = err instanceof QueueUnavailableError;
     log.error(
-      { bookingId: booking.id, err: err instanceof Error ? err.message : String(err), ...actorMeta },
-      "bookings: create — auto message write failed（狀態已 CONFIRMED，staff 手動覆）"
+      { bookingId: booking.id, clinicId: booking.clinicId, queueDown, err: err instanceof Error ? err.message : String(err), ...actorMeta },
+      "bookings: create — enqueue booking-write failed（rollback WRITING）"
     );
-    return { ok: true, apricotApptId, autoMessage: { sent: false, reason: "queue_unavailable" } };
+    return { ok: false, kind: "QUEUE_UNAVAILABLE", message: "booking queue 暫時唔可用 — 請重試" };
   }
-  try {
-    await Promise.race([
-      enqueueOutboundSend(msg.id),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
-    ]);
-  } catch (err) {
-    // ★ cwi-final S1-15 (P0-07)：enqueue uncertain — **唔標 FAILED / 唔報 queue_unavailable**：
-    //   job 可能已落隊列（jobId 冪等）— 留 QUEUED，outbound-sweep 120s 後重加兜底（唔雙發）。
-    //   回 sent:true = 當「已發出」— 防 caller 提示 staff 手動重覆（雙發）。
-    log.warn(
-      { bookingId: booking.id, messageId: msg.id, err: err instanceof Error ? err.message : String(err), ...actorMeta },
-      "bookings: create — auto message enqueue uncertain（QUEUED，sweep 兜底重加）"
-    );
-  }
-  await prisma.$executeRaw`
-    UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${now}) WHERE "id" = ${conv.id}`;
-  log.info(
-    { bookingId: booking.id, messageId: msg.id, clinicId: booking.clinicId, ...actorMeta },
-    "bookings: create — auto confirmation message queued"
-  );
-  return { ok: true, apricotApptId, autoMessage: { sent: true, messageId: msg.id } };
+
+  log.info({ bookingId: booking.id, clinicId: booking.clinicId, ...actorMeta }, "bookings: create — WRITING（booking-write job enqueued）");
+  return { ok: true, state: "WRITING" };
 }

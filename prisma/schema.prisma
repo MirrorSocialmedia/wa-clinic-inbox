@@ -703,6 +703,14 @@ model BookingRequest {
   // ★ AI Workflow Phase C（cwi-sess-20260824-c1）：L4 AI 自動落單標記（Phase E rollback 統計鈎）。
   //   staff 三掣 / 普通 Flow 路徑 = false；BookingSession AUTO_BOOK 成功 = true。
   autoBooked        Boolean @default(false)
+  // ★ cwi-final S5-1（F1）：async 寫入狀態機 — createBooking 搬去 booking-write worker（concurrency 1）。
+  //   null = 從未寫 / 寫完清回；WRITING = worker 處理緊；UNKNOWN = timeout/結果未知（唔好人手落單，可同 key 重試）；
+  //   FAILED = 確定性失敗（writeError = workforce code）。
+  writeState        String? @db.VarChar(16)
+  writeAttemptAt    DateTime? @db.Timestamptz
+  // ★ cwi-final S5-6（F1）：冪等試次 — 同 booking 重試用同一 idemAttempt → 同 idempotency key / 同 clientMessageId（uuidv5）。
+  idemAttempt       Int @default(0)
+  writeError        String? @db.VarChar(64)
   createdAt         DateTime @db.Timestamptz      @default(now())
   // Phase 3：/bookings 隊列查詢（本店 + 狀態 + 時間）
   @@index([clinicId, status, createdAt])

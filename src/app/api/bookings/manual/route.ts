@@ -1,35 +1,25 @@
 /**
  * POST /api/bookings/manual — G-3（cwi-writeword-20260904）：D.3 人手落單（schedule-board 直接入 Apricot）
  *
- * 同代落單（/api/bookings/[id]/create）共用同一條寫入鏈：
- *   建 PENDING BookingRequest → confirmBookingCore（workforce create / CONFIRMED /
- *   AuditLog BOOKING_CREATE / L2 invalidate / booking:updated / 窗口內自動確認訊息）。
- *   卡／審計／刷新與代落單完全一致 — 唔另起爐灶（MD G-3.4）。
+ * ★ cwi-final S5-8①（F1）：排班表落單重複防護 —
+ * - body `requestId: uuid`（UI 每次打開視窗生成；重試 = 同一 requestId）；
+ * - `flowToken = manual-${requestId}`（FlowSession.flowToken @unique 慣例 — BookingRequest.flowToken @unique）
+ *   → 同 requestId 重複 call 幂等：
+ *     CONFIRMED → 200 返原單（零 workforce call）｜WRITING → 202｜FAILED/UNKNOWN/PENDING-null → 重試（同一單）；
+ * - 同 pinned 病人（同對話）+ 同醫生 + 同日 + 同開始時間 已有 CONFIRMED / WRITING → 409 DUPLICATE_BOOKING；
+ * - queue 不可用 → **200**（ok:true + autoMessage.queue_unavailable — 唔再 503）；
+ * - 成功 = 202 { state: "WRITING" }（S5-1 async — 寫入喺 booking-write worker）。
  *
- * 同 create route 嘅分別（入口差異）：
- * - 病人 = 既有對話嘅**已釘住舊客**（pinnedPatientApricotId — PHONE_HASH 路徑）；
- *   未釘住 → **422 NEW_PATIENT_DISABLED**（鐵律：ALLOW_NEW_PATIENT_WRITE off，新客寫入路徑唔存在）。
- *   （create route 對未釘住回 400 no_pinned_patient — 嗰邊係卡上代落單嘅前置提示；
- *    呢邊係主動落單入口，照鐵律語義回 422 + 指引側欄釘舊客。）
- * - 時段 = schedule-board 撳落嘅 ONLINE 格（date + start + provider）；
- *   必係未來時段（今日已過 / 過期日 → 400 slot_in_past）。
- * - S3-9：providerApricotId 必須經 ProviderClinic 屬該對話嘅店（唔屬 → 400
- *   provider_not_at_clinic）；醫生名由 DB 讀（Provider.name，唔信 body.providerName）。
- * - visit reason = body 可選；唔帶 → BOOKING_DEFAULT_VISIT_REASON_CODE env 模式
- *   （跟 cwi-bkui 現狀 — board popover 唔設 picker）。
+ * 同代落單（/api/bookings/[id]/create）共用同一條寫入鏈（confirmBookingCore 條件 claim + enqueue）：
+ * 卡／審計／刷新與代落單完全一致 — 唔另起爐灶（MD G-3.4）。
  *
- * 權限（跟代落單現狀 — MD §7）：assertConversationAccess（403）+ Send Lock
- *   （assignee 係其他人 → 423 SEND_LOCKED；rollback/cancel/reschedule 一致）。
- *
- * workforce 錯誤分支（同 create route）：
- *   409 SLOT_TAKEN（含 L2 預檢 / mock flag / F checkClash）｜422 MANUAL_REQUIRED（NEW_PATIENT_DISABLED 等）
- *   ｜503 WRITE_DISABLED｜502/其他 WORKFORCE_DOWN。
- *   失敗時 PENDING 行保留（同 Flow 路徑 — 側欄卡可重試；48h expiry 掃）。
- *
- * 15 分鐘時長 = confirmBookingCore 現狀偏離項 D-1（唔改）。
+ * 入口差異（同 G-3 現狀）：
+ * - 病人 = 既有對話嘅**已釘住舊客**（pinnedPatientApricotId）；未釘住 → 422 NEW_PATIENT_DISABLED
+ * - 時段 = schedule-board 撳落嘅 ONLINE 格；必係未來時段（slot_in_past → 400）
+ * - S3-9：providerApricotId 必須經 ProviderClinic 屬該對話嘅店（唔屬 → 400）
+ * - 權限：assertConversationAccess（403）+ Send Lock（423）
  */
 import { type NextRequest, NextResponse } from "next/server";
-import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -37,11 +27,12 @@ import { requireAuth, assertConversationAccess, assertCanWriteConversation } fro
 import { handle } from "@/lib/api-error";
 import { confirmBookingCore } from "@/lib/booking/confirm-core";
 import { slotAvailable } from "@/lib/availability";
-import { confirmMessageText } from "@/lib/booking/booking-text";
 
 export const dynamic = "force-dynamic";
 
 const ManualBody = z.object({
+  // ★ S5-8①：UI 視窗級冪等 id（重試 = 同一 requestId → 同一 flowToken → 零雙單）
+  requestId: z.string().uuid(),
   conversationId: z.string().min(1),
   providerApricotId: z.string().min(1).max(200),
   // S3-9：名由 DB 讀（Provider.name）— body.providerName 只係 UI 兼容，唔再信任
@@ -73,7 +64,7 @@ export const POST = handle(async (req: NextRequest) => {
   if (!parsed.success) {
     return NextResponse.json({ error: "invalid body", details: parsed.error.flatten() }, { status: 400 });
   }
-  const { conversationId, providerApricotId, date, start, visitReasonId } = parsed.data;
+  const { requestId, conversationId, providerApricotId, date, start, visitReasonId } = parsed.data;
 
   const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
@@ -129,13 +120,57 @@ export const POST = handle(async (req: NextRequest) => {
     );
   }
 
-  // 建 PENDING 卡（同 Flow 路徑同形）→ 立即行代落單 core
-  // - flowToken = manual-<uuid>（唔會同 Flow JWT 撞；nfm_reply 只匹配 Flow session）
-  // - L2 預檢：slot 行存在且已佔（G-4/B7 F2 capacity-aware — 每格 3 人共享池；缺欄 fallback 舊語義）
-  //   → 即刻 409（慳一次 workforce call；行唔喺 = 照行，最終防線 = F 側 checkClash / mock SLOT_TAKEN flag）
-  // - 同 slot 已有 PENDING（Flow 路徑建）→ 409 pending_exists（防雙單 — 兩單同 slot 都喺 Apricot 會撞）
+  // ── ★ S5-8①：requestId 冪等 — flowToken = manual-${requestId}（unique）→ 同 requestId 唔會建第二張卡 ──
+  const flowToken = `manual-${requestId}`;
+  const existing = await prisma.bookingRequest.findUnique({ where: { flowToken } });
+  if (existing) {
+    if (existing.conversationId !== conv.id || existing.clinicId !== conv.clinicId) {
+      // 防禦：requestId 衝撞咗其他對話（理論上唔會 — uuid）→ 唔重入
+      return NextResponse.json(
+        { error: "DUPLICATE_BOOKING", message: "呢個請求ID已對應其他預約 — 請重開落單視窗再試" },
+        { status: 409 }
+      );
+    }
+    if (existing.status === "CONFIRMED") {
+      // 冪等 replay：返原單（零 workforce call / 零重複訊息）
+      return NextResponse.json({
+        ok: true,
+        confirmed: true,
+        replayed: true,
+        bookingId: existing.id,
+        apricotApptId: existing.apricotApptId,
+        autoMessage: { sent: false, reason: "already_confirmed" },
+        message: "已確認過 — 原單號如常",
+      });
+    }
+    if (existing.status !== "PENDING") {
+      // REJECTED / EXPIRED — requestId 已消耗（防 48h 後重放舊視窗）
+      return NextResponse.json(
+        { error: "DUPLICATE_BOOKING", message: "呢個請求ID已使用過（預約已失效）— 請重開落單視窗再試" },
+        { status: 409 }
+      );
+    }
+    if (existing.writeState === "WRITING") {
+      // 寫緊 — 返 202（UI 輪詢 / 卡上 spinner）
+      return NextResponse.json(
+        { ok: true, state: "WRITING", bookingId: existing.id, hint: "落單處理緊 — 結果會即時顯示喺預約卡" },
+        { status: 202 }
+      );
+    }
+    // PENDING + writeState ∈ {null, FAILED, UNKNOWN} — 重試（queue 死 / 寫失敗 / 結果未知）
+    if (existing.requestedDate !== date || existing.requestedTime !== start) {
+      return NextResponse.json(
+        { error: "DUPLICATE_BOOKING", message: "呢個請求ID已對應其他時段 — 請重開落單視窗再試" },
+        { status: 409 }
+      );
+    }
+    // 重試同一張卡（同一 idempotency key — workforce 冪等重放安全）
+    log.info({ bookingId: existing.id, requestId, writeState: existing.writeState ?? null }, "bookings: manual — requestId retry（同單）");
+    return runCore(existing.id);
+  }
+
+  // ── 新卡：建 PENDING（同 Flow 路徑同形）+ 重複防護 ──
   const clinicId = conv.clinicId;
-  // object holder（closure 入面 assign — TS 對 let 變量收窄會誤判 never）
   const txOut: {
     err: { status: number; body: Record<string, unknown> } | null;
     bookingId: string | null;
@@ -143,16 +178,36 @@ export const POST = handle(async (req: NextRequest) => {
   try {
     await prisma.$transaction(
       async (tx) => {
+        // ★ S5-8①：同 pinned 病人（同對話）+ 同醫生 + 同日 + 同開始時間 已有 CONFIRMED / WRITING → 409
+        //   （先於 SLOT_TAKEN：病人級重複判斷決定性 — 容量同步快慢唔影響結果）
+        const dupConfirmed = await tx.bookingRequest.findFirst({
+          where: {
+            conversationId: conv.id,
+            providerApricotId,
+            requestedDate: date,
+            requestedTime: start,
+            OR: [{ status: "CONFIRMED" }, { writeState: "WRITING" }],
+          },
+          select: { id: true },
+        });
+        if (dupConfirmed) {
+          txOut.err = {
+            status: 409,
+            body: {
+              error: "DUPLICATE_BOOKING",
+              message: "呢位病人呢個時段已有預約（已確認或處理緊）— 請喺對話預約卡核對",
+              bookingId: dupConfirmed.id,
+            },
+          };
+          return;
+        }
         const slotRow = await tx.availabilitySlot.findUnique({
           where: {
             clinicId_providerApricotId_date_startTime: { clinicId, providerApricotId, date, startTime: start },
           },
         });
         if (slotRow && !slotAvailable(slotRow)) {
-          txOut.err = {
-            status: 409,
-            body: { error: "SLOT_TAKEN", message: "時段啱啱滿咗", retryable: true },
-          };
+          txOut.err = { status: 409, body: { error: "SLOT_TAKEN", message: "時段啱啱滿咗", retryable: true } };
           return;
         }
         const existingPending = await tx.bookingRequest.findFirst({
@@ -160,17 +215,14 @@ export const POST = handle(async (req: NextRequest) => {
           select: { id: true },
         });
         if (existingPending) {
-          txOut.err = {
-            status: 409,
-            body: { error: "pending_exists", message: "呢個時段已有待處理預約", bookingId: existingPending.id },
-          };
+          txOut.err = { status: 409, body: { error: "pending_exists", message: "呢個時段已有待處理預約", bookingId: existingPending.id } };
           return;
         }
         const b = await tx.bookingRequest.create({
           data: {
             conversationId: conv.id,
             clinicId,
-            flowToken: `manual-${randomUUID()}`,
+            flowToken, // ★ S5-8①：manual-${requestId}（冪等）
             providerApricotId,
             providerName: resolvedProviderName,
             requestedDate: date,
@@ -200,70 +252,36 @@ export const POST = handle(async (req: NextRequest) => {
     return NextResponse.json(txOut.err.body, { status: txOut.err.status });
   }
 
-  // ★ 共用代落單 core（workforce 冪等 key = wa-inbox-<bookingId> — retry 唔會雙單）
-  const result = await confirmBookingCore(txOut.bookingId!, { type: "STAFF", staffId: ctx.staff.id }, { visitReasonId });
+  return runCore(txOut.bookingId!);
 
-  if (!result.ok) {
-    if (result.kind === "PRECONDITION") {
-      return NextResponse.json({ error: result.code, message: result.message }, { status: 400 });
+  // ── 共用代落單 core（條件 claim WRITING + enqueue booking-write）→ HTTP 映射 ──
+  async function runCore(bookingId: string) {
+    const result = await confirmBookingCore(bookingId, { type: "STAFF", staffId: ctx.staff.id }, { visitReasonId });
+    if (!result.ok) {
+      if (result.kind === "QUEUE_UNAVAILABLE") {
+        // ★ S5-8①：queue 死 → 200（ok:true + 提示人手覆）— 唔再 503（booking 保持 PENDING，可重試）
+        return NextResponse.json({
+          ok: true,
+          confirmed: false,
+          state: "PENDING",
+          bookingId,
+          autoMessage: { sent: false, reason: "queue_unavailable", hint: "落單隊列暫時唔可用 — 請人手覆病人，稍後重試落單" },
+        });
+      }
+      if (result.kind === "PRECONDITION") {
+        if (result.code === "write_in_progress") {
+          return NextResponse.json(
+            { ok: true, state: "WRITING", bookingId, hint: "落單處理緊 — 結果會即時顯示喺預約卡" },
+            { status: 202 }
+          );
+        }
+        return NextResponse.json({ error: result.code, message: result.message }, { status: 400 });
+      }
     }
-    if (result.kind === "SLOT_TAKEN") {
-      return NextResponse.json({ error: "SLOT_TAKEN", message: "時段啱啱滿咗", retryable: true }, { status: 409 });
-    }
-    if (result.kind === "MANUAL_REQUIRED") {
-      return NextResponse.json(
-        { error: result.code ?? "NEW_PATIENT_DISABLED", manual: true, message: result.message },
-        { status: 422 }
-      );
-    }
-    if (result.kind === "WRITE_DISABLED") {
-      return NextResponse.json(
-        { error: result.code ?? "WRITE_DISABLED", manual: true, message: "Workforce 寫入暫時停用 — 請人手喺 Apricot 落單" },
-        { status: 503 }
-      );
-    }
+    // ★ S5-1：受理成功 — 寫入處理緊（結果經 booking:updated / 卡上 writeState 更新）
     return NextResponse.json(
-      { error: "WORKFORCE_UNAVAILABLE", manual: true, message: "Workforce 落單失敗 — 請人手喺 Apricot 落單" },
-      { status: 502 }
+      { ok: true, state: "WRITING", bookingId, hint: "落單處理緊 — 結果會即時顯示喺預約卡" },
+      { status: 202 }
     );
   }
-
-  // ── 成功分支（映射同 create route；多帶 bookingId 畀 UI 追卡）─────────────
-  const booking = await prisma.bookingRequest.findUnique({ where: { id: txOut.bookingId! } });
-  if (result.autoMessage.sent) {
-    return NextResponse.json({
-      ok: true,
-      confirmed: true,
-      bookingId: txOut.bookingId,
-      apricotApptId: result.apricotApptId,
-      autoMessage: { sent: true, messageId: result.autoMessage.messageId },
-    });
-  }
-  if (result.autoMessage.reason === "window_closed") {
-    return NextResponse.json(
-      {
-        ok: true,
-        confirmed: true,
-        bookingId: txOut.bookingId,
-        apricotApptId: result.apricotApptId,
-        autoMessage: {
-          sent: false,
-          reason: "window_closed",
-          hint: "24 小時客服窗口已過 — 請用帶確認內容嘅 utility template 覆病人",
-          suggestedText: booking ? confirmMessageText(booking) : null,
-        },
-      },
-      { status: 422 }
-    );
-  }
-  return NextResponse.json(
-    {
-      ok: true,
-      confirmed: true,
-      bookingId: txOut.bookingId,
-      apricotApptId: result.apricotApptId,
-      autoMessage: { sent: false, reason: "queue_unavailable", hint: "請手動覆病人" },
-    },
-    { status: 503 }
-  );
 });

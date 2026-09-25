@@ -606,6 +606,7 @@ function DayGrid({
   const [selId, setSelId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [manualBusy, setManualBusy] = useState(false); // G-3 人手落單
+  const [manualRequestId, setManualRequestId] = useState<string | null>(null); // ★ S5-8①：視窗級冪等 id（重試 = 同一 requestId）
   const [popErr, setPopErr] = useState<string | null>(null);
   const [raceConv, setRaceConv] = useState<ConversationItem | null>(null); // 422 競態 → 三出路
 
@@ -792,17 +793,21 @@ function DayGrid({
   // G-3：人手落單 — 直接行代落單寫入鏈入 Apricot（病人唔使行 Flow）。
   // 前端預檢：selConv 要有已釘住舊客（pinnedPatientApricotId）— 無 = 新客路徑唔存在（422 鐵律）。
   // visit reason 唔帶 = server 用 BOOKING_DEFAULT_VISIT_REASON_CODE env 模式（跟 cwi-bkui 現狀）。
-  // 成功後 board 經 availability:busted socket 自動重繪（createBooking 已 bust 該日 L2）。
+  // ★ cwi-final S5-8①：
+  // - requestId 每次打開視窗生成；重試 = 同一 requestId → server 冪等（零雙單）；
+  // - 成功語義 = `data.ok === true`（202 WRITING = 受理 / 200 queue_unavailable = 建單但寫入隊列死）— 唔再「res.ok + apricotApptId = 成功」。
   async function sendManual(conv: ConversationItem) {
     if (!pop || !p || manualBusy) return;
     if (!conv.pinnedPatientApricotId) return; // UI gate（server 再擋一道 422）
     setManualBusy(true);
     setPopErr(null);
+    const requestId = manualRequestId ?? crypto.randomUUID();
     try {
       const res = await fetch("/api/bookings/manual", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          requestId, // ★ S5-8①：視窗級冪等（重試同 id → 同單）
           conversationId: conv.id,
           providerApricotId: p.providerId,
           providerName: p.providerName,
@@ -812,23 +817,26 @@ function DayGrid({
       });
       const j = (await res.json().catch(() => null)) as {
         ok?: boolean;
+        state?: string;
+        confirmed?: boolean;
+        replayed?: boolean;
         apricotApptId?: string;
+        bookingId?: string;
         error?: string;
         message?: string;
         autoMessage?: { sent: boolean; reason?: string; hint?: string };
       } | null;
-      if (res.ok) {
-        // 200：成功 + 窗口內自動確認訊息已入隊
-        onToast?.("ok", `已喺 Apricot 落單（單號 ${j?.apricotApptId ?? "…"}）— 確認訊息已自動發`);
-        setPop(null);
-        setQ("");
-        setHits(null);
-        setSelId(null);
-        setRaceConv(null);
-        setPopErr(null);
-      } else if (res.status === 422 && j?.ok === true) {
-        // 200 語義但 422：booking 已成（CONFIRMED），只是自動確認訊息出唔到（過窗/隊列）
-        onToast?.("warn", `已喺 Apricot 落單（單號 ${j?.apricotApptId ?? "…"}）— ${j?.autoMessage?.hint ?? "請手動覆病人"}`);
+      // ★ S5-8①：成功 = data.ok === true（HTTP 狀態唔再決定成功）
+      if (j?.ok === true) {
+        if (j.replayed === true) {
+          onToast?.("ok", `已確認過 — 原單號 ${j.apricotApptId ?? "…"} 如常`);
+        } else if (j.state === "WRITING") {
+          onToast?.("ok", "落單已開始處理 — 結果會即時顯示喺對話預約卡");
+        } else if (j.autoMessage?.reason === "queue_unavailable") {
+          onToast?.("warn", "預約單已建，但落單隊列暫時唔可用 — 請人手覆病人，稍後喺預約卡重試落單");
+        } else {
+          onToast?.("ok", j.autoMessage?.hint ?? "已喺 Apricot 落單");
+        }
         setPop(null);
         setQ("");
         setHits(null);
@@ -836,7 +844,11 @@ function DayGrid({
         setRaceConv(null);
         setPopErr(null);
       } else if (res.status === 409) {
-        setPopErr(j?.error === "pending_exists" ? "呢個時段已有待處理預約（對話卡可跟進）" : (j?.message ?? "時段啱啱滿咗 — 撳更新重揀"));
+        setPopErr(
+          j?.error === "pending_exists" || j?.error === "SLOT_TAKEN"
+            ? j?.message ?? "時段啱啱滿咗 — 撳更新重揀"
+            : (j?.message ?? "呢位病人呢個時段已有預約 — 請喺對話預約卡核對")
+        );
       } else if (res.status === 423) {
         setPopErr("此對話已有負責人 — 落唔到單（可喺 inbox 撳接手）");
       } else {
@@ -913,7 +925,11 @@ function DayGrid({
           {clickable ? (
             <button
               type="button"
-              onClick={() => setPop({ m, slot: slot! })}
+              onClick={() => {
+                setPop({ m, slot: slot! });
+                setManualRequestId(crypto.randomUUID()); // ★ S5-8①：每次打開視窗 = 新 requestId（重試 = 同一個）
+                setPopErr(null);
+              }}
               className={`h-[26px] w-full rounded-[6px] border flex items-center justify-center gap-1 text-[10px] font-medium cursor-pointer hover:brightness-95 ${CELL_CLS[state]}`}
               title={`${p.providerName} ${minToHHmm(m)}–${minToHHmm(m + 30)}：${copy.hover}（撳 = 幫病人約）`}
             >

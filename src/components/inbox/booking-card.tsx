@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, CalendarDays, Check, Lock, RotateCcw } from "lucide-react";
+import { AlertTriangle, CalendarDays, Check, Loader2, Lock, RotateCcw } from "lucide-react";
 import type { BookingInfo, ConversationItem } from "./types";
 
 /**
@@ -9,7 +9,10 @@ import type { BookingInfo, ConversationItem } from "./types";
  *
  * PENDING（綠邊）：病人 + 醫生/日期/時間 + 主訴 + 空檔初驗 + visitReason 下拉
  *   + 三掣：〔幫我喺 Apricot 落單〕（藍，已釘住先出現）/〔已人手落單〕/〔改期 · 重發 Flow〕
- *   409 → 紅字「時段啱啱滿咗」+ 〔重發 Flow〕；422/503 → 人手指示
+ *   409 → 紅字「時段啱啱滿咗」+ 〔重發 Flow〕
+ *   ★ cwi-final S5-1（F1）：writeState 三態 — WRITING = 轉圈「落單處理緊…」；
+ *     UNKNOWN = 黃「未確定 Apricot 有冇落到單 — 唔好人手落單」+〔重試（同一單號）〕；
+ *     FAILED 按 code（SLOT_TAKEN = 撞單陶土卡；WRITE_DISABLED = 唯一保留人手落單指示字眼）
  *
  * CONFIRMED：Apricot 單號 + 發起人 + 「確認訊息已自動發出」+ 〔撤銷（mm:ss）〕
  *   5 分鐘內可撤銷（removeBooking → 卡彈返 PENDING；server 強制窗口）；過 5 分鐘掣消失。
@@ -76,7 +79,7 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
 
   // ── 掣狀態 ──────────────────────────────────────────────────────
   const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<{ kind: "slot_taken" | "manual" | "generic"; message: string } | null>(null);
+  const [createError, setCreateError] = useState<{ kind: "slot_taken" | "generic"; message: string } | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [confirmMsg, setConfirmMsg] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
   const [resendBusy, setResendBusy] = useState(false);
@@ -146,18 +149,19 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
       const j = (await res.json().catch(() => null)) as {
         error?: string;
         message?: string;
-        manual?: boolean;
-        autoMessage?: { sent: boolean; hint?: string; reason?: string };
+        state?: string;
       } | null;
-      if (res.ok || res.status === 422) {
-        // 422 = 已落單但確認訊息要 template（window closed）— 卡會經 onActionDone 轉 CONFIRMED
-        if (j?.autoMessage && !j.autoMessage.sent) {
-          setConfirmMsg({ tone: "warn", text: j.autoMessage.hint ?? "確認訊息未自動發 — 請手覆" });
-        }
+      // ★ cwi-final S5-1：202 WRITING = 受理（async 寫 Apricot）— 卡經 onActionDone 重拉後由 writeState 顯示轉圈
+      if (res.status === 202 || (res.ok && j?.state === "WRITING")) {
         onActionDone();
         return;
       }
       if (res.status === 409) {
+        if (j?.error === "write_in_progress") {
+          // WRITING 中（雙擊/並發）— 卡上轉圈已顯示
+          onActionDone();
+          return;
+        }
         setCreateError({ kind: "slot_taken", message: j?.message ?? "時段啱啱滿咗" });
         return;
       }
@@ -169,11 +173,8 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
         setCreateError({ kind: "generic", message: j.message ?? "要先喺右側欄釘住舊客" });
         return;
       }
-      if (j?.manual || res.status >= 500) {
-        setCreateError({ kind: "manual", message: j?.message ?? "代落單失敗 — 請人手喺 Apricot 落單" });
-        return;
-      }
-      setCreateError({ kind: "generic", message: j?.message ?? `HTTP ${res.status}` });
+      // 503 QUEUE_UNAVAILABLE / 其他 400 — booking 保持 PENDING（可重試）
+      setCreateError({ kind: "generic", message: j?.message ?? `落單失敗（HTTP ${res.status}）— 請重試` });
     } catch (e) {
       setCreateError({ kind: "generic", message: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -188,17 +189,24 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
     try {
       const res = await fetch(`/api/bookings/${b.id}/confirm`, { method: "POST" });
       const j = (await res.json().catch(() => null)) as {
-        autoMessage?: { sent: boolean; hint?: string };
+        autoMessage?: { sent: boolean; hint?: string; reason?: string };
         error?: string;
+        already?: boolean;
+        message?: string;
       } | null;
       if (res.ok || res.status === 422) {
-        if (j?.autoMessage?.sent) setConfirmMsg({ tone: "ok", text: "已確認 + 確認訊息已發俾病人 ✅" });
+        // ★ cwi-final S5-6：already = 雙擊/並發冪等（未重複發訊息）
+        if (j?.already) setConfirmMsg({ tone: "warn", text: j?.message ?? "已確認過 — 未重複發確認訊息" });
+        else if (j?.autoMessage?.sent) setConfirmMsg({ tone: "ok", text: "已確認 + 確認訊息已發俾病人 ✅" });
         else setConfirmMsg({ tone: "warn", text: j?.autoMessage?.hint ?? "已確認（訊息未自動發 — 見提示）" });
         onActionDone();
         return;
       }
       if (res.status === 409) {
-        setConfirmMsg({ tone: "warn", text: "呢張卡已經處理過（狀態已變）" });
+        setConfirmMsg({
+          tone: "warn",
+          text: j?.error === "write_in_progress" ? (j?.message ?? "落單處理緊 — 請等結果") : "呢張卡已經處理過（狀態已變）",
+        });
         onActionDone();
         return;
       }
@@ -261,7 +269,10 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
 
   // ── PENDING 態（Organic 1e 收據式：預設鼠尾草；slot_taken = 整卡陶土）────────────
   if (b.status === "PENDING") {
-    const slotTaken = createError?.kind === "slot_taken";
+    // ★ cwi-final S5-1（F1）：async 寫入態（卡上顯示）
+    const wsTaken = b.writeState === "FAILED" && b.writeError === "SLOT_TAKEN";
+    const writing = b.writeState === "WRITING";
+    const slotTaken = createError?.kind === "slot_taken" || wsTaken;
     const day = fmtRequestDay(b.requestedDate);
     return (
       <div
@@ -337,11 +348,36 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
             </>
           ) : (
             <>
+              {/* ★ S5-1：寫入狀態帶（WRITING 轉圈 / UNKNOWN 黃 / FAILED 按 code）*/}
+              {writing && (
+                <div className="rounded-2xl bg-panel-2 border border-line px-3 py-2.5 text-xs text-t1 inline-flex items-center gap-2">
+                  <Loader2 size={14} className="animate-spin text-brand" strokeWidth={2.5} />
+                  落單處理緊…（寫入 Apricot）
+                </div>
+              )}
+              {b.writeState === "UNKNOWN" && (
+                <div className="rounded-2xl bg-warn-soft border border-warn px-3 py-2.5 text-xs text-warn-text leading-relaxed inline-flex items-start gap-1.5">
+                  <AlertTriangle size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+                  未確定 Apricot 有冇落到單 — 唔好人手落單（可能已寫到；撳〔重試（同一單號）〕用同一單號核對）
+                </div>
+              )}
+              {b.writeState === "FAILED" && b.writeError === "WRITE_DISABLED" && (
+                <div className="rounded-2xl bg-warn-soft border border-warn px-3 py-2.5 text-xs text-warn-text leading-relaxed inline-flex items-start gap-1.5">
+                  <AlertTriangle size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+                  Workforce 寫入暫時停用 — 請人手喺 Apricot 落單，然後撳〔已人手落單〕
+                </div>
+              )}
+              {b.writeState === "FAILED" && b.writeError && b.writeError !== "SLOT_TAKEN" && b.writeError !== "WRITE_DISABLED" && (
+                <div className="rounded-2xl bg-danger-soft border border-warn px-3 py-2.5 text-xs text-danger-text leading-relaxed inline-flex items-start gap-1.5">
+                  <AlertTriangle size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+                  落單失敗（{b.writeError}）— 可撳〔重試（同一單號）〕
+                </div>
+              )}
               {/* visitReason 下拉 + 三掣（Organic：全部 rounded-full，主掣 brand-hover） */}
               <select
                 value={selectedId ?? ""}
                 onChange={(e) => setSelectedId(e.target.value || null)}
-                disabled={creating || dictError !== null}
+                disabled={creating || writing || dictError !== null}
                 className="w-full text-xs px-3 py-2 rounded-full border border-line-strong bg-panel text-t1"
                 title="Visit reason（寫入 Apricot remarks + payload）"
               >
@@ -362,14 +398,24 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
                 )}
               </select>
               {pinned ? (
-                <button
-                  onClick={() => void doCreate()}
-                  disabled={creating || selectedId === null}
-                  title={selectedId === null ? "先揀 visit reason" : undefined}
-                  className="w-full rounded-full bg-brand-hover text-panel text-[13px] font-semibold px-3.5 py-2.5 hover:opacity-90 disabled:opacity-40"
-                >
-                  {creating ? "代落單中…" : "幫我喺 Apricot 落單"}
-                </button>
+                b.writeState === "UNKNOWN" || (b.writeState === "FAILED" && b.writeError && b.writeError !== "WRITE_DISABLED") ? (
+                  <button
+                    onClick={() => void doCreate()}
+                    disabled={creating || writing}
+                    className="w-full rounded-full bg-brand-hover text-panel text-[13px] font-semibold px-3.5 py-2.5 hover:opacity-90 disabled:opacity-40"
+                  >
+                    {creating ? "重試中…" : "重試（同一單號）"}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => void doCreate()}
+                    disabled={creating || writing || selectedId === null}
+                    title={selectedId === null ? "先揀 visit reason" : undefined}
+                    className="w-full rounded-full bg-brand-hover text-panel text-[13px] font-semibold px-3.5 py-2.5 hover:opacity-90 disabled:opacity-40"
+                  >
+                    {creating ? "代落單中…" : "幫我喺 Apricot 落單"}
+                  </button>
+                )
               ) : (
                 <span className="text-[10.5px] text-t3 inline-flex items-center gap-1">
                   <Lock size={10} strokeWidth={2.75} /> 未釘住舊客 — 先喺右側欄釘住先可以代落單
@@ -378,7 +424,7 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
               <div className="flex gap-2">
                 <button
                   onClick={() => void doConfirm()}
-                  disabled={confirmBusy || creating}
+                  disabled={confirmBusy || creating || writing}
                   className="flex-1 rounded-full border border-line bg-panel text-t1 text-xs px-3 py-2 hover:bg-panel-2 disabled:opacity-40"
                 >
                   {confirmBusy ? "處理中…" : "已人手落單"}
@@ -386,7 +432,7 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
                 {slotClaimEnabled !== false && (
                   <button
                     onClick={() => void doResendFlow()}
-                    disabled={resendBusy || creating}
+                    disabled={resendBusy || creating || writing}
                     className="flex-1 rounded-full border border-line bg-panel text-t1 text-xs px-3 py-2 hover:bg-panel-2 disabled:opacity-40"
                   >
                     {resendBusy ? "發送中…" : "改期 · 重發 Flow"}
@@ -396,13 +442,9 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
             </>
           )}
 
-          {/* 422/503 人手指示 / 其他提示（slot_taken 已在上面整卡陶土處理） */}
+          {/* 其他錯誤提示（slot_taken 已在上面整卡陶土處理） */}
           {createError && createError.kind !== "slot_taken" && (
-            <div
-              className={`text-xs inline-flex items-center gap-1 ${
-                createError.kind === "manual" ? "text-warn-text" : "text-danger-text"
-              }`}
-            >
+            <div className="text-xs inline-flex items-center gap-1 text-danger-text">
               <AlertTriangle size={12} strokeWidth={2.75} /> {createError.message}
             </div>
           )}
@@ -436,7 +478,7 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
           <div className="font-display text-[25px] leading-[1.15] mt-1.5">
             {day.main} {slotText}
           </div>
-          <div className="text-xs opacity-90 mt-0.5">確認訊息已自動發給病人</div>
+          <div className="text-xs opacity-90 mt-0.5">已喺 Apricot 落單（確認訊息視 24h 窗口自動發出）</div>
         </div>
 
         {/* 卡身 */}

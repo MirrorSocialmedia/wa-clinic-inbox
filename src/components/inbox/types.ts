@@ -128,6 +128,12 @@ export interface BookingInfo {
   handledAt?: string | null; // ISO — 5 分鐘撤銷倒數起點
   /** ★ booking-ui（D）：主訴（AI 摘要快照，≤50 字 — 顯示 + remarks 來源） */
   chiefComplaint?: string | null;
+  /** ★ cwi-final S5-1（F1）：async 寫入狀態機 — null = 從未寫/寫完；WRITING = 處理緊；UNKNOWN = 結果未知（唔好人手落單）；FAILED = 確定性失敗 */
+  writeState?: "WRITING" | "UNKNOWN" | "FAILED" | null;
+  /** ★ S5-1：失敗碼（FAILED = workforce code，如 SLOT_TAKEN / WRITE_DISABLED；UNKNOWN = "timeout"） */
+  writeError?: string | null;
+  /** ★ S5-1：本次寫入試次開始（ISO — WRITING 顯示用） */
+  writeAttemptAt?: string | null;
 }
 
 /** providerslot-20260830 T3：Flow 硬保留 hold（本地 FlowHoldEvent — 病人資料落 inbox 本地） */

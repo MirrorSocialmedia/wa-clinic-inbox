@@ -1,8 +1,15 @@
 /**
  * POST /api/bookings/[id]/confirm — 員工撳〔已喺醫生系統落單〕（MD §8.3）
  *
+ * ★ cwi-final S5-6（F1）：雙擊/並發防護 —
+ * - 條件 updateMany（status PENDING + writeState ∈ {null, FAILED, UNKNOWN} → CONFIRMED）
+ *   count≠1 → ALREADY（200 冪等：返原單號、零重複訊息）；WRITING 中 → 409 write_in_progress。
+ * - 確認訊息 clientMessageId = uuidv5(booking-confirm:${id}:${idemAttempt}) —
+ *   Message.clientMessageId @unique 物理擋第二條（就算 updateMany 都漏咗都唔會雙發）。
+ * - Send Lock（S3-3）照舊（confirm 會覆病人 → 非負責人 423）。
+ *
  * 1. RBAC：assertClinicAccess（STAFF 撳別店 booking → 403 實測）
- * 2. 狀態機：只 PENDING 可以 confirm（其餘 → 409）
+ * 2. 狀態機：條件 updateMany（上面）— EXPIRED/REJECTED → 409
  * 3. BookingRequest → CONFIRMED + AuditLog(CONFIRM_BOOKING)
  * 4. 自動發確認訊息：
  *    - 24h 窗口內 → free-form「已為你預約 X 月 X 日 HH:mm 陳醫生，到時見 🙂」
@@ -10,6 +17,7 @@
  *      booking 照樣 CONFIRMED — 狀態要反映「人已喺醫生系統落咗單」）
  */
 import { type NextRequest, NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
@@ -18,6 +26,7 @@ import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { enqueueOutboundSend } from "@/lib/queue";
 import { publishConvEvent, convRef } from "@/lib/notify";
+import { bookingConfirmClientMessageId } from "@/lib/booking/booking-id";
 
 export const dynamic = "force-dynamic";
 
@@ -51,21 +60,42 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   const locked = sendLockResponse(ctx, conv);
   if (locked) return locked;
 
-  if (booking.status !== "PENDING") {
-    return NextResponse.json({ error: `booking already ${booking.status}` }, { status: 409 });
-  }
-
   const clinic = await prisma.clinic.findUnique({ where: { id: booking.clinicId } });
   if (!clinic) {
     return NextResponse.json({ error: "conversation missing" }, { status: 500 });
   }
 
-  // 1) CONFIRMED + AuditLog（先落定狀態，自動訊息係附送）
+  // ── ★ S5-6：條件 CONFIRMED（PENDING + writeState 唔係 WRITING）— 雙擊/並發第二枝 count=0 → ALREADY ──
   const now = new Date();
-  await prisma.bookingRequest.update({
-    where: { id: booking.id },
-    data: { status: "CONFIRMED", handledByStaffId: ctx.staff.id, handledAt: now },
+  const upd = await prisma.bookingRequest.updateMany({
+    where: {
+      id: booking.id,
+      status: "PENDING",
+      OR: [{ writeState: null }, { writeState: { in: ["FAILED", "UNKNOWN"] } }],
+    },
+    data: { status: "CONFIRMED", handledByStaffId: ctx.staff.id, handledAt: now, writeState: null, writeError: null },
   });
+  if (upd.count !== 1) {
+    const cur = await prisma.bookingRequest.findUnique({ where: { id: booking.id } });
+    if (cur?.status === "PENDING" && cur.writeState === "WRITING") {
+      return NextResponse.json({ error: "write_in_progress", message: "落單處理緊 — 請等結果" }, { status: 409 });
+    }
+    if (cur && cur.status !== "CONFIRMED") {
+      return NextResponse.json({ error: `booking already ${cur.status}` }, { status: 409 });
+    }
+    // ALREADY：雙擊 / 並發重入 — 已 CONFIRMED（冪等：返原單號、零重複訊息）
+    log.info({ bookingId: booking.id, staffId: ctx.staff.id }, "bookings: confirm — ALREADY（雙擊/並發）");
+    return NextResponse.json({
+      ok: true,
+      confirmed: true,
+      already: true,
+      apricotApptId: cur?.apricotApptId ?? null,
+      autoMessage: { sent: false, reason: "already_confirmed" },
+      message: "已確認過 — 未重複發確認訊息",
+    });
+  }
+
+  // 1) AuditLog（先落定狀態，自動訊息係附送）
   await prisma.auditLog
     .create({
       data: {
@@ -133,6 +163,8 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
         // cwi-window-20260901（P1）：staff 確認預約覆（窗口內）= SERVICE
         billingCategory: "SERVICE",
         waTimestamp: now,
+        // ★ S5-6：uuidv5 冪等 — 同 booking + 同 idemAttempt 重複 INSERT → P2002 物理擋（雙擊零雙發）
+        clientMessageId: bookingConfirmClientMessageId(booking.id, booking.idemAttempt),
       },
     });
     await Promise.race([
@@ -151,6 +183,17 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
       autoMessage: { sent: true, messageId: msg.id },
     });
   } catch (err) {
+    // ★ S5-6：clientMessageId unique 撞（並發第二枝都搶到 CONFIRMED 嘅極端 case）→ 當已發
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      log.warn({ bookingId: booking.id, staffId: ctx.staff.id }, "bookings: confirm — 確認訊息 P2002（clientMessageId 重複）— 已發過");
+      return NextResponse.json({
+        ok: true,
+        confirmed: true,
+        already: true,
+        autoMessage: { sent: false, reason: "already_confirmed" },
+        message: "已確認過 — 未重複發確認訊息",
+      });
+    }
     // 狀態已 CONFIRMED；訊息 enqueue 失敗 → 503（staff 手動覆）
     log.error(
       { bookingId: booking.id, err: err instanceof Error ? err.message : String(err) },
