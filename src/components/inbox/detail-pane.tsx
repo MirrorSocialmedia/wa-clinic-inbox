@@ -619,7 +619,7 @@ export function DetailPane({
               </div>
             )}
 
-            {/* （E）upcoming 預約卡（status 0/102 only — API 已過濾）+ 兩新掣（Send Lock） */}
+            {/* （E）upcoming 預約卡（status 0/1 only — API 已過濾；cwi-final S5-7：102 舊單排除）+ 兩新掣（Send Lock） */}
             {ctx.pinned && (ctx.upcomingAppointments ?? []).length > 0 && (
               <div className="mt-2 space-y-2">
                 {apptNote && <div className="text-[10px] text-ok-text">✓ {apptNote}</div>}
@@ -634,7 +634,7 @@ export function DetailPane({
                             a.bookingStatus === 0 ? "bg-brand-soft text-brand-text" : "bg-warn-soft text-warn-text"
                           }`}
                         >
-                          {a.bookingStatus === 0 ? "已確認" : "待確認"}
+                          {a.bookingStatus === 0 ? "已確認" : "已到診"}
                         </span>
                       </div>
                       <div className="text-t2 font-mono">

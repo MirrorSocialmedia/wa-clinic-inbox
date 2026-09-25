@@ -115,6 +115,11 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
       visitReasonCode: null,
       handledByStaffId: null,
       handledAt: null,
+      // ★ cwi-final S5-3③（F2）：rollback 後重新落單用新 key —
+      //   idemAttempt+1（S5-1 key = wa-inbox-${id}-${idemAttempt}-${slotHash} → 自動新 idempotencyKey）
+      //   + writeState 清 null（回可 claim 態；writeError 本已只喺 FAILED/UNKNOWN 才有，rollback 要求 CONFIRMED → 唔會帶）
+      idemAttempt: { increment: 1 },
+      writeState: null,
       // ★ Phase B（cwi-tmpl-20260824-b1）：rollback 清提醒旗 — 重新 CONFIRMED 後會再提醒
       remindedAt: null,
     },

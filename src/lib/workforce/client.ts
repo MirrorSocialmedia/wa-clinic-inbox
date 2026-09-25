@@ -754,18 +754,20 @@ export async function createBooking(p: {
   return res;
 }
 
-/** 改狀態（白名單 102 / -7 — 其他 workforce 400） */
+/** 改狀態（白名單 102 / -7 — 其他 workforce 400）。
+ * ★ cwi-final S5-8②（F2）：可選 idempotencyKey — commit 後 102 舊單冪等（重試同 key = 同一結果）。 */
 export async function updateBookingStatus(
   apricotApptId: string,
   status: 102 | -7,
-  p: { clinicCode: string; date: string }
+  p: { clinicCode: string; date: string },
+  idempotencyKey?: string,
 ): Promise<BookingStatusResult> {
   const raw = await wfSend(
     "PUT",
     `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/status`,
     { status: String(status), date: p.date, clinicCode: p.clinicCode },
     undefined,
-    undefined,
+    idempotencyKey ? { "idempotency-key": idempotencyKey } : undefined,
     { bookingWrite: true }, // ★ cwi-final S5-1
   );
   const res = BookingStatusResponse.parse(raw);
@@ -804,7 +806,10 @@ export async function rescheduleBooking(
     patient: { patientApricotId: string } | { name: string; phone: string };
     visitReasonId?: string;
     remarks?: string;
-  }
+  },
+  // ★ cwi-final S5-7（F2）：Idempotency-Key = sha256(flowToken)（caller 算好傳入；唔自動重試 —
+  //   WorkforceOutcomeUnknown 由 caller fetchAppointments 對賬後再決定）
+  idempotencyKey?: string,
 ): Promise<BookingRescheduleResult> {
   const body = {
     v: 1 as const,
@@ -818,7 +823,14 @@ export async function rescheduleBooking(
     ...(p.visitReasonId ? { visitReasonId: p.visitReasonId } : {}),
     ...(p.remarks ? { remarks: p.remarks } : {}),
   };
-  const raw = await wfSend("POST", `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/reschedule`, {}, body, undefined, { bookingWrite: true }); // ★ cwi-final S5-1
+  const raw = await wfSend(
+    "POST",
+    `/api/external/v1/bookings/${encodeURIComponent(apricotApptId)}/reschedule`,
+    {},
+    body,
+    idempotencyKey ? { "idempotency-key": idempotencyKey } : undefined,
+    { bookingWrite: true }, // ★ cwi-final S5-1
+  );
   const res = BookingRescheduleResponse.parse(raw);
   // reschedule 兩日都要：舊日 + 新日
   if (res.dayRefreshed) {

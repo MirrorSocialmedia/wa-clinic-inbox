@@ -14,7 +14,9 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { commitHold, WorkforceApiError, slotClaimEnabled } from "@/lib/workforce/client";
+import { commitHold, WorkforceApiError, WorkforceOutcomeUnknown, fetchAppointments, updateBookingStatus, slotClaimEnabled } from "@/lib/workforce/client";
+import { phoneHash } from "@/lib/phone-hash";
+import { hkDateOffset } from "@/lib/availability";
 
 export const dynamic = "force-dynamic";
 
@@ -67,5 +69,59 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     }),
   ]);
   log.info({ id, wfStatus: wf.status }, "hold commit: COMMITTED");
+
+  // ★ cwi-final S5-8②（F2）：T4 改期唔取消舊單 — commit 成功 + 有改期 context → 102 舊單。
+  //   冪等：idempotencyKey = resched-${hold.id}（重試同 key）；舊單已 102/-7/搵唔到 = no-op 當成功。
+  //   失敗 → 207 + StaffNotice「新單已入，舊單標記失敗，請人手處理」（hold 仍 COMMITTED — 新單有效）。
+  if (hold.rescheduleOfApptId) {
+    const oldApptId = hold.rescheduleOfApptId;
+    try {
+      const data = await fetchAppointments(phoneHash(hold.patientPhone), hkDateOffset(-7), hkDateOffset(30));
+      const oldAppt = data.appointments.find((a) => a.apricotApptId === oldApptId);
+      if (oldAppt && oldAppt.bookingStatus === 0) {
+        await updateBookingStatus(oldApptId, 102, { clinicCode: oldAppt.clinicCode, date: oldAppt.date }, `resched-${hold.id}`);
+        log.info({ id, oldApptId }, "hold commit: 舊單已 102（改期 context）");
+      } else {
+        log.info(
+          { id, oldApptId, seenStatus: oldAppt?.bookingStatus ?? null },
+          "hold commit: 舊單已非 status 0（已 102/-7/搵唔到）— 冪等 no-op"
+        );
+      }
+    } catch (err) {
+      // 新單已 COMMITTED（有效）— 舊單標記失敗唔阻主流程；207 + StaffNotice 俾 staff 接手
+      log.warn(
+        { id, oldApptId, err: err instanceof Error ? err.name : "?" },
+        "hold commit: 舊單 102 標記失敗 → 207 + StaffNotice（人手處理）"
+      );
+      if (hold.clinicId) {
+        await prisma.staffNotice
+          .create({
+            data: {
+              clinicId: hold.clinicId,
+              conversationId: hold.conversationId ?? null,
+              kind: "HANDOFF_REQUEST",
+              title: `新單已入，舊單 ${oldApptId} 標記失敗，請人手處理`,
+              meta: { holdId: hold.workforceHoldId ?? null, oldApptId, reason: err instanceof WorkforceApiError ? `workforce_${err.status}` : err instanceof WorkforceOutcomeUnknown ? "outcome_unknown" : "error" },
+            },
+          })
+          .catch(() => undefined);
+      } else {
+        log.error({ id, oldApptId }, "hold commit: 舊單 102 失敗 + hold.clinicId 缺失（舊 row 防禦 case）— 無處落 StaffNotice，需人手核對");
+      }
+      return NextResponse.json(
+        {
+          ok: true,
+          status: "COMMITTED",
+          committedAt: now.toISOString(),
+          oldApptMarked: false,
+          notice: true,
+          message: "新單已入，舊單標記失敗，請人手處理",
+        },
+        { status: 207 }
+      );
+    }
+    return NextResponse.json({ ok: true, status: "COMMITTED", committedAt: now.toISOString(), oldApptMarked: true });
+  }
+
   return NextResponse.json({ ok: true, status: "COMMITTED", committedAt: now.toISOString() });
 });

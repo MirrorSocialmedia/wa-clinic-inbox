@@ -150,6 +150,9 @@ export interface HoldInfo {
   source: string;
   committedAt: string | null; // ISO — 完成態顯示
   createdAt: string;
+  // ★ cwi-final S5-8②（F2）：T4 改期 context（紅標用）— 舊單號 + 舊單日期時間（BR join；電話單 null）
+  rescheduleOfApptId: string | null;
+  rescheduleOfApptLabel: string | null;
 }
 
 /** Phase 4：今日當值（clinic-workforce 窄 API，4 欄白名單 — MD §9.2） */
@@ -175,7 +178,7 @@ export interface PatientAppointment {
   date: string; // YYYY-MM-DD
   start: string; // HH:mm
   end: string; // HH:mm
-  bookingStatus: number; // 0 = confirmed / 102 = pending
+  bookingStatus: number; // 0 = confirmed / 1 = arrived（upcoming 列表只顯示 0/1 — cwi-final S5-7；102 = 舊單已改期，排除）
   patientApricotId: string;
   patientCode: string;
   patientName: string;

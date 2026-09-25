@@ -134,6 +134,21 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     })
     .catch(() => undefined);
 
+  // ★ cwi-final S5-7（F2）：預約狀態一致 — 本地 BookingRequest 同步 CANCELLED
+  //   （CONFIRMED 卡唔會再顯示做可操作；reminder scan 候選 = CONFIRMED only → 天然排除）。
+  //   電話落嘅 Apricot 單無 BookingRequest row → 0 行，安全。
+  try {
+    await prisma.bookingRequest.updateMany({
+      where: { apricotApptId },
+      data: { status: "CANCELLED" },
+    });
+  } catch (err) {
+    log.warn(
+      { conversationId: conv.id, apricotApptId, err: err instanceof Error ? err.message : String(err) },
+      "patient-appointments: cancel — BookingRequest CANCELLED 同步失敗（Apricot 已取消，需人手核對本地卡）"
+    );
+  }
+
   // 即時刷新三步（L2 invalidate + booking:changed CANCELLED）
   await afterBookingWrite(conv.clinicId, [appt.date], conv.id, "CANCELLED", appt.date);
 

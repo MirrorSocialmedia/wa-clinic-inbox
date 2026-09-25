@@ -22,6 +22,11 @@ import {
 // 「reminder」params 讀（全局一份；env REMINDER_MIN/MAX_HOURS、TEMPLATE_REMINDER_NAME/LANG 保留做 defaults 底）
 import { getParams } from "@/lib/workflow/store";
 
+// ★ cwi-final S5-7（F2）：發前核對 Apricot 預約狀態（fail-closed）
+import { fetchAppointments } from "@/lib/workforce/client";
+import { phoneHash } from "@/lib/phone-hash";
+import { hkDateOffset } from "@/lib/availability";
+
 // ★ 延遲 import：outboundQueue/publishNotify 會拉起 Redis 連接（BullMQ module-level
 // instance）— unit test（零 Redis）import 呢個 module 時唔想連坐。生產路徑行為不變。
 async function lazyEnqueue(messageId: string) {
@@ -94,6 +99,29 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
     const conv = await prisma.conversation.findUnique({ where: { id: b.conversationId } });
     const clinic = await prisma.clinic.findUnique({ where: { id: b.clinicId } });
     if (!conv || !clinic) continue;
+
+    // ★ cwi-final S5-7（F2）：發前 fetchAppointments 核對 — 預約狀態必須 = 0（booked）。
+    //   102 = 舊單已改期 / -7 = 已取消 / 搵唔到（單已消失）/ workforce 離線 → fail-closed skip：
+    //   remindedAt 留 null（下輪 scan 重試）— 寧可遲提醒，唔提醒已取消嘅單。
+    const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
+    if (!contact?.waId) continue;
+    try {
+      const appts = await fetchAppointments(phoneHash(contact.waId), hkDateOffset(-7), hkDateOffset(30));
+      const found = appts.appointments.find((a) => a.apricotApptId === b.apricotApptId);
+      if (found?.bookingStatus !== 0) {
+        log.info(
+          { bookingId: b.id, apptStatus: found?.bookingStatus ?? null },
+          "reminder: appt status != 0（或已消失）→ skip（fail-closed，唔提醒）"
+        );
+        continue;
+      }
+    } catch (err) {
+      log.warn(
+        { bookingId: b.id, err: err instanceof Error ? err.name : "?" },
+        "reminder: fetchAppointments failed → skip（fail-closed，下輪重試）"
+      );
+      continue;
+    }
 
     const input = {
       requestedDate: b.requestedDate,

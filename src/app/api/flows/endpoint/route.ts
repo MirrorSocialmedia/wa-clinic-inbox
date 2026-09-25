@@ -431,12 +431,18 @@ export async function POST(req: NextRequest) {
             patientName: name,
             patientPhone,
             notes: notes || null,
+            // ★ cwi-final S5-8②（F2）：改期 context 由 FlowSession 帶入
+            //   （hold 卡紅標 + commit 成功後 102 舊單；conversationId 俾 S5-11（F4）sweep 用）
+            rescheduleOfApptId: session.rescheduleOfApptId ?? null,
+            conversationId: conv.id,
             source: "whatsapp_flow",
           },
           update: {
-            // 冪等重放（Meta 重試）：唔覆病人資料，只對齊 holdId/狀態
+            // 冪等重放（Meta 重試）：唔覆病人資料，只對齊 holdId/狀態 + 改期 context
             workforceHoldId: claim.holdId,
             status: "HELD",
+            rescheduleOfApptId: session.rescheduleOfApptId ?? null,
+            conversationId: conv.id,
           },
         });
         await prisma.auditLog

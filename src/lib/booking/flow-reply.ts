@@ -24,6 +24,7 @@
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
+import { createHash } from "node:crypto";
 import {
   ensureKeypair,
   unwrapAesKey,
@@ -167,9 +168,22 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
       await prisma.conversation
         .update({ where: { id: conversationId }, data: { reschedulingApptId: null } })
         .catch(() => undefined);
+      // ★ cwi-final S5-8②（F2）：T4 改期唔取消舊單 — 病人經 Flow 佔咗新位，舊單仲有效：
+      //   staff 要入 Apricot 新單 + 處理舊單（commit 成功會 102 舊單 — /api/flows/holds/[id]/commit）
+      await prisma.staffNotice
+        .create({
+          data: {
+            clinicId: conv.clinicId,
+            conversationId: conv.id,
+            kind: "HANDOFF_REQUEST",
+            title: "病人經 Flow 改期 — 請入 Apricot 新單並處理舊單",
+            meta: { oldApptId: conv.reschedulingApptId, holdId: reply.holdId } as object,
+          },
+        })
+        .catch(() => undefined);
       log.warn(
-        { conversationId, oldApptId: conv.reschedulingApptId },
-        "flow-reply: T4 claimed 喺改期 context — 旗標已清（舊單需 staff 手處理）"
+        { conversationId, oldApptId: conv.reschedulingApptId, holdId: reply.holdId },
+        "flow-reply: T4 claimed 喺改期 context — 旗標已清 + StaffNotice（舊單需 staff 手處理；commit 會 102 舊單）"
       );
     }
     await prisma.flowSession
@@ -355,6 +369,7 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
       providerApricotId: provider.apricotId!,
       date: date!,
       time: time!,
+      flowToken: flow_token,
     });
   }
 
@@ -407,8 +422,10 @@ async function handleReschedule(p: {
   providerApricotId: string;
   date: string;
   time: string;
+  /** ★ cwi-final S5-7（F2）：Idempotency-Key = sha256(flowToken) — 冪等重放安全 */
+  flowToken: string;
 }): Promise<FlowReplyOutcome> {
-  const { session, conv, contactWaId, oldApptId, clinicId, clinicCode, providerApricotId, date, time } = p;
+  const { session, conv, contactWaId, oldApptId, clinicId, clinicCode, providerApricotId, date, time, flowToken } = p;
 
   // 舊單回查（side 攞 oldDate / clinicCode — reschedule 契約要；contactWaId 已喺 step 3 驗證 = 病人本人）
   let oldAppt: { apricotApptId: string; clinicCode: string; date: string; start: string };
@@ -434,25 +451,88 @@ async function handleReschedule(p: {
     return { status: "send_failed", reason: "reschedule_lookup_failed" };
   }
 
-  let newApptId: string;
+  // ★ cwi-final S5-7（F2）：Idempotency-Key = sha256(flowToken)；caller 層唔自動重試 —
+  //   WorkforceOutcomeUnknown 由 fetchAppointments 對賬後再決定（下面 catch 分支）
+  const idempotencyKey = createHash("sha256").update(flowToken).digest("hex");
+
+  let newApptId: string | null = null;
   try {
-    const r = await rescheduleBooking(oldApptId, {
-      // 舊單喺邊間 clinic 就用邊間嘅 code（E route 已驗證本店；雙保險用舊單自己嘅）
-      clinicCode: oldAppt.clinicCode,
-      providerApricotId,
-      date,
-      start: time,
-      durationMin: RESCHEDULE_DURATION_MIN,
-      oldDate: oldAppt.date,
-      patient: { patientApricotId: conv.pinnedPatientApricotId! },
-    });
+    const r = await rescheduleBooking(
+      oldApptId,
+      {
+        // 舊單喺邊間 clinic 就用邊間嘅 code（E route 已驗證本店；雙保險用舊單自己嘅）
+        clinicCode: oldAppt.clinicCode,
+        providerApricotId,
+        date,
+        start: time,
+        durationMin: RESCHEDULE_DURATION_MIN,
+        oldDate: oldAppt.date,
+        patient: { patientApricotId: conv.pinnedPatientApricotId! },
+      },
+      idempotencyKey,
+    );
     newApptId = r.newApptId;
   } catch (err) {
-    // ★ cwi-final S5-1：改期結果未知（timeout/回應丟失）— 唔好盲斷「改期失敗」（可能已改成功）
+    // ★ cwi-final S5-7（F2）：改期結果未知（timeout/回應丟失）— 唔好盲斷「改期失敗」（可能已改成功），
+    //   亦唔好盲目重試（舊 key 重放安全但可能重寫）→ 先 fetchAppointments 對賬：
+    //   舊單已 102/-7/消失 + 目標時段出現新單（status 0）= 改期其實成功 → 採納走成功路徑
     if (err instanceof WorkforceOutcomeUnknown) {
+      let adopted: string | null = null;
+      try {
+        const rec = await fetchAppointments(phoneHash(contactWaId), hkDateOffset(-7), hkDateOffset(30));
+        const oldNow = rec.appointments.find((a) => a.apricotApptId === oldApptId);
+        const oldGone = !oldNow || oldNow.bookingStatus === 102 || oldNow.bookingStatus === -7;
+        const newNow = rec.appointments.find(
+          (a) =>
+            a.apricotApptId !== oldApptId &&
+            a.date === date &&
+            a.start === time &&
+            a.clinicCode === oldAppt.clinicCode &&
+            a.bookingStatus === 0,
+        );
+        if (oldGone && newNow) adopted = newNow.apricotApptId;
+      } catch {
+        // 對账本身都連唔到（workforce 離線）→ 落返原 unknown 處理（旗標保留，病人可重試）
+      }
+      if (adopted) {
+        newApptId = adopted;
+        log.info(
+          { conversationId: conv.id, clinic: clinicCode, oldApptId, newApptId: adopted, newDate: date },
+          "flow-reply: reschedule — outcome unknown → fetchAppointments 對賬確認成功（採納）"
+        );
+      } else {
+        log.warn(
+          { conversationId: conv.id, clinic: clinicCode, oldApptId, newDate: date },
+          "flow-reply: reschedule — outcome unknown + 對賬未確認成功 → staff 核對 Apricot"
+        );
+        await prisma.staffNotice
+          .create({
+            data: {
+              clinicId: conv.clinicId,
+              conversationId: conv.id,
+              kind: "HANDOFF_REQUEST",
+              title: `改期結果未確定（超時）— 請核對 Apricot 單 ${oldApptId} 有冇改到 ${date} ${time}`,
+              meta: { oldApptId, newDate: date, newTime: time },
+            },
+          })
+          .catch(() => undefined);
+        const reply = "你嘅改期處理緊 — 請稍候，職員會核對後同你確認 🙏";
+        await failSessionAndResend(
+          session.id,
+          conv,
+          reply,
+          { clinic: clinicCode, oldApptId, newDate: date, reason: "reschedule_unknown" },
+          "reschedule_unknown"
+        );
+        return { status: "send_failed", reason: "reschedule_unknown" };
+      }
+    }
+    // ★ cwi-final S5-7（F2）：RESCHEDULE_PARTIAL = workforce 原子改期半成功（舊/新單其一成功）
+    //   → 重試會重複 → StaffNotice 俾 staff 人手處理（旗標保留，病人可再試新時段）
+    if (err instanceof WorkforceApiError && err.code === "RESCHEDULE_PARTIAL") {
       log.warn(
         { conversationId: conv.id, clinic: clinicCode, oldApptId, newDate: date },
-        "flow-reply: reschedule — outcome unknown → staff 核對 Apricot"
+        "flow-reply: reschedule — RESCHEDULE_PARTIAL → StaffNotice + 重出 Flow（旗標保留）"
       );
       await prisma.staffNotice
         .create({
@@ -460,20 +540,19 @@ async function handleReschedule(p: {
             clinicId: conv.clinicId,
             conversationId: conv.id,
             kind: "HANDOFF_REQUEST",
-            title: `改期結果未確定（超時）— 請核對 Apricot 單 ${oldApptId} 有冇改到 ${date} ${time}`,
+            title: `改期部分失敗（RESCHEDULE_PARTIAL）— 舊單 ${oldApptId} 請人手核對 Apricot`,
             meta: { oldApptId, newDate: date, newTime: time },
           },
         })
         .catch(() => undefined);
-      const reply = "你嘅改期處理緊 — 請稍候，職員會核對後同你確認 🙏";
       await failSessionAndResend(
         session.id,
         conv,
-        reply,
-        { clinic: clinicCode, oldApptId, newDate: date, reason: "reschedule_unknown" },
-        "reschedule_unknown"
+        "對唔住，改期暫時出錯咗，請重新揀時間，我哋會再安排 🙏",
+        { clinic: clinicCode, oldApptId, newDate: date, reason: "reschedule_partial" },
+        "reschedule_partial"
       );
-      return { status: "send_failed", reason: "reschedule_unknown" };
+      return { status: "send_failed", reason: "reschedule_partial" };
     }
     const status = err instanceof WorkforceApiError ? err.status : 502;
     log.warn(
@@ -492,6 +571,12 @@ async function handleReschedule(p: {
       `reschedule_failed_${status}`
     );
     return { status: "send_failed", reason: `reschedule_failed_${status}` };
+  }
+
+  if (newApptId === null) {
+    // 理論唔會到（catch 各分支都 return 或 assign）— 防禦兜底
+    log.error({ conversationId: conv.id, oldApptId }, "flow-reply: reschedule — newApptId 丟失（unreachable）");
+    return { status: "send_failed", reason: "reschedule_unknown" };
   }
 
   // ── 成功：清旗標 + 審計 + 覆病人 + 即時刷新（舊日 + 新日）──────────────────
@@ -526,6 +611,9 @@ async function handleReschedule(p: {
         requestedDate: date,
         requestedTime: time,
         apricotApptId: newApptId,
+        // ★ cwi-final S5-7（F2）：改期成功 → 舊 BookingRequest = RESCHEDULED
+        //   （唔再 CONFIRMED → reminder scan 候選天然排除；時間/單號同步保留做歷史審計）
+        status: "RESCHEDULED",
         remindedAt: null,
       },
     });

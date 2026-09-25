@@ -107,6 +107,9 @@ export async function sendBookingFlow(opts: {
       clinicId: conv.clinicId,
       flowToken: token,
       status: "SENT",
+      // ★ cwi-final S5-8②（F2）：T4 改期 context — 由 Conversation.reschedulingApptId 複製
+      //   （側欄〔改期〕設旗標後發 Flow；submit_claim claim 時帶入 FlowHoldEvent）
+      rescheduleOfApptId: conv.reschedulingApptId ?? null,
     },
   });
 

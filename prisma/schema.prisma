@@ -100,6 +100,10 @@ enum BookingStatus {
   CONFIRMED
   REJECTED
   EXPIRED
+  // ★ cwi-final S5-7（F2）：預約狀態一致 — Apricot 取消（-7）後同步；reminder scan 候選 = CONFIRMED only（天然排除）
+  CANCELLED
+  // ★ cwi-final S5-7（F2）：workforce 原子改期（102 舊單 + 新單）成功後同步舊卡
+  RESCHEDULED
 }
 
 // ★ AI Workflow Phase C（cwi-sess-20260824-c1）：slot-filling 對話式預約 session 狀態。
@@ -750,6 +754,9 @@ model FlowSession {
   messageId        String?                   // cwi-r1close (D)：對應 interactive Message 內部 id —
                                              // 發送最終 FAILED 時回滾本 session（防 dedup 誤中 → UI 謊報「已發咗」）
   status           String    @default("SENT")
+  // ★ cwi-final S5-8②（F2）：T4 改期唔取消舊單 — 發 Flow 時由 Conversation.reschedulingApptId 複製
+  //   （submit_confirm claim 時帶入 FlowHoldEvent → hold 卡紅標 + commit 後 102 舊單）
+  rescheduleOfApptId String?
   createdAt        DateTime  @db.Timestamptz @default(now())
   completedAt      DateTime? @db.Timestamptz
   @@index([conversationId, status])
@@ -779,6 +786,11 @@ model FlowHoldEvent {
   patientName     String?
   patientPhone    String                            // 病人 WA 號（= Contact.waId）
   notes           String?
+  // ★ cwi-final S5-8②（F2）：改期 context — 由 FlowSession.rescheduleOfApptId 帶入（submit_confirm）；
+  //   hold 卡紅標 + commit 成功後 updateBookingStatus(old, 102, idempotencyKey=resched-${hold.id})
+  rescheduleOfApptId String?
+  // ★ cwi-final S5-8②（F2）：對話關聯（本批加好俾 S5-11（F4）hold sweep 先用 — 避免二次 migration）
+  conversationId  String?
   source          String    @default("whatsapp_flow")
   committedAt     DateTime? @db.Timestamptz
   createdAt       DateTime  @db.Timestamptz @default(now())

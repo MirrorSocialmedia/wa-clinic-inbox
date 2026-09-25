@@ -38,6 +38,8 @@ export function HoldCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  // ★ cwi-final S5-8②（F2）：commit 207（新單已入、舊單 102 標記失敗）→ 卡上保留提示
+  const [noteMsg, setNoteMsg] = useState<string | null>(null);
   const day = fmtHoldDay(hold.date);
   const isHeld = hold.status === "HELD";
 
@@ -47,9 +49,11 @@ export function HoldCard({
     setErrMsg(null);
     try {
       const res = await fetch(`/api/flows/holds/${hold.id}/commit`, { method: "POST" });
-      const j = (await res.json().catch(() => null)) as { error?: string; status?: string; already?: boolean } | null;
+      const j = (await res.json().catch(() => null)) as { error?: string; status?: string; already?: boolean; notice?: boolean; message?: string } | null;
       if (res.ok) {
         // 父組 re-fetch 會帶新狀態落嚟（COMMITTED / EXPIRED）
+        // ★ cwi-final S5-8②（F2）：207 = 新單已入但舊單 102 標記失敗（StaffNotice 已出）
+        if (j?.notice) setNoteMsg(j.message ?? "新單已入，舊單標記失敗，請人手處理");
         onActionDone?.();
       } else if (res.status === 409) {
         setErrMsg("呢個 hold 已唔係 HELD（可能已入 Apricot 或已放開）— 刷新中");
@@ -84,6 +88,7 @@ export function HoldCard({
             病人 <span className="font-semibold text-t1">{hold.patientName ?? "—"}</span>
             <span className="text-t3 font-mono ml-1.5">{hold.patientPhone}</span>
           </span>
+          {noteMsg && <span className="text-[10.5px] text-danger-text">⚠️ {noteMsg}</span>}
           {hold.committedAt && (
             <span className="ml-auto text-[10.5px] text-ok-text">
               {new Date(hold.committedAt).toLocaleString("zh-HK", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} 完成
@@ -107,6 +112,14 @@ export function HoldCard({
         </div>
       </div>
       <div className="px-4 py-3 flex flex-col gap-2">
+        {/* ★ cwi-final S5-8②（F2）：T4 改期 context 紅標 — 舊單唔自動取消，staff 入完新單要手取消舊單
+            （{date time} = BR join 嘅舊單預約時間；電話落單無 BR → 顯示舊單號） */}
+        {hold.rescheduleOfApptId && (
+          <div className="rounded-xl bg-danger-soft border border-danger/40 px-3 py-2 text-[11px] leading-relaxed text-danger-text">
+            ⚠️ 改期：舊單 {hold.rescheduleOfApptLabel ?? hold.rescheduleOfApptId} 仍然有效 — 入完新單要取消舊單
+          </div>
+        )}
+        {noteMsg && <div className="rounded-xl bg-danger-soft border border-danger/40 px-3 py-2 text-[11px] text-danger-text">⚠️ {noteMsg}</div>}
         <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
           <span className="text-t2 shrink-0">病人</span>
           <span className="font-semibold text-t1 text-right">

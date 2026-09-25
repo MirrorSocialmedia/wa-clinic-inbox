@@ -60,7 +60,8 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       }
     : null;
 
-  // upcoming appointments（只有釘咗先查；窗口 38 日內，status 0/102，本店）
+  // upcoming appointments（只有釘咗先查；窗口 38 日內，status 0/1，本店）
+  // ★ cwi-final S5-7（F2）：102 = 舊單已改期 → 排除（唔再顯示做「將來預約」；0 = booked / 1 = arrived）
   let upcomingAppointments: unknown[] | null = null;
   if (conv.pinnedPatientApricotId) {
     try {
@@ -69,7 +70,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
         (a) =>
           a.patientApricotId === conv.pinnedPatientApricotId &&
           a.clinicCode === clinic.code &&
-          (a.bookingStatus === 0 || a.bookingStatus === 102)
+          (a.bookingStatus === 0 || a.bookingStatus === 1)
       );
     } catch (e) {
       degraded = true;

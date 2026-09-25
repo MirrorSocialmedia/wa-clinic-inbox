@@ -247,6 +247,9 @@ export interface HoldEventView {
   source: string;
   committedAt: string | null;
   createdAt: string;
+  // ★ cwi-final S5-8②（F2）：T4 改期 context（紅標用）— 舊單號 + 舊單日期時間（BR join；電話單 null）
+  rescheduleOfApptId: string | null;
+  rescheduleOfApptLabel: string | null;
 }
 
 export async function latestHoldsByPhone(
@@ -265,6 +268,24 @@ export async function latestHoldsByPhone(
     take: 500,
   });
   const m = new Map<string, HoldEventView>();
+  // ★ cwi-final S5-8②（F2）：改期 context 紅標 — 舊單日期/時間靠 join BookingRequest 補
+  //   （FlowHoldEvent 本身無舊單 date/time 欄；電話落嘅 Apricot 單無 BR → label null → 卡顯示單號）
+  const reschedHolds = rows.filter((r) => r.rescheduleOfApptId && r.conversationId);
+  const apptLabelMap = new Map<string, string>();
+  if (reschedHolds.length > 0) {
+    const brs = await prisma.bookingRequest
+      .findMany({
+        where: {
+          conversationId: { in: [...new Set(reschedHolds.map((r) => r.conversationId!))] },
+          apricotApptId: { in: [...new Set(reschedHolds.map((r) => r.rescheduleOfApptId!))] },
+        },
+        select: { apricotApptId: true, requestedDate: true, requestedTime: true },
+      })
+      .catch(() => []);
+    for (const b of brs) {
+      apptLabelMap.set(b.apricotApptId!, `${b.requestedDate}${b.requestedTime ? ` ${b.requestedTime}` : ""}`);
+    }
+  }
   for (const r of rows) {
     if (m.has(r.patientPhone)) continue; // 已排序 desc — 第一條 = 最新
     m.set(r.patientPhone, {
@@ -280,6 +301,10 @@ export async function latestHoldsByPhone(
       source: r.source,
       committedAt: r.committedAt ? r.committedAt.toISOString() : null,
       createdAt: r.createdAt.toISOString(),
+      rescheduleOfApptId: r.rescheduleOfApptId,
+      rescheduleOfApptLabel: r.rescheduleOfApptId
+        ? (apptLabelMap.get(r.rescheduleOfApptId) ?? null)
+        : null,
     });
   }
   return m;
