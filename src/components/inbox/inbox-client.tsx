@@ -17,6 +17,7 @@ import type {
   DraftInfo,
   DraftExpiredEvent,
   DraftReadyEvent,
+  HoldNewEvent,
   MessageItem,
   MessageStatusEvent,
   MediaReadyEvent,
@@ -957,6 +958,13 @@ export function InboxClient({
       if (!firstTime(e)) return;
       void fetchConversations(activeClinicRef.current);
       setCtxRefreshKey((k) => k + 1);
+    });
+
+    // ★ cwi-final S5-11（F4）：Flow 硬保留 hold 新佔位（病人 claim 成功）→ 列表重拉補載該對話 hold 卡
+    //   payload 零病人 PII（holdEventId/conversationId/clinicCode metadata）— 卡數據行 REST refresh
+    socket.on("hold:new", (e: HoldNewEvent) => {
+      if (!firstTime(e)) return;
+      void fetchConversations(activeClinicRef.current);
     });
 
     // ★ cwi-inboxfix-20260905（MD I-10）：socket 重連修復 —

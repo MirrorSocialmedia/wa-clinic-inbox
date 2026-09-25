@@ -784,19 +784,24 @@ model FlowHoldEvent {
   endMin          Int                               // 30m 格 = startMin+30
   status          String    @default("HELD")       // HELD | IN_APRICOT | COMMITTED | RELEASED | EXPIRED
   patientName     String?
-  patientPhone    String                            // 病人 WA 號（= Contact.waId）
+  patientPhone    String?                           // 病人 WA 號（= Contact.waId）— ★ S5-11（F4）：nullable 俾 retention-purge 90 日清 PII（終態 PURGED）
   notes           String?
   // ★ cwi-final S5-8②（F2）：改期 context — 由 FlowSession.rescheduleOfApptId 帶入（submit_confirm）；
   //   hold 卡紅標 + commit 成功後 updateBookingStatus(old, 102, idempotencyKey=resched-${hold.id})
   rescheduleOfApptId String?
   // ★ cwi-final S5-8②（F2）：對話關聯（本批加好俾 S5-11（F4）hold sweep 先用 — 避免二次 migration）
   conversationId  String?
+  // ★ cwi-final S5-11（F4）：病人喺 Flow 打嘅電話（同 patientPhone = WA 號分清；卡顯示「病人留嘅電話」）
+  contactPhone    String?
+  // ★ cwi-final S5-11（F4）：commit 必填嘅 Apricot 單號（fetchAppointments 核對存在 + 時間一致先 COMMITTED）
+  apricotRef      String?
   source          String    @default("whatsapp_flow")
   committedAt     DateTime? @db.Timestamptz
   createdAt       DateTime  @db.Timestamptz @default(now())
   updatedAt       DateTime  @db.Timestamptz @updatedAt
   @@index([patientPhone, status])
   @@index([clinicCode, status])
+  @@index([conversationId, status])
 }
 
 model AvailabilitySlot {                       // workforce API 嘅 L2 cache（switch 後來源 = clinic-workforce /api/external/v1/availability）

@@ -3628,6 +3628,13 @@ if [ -n "$PC4_SLOT" ]; then
   wait_for "SELECT \"intent\"::text i FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PC4_WA' AND c.\"clinicId\"='$PC4_CID'" '[{"i":"QUESTION"}]' 45 || { fail "PC-G4 首訊未 triage"; PC_FAIL=1; }
   PC4_CONV=$(pc_conv_of "$PC4_WA" "$PC4_CID")
   q "UPDATE \"Conversation\" SET \"pinnedPatientApricotId\"='e2e-pc-l4-pat' WHERE id='$PC4_CONV'" >/dev/null 2>&1
+  # ★ cwi-final S5-12（F4）：AUTO_BOOK 要求 matchCount===1（pinned 唯一身份）— fixture 寫 1 match，
+  #   否則新 gate 降 CREATE_CARD（舊 PC-G4 預期 AUTO_BOOK 全鏈）
+  PC4_HASH=$(npx tsx -e 'import { phoneHash } from "./src/lib/phone-hash"; console.log(phoneHash(process.argv[1]));' "$PC4_WA" 2>/dev/null | tail -1)
+  [ "${#PC4_HASH}" = "64" ] || { fail "PC-G4 phoneHash 計算失敗"; PC_FAIL=1; }
+  cat > .dev/workforce-mock-patients.json <<EOJSON
+{"byPhoneHash":{"$PC4_HASH":{"matches":[{"patientApricotId":"e2e-pc-l4-pat","patientCode":"E2E-PC4","patientName":"E2E PC4","lastVisit":null}]}}}
+EOJSON
 
   pnpm -s mock-inbound message --clinic "$PC4_CODE" --from "$PC4_WA" --text "想約${PC4_SUR}醫生洗牙" --wamid "wamid.E2E_PC4_2_${EPOCH}" --name "E2E PC4" >/dev/null 2>&1
   wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC4_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"1"}]' 45 || { fail "PC-G4 r1 未收到"; PC_FAIL=1; }
@@ -4367,8 +4374,14 @@ WA_GRAPH_MOCK_FAIL=1 nohup pnpm worker >/tmp/e2e-worker-t93.log 2>&1 &
 for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t93.log 2>/dev/null && break; sleep 1; done
 PAT_T93="8526301${EPOCH}"; WAMID_T93="wamid.E2E_T93_${EPOCH}"
 pnpm -s mock-inbound message --clinic TKW --from "$PAT_T93" --text "你好，我想預約下週" --wamid "$WAMID_T93" --name "E2E T93 flowfail" >/dev/null || T93=1
-CONV_T93=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T93'" | jf conversationId)
-[ -n "$CONV_T93" ] || { fail "T93 conversation 未入庫"; T93=1; }
+# ★ F4 修：webhook 係 async enqueue + worker 冷啟有 refreshAllClinics 延遲 — 一次性 q 係 race（run#1 實測中招）→ 改 wait_for 30s
+CONV_T93=""
+for i in $(seq 1 30); do
+  CONV_T93=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='$WAMID_T93'" | jf conversationId)
+  [ -n "$CONV_T93" ] && break
+  sleep 1
+done
+[ -n "$CONV_T93" ] || { fail "T93 conversation 未入庫（30s）"; T93=1; }
 # 1a) auto-claim 可能分畀其他臨時 staff（e2e 後半段 TKW 有多 staff — 本 run 實測分咗 T79 D）→
 #     A（COOKIE_TKW）先 takeover 到自己（同店 self-claim 路徑）保證有 send 權（否則 flow POST 423）
 STAFF_A_ID=$(q "SELECT id::text id FROM \"StaffUser\" WHERE email='$TKW_EMAIL'" | jf id)
@@ -4398,11 +4411,13 @@ if [ "$T93" = 0 ]; then
   [ -n "$M93_2" ] && [ "$M93_2" != "$M93_1" ] || { fail "T93 重按未開新 message"; T93=1; }
   FS93_2=$(q "SELECT id FROM \"FlowSession\" WHERE \"messageId\"='$M93_2'" | jf id)
   check "T93 新 session 已寫 messageId" "$(q "SELECT (\"messageId\" IS NOT NULL)::text n FROM \"FlowSession\" WHERE id='$FS93_2'" | jf n)" "true"
-  # 4) 恢復正常 worker → 第 2 條 message SENT（新發送真送到）
-  pkill -f "src/workers/index.ts" 2>/dev/null || true
-  sleep 1
-  nohup pnpm worker >/tmp/e2e-worker-t93r.log 2>&1 &
-  for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t93r.log 2>/dev/null && break; sleep 1; done
+fi
+# 4) ★ F4 修：無條件恢復正常 worker（run#1 實測：setup fail 時 graph-fail poison worker 存活 → 攞晒後續 queue job → T101/T95/T170/T173 連鎖炸）
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-t93r.log 2>&1 &
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t93r.log 2>/dev/null && break; sleep 1; done
+if [ "$T93" = 0 ]; then
   if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE id='$M93_2'" '[{"s":"SENT"}]' 45; then
     pass "T93 恢復後 → 第 2 條 flow message SENT（重按 = 真新發送）"
   else
@@ -8098,14 +8113,19 @@ T677_CONV="t677-conv-${EPOCH}"
 T677_PROV="mock-pract-TKW-1"
 T677_OLD_DATE=$(TZ=Asia/Hong_Kong date -d '+5 days' +%F)
 pick_claim_slot T677_D T677_T
+if [ -n "${T677_T:-}" ]; then
+  _T677_EH=$((10#${T677_T%%:*})); _T677_EM=$((10#${T677_T##*:} + 30))
+  [ "$_T677_EM" -ge 60 ] && { _T677_EM=$((_T677_EM-60)); _T677_EH=$((_T677_EH+1)); }
+  T677_TE=$(printf '%02d:%02d' "$_T677_EH" "$_T677_EM")
+fi
 if [ -z "${T677_D:-}" ]; then
   fail "T677 claim slot fixture 空"
 else
   T677_HASH=$(npx tsx -e 'import { phoneHash } from "./src/lib/phone-hash"; console.log(phoneHash(process.argv[1]));' "$T677_WA" 2>/dev/null | tail -1)
   [ "${#T677_HASH}" = "64" ] || fail "T677 phoneHash 計算失敗（${T677_HASH:0:16}）"
-  # Apricot 真實狀態：舊單（status 0）— mock 無狀態，file 即真相
+  # Apricot 真實狀態：舊單（status 0）+ 新單（新 hold 時段 — S5-11 commit 對賬目標；mock 無狀態，file 即真相）
   cat > .dev/workforce-mock-patients.json <<EOJSON
-{"byPhoneHash":{"$T677_HASH":{"matches":[{"patientApricotId":"apr-e2e-t677","patientCode":"E2E-T677","patientName":"E2E T677","lastVisit":{"date":"2026-01-01","providerName":"E2E DR","visitReasons":["e2e"]}}],"appointments":[{"apricotApptId":"apt-e2e-t677-old","clinicCode":"TKW","providerApricotId":"$DOC_A","providerName":"E2E T677 Dr","date":"$T677_OLD_DATE","start":"10:00","end":"10:30","bookingStatus":0,"patientApricotId":"apr-e2e-t677","patientCode":"E2E-T677","patientName":"E2E T677","visitReasons":["e2e"],"remarks":null}]}}}
+{"byPhoneHash":{"$T677_HASH":{"matches":[{"patientApricotId":"apr-e2e-t677","patientCode":"E2E-T677","patientName":"E2E T677","lastVisit":{"date":"2026-01-01","providerName":"E2E DR","visitReasons":["e2e"]}}],"appointments":[{"apricotApptId":"apt-e2e-t677-old","clinicCode":"TKW","providerApricotId":"$DOC_A","providerName":"E2E T677 Dr","date":"$T677_OLD_DATE","start":"10:00","end":"10:30","bookingStatus":0,"patientApricotId":"apr-e2e-t677","patientCode":"E2E-T677","patientName":"E2E T677","visitReasons":["e2e"],"remarks":null},{"apricotApptId":"apt-e2e-t677-new","clinicCode":"TKW","providerApricotId":"$T677_PROV","providerName":"E2E T677 Dr","date":"$T677_D","start":"$T677_T","end":"$T677_TE","bookingStatus":0,"patientApricotId":"apr-e2e-t677","patientCode":"E2E-T677","patientName":"E2E T677","visitReasons":["e2e"],"remarks":null}]}}}
 EOJSON
   T677C="t677-c-${EPOCH}"
   q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T677C', '$TKW_CLINIC_ID', '$T677_WA', 'E2E T677', ARRAY[]::text[])" >/dev/null 2>&1
@@ -8154,7 +8174,11 @@ EOJSON
       check "T677 旗標清（reschedulingApptId NULL）" "$(q "SELECT COALESCE(\"reschedulingApptId\",'NULL')::text v FROM \"Conversation\" WHERE id='$T677_CONV'" | jf v)" "NULL"
       # commit → COMMITTED + 舊單 102（idempotencyKey = resched-${hold.id}）
       _T677_LOG_B=$(grep -c '"method":"PUT","path":"/api/external/v1/bookings/apt-e2e-t677-old/status"' .dev/workforce-mock-calls.jsonl 2>/dev/null); _T677_LOG_B=${_T677_LOG_B:-0}
-      CODE=$(curl -s -o /tmp/e2e-t677-2.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/flows/holds/$T677_HOLDDB/commit")
+      # ★ F4 S5-11：commit 必填 apricotRef + fetchAppointments 對賬（存在 + 時間 + 店 + 狀態）
+      CODE409=$(curl -s -o /tmp/e2e-t677-neg.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/flows/holds/$T677_HOLDDB/commit" -H 'Content-Type: application/json' -d '{"apricotRef":"apt-wrong-ref"}')
+      check "T677 錯單號 → 409（對賬拒 — 新合約）" "$CODE409" "409"
+      check "T677 409 後 hold 留 HELD" "$(q "SELECT \"status\"::text s FROM \"FlowHoldEvent\" WHERE id='$T677_HOLDDB'" | jf s)" "HELD"
+      CODE=$(curl -s -o /tmp/e2e-t677-2.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/flows/holds/$T677_HOLDDB/commit" -H 'Content-Type: application/json' -d '{"apricotRef":"apt-e2e-t677-new"}')
       check "T677 commit → 200" "$CODE" "200"
       grep -q '"oldApptMarked":true' /tmp/e2e-t677-2.json && pass "T677 commit body oldApptMarked:true（舊單 102 成功）" || { fail "T677 commit body 錯（$(head -c 200 /tmp/e2e-t677-2.json)）"; T677=1; }
       _T677_LOG_A=$(grep -c '"method":"PUT","path":"/api/external/v1/bookings/apt-e2e-t677-old/status"' .dev/workforce-mock-calls.jsonl 2>/dev/null); _T677_LOG_A=${_T677_LOG_A:-0}
@@ -8322,6 +8346,223 @@ for _pre in t670 t672 t674 t673 t677 t679a t679b; do
   q "DELETE FROM \"Contact\" WHERE id='${_pre}-c-${EPOCH}'" >/dev/null 2>&1
 done
 rm -f .dev/workforce-mock-write-slow.json .dev/booking-write-queue-off.json  # 殘留旗清掉（防下一 run 污染）
+
+# ════════════ O. cwi-final S5-11 / S5-12（F4）：T678 hold 卡全套 + T680 同號多病人 ════════════
+#   T678（S5-11）：病人打第二個電話（新對話）→ hold 卡只喺原對話（conversationId 主配對，唔跟電話串卡）；
+#        舊行（conversationId NULL）fallback phone 配對但受 clinic filter 限（MF 店 legacy 行唔漏入 TKW 列表）；
+#        hold 喺 workforce 消失 → 本地 EXPIRED + HIGH alert（hold_expired_unhandled）+ StaffNotice（發原對話）
+#   T680（S5-12）：同號兩個病人（lookup matchCount=2）→ L4+pinned 唔自動落單（CREATE_CARD 出卡 + 要揀人；
+#        零 workforce create 調用、零 AI_AUTO_BOOKING audit）
+#   注：worker cron hold-sweep（*/5min）可能喺本段期間自然觸發 — 所有斷言對冪等 sweep 不變（HELD 條件門 + 唯一 identity）
+T678=0; T680=0
+T678_TOK=""; T678_HOLD=""; T678_HOLDDB=""; T678_LEG=""; T680_CONV=""; T680_SESS=""  # set -u：早初始化（失敗路徑 cleanup 會引用）
+
+# ── T678 setup：hermetic（清殘留 hold/session/expired alert — persistent DB 跨 run）──
+rm -f .dev/workforce-mock-claims.json
+q "DELETE FROM \"FlowHoldEvent\"" >/dev/null 2>&1
+q "DELETE FROM \"FlowSession\"" >/dev/null 2>&1
+q "DELETE FROM \"Alert\" WHERE type='hold_expired_unhandled'" >/dev/null 2>&1
+# deterministic fixture（同 T101 源：djb2 base=1 slot — claim 目標）
+eval "$(node -e '
+function djb2(s){let h=5381;for(let i=0;i<s.length;i++){h=((h<<5)+h+s.charCodeAt(i))>>>0}return h}
+function pad(n){return String(n).padStart(2,"0")}
+const c="TKW";
+const d0=new Date(Date.now()+8*3600e3).toISOString().slice(0,10);
+let d=null,t=null,p=null;
+outer:
+for(let i=0;i<31;i++){
+  const day=new Date(Date.parse(d0+"T00:00:00Z")+i*86400e3).toISOString().slice(0,10);
+  if(djb2(c+"|"+day)%7===3) continue;
+  for(let pr=0;pr<2;pr++){
+    for(let s=9*60;s<13*60;s+=30){
+      if(1+(djb2(c+"|"+day+"|"+s+"|"+pr)%3)===1){ d=day; t=pad(Math.floor(s/60))+":"+pad(s%60); p="mock-pract-"+c+"-"+pr; break outer; }
+    }
+  }
+}
+if(!d){ console.log("T678_D=\"\""); process.exit(0); }
+console.log([`T678_D=${d}`,`T678_T=${t}`,`T678_PROV=${p}`,`T678_SLOTKEY=\"mock|${c}|${d}|${t}|${p}\"`].join("\n"));
+')"
+# 斷言 helper：<list-file> <convId> → echo 該對話 holdEvent.id（無卡 = 空）
+t678_hold_id() {
+  node -e '
+const fs=require("fs");
+const [f,convId]=process.argv.slice(1); // node -e：argv[0]=node（無 script path）
+try{
+  const d=JSON.parse(fs.readFileSync(f,"utf8"));
+  const it=(d.items||[]).find(x=>x.id===convId);
+  console.log((it&&it.holdEvent&&it.holdEvent.id)||"");
+}catch(e){console.log("")}
+' "$1" "$2" 2>/dev/null
+}
+if [ -z "${T678_D:-}" ]; then
+  fail "T678 fixture：30 日內搵唔到 base=1 slot"
+else
+  T678_WA="8526951${EPOCH}"
+  T678C="t678-c-${EPOCH}"; T678_CONV="t678-conv-${EPOCH}"
+  T678_MF_CONV=""
+  q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T678C', '$TKW_CLINIC_ID', '$T678_WA', 'E2E T678', ARRAY[]::text[])" >/dev/null 2>&1
+  q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T678_CONV', '$TKW_CLINIC_ID', '$T678C', 'OPEN', now(), now())" >/dev/null 2>&1
+  curl -s -o /tmp/e2e-t678-flow.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$T678_CONV/flows" -H 'Content-Type: application/json'
+  T678_TOK=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$T678_CONV' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t)
+  if [ -z "$T678_TOK" ]; then
+    fail "T678 setup：flowToken 缺（$(head -c 200 /tmp/e2e-t678-flow.json)）"; T678=1
+  else
+    # (a) 三屏 → submit_confirm → claim → FlowHoldEvent（conversationId = 原對話）
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T678_TOK" --action INIT 2>&1 || true)
+    stepx_parse "$OUT" /tmp/e2e-t678-init.json || { echo "    ❌ T678 INIT fail"; T678=1; }
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T678_TOK" --action data_exchange --screen SCR_DATE --data "{\"user_action\":\"submit_date\",\"date\":\"$T678_D\"}" 2>&1 || true)
+    stepx_parse "$OUT" /tmp/e2e-t678-slot.json || { echo "    ❌ T678 submit_date fail"; T678=1; }
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T678_TOK" --action data_exchange --screen SCR_SLOT --data "{\"user_action\":\"submit_slot\",\"date\":\"$T678_D\",\"provider_id\":\"$T678_PROV\",\"time\":\"$T678_T\"}" 2>&1 || true)
+    stepx_parse "$OUT" /tmp/e2e-t678-confirm.json || { echo "    ❌ T678 submit_slot fail"; T678=1; }
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T678_TOK" --action data_exchange --screen SCR_CONFIRM --data "{\"user_action\":\"submit_confirm\",\"date\":\"$T678_D\",\"provider_id\":\"$T678_PROV\",\"time\":\"$T678_T\",\"name\":\"E2E T678\",\"patient_phone\":\"\",\"notes\":\"t678\"}" 2>&1 || true)
+    if stepx_parse "$OUT" /tmp/e2e-t678-success.json; then
+      check "T678 submit_confirm → SUCCESS" "$(jf screen < /tmp/e2e-t678-success.json)" "SUCCESS"
+      T678_HOLD=$(jf holdId < /tmp/e2e-t678-success.json)
+      T678_HOLDDB=$(q "SELECT id FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T678_TOK'" | jf id)
+    else
+      echo "    ❌ T678 submit_confirm fail（=${OUT%%$'\n'*}）"; T678=1
+    fi
+    check "T678 FlowHoldEvent（HELD + conversationId 主鍵 + contactPhone=NULL（WA fallback））" \
+      "$(q "SELECT \"status\"||'|'||\"conversationId\"||'|'||COALESCE(\"contactPhone\",'NULL') v FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T678_TOK'" | jf v)" \
+      "HELD|$T678_CONV|NULL"
+    curl -s -b "$COOKIE_TKW" "$BASE/api/conversations" -o /tmp/e2e-t678-tkw-a.json
+    check "T678 原對話有 hold 卡（TKW staff 列表 — local 行 id 配對）" "$(t678_hold_id /tmp/e2e-t678-tkw-a.json "$T678_CONV")" "$T678_HOLDDB"
+
+    # (b) 病人打第二個電話（新對話 = 同一 WA 號打去 MF 店）→ 卡唔跟病人串過去
+    pnpm -s mock-inbound message --clinic MF --from "$T678_WA" --text "你好，想預約" --wamid "wamid.E2E_T678_MF_${EPOCH}" --name "E2E T678" >/dev/null 2>&1
+    for i in $(seq 1 20); do
+      T678_MF_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$T678_WA' AND c.\"clinicId\"='$MF_CLINIC_ID'" | jf id)
+      [ -n "$T678_MF_CONV" ] && break
+      sleep 1
+    done
+    if [ -z "$T678_MF_CONV" ]; then
+      echo "    ❌ T678 MF 新對話未建立（第二個電話）"; T678=1
+    else
+      curl -s -b "$COOKIE_MF" "$BASE/api/conversations" -o /tmp/e2e-t678-mf-a.json
+      check "T678 新對話（MF）無 hold 卡（conversationId 主配對 — 唔跟電話串卡）" "$(t678_hold_id /tmp/e2e-t678-mf-a.json "$T678_MF_CONV")" ""
+      curl -s -b "$COOKIE_TKW" "$BASE/api/conversations" -o /tmp/e2e-t678-tkw-b.json
+      check "T678 原對話（TKW）卡照喺度" "$(t678_hold_id /tmp/e2e-t678-tkw-b.json "$T678_CONV")" "$T678_HOLDDB"
+
+      # (c)+(d) sweep 驗證（claim 成功先做 — T678_HOLD 有值；失敗則跳過，T678 已記 fail）
+      if [ -n "$T678_HOLD" ]; then
+      pnpm -s e2e:cron hold-sweep >/tmp/e2e-t678-sweep1.log 2>&1
+      check "T678 sweep① hold 仲喺 workforce → 留 HELD" "$(q "SELECT \"status\"::text s FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T678_TOK'" | jf s)" "HELD"
+
+      # (d) hold 喺 workforce 消失（模擬 RELEASED / TTL 釋放）→ sweep → EXPIRED + HIGH alert + notice
+      node -e '
+const fs=require("fs");const f=".dev/workforce-mock-claims.json";
+try{const a=JSON.parse(fs.readFileSync(f,"utf8"));fs.writeFileSync(f,JSON.stringify(a.filter(e=>e.holdId!==process.argv[1]),null,1))}catch(e){}
+' "$T678_HOLD" 2>/dev/null
+      pnpm -s e2e:cron hold-sweep >/tmp/e2e-t678-sweep2.log 2>&1
+      check "T678 sweep② hold 消失 → 本地 EXPIRED" "$(q "SELECT \"status\"::text s FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T678_TOK'" | jf s)" "EXPIRED"
+      check "T678 HIGH alert hold_expired_unhandled（TKW + 未 resolve）" \
+        "$(q "SELECT count(*)::text c FROM \"Alert\" WHERE type='hold_expired_unhandled' AND \"clinicId\"='$TKW_CLINIC_ID' AND \"severity\"='HIGH' AND \"resolvedAt\" IS NULL" | jf c)" "1"
+      check "T678 StaffNotice（發原對話 + 逐字 title）" \
+        "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$T678_CONV' AND kind='SYSTEM' AND title='網上預約佔位已自動釋放 — 如果病人仲要呢個時段，請即刻入 Apricot'" | jf c)" "1"
+      curl -s -b "$COOKIE_TKW" "$BASE/api/conversations" -o /tmp/e2e-t678-tkw-c.json
+      check "T678 EXPIRED 後卡消失（唔再顯示）" "$(t678_hold_id /tmp/e2e-t678-tkw-c.json "$T678_CONV")" ""
+      else
+        echo "    ⚠ T678 claim 未成功 — (c)/(d) sweep 驗證跳過"
+      fi
+
+      # (e) clinic filter + legacy 行（conversationId NULL = F2 前）fallback phone 配對：
+      #     MF 店 legacy 行 → MF 新對話有卡（fallback 仍有效）；TKW 列表冇（clinic filter 唔漏）
+      T678_LEG="t678-legacy-${EPOCH}"
+      q "INSERT INTO \"FlowHoldEvent\" (id, \"flowToken\", \"workforceHoldId\", \"clinicCode\", \"clinicId\", \"providerName\", \"providerId\", \"date\", \"startMin\", \"endMin\", status, \"patientName\", \"patientPhone\", \"contactPhone\", \"rescheduleOfApptId\", \"conversationId\", source, \"updatedAt\") VALUES ('$T678_LEG', 't678-legacy-flow-${EPOCH}', 'mock-hold-legacy0001', 'MF', '$MF_CLINIC_ID', 'E2E T678 Legacy Dr', 'mock-pract-mf-1', '$T678_D', 540, 570, 'HELD', 'E2E T678', '$T678_WA', NULL, NULL, NULL, 'whatsapp_flow', now())" >/dev/null 2>&1
+      curl -s -b "$COOKIE_MF" "$BASE/api/conversations" -o /tmp/e2e-t678-mf-b.json
+      check "T678 legacy 行（conversationId NULL）fallback phone 配對 → MF 新對話有卡" "$(t678_hold_id /tmp/e2e-t678-mf-b.json "$T678_MF_CONV")" "$T678_LEG"
+      curl -s -b "$COOKIE_TKW" "$BASE/api/conversations" -o /tmp/e2e-t678-tkw-d.json
+      check "T678 MF legacy 行唔漏入 TKW 列表（clinic filter）" \
+        "$(node -e 'const fs=require("fs");try{const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));console.log((d.items||[]).some(x=>x.holdEvent&&x.holdEvent.id===process.argv[2])?"1":"0");}catch(e){console.log("0")}' /tmp/e2e-t678-tkw-d.json "$T678_LEG" 2>/dev/null)" "0"
+    fi
+  fi
+  # T678 cleanup（hermetic：FK 順序 BookingSession/BookingRequest → Message/AiDraft → Conversation → Contact）
+  q "DELETE FROM \"BookingSession\" WHERE \"conversationId\" IN ('$T678_CONV','$T678_MF_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"BookingRequest\" WHERE \"conversationId\" IN ('$T678_CONV','$T678_MF_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN ('$T678_CONV','$T678_MF_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN ('$T678_CONV','$T678_MF_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\" IN ('$T678_CONV','$T678_MF_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"FlowHoldEvent\" WHERE \"flowToken\" IN ('$T678_TOK', 't678-legacy-flow-${EPOCH}') OR id='$T678_LEG'" >/dev/null 2>&1
+  q "DELETE FROM \"FlowSession\" WHERE \"flowToken\"='$T678_TOK'" >/dev/null 2>&1
+  q "DELETE FROM \"Alert\" WHERE type='hold_expired_unhandled'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id IN ('$T678_CONV','$T678_MF_CONV')" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE \"clinicId\"='$MF_CLINIC_ID' AND \"waId\"='$T678_WA'" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE id='$T678C'" >/dev/null 2>&1
+  rm -f .dev/workforce-mock-claims.json
+  [ "$T678" = 0 ] && pass "T678 S5-11 hold 卡全套（conversationId 主配對 + clinic filter + 消失→EXPIRED+HIGH alert+notice）" || { fail "T678 有項失敗（見上 ❌）"; }
+fi
+
+# ── T680. S5-12 同號多病人：L4 + pinned + matchCount=2 → 唔自動落單（出卡 + 要揀人）──
+T680_SLOT=$(pc_pick "$TKW_CLINIC_ID" "" 0)
+if [ -z "$T680_SLOT" ]; then
+  fail "T680 fixture：TKW 聽日/後日/大後日 無 15:00 空槽（djb2 grid）"
+else
+  T680_P=${T680_SLOT%%|*}; T680_D=${T680_SLOT##*|}
+  T680_PNAME=$(pc_prov_name "$T680_P"); T680_SUR=$(pc_surname "$T680_P")
+  q "INSERT INTO \"AutomationPolicy\" (\"id\",\"clinicId\",\"category\",\"level\",\"updatedAt\") VALUES ('e2e-t680-l4','$TKW_CLINIC_ID','BOOKING_REQUEST','L4',now()) ON CONFLICT (\"clinicId\",\"category\") DO UPDATE SET \"level\"=EXCLUDED.\"level\" RETURNING \"id\"" >/dev/null 2>&1
+  T680_WA="8526952${EPOCH}"
+  T680_HASH=$(npx tsx -e 'import { phoneHash } from "./src/lib/phone-hash"; console.log(phoneHash(process.argv[1]));' "$T680_WA" 2>/dev/null | tail -1)
+  if [ "${#T680_HASH}" != "64" ]; then
+    fail "T680 phoneHash 計算失敗"
+  else
+    # 同號兩個病人（S5-12：lookup 返 2 matches — 身份唔唯一）
+    cat > .dev/workforce-mock-patients.json <<EOJSON
+{"byPhoneHash":{"$T680_HASH":{"matches":[{"patientApricotId":"e2e-t680-pat","patientCode":"T680-1","patientName":"E2E T680A","lastVisit":null},{"patientApricotId":"e2e-t680-pat-2","patientCode":"T680-2","patientName":"E2E T680B","lastVisit":null}]}}}
+EOJSON
+    pnpm -s mock-inbound message --clinic TKW --from "$T680_WA" --text "你好，想問下地址" --wamid "wamid.E2E_T680_1_${EPOCH}" --name "E2E T680" >/dev/null 2>&1
+    wait_for "SELECT \"intent\"::text i FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$T680_WA' AND c.\"clinicId\"='$TKW_CLINIC_ID'" '[{"i":"QUESTION"}]' 45 || { fail "T680 首訊未 triage"; T680=1; }
+    T680_CONV=$(pc_conv_of "$T680_WA" "$TKW_CLINIC_ID")
+    [ -n "$T680_CONV" ] || { fail "T680 對話未建立"; T680=1; }
+    [ -n "$T680_CONV" ] && q "UPDATE \"Conversation\" SET \"pinnedPatientApricotId\"='e2e-t680-pat', \"pinnedPatientName\"='E2E T680A' WHERE id='$T680_CONV'" >/dev/null 2>&1
+    pnpm -s mock-inbound message --clinic TKW --from "$T680_WA" --text "想約${T680_SUR}醫生洗牙" --wamid "wamid.E2E_T680_2_${EPOCH}" --name "E2E T680" >/dev/null 2>&1
+    wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T680_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"1"}]' 45 || { fail "T680 r1 未收到"; T680=1; }
+    T680_SESS=$(q "SELECT id FROM \"BookingSession\" WHERE \"conversationId\"='$T680_CONV'" | jf id)
+    pnpm -s mock-inbound message --clinic TKW --from "$T680_WA" --text "$(pc_date_kw "$T680_D")" --wamid "wamid.E2E_T680_3_${EPOCH}" --name "E2E T680" >/dev/null 2>&1
+    wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T680_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"2"}]' 45 || { fail "T680 r2 未收到"; T680=1; }
+    pnpm -s mock-inbound message --clinic TKW --from "$T680_WA" --text "三點啦" --wamid "wamid.E2E_T680_4_${EPOCH}" --name "E2E T680" >/dev/null 2>&1
+    wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T680_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"3"}]' 45 || { fail "T680 r3 未收到"; T680=1; }
+    T680_MO_N=$((10#$(echo "$T680_D" | cut -d- -f2))); T680_DD_N=$((10#$(echo "$T680_D" | cut -d- -f3)))
+    check "T680 confirmLine 逐字" "$(pc_sess_reply "$T680_CONV" 3)" "收到！ 同你確認一次：${T680_MO_N}月${T680_DD_N}日 15:00 ${T680_PNAME}，啱唔啱？"
+    # confirm → matchCount=2 → 禁 AUTO_BOOK → CREATE_CARD
+    T680_CALLS_LOG=.dev/workforce-mock-calls.jsonl
+    t680_creates() { grep -c '"method":"POST","path":"/api/external/v1/bookings","status":200' "$T680_CALLS_LOG" 2>/dev/null; }
+    T680_CREATE_BEFORE=$(t680_creates); T680_CREATE_BEFORE=${T680_CREATE_BEFORE:-0}
+    pnpm -s mock-inbound message --clinic TKW --from "$T680_WA" --text "好呀" --wamid "wamid.E2E_T680_5_${EPOCH}" --name "E2E T680" >/dev/null 2>&1
+    wait_for "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$T680_CONV'" '[{"s":"PENDING"}]' 60 || { fail "T680 卡未建（PENDING）"; T680=1; }
+    sleep 3  # 畀 auto-book 試行（如有 bug）有機會顯形
+    check "T680 卡留 PENDING（無自動落單）" "$(q "SELECT \"status\"::text s FROM \"BookingRequest\" WHERE \"conversationId\"='$T680_CONV'" | jf s)" "PENDING"
+    check "T680 autoBooked 非 true" "$(q "SELECT (\"autoBooked\" IS NOT TRUE)::text v FROM \"BookingRequest\" WHERE \"conversationId\"='$T680_CONV'" | jf v)" "true"
+    check "T680 無 AI_AUTO_BOOKING audit" "$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='AI_AUTO_BOOKING' AND \"meta\"->>'sessionId'='$T680_SESS'" | jf c)" "0"
+    T680_CREATE_AFTER=$(t680_creates); T680_CREATE_AFTER=${T680_CREATE_AFTER:-0}
+    check "T680 workforce create 調用 = 0（零落單）" "$((T680_CREATE_AFTER - T680_CREATE_BEFORE))" "0"
+    check "T680 session COMPLETED（出卡 = 交俾人手）" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$T680_SESS'" | jf s)" "COMPLETED"
+    wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T680_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"4"}]' 45 || { fail "T680 r4 未收到"; T680=1; }
+    check "T680 病人回覆「職員會好快幫你確認」（出卡，非「已為你預約」）" "$(pc_sess_reply "$T680_CONV" 4)" "收到！職員會好快幫你確認 🙂"
+    # 出卡（conversations API pendingBooking）+ 「要揀人」數據源（patient-context matches=2）
+    BOOK_T680=$(q "SELECT id FROM \"BookingRequest\" WHERE \"conversationId\"='$T680_CONV'" | jf id)
+    curl -s -b "$COOKIE_TKW" "$BASE/api/conversations" -o /tmp/e2e-t680-convlist.json
+    if [ -n "$BOOK_T680" ] && grep -qF "\"pendingBooking\":{\"id\":\"$BOOK_T680\"" /tmp/e2e-t680-convlist.json; then
+      pass "T680 三掣卡出咗（conversations API pendingBooking）"
+    else
+      echo "    ❌ T680 卡唔喺 conversations API"; T680=1
+    fi
+    curl -s -b "$COOKIE_TKW" "$BASE/api/conversations/$T680_CONV/patient-context" -o /tmp/e2e-t680-ctx.json
+    check "T680 patient-context matches=2（卡片「揀人」黃帶數據源）" \
+      "$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log((d.matches||[]).length)' /tmp/e2e-t680-ctx.json 2>/dev/null)" "2"
+  fi
+  # T680 cleanup（hermetic：policy / patients file / session / 對話鏈）
+  rm -f .dev/workforce-mock-patients.json
+  q "DELETE FROM \"AutomationPolicy\" WHERE id='e2e-t680-l4'" >/dev/null 2>&1
+  q "DELETE FROM \"BookingSession\" WHERE \"conversationId\"='$T680_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"BookingRequest\" WHERE \"conversationId\"='$T680_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"PatientFact\" WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$T680_WA' AND \"clinicId\"='$TKW_CLINIC_ID')" >/dev/null 2>&1
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$T680_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\"='$T680_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$T680_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id='$T680_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"waId\"='$T680_WA'" >/dev/null 2>&1
+  [ "$T680" = 0 ] && pass "T680 S5-12 同號多病人 → L4 唔自動落單（出卡 + 要揀人）" || { fail "T680 有項失敗（見上 ❌）"; }
+fi
 
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

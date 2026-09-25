@@ -3,8 +3,10 @@
  *
  * 狀態機：只 HELD 可 commit（其餘 → 409）。
  * 1. RBAC：assertClinicAccess（clinicId 缺失 = 只 ADMIN）
- * 2. call workforce commit（MD 3.3：HELD → IN_APRICOT；冪等）
- * 3. 本地 → COMMITTED + committedAt + AuditLog(COMMIT_HOLD)
+ * 2. ★ cwi-final S5-11（F4）：body.apricotRef 必填 — fetchAppointments 核對單號存在 + 日期/時間一致
+ *    （+ 本店 + 有效狀態 0/102）→ 唔一致 → 409 拒絕 + 提示（hold 留 HELD）
+ * 3. call workforce commit（MD 3.3：HELD → IN_APRICOT；冪等）
+ * 4. 本地 → COMMITTED + committedAt + apricotRef + AuditLog(COMMIT_HOLD)
  *
  * workforce fail（404/409 = 已 RELEASED）→ 本地 EXPIRED + 200 {already}；
  * 其他 fail（離線/超時）→ 502 保持 HELD（可重試）。
@@ -37,6 +39,45 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   if (!hold.workforceHoldId) {
     return NextResponse.json({ error: "workforce hold id missing" }, { status: 500 });
   }
+  // ★ S5-11（F4）：patientPhone nullable（retention-purge 90 日清 PII）— HELD 行理論上一定有；
+  //   缺失 = 異常（purge 誤傷 / 舊 row）→ 500 唔好 hash(null)
+  if (!hold.patientPhone) {
+    return NextResponse.json({ error: "hold 缺病人電話（PII 已清？）— 無法核對單號" }, { status: 500 });
+  }
+
+  // ★ cwi-final S5-11（F4）：commit 必填 Apricot 單號（staff 入完單先撳完成 — 防「卡撳咗但單未入」）
+  const body = (await req.json().catch(() => null)) as { apricotRef?: unknown } | null;
+  const apricotRef = String(body?.apricotRef ?? "").trim();
+  if (!apricotRef || apricotRef.length > 64) {
+    return NextResponse.json({ error: "請填 Apricot 單號先完成" }, { status: 400 });
+  }
+
+  // ★ cwi-final S5-11（F4）：fetchAppointments 核對單號存在 + 日期/時間一致（hold.date/startMin 為準）。
+  //   唔一致 → 409 拒絕 + 提示（hold 留 HELD — staff 可重新核對）；workforce 離線 → 502（唔准未核對先 COMMITTED）。
+  const hhmm = (min: number) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+  try {
+    const data = await fetchAppointments(phoneHash(hold.patientPhone), hold.date, hold.date);
+    const appt = data.appointments.find((a) => a.apricotApptId === apricotRef);
+    if (!appt) {
+      return NextResponse.json({ error: `單號 ${apricotRef} 喺 Apricot 搵唔到 — 請核對單號（病人：${hold.patientName ?? hold.patientPhone}）` }, { status: 409 });
+    }
+    if (appt.date !== hold.date || appt.start !== hhmm(hold.startMin) || appt.end !== hhmm(hold.endMin)) {
+      return NextResponse.json(
+        { error: `單號 ${apricotRef} 時間（${appt.date} ${appt.start}–${appt.end}）同呢個 hold（${hold.date} ${hhmm(hold.startMin)}–${hhmm(hold.endMin)}）唔一致 — 請核對` },
+        { status: 409 }
+      );
+    }
+    // 本店 + 有效狀態（0 = 已約 / 102 = 改期）— 其他店 / 已取消單唔算數（防打錯單號）
+    if (appt.clinicCode !== hold.clinicCode) {
+      return NextResponse.json({ error: `單號 ${apricotRef} 唔屬呢間店（${appt.clinicCode} ≠ ${hold.clinicCode}）— 請核對` }, { status: 409 });
+    }
+    if (appt.bookingStatus !== 0 && appt.bookingStatus !== 102) {
+      return NextResponse.json({ error: `單號 ${apricotRef} 狀態非有效預約（已取消/已放開？）— 請核對` }, { status: 409 });
+    }
+  } catch (err) {
+    log.warn({ id, apricotRefLen: apricotRef.length, err: err instanceof Error ? err.name : "?" }, "hold commit: fetchAppointments 核對失敗 → 502");
+    return NextResponse.json({ error: "clinic-workforce 連唔到，未能核對單號 — 請重試" }, { status: 502 });
+  }
 
   let wf;
   try {
@@ -56,7 +97,8 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   await prisma.$transaction([
     prisma.flowHoldEvent.update({
       where: { id: hold.id },
-      data: { status: "COMMITTED", committedAt: now },
+      // ★ cwi-final S5-11（F4）：apricotRef 已核對（存在 + 時間一致 + 本店 + 有效狀態）→ 落庫留痕
+      data: { status: "COMMITTED", committedAt: now, apricotRef },
     }),
     prisma.auditLog.create({
       data: {
@@ -64,11 +106,11 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
         action: "COMMIT_HOLD",
         entity: "FlowHoldEvent",
         entityId: hold.id,
-        meta: { holdId: hold.workforceHoldId, clinicCode: hold.clinicCode, date: hold.date } as object,
+        meta: { holdId: hold.workforceHoldId, clinicCode: hold.clinicCode, date: hold.date, apricotRef } as object,
       },
     }),
   ]);
-  log.info({ id, wfStatus: wf.status }, "hold commit: COMMITTED");
+  log.info({ id, wfStatus: wf.status, apricotRef }, "hold commit: COMMITTED");
 
   // ★ cwi-final S5-8②（F2）：T4 改期唔取消舊單 — commit 成功 + 有改期 context → 102 舊單。
   //   冪等：idempotencyKey = resched-${hold.id}（重試同 key）；舊單已 102/-7/搵唔到 = no-op 當成功。

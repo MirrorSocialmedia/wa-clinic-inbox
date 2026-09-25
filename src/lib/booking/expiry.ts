@@ -5,12 +5,15 @@
  * - PENDING 且 createdAt < now - 48h → EXPIRED + AuditLog(BOOKING_EXPIRED)
  * - FlowSession SENT 且 createdAt < now - 48h → ABANDONED（flow 中途棄 = 零 BookingRequest，
  *   無殭屍 — ABANDONED 只係清理 token 狀態）
+ *   ★ cwi-final S5-11（F4）：abandon 前若該 flowToken 有本地 HELD hold → call workforce release
+ *   （DELETE claim/{holdId}；S0-12 閘唔擋；fail-soft — 放唔到下次 sweep 對返發現消失 → EXPIRED）
  * - ★ Phase C：BookingSession ACTIVE/CONFIRMING 且 expiresAt < now（24h TTL）→ ABANDONED
  *
  * 冪等：重複執行只處理 still-PENDING/ACTIVE 嘅 row（UPDATE WHERE status=...）。
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
+import { releaseHold, WorkforceOutcomeUnknown } from "@/lib/workforce/client";
 
 export const EXPIRY_HOURS = 48;
 
@@ -19,6 +22,8 @@ export interface ExpiryResult {
   abandonedFlows: number;
   /** ★ Phase C：過期 slot-filling session（24h TTL） */
   abandonedSessions: number;
+  /** ★ cwi-final S5-11（F4）：abandoned flow 對應嘅本地 HELD hold 放開數 */
+  releasedHolds: number;
 }
 
 export async function runExpiry(now: Date = new Date()): Promise<ExpiryResult> {
@@ -49,10 +54,45 @@ export async function runExpiry(now: Date = new Date()): Promise<ExpiryResult> {
   }
 
   // 2) SENT flows → ABANDONED（棄單清理）
+  // ★ cwi-final S5-11（F4）：先撳 abandoned flow 嘅 flowToken（= FlowHoldEvent.flowToken）→
+  //   有本地 HELD hold → release（病人棄單 = 位數應該放開；fail-soft 唔阻 abandon）
+  const staleFlows = await prisma.flowSession.findMany({
+    where: { status: "SENT", createdAt: { lt: cutoff } },
+    select: { flowToken: true },
+    take: 200,
+  });
   const abandoned = await prisma.flowSession.updateMany({
     where: { status: "SENT", createdAt: { lt: cutoff } },
     data: { status: "ABANDONED" },
   });
+  let releasedHolds = 0;
+  for (const f of staleFlows) {
+    const hold = await prisma.flowHoldEvent.findFirst({
+      where: { flowToken: f.flowToken, status: "HELD" },
+      select: { id: true, workforceHoldId: true, flowToken: true },
+    });
+    if (!hold?.workforceHoldId) continue; // 無 hold / 無 workforce 連結（舊 row）→ 無乜可放
+    try {
+      await releaseHold(hold.workforceHoldId);
+      // 本地同步 RELEASED（冪等：status HELD 條件擋重複）
+      const upd = await prisma.flowHoldEvent.updateMany({
+        where: { id: hold.id, status: "HELD" },
+        data: { status: "RELEASED" },
+      });
+      if (upd.count > 0) {
+        releasedHolds += 1;
+        log.info({ holdId: hold.id, flowToken8: f.flowToken.slice(0, 8) }, "expiry: flow ABANDONED → hold released");
+      }
+    } catch (err) {
+      // fail-soft：workforce 離線/404（已放）→ 下次 hold-sweep 對返發現消失 → EXPIRED
+      if (!(err instanceof WorkforceOutcomeUnknown)) {
+        log.warn(
+          { holdId: hold.id, err: err instanceof Error ? err.name : "?" },
+          "expiry: hold release fail（fail-soft — sweep 兜底）"
+        );
+      }
+    }
+  }
 
   // 3) ★ Phase C（cwi-sess-20260824-c1）：slot-filling session 24h TTL → ABANDONED
   //    （唔通知 — 病人 24h 冇理 = 自然冷卻；再講預約會重新開 session）
@@ -61,11 +101,11 @@ export async function runExpiry(now: Date = new Date()): Promise<ExpiryResult> {
     data: { status: "ABANDONED" },
   });
 
-  if (expiredBookings > 0 || abandoned.count > 0 || abandonedSessions.count > 0) {
+  if (expiredBookings > 0 || abandoned.count > 0 || abandonedSessions.count > 0 || releasedHolds > 0) {
     log.info(
-      { expiredBookings, abandonedFlows: abandoned.count, abandonedSessions: abandonedSessions.count },
+      { expiredBookings, abandonedFlows: abandoned.count, abandonedSessions: abandonedSessions.count, releasedHolds },
       "cron: bookings-expire ok"
     );
   }
-  return { expiredBookings, abandonedFlows: abandoned.count, abandonedSessions: abandonedSessions.count };
+  return { expiredBookings, abandonedFlows: abandoned.count, abandonedSessions: abandonedSessions.count, releasedHolds };
 }

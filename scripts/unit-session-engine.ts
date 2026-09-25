@@ -257,12 +257,22 @@ console.log("[6] CONFIRMING + CONFIRM");
   check("L3 → COMPLETED + CREATE_CARD", r3.patch.status === "COMPLETED" && effectsOf(r3).includes("CREATE_CARD"));
   check("L3 → 覆「職員會好快幫你確認」", r3.replyText === "收到！職員會好快幫你確認 🙂");
 
-  const r4a = step(base, ai({ action: "CONFIRM" }), slotsData(), ctx({ level: "L4", pinnedPatient: true }));
-  check("L4+pinned → COMPLETED + AUTO_BOOK", r4a.patch.status === "COMPLETED" && effectsOf(r4a).includes("AUTO_BOOK"));
-  check("L4+pinned → 唔覆（確認訊息由 confirm-core 出）", r4a.replyText === null);
+  // ★ cwi-final S5-12（F4）：AUTO_BOOK 要求 matchCount === 1（pinned 病人唯一身份）
+  const r4a = step(base, ai({ action: "CONFIRM" }), slotsData(), ctx({ level: "L4", pinnedPatient: true, matchCount: 1 }));
+  check("L4+pinned+matchCount=1 → COMPLETED + AUTO_BOOK", r4a.patch.status === "COMPLETED" && effectsOf(r4a).includes("AUTO_BOOK"));
+  check("L4+pinned+matchCount=1 → 唔覆（確認訊息由 confirm-core 出）", r4a.replyText === null);
 
   const r4b = step(base, ai({ action: "CONFIRM" }), slotsData(), ctx({ level: "L4", pinnedPatient: false }));
   check("L4 無 pinned → 降 L3 出 CREATE_CARD", effectsOf(r4b).includes("CREATE_CARD") && !effectsOf(r4b).includes("AUTO_BOOK"));
+
+  // ★ cwi-final S5-12（F4）：同號多病人（matchCount>1）→ 禁 AUTO_BOOK，出卡俾 staff 揀人
+  const r4c = step(base, ai({ action: "CONFIRM" }), slotsData(), ctx({ level: "L4", pinnedPatient: true, matchCount: 2 }));
+  check("L4+pinned+matchCount=2 → COMPLETED + CREATE_CARD（禁 AUTO_BOOK）", r4c.patch.status === "COMPLETED" && effectsOf(r4c).includes("CREATE_CARD") && !effectsOf(r4c).includes("AUTO_BOOK"));
+  check("L4+pinned+matchCount=2 → 覆「職員會好快幫你確認」", r4c.replyText === "收到！職員會好快幫你確認 🙂");
+
+  // fail-safe：matchCount 缺失（lookup 失敗/未做）→ 同樣降 CREATE_CARD（寧慢唔錯）
+  const r4d = step(base, ai({ action: "CONFIRM" }), slotsData(), ctx({ level: "L4", pinnedPatient: true }));
+  check("L4+pinned+matchCount 缺失 → CREATE_CARD（fail-safe）", effectsOf(r4d).includes("CREATE_CARD") && !effectsOf(r4d).includes("AUTO_BOOK"));
 }
 
 // ── 7. CONFIRMING + 改主意 ────────────────────────────────────────────

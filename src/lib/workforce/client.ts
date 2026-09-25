@@ -421,6 +421,15 @@ const HoldCommitResponse = z.object({
 });
 export type HoldCommitResult = z.infer<typeof HoldCommitResponse>;
 
+// release（MD 3.3）— 病人取消／前台放開：HELD → RELEASED（冪等；已 RELEASED → 200 同狀；hold 唔存在 → 404）
+const HoldReleaseResponse = z.object({
+  v: z.literal(1),
+  holdId: z.string(),
+  status: z.literal("RELEASED"),
+  apricotRef: z.string().nullable(),
+});
+export type HoldReleaseResult = z.infer<typeof HoldReleaseResponse>;
+
 // claim（MD 3.2 / providerslot T4）— 佔位硬保留：workforce 單交易重算 offerable → 插 hold。
 // 🔴 response 零病人回顯（只時段/醫生欄）；409 → WorkforceApiError(code=SLOT_TAKEN / FLOW_TOKEN_REUSED)。
 export const ClaimResponse = z.object({
@@ -523,7 +532,7 @@ async function cwmRateGate(): Promise<void> {
 }
 
 async function wfFetch(
-  method: "GET" | "POST" | "PUT",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   params: Record<string, string>,
   body?: unknown,
@@ -580,7 +589,7 @@ async function wfGet(
 }
 
 async function wfSend(
-  method: "POST" | "PUT",
+  method: "POST" | "PUT" | "DELETE",
   path: string,
   params: Record<string, string>,
   body?: unknown,
@@ -604,7 +613,7 @@ export const wfSendForTest = wfSend;
  * real 分支：wfFetch 帶 write timeout）。錯誤分類喺外层 wfSendBookingWrite。
  */
 async function wfSendBookingWriteOnce(
-  method: "POST" | "PUT",
+  method: "POST" | "PUT" | "DELETE",
   path: string,
   params: Record<string, string>,
   body?: unknown,
@@ -627,7 +636,7 @@ async function wfSendBookingWriteOnce(
  * - 確定性錯誤（SLOT_TAKEN / IDEMPOTENCY_* / MANUAL_RECONCILE / 422 / 400 / 403 / 404 / 503 WRITE_DISABLED…）→ 原樣 throw
  */
 async function wfSendBookingWrite(
-  method: "POST" | "PUT",
+  method: "POST" | "PUT" | "DELETE",
   path: string,
   params: Record<string, string>,
   body?: unknown,
@@ -1035,6 +1044,14 @@ export async function commitHold(holdId: string, apricotRef?: string): Promise<H
   );
 }
 
+/** release（MD 3.3）— ★ cwi-final S5-11（F4）：wa-inbox 自己放 hold（FlowSession ABANDONED 48h 清理）。
+ *  S0-12 閘唔擋（spec 明確：release 唔入 G2 claim/commit — 否則棄單 hold 永遠放唔晒）；冪等（已 RELEASED → 200 同狀）。 */
+export async function releaseHold(holdId: string): Promise<HoldReleaseResult> {
+  return HoldReleaseResponse.parse(
+    await wfSend("DELETE", `/api/external/v1/bookable-slots/claim/${encodeURIComponent(holdId)}`, {})
+  );
+}
+
 /**
  * claim（MD 3.2 / providerslot T4）— 佔位硬保留（Flow 三屏 submit_confirm 內 call）。
  * - 冪等：Idempotency-Key = claim token（T1 契約）— Meta 重試同 token 同 slot → 同 holdId（唔佔兩個位）
@@ -1238,7 +1255,7 @@ function readFillFlags(): { clinicCode: string; providerApricotId: string; date:
   }
 }
 
-function mockFixture(path: string, params: Record<string, string>, method?: "POST" | "PUT", body?: unknown): unknown {
+function mockFixture(path: string, params: Record<string, string>, method?: "POST" | "PUT" | "DELETE", body?: unknown): unknown {
   try {
     const out = mockFixtureImpl(path, params, method, body);
     mockCallLog(method ?? "GET", path, 200);
@@ -1262,7 +1279,7 @@ function mockCallLog(method: string, reqPath: string, status: number): void {
   }
 }
 
-function mockFixtureImpl(path: string, params: Record<string, string>, method?: "POST" | "PUT", body?: unknown): unknown {
+function mockFixtureImpl(path: string, params: Record<string, string>, method?: "POST" | "PUT" | "DELETE", body?: unknown): unknown {
   // 全店 fail 旗（env）
   if (process.env.WORKFORCE_MOCK_FAIL === "1") {
     log.info({ path, mock: true }, "workforce MOCK: fail（WORKFORCE_MOCK_FAIL=1）");
@@ -1376,6 +1393,13 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
     // 靜態 flag file 嘅 holdId（T3 截圖 fixture）唔喺 store → no-op（行為唔變）
     markClaimCommitted(decodeURIComponent(holdCommitM[1]));
     return { v: 1, holdId: decodeURIComponent(holdCommitM[1]), status: "IN_APRICOT" as const, committedAt: new Date().toISOString() };
+  }
+
+  // ★ cwi-final S5-11（F4）：release（MD 3.3）— FlowSession ABANDONED 自放 hold（mock 決定性；冪等）
+  const holdReleaseM = path.match(/^\/api\/external\/v1\/bookable-slots\/claim\/([^/]+)$/);
+  if (holdReleaseM && method === "DELETE") {
+    markClaimReleased(decodeURIComponent(holdReleaseM[1]));
+    return { v: 1, holdId: decodeURIComponent(holdReleaseM[1]), status: "RELEASED" as const, apricotRef: null };
   }
 
   // /bookings/{id}/status | /remove | /reschedule
@@ -2277,6 +2301,14 @@ function markClaimCommitted(holdId: string): void {
     hit.status = "IN_APRICOT";
     writeClaimStore(store);
   }
+}
+
+/** release（★ cwi-final S5-11 F4）：store 移除該 hold（位放開 — held mock / bookable-slots mock 重新 offer）。
+ *  冪等：唔喺 store → no-op（對齊真端點「已 RELEASED → 200 同狀」）。 */
+function markClaimReleased(holdId: string): void {
+  const store = readClaimStore();
+  const next = store.filter((e) => e.holdId !== holdId);
+  if (next.length !== store.length) writeClaimStore(next);
 }
 
 /** 該 slot 活躍 hold 數（HELD/IN_APRICOT 都佔位 — 真 T1：holds 入 concurrency 重算）。 */

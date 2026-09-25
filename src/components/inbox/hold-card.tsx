@@ -38,6 +38,8 @@ export function HoldCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  // ★ cwi-final S5-11（F4）：commit 必填 Apricot 單號（staff 入完單先撳完成）
+  const [apricotRef, setApricotRef] = useState("");
   // ★ cwi-final S5-8②（F2）：commit 207（新單已入、舊單 102 標記失敗）→ 卡上保留提示
   const [noteMsg, setNoteMsg] = useState<string | null>(null);
   const day = fmtHoldDay(hold.date);
@@ -45,18 +47,27 @@ export function HoldCard({
 
   async function doCommit() {
     if (busy || !isHeld) return;
+    if (!apricotRef.trim()) {
+      setErrMsg("請填 Apricot 單號先完成");
+      return;
+    }
     setBusy(true);
     setErrMsg(null);
     try {
-      const res = await fetch(`/api/flows/holds/${hold.id}/commit`, { method: "POST" });
+      const res = await fetch(`/api/flows/holds/${hold.id}/commit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apricotRef: apricotRef.trim() }),
+      });
       const j = (await res.json().catch(() => null)) as { error?: string; status?: string; already?: boolean; notice?: boolean; message?: string } | null;
-      if (res.ok) {
+      if (res.ok || res.status === 207) {
         // 父組 re-fetch 會帶新狀態落嚟（COMMITTED / EXPIRED）
         // ★ cwi-final S5-8②（F2）：207 = 新單已入但舊單 102 標記失敗（StaffNotice 已出）
         if (j?.notice) setNoteMsg(j.message ?? "新單已入，舊單標記失敗，請人手處理");
         onActionDone?.();
-      } else if (res.status === 409) {
-        setErrMsg("呢個 hold 已唔係 HELD（可能已入 Apricot 或已放開）— 刷新中");
+      } else if (res.status === 400 || res.status === 409) {
+        // ★ cwi-final S5-11（F4）：400 = 缺單號；409 = hold 已非 HELD 或 單號核對唔過（訊息由 backend 帶）
+        setErrMsg(j?.error ?? (res.status === 409 ? "呢個 hold 已唔係 HELD（可能已入 Apricot 或已放開）— 刷新中" : "請填 Apricot 單號先完成"));
         onActionDone?.();
       } else if (res.status === 502) {
         setErrMsg("clinic-workforce 連唔到 — 稍後重試（位數仍然佔住）");
@@ -81,12 +92,16 @@ export function HoldCard({
           <div className="font-display text-[22px] leading-[1.15] mt-1.5">✅ 已入 Apricot · 完成</div>
           <div className="text-xs opacity-90 mt-0.5">
             {day.main}（{day.weekday}）{minToHHmm(hold.startMin)}–{minToHHmm(hold.endMin)} · {hold.providerName}
+            {/* ★ cwi-final S5-11（F4）：clinic code（跨店 staff 分辨 hold 屬邊間店） */}
+            <span className="font-mono ml-1.5">{hold.clinicCode}</span>
           </div>
         </div>
         <div className="px-4 py-2.5 flex items-center gap-3 text-[12px]">
           <span className="text-t2">
             病人 <span className="font-semibold text-t1">{hold.patientName ?? "—"}</span>
-            <span className="text-t3 font-mono ml-1.5">{hold.patientPhone}</span>
+            <span className="text-t3 font-mono ml-1.5">{hold.patientPhone ?? "—"}</span>
+            {/* ★ cwi-final S5-11（F4）：病人喺 Flow 打嘅電話（同 waId 分清） */}
+            {hold.contactPhone && <span className="text-t3 ml-1.5">（留嘅電話 {hold.contactPhone}）</span>}
           </span>
           {noteMsg && <span className="text-[10.5px] text-danger-text">⚠️ {noteMsg}</span>}
           {hold.committedAt && (
@@ -109,6 +124,8 @@ export function HoldCard({
         <div className="font-display text-[22px] leading-[1.15] mt-1.5 text-warn-text">🕓 線上已佔 · 等你入 Apricot</div>
         <div className="text-xs text-warn-text/90 mt-0.5">
           {day.main}（{day.weekday}）{minToHHmm(hold.startMin)}–{minToHHmm(hold.endMin)} · {hold.providerName}
+          {/* ★ cwi-final S5-11（F4）：clinic code（跨店 staff 分辨 hold 屬邊間店） */}
+          <span className="font-mono ml-1.5">{hold.clinicCode}</span>
         </div>
       </div>
       <div className="px-4 py-3 flex flex-col gap-2">
@@ -124,9 +141,16 @@ export function HoldCard({
           <span className="text-t2 shrink-0">病人</span>
           <span className="font-semibold text-t1 text-right">
             {hold.patientName ?? "—"}
-            <span className="text-t3 font-mono ml-1.5 text-[11px]">{hold.patientPhone}</span>
+            <span className="text-t3 font-mono ml-1.5 text-[11px]">{hold.patientPhone ?? "—"}</span>
           </span>
         </div>
+        {/* ★ cwi-final S5-11（F4）：病人喺 Flow 打嘅電話（同 waId 分清） */}
+        {hold.contactPhone && (
+          <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
+            <span className="text-t2 shrink-0">病人留嘅電話</span>
+            <span className="text-t1 text-right font-mono">{hold.contactPhone}</span>
+          </div>
+        )}
         {hold.notes && (
           <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
             <span className="text-t2 shrink-0">備註</span>
@@ -136,18 +160,26 @@ export function HoldCard({
         <div className="text-[10.5px] text-warn-text">
           位數已經線上佔住（workforce 硬保留）— 超時未入 Apricot 會落 /admin 警報（12h MEDIUM / 24h HIGH）
         </div>
-        {errMsg && <div className="text-[11px] text-danger-text">{errMsg}</div>}
+        {/* ★ cwi-final S5-11（F4）：commit 必填 Apricot 單號（backend fetchAppointments 核對存在 + 時間一致） */}
         <div className="flex items-center gap-2">
+          <input
+            value={apricotRef}
+            onChange={(e) => setApricotRef(e.target.value)}
+            placeholder="Apricot 單號（入完單先撳完成）"
+            maxLength={64}
+            className="flex-1 rounded-full border border-line bg-panel px-3.5 py-1.5 text-xs outline-none focus:border-brand"
+          />
           <button
             onClick={() => void doCommit()}
-            disabled={busy || locked}
-            title={locked ? "Send Lock：只有負責人可以 commit" : undefined}
+            disabled={busy || locked || !apricotRef.trim()}
+            title={locked ? "Send Lock：只有負責人可以 commit" : !apricotRef.trim() ? "請填 Apricot 單號" : undefined}
             className="inline-flex items-center gap-1.5 text-xs px-3.5 py-1.5 rounded-full bg-brand hover:bg-brand-hover text-panel font-semibold disabled:opacity-50"
           >
             <CalendarDays size={13} strokeWidth={2.75} />
             {busy ? "處理中…" : "已入 Apricot · 完成"}
           </button>
         </div>
+        {errMsg && <div className="text-[11px] text-danger-text">{errMsg}</div>}
       </div>
     </div>
   );

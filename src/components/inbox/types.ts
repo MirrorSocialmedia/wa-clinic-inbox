@@ -145,7 +145,11 @@ export interface HoldInfo {
   startMin: number; // 分鐘自午夜（0..1410）
   endMin: number;
   patientName: string | null;
-  patientPhone: string; // waId（join key = Contact.waId）
+  patientPhone: string | null; // waId（join key = Contact.waId）— ★ S5-11（F4）：retention-purge 終態 90 日 → null
+  // ★ cwi-final S5-11（F4）：病人喺 Flow 打嘅電話（同 waId 分清；卡顯示「病人留嘅電話」）
+  contactPhone: string | null;
+  // ★ cwi-final S5-11（F4）：卡片顯示 clinic code（跨店 staff 分辨 hold 屬邊間店）
+  clinicCode: string;
   notes: string | null;
   source: string;
   committedAt: string | null; // ISO — 完成態顯示
@@ -153,6 +157,21 @@ export interface HoldInfo {
   // ★ cwi-final S5-8②（F2）：T4 改期 context（紅標用）— 舊單號 + 舊單日期時間（BR join；電話單 null）
   rescheduleOfApptId: string | null;
   rescheduleOfApptLabel: string | null;
+}
+
+/** ★ cwi-final S5-11（F4）：Flow 硬保留 hold 新佔位事件（claim 成功 — commit-then-emit）。
+ *  零病人 PII（patientName/patientPhone 唔入事件）— client 收 → REST 重拉列表補載 hold 卡。 */
+export interface HoldNewEvent {
+  /** ★ cwi-final S1-4：publishConvEvent 注入（client 去重） */
+  eventId?: string;
+  holdEventId: string;
+  conversationId: string | null;
+  clinicCode: string | null;
+  providerName: string | null;
+  date: string | null;
+  startMin: number | null;
+  endMin: number | null;
+  status: string | null;
 }
 
 /** Phase 4：今日當值（clinic-workforce 窄 API，4 欄白名單 — MD §9.2） */

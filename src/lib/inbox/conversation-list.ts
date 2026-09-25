@@ -19,7 +19,7 @@ import type { Prisma, Conversation } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { scopedClinicSet, myGroupIds as loadMyGroupIds, type AuthContext } from "@/lib/rbac";
-import { latestHoldsByPhone } from "@/lib/flows/hold-sweep";
+import { latestHoldsByConversation } from "@/lib/flows/hold-sweep";
 import { LIST_PAGE_SIZE, RESOLVED_TAIL } from "./list-constants";
 import type { CapsuleKey } from "./capsule";
 import type { BookingInfo, ConversationItem, HoldInfo, WindowState } from "@/components/inbox/types";
@@ -322,8 +322,12 @@ export async function toConversationDTOs(
   const staffMap = new Map(staff.map((s) => [s.id, s.name]));
   const clinicMap = new Map(clinics.map((c) => [c.id, c]));
   const groupMap = new Map(groups.map((g) => [g.id, g]));
-  // providerslot-20260830 T3：hold 卡 — 本頁 contact 嘅 WA 號（≤300，唔會爆 bind 上限）；fail-soft → 空 Map
-  const holdByPhone = await latestHoldsByPhone(contacts.map((c) => c.waId), holdClinicFilter).catch((err) => {
+  // ★ cwi-final S5-11（F4）：hold 卡按 conversationId 配對（同號多病人唔串卡）；
+  //   舊行（conversationId null）fallback phone 配對 — fail-soft → 空 Map
+  const holdByConv = await latestHoldsByConversation(
+    rows.map((r) => ({ id: r.id, waId: contactMap.get(r.contactId)?.waId ?? null })),
+    holdClinicFilter
+  ).catch((err) => {
     log.warn({ err: err instanceof Error ? err.message : String(err) }, "inbox list: hold lookup failed");
     return new Map();
   });
@@ -412,12 +416,8 @@ export async function toConversationDTOs(
           writeAttemptAt: b.writeAttemptAt ? b.writeAttemptAt.toISOString() : null,
         };
       })() as BookingInfo | null,
-      // providerslot-20260830 T3：Flow 硬保留 hold 卡（HELD / IN_APRICOT / COMMITTED）
-      holdEvent: (() => {
-        const ph = contactMap.get(cv.contactId)?.waId;
-        if (!ph) return null;
-        return holdByPhone.get(ph) ?? null;
-      })() as HoldInfo | null,
+      // ★ cwi-final S5-11（F4）：Flow 硬保留 hold 卡（HELD / IN_APRICOT / COMMITTED）— 按對話配對
+      holdEvent: (holdByConv.get(cv.id) ?? null) as HoldInfo | null,
       window: {
         open,
         remainingMs,

@@ -273,6 +273,20 @@ const followupChanged = z.looseObject({
   eventId: id,
 });
 
+/** ★ cwi-final S5-11（F4）：Flow 硬保留 hold 新佔位（endpoint claim 成功）— client 收 → 補載該對話 hold 卡
+ *  零病人 PII（patientName/patientPhone 唔入事件 — 卡數據由 REST refresh 帶） */
+const holdNew = z.looseObject({
+  holdEventId: id,
+  conversationId: z.string().nullish(),
+  clinicCode: z.string().nullish(),
+  providerName: z.string().nullish(),
+  date: z.string().nullish(),
+  startMin: z.number().int().nullish(),
+  endMin: z.number().int().nullish(),
+  status: z.string().nullish(),
+  eventId: id,
+});
+
 /** 事件名 → schema 註冊表（publishConvEvent 按 event 名查） */
 export const EVENT_SCHEMAS: Record<string, z.ZodType> = {
   "message:new": messageNew,
@@ -297,4 +311,5 @@ export const EVENT_SCHEMAS: Record<string, z.ZodType> = {
   "notify:assigned": notifyAssigned,
   "notify:takeover": notifyTakeover,
   "followup:changed": followupChanged,
+  "hold:new": holdNew,
 };

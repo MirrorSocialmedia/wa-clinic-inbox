@@ -36,6 +36,9 @@ export interface StepCtx {
   level: "L3" | "L4";
   providers: { apricotId: string; name: string }[];
   pinnedPatient: boolean; // conv.pinnedPatientApricotId != null
+  // ★ cwi-final S5-12 同號多病人：pinned 病人嘅 PatientIndex lookup match 數（runner 喺 AUTO_BOOK 決策前 re-lookup）。
+  //   AUTO_BOOK 要 matchCount === 1（唯一身份）；undefined（lookup 失敗）/>1（同號多人）/0 → fail-safe CREATE_CARD。
+  matchCount?: number;
   // ★ Phase D：workflow 參數（runner 讀 getParams("booking-session", clinicId) 傳落）。
   // optional — unit 測試唔傳 → SESSION_DEFAULTS（零改）。
   params?: SessionParamsType;
@@ -113,11 +116,14 @@ export function step(
   // ── 3. CONFIRMING 態：等緊 yes ──────────────────────────
   if (session.status === "CONFIRMING") {
     if (ai.action === "CONFIRM") {
-      const eff: Effect[] = ctx.level === "L4" && ctx.pinnedPatient ? [{ kind: "AUTO_BOOK" }] : [{ kind: "CREATE_CARD" }];
-      // L4 但未釘住舊客 → 降 L3 出卡（總綱 6.6：新客留人手）
+      // ★ cwi-final S5-12 同號多病人：AUTO_BOOK 多一層 gate — matchCount === 1 先自動落單。
+      //   undefined（lookup 失敗/未做）/ >1（同號多人）/ 0 → CREATE_CARD（staff 揀人，寧慢唔錯）。
+      const canAutoBook = ctx.level === "L4" && ctx.pinnedPatient && ctx.matchCount === 1;
+      const eff: Effect[] = canAutoBook ? [{ kind: "AUTO_BOOK" }] : [{ kind: "CREATE_CARD" }];
+      // L4 但未釘住舊客 / 同號多人 → 降 L3 出卡（總綱 6.6：新客留人手；S5-12：身份唔確定留人手）
       return {
         patch: { slots: merged, status: "COMPLETED", turns, noProgress: 0 },
-        replyText: ctx.level === "L4" && ctx.pinnedPatient ? null : "收到！職員會好快幫你確認 🙂",
+        replyText: canAutoBook ? null : "收到！職員會好快幫你確認 🙂",
         effects: eff,
       }; // AUTO_BOOK 嘅確認訊息由 confirm-core 出（已為你預約…）
     }

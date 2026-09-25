@@ -779,12 +779,33 @@ async function handleSessionTurn(
 
   // 4. engine step（pure — 所有事實句喺度砌）
   // ★ Phase D：engine 保持 pure — params 由 runner 讀落（getParams 三級 fallback + fail-soft）
+  // ★ cwi-final S5-12 同號多病人：AUTO_BOOK 決策前 re-lookup PatientIndex（唯一身份先自動落單）。
+  //   只喺必要時多一次 IO（L4 + pinned + CONFIRMING + CONFIRM）；fail-safe：
+  //   contact 無 waId / lookup 失敗 / 0 match → matchCount 唔傳 → engine 降 CREATE_CARD（寧慢唔錯）。
+  let matchCount: number | undefined;
+  if (level === "L4" && conv.pinnedPatientApricotId && session.status === "CONFIRMING" && aiOut.action === "CONFIRM") {
+    try {
+      const c = await prisma.contact.findUnique({ where: { id: conv.contactId }, select: { waId: true } });
+      if (c?.waId) {
+        matchCount = (await lookupPatient(phoneHash(c.waId))).matches.length;
+        if (matchCount > 1) {
+          log.info({ sessionId, matchCount }, "session: 同號多病人 — 禁 AUTO_BOOK（CREATE_CARD + 揀人）");
+        }
+      }
+    } catch (err) {
+      log.warn(
+        { sessionId, err: err instanceof Error ? err.name : "?" },
+        "session: S5-12 matchCount lookup fail → CREATE_CARD（fail-safe）"
+      );
+    }
+  }
   const stepCtx: StepCtx = {
     todayHk,
     // ★ cwi-final S4-3：stepCtx 直接用真 level（開頭已重查 — 只係 L3/L4 先會走到呢度；唔再 L1→"L3" 映射）
     level,
     providers,
     pinnedPatient: conv.pinnedPatientApricotId !== null,
+    matchCount,
     params: await getParams("booking-session", conv.clinicId),
   };
   const out = sessionStep(

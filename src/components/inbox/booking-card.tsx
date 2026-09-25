@@ -67,6 +67,18 @@ export function fmtRequestDay(dateStr: string): { main: string; weekday: string 
   return { main, weekday };
 }
 
+// ★ cwi-final S5-12 同號多病人：姓名比對正規化（pure — unit test 用）：去空白 + 小寫
+export function normPatientName(s: string | null | undefined): string {
+  return (s ?? "").replace(/\s+/g, "").toLowerCase();
+}
+
+/** patient-context 輕量 shape（卡只讀 matches 數 + pinned 名 — 零額外 PII） */
+interface PatientCtxLite {
+  degraded?: boolean;
+  pinned: { patientApricotId: string; patientName?: string } | null;
+  matches: { patientApricotId: string; patientName: string }[] | null;
+}
+
 export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDone, slotClaimEnabled }: Props) {
   const pinned = !!c.pinnedPatientApricotId;
   const locked = !!c.assigneeId && c.assigneeId !== myStaffId;
@@ -95,6 +107,32 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
     return () => clearInterval(t);
   }, [b.status, b.id]);
 
+  // ── ★ cwi-final S5-12 同號多病人：PENDING 卡拉 patient-context（既有端點 — matches 數 + pinned 名）──
+  //   matches > 1 → 黃標「同號多人 — 落單前必須核對釘咗邊個」（揀人機制 = 右側欄 pin picker，server 已驗證）；
+  //   病人留嘅名（contact profileName）≠ pinned 名 → 黃標。workforce 離線 = degraded → 靜默降級（唔擋卡）。
+  const [pctx, setPctx] = useState<PatientCtxLite | null>(null);
+  useEffect(() => {
+    if (b.status !== "PENDING") {
+      setPctx(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/conversations/${c.id}/patient-context`)
+      .then((res) => (res.ok ? (res.json() as Promise<PatientCtxLite>) : null))
+      .then((d) => {
+        if (!cancelled && d) setPctx(d);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [b.status, b.id, c.id]);
+  const multiMatch = (pctx?.matches?.length ?? 0) > 1;
+  const nameMismatch =
+    !!pctx?.pinned?.patientName &&
+    !!c.contact?.profileName &&
+    normPatientName(c.contact.profileName) !== normPatientName(pctx.pinned.patientName);
+
   // 換 booking → 重置所有本地狀態
   useEffect(() => {
     setDictItems(null);
@@ -106,6 +144,7 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
     setConfirmMsg(null);
     setResendMsg(null);
     setRollbackMsg(null);
+    setPctx(null);
   }, [b.id, b.status]);
 
   // 攞 dictionaries（PENDING 先要）
@@ -348,6 +387,21 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
             </>
           ) : (
             <>
+              {/* ★ cwi-final S5-12 同號多病人：黃標（matches > 1 / 姓名唔符）— 揀人機制 = 右側欄 pin picker */}
+              {multiMatch && (
+                <div className="rounded-2xl bg-warn-soft border border-warn px-3 py-2.5 text-xs text-warn-text leading-relaxed inline-flex items-start gap-1.5">
+                  <AlertTriangle size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+                  {pctx?.pinned
+                    ? `呢個電話喺 Apricot 對住 ${pctx.matches!.length} 個病人 — 同號多人，請喺右側欄核對釘咗先可以落單（釘錯人會約錯診）`
+                    : `呢個電話喺 Apricot 對住 ${pctx!.matches!.length} 個病人 — 同號多人，必須喺右側欄釘咗正確病人先可以落單`}
+                </div>
+              )}
+              {nameMismatch && (
+                <div className="rounded-2xl bg-warn-soft border border-warn px-3 py-2.5 text-xs text-warn-text leading-relaxed inline-flex items-start gap-1.5">
+                  <AlertTriangle size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+                  病人留嘅名（{c.contact?.profileName}）同釘住嘅病人（{pctx?.pinned?.patientName}）唔同 — 請核對釘住嘅病人係咪正確
+                </div>
+              )}
               {/* ★ S5-1：寫入狀態帶（WRITING 轉圈 / UNKNOWN 黃 / FAILED 按 code）*/}
               {writing && (
                 <div className="rounded-2xl bg-panel-2 border border-line px-3 py-2.5 text-xs text-t1 inline-flex items-center gap-2">

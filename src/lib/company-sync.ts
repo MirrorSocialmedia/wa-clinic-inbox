@@ -23,6 +23,8 @@ export interface CompanySyncSummary {
   companiesCreated: number;
   nameMatched: number;
   clinicsMapped: number;
+  /** ★ cwi-final S5-5④（F4）：remote 同 code 兩間店 → skip mapping 數（防呆 — log.error + 唔自動 map/建） */
+  duplicateCodesSkipped: number;
   /** 對唔上嘅本地公司（sourceId=null）— hub UI 紅字要求人手配對 */
   unmatchedLocal: { id: string; code: string; name: string }[];
 }
@@ -57,6 +59,7 @@ async function doSync(): Promise<CompanySyncSummary> {
     companiesCreated: 0,
     nameMatched: 0,
     clinicsMapped: 0,
+    duplicateCodesSkipped: 0,
     unmatchedLocal: [],
   };
 
@@ -98,10 +101,29 @@ async function doSync(): Promise<CompanySyncSummary> {
   }
 
   // ── 3) Clinic.companyId 按 code 填（非破壞性 — 只改 workforce 有碼對到嘅）──
+  // ★ cwi-final S5-5④（F4）：防呆 — remote list 同一 code 出現超過一次（兩間同 code 店）→
+  //   log.error（淨 code，零 PII）+ skip 該 code（唔 map、唔建）— 唔會隨機映射到其中一間。
+  //   （workforce 側 Clinic_shortName_unique（F3）係上游防線；呢度係 remote list 異常時嘅後備防線 —
+  //   長遠改用 workforce clinic cuid 對店，本批先做 code 重複防呆）
+  const remoteCodeCount = new Map<string, number>();
+  for (const rc of remote.companies) {
+    for (const rcClinic of rc.clinics) {
+      remoteCodeCount.set(rcClinic.code, (remoteCodeCount.get(rcClinic.code) ?? 0) + 1);
+    }
+  }
   for (const rc of remote.companies) {
     const localCo = await prisma.company.findUnique({ where: { sourceId: rc.id } });
     if (!localCo) continue;
     for (const rcClinic of rc.clinics) {
+      if ((remoteCodeCount.get(rcClinic.code) ?? 0) > 1) {
+        // S5-5④：同 code 兩間店 — 唔自動 map（映射錯 = 店級數據串門）
+        log.error(
+          { clinicCode: rcClinic.code, companySourceId: rc.id },
+          "company-sync: remote 出現重複 clinic code — skip mapping（S5-5④ 防呆，需人手核對）"
+        );
+        summary.duplicateCodesSkipped++;
+        continue;
+      }
       const localClinic = await prisma.clinic.findUnique({ where: { code: rcClinic.code } });
       if (!localClinic) continue; // W 無呢間店 → 唔理（workforce 獨有店唔自動開）
       if (localClinic.companyId !== localCo.id) {

@@ -4,18 +4,24 @@
  * 兩職責（冪等、可無數據空跑）：
  * 1. 狀態推進：本地 FlowHoldEvent（HELD）× workforce held API（逐 clinicCode 對返）：
  *    - workforce 端 IN_APRICOT（workforce 側 commit 咗）→ 本地 IN_APRICOT（卡「已入 Apricot · 完成」）
- *    - held list 冇咗（RELEASED / 預約時間已過 lazy sweep）→ 本地 EXPIRED
+ *    - held list 冇咗（RELEASED / 預約時間已過 lazy sweep / TTL 釋放）→ 本地 EXPIRED
+ *      + ★ cwi-final S5-4①/S5-11（F4）：HIGH alert `hold_expired_unhandled`（S1-1a 慣例）+ StaffNotice
+ *      （「網上預約佔位已自動釋放 — 如果病人仲要呢個時段，請即刻入 Apricot」）
+ *      **唔 resolve `held_timeout`**（spec 明確 — 需要人跟嘅 alert 只准人手 resolve）
  *    （inbox staff 撳「已入 Apricot · 完成」走另一條路：/api/flows/holds/[id]/commit → COMMITTED）
  * 2. 警報 upsert（MD §6）：workforce HELD ageHours > 12 → MEDIUM；> holdTimeoutHours(24) → HIGH。
  *    - 冪等 = Alert type=held_timeout + detail.holdId（重跑唔重複；升級/降級跟最新齡）
- *    - hold 消失 → 對應未解決 alert auto-resolve
+ *    - ★ cwi-final S5-11（F4）：唔再 auto-resolve（hold 消失 = 未處理問題，行 hold_expired_unhandled 路徑）
  *
  * 🔴 零病人 PII：workforce held API 只出 provider 層；Alert.detail 亦無任何病人欄位。
  * 觸發：cron `hold-sweep`（每 5 分鐘，workers）+ POST /api/admin/hold-sweep（手動，ADMIN）。
  */
 import prisma from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import log from "@/lib/log";
 import { getHeld, type HeldItem, type HeldResult } from "@/lib/workforce/client";
+import { upsertAlert } from "@/lib/health/alerts";
+import { publishConvEvent, convRef } from "@/lib/notify";
 
 export const HELD_ALERT_TYPE = "held_timeout";
 /** MD §6 建議值（數值本身由 clinic.holdTimeoutHours 帶出 — 呢度只係 MEDIUM 門檻 + fallback） */
@@ -82,6 +88,9 @@ export async function sweepFlowHolds(): Promise<SweepSummary> {
       if (!wf) {
         await prisma.flowHoldEvent.update({ where: { id: ev.id }, data: { status: "EXPIRED" } });
         summary.toExpired += 1;
+        // ★ cwi-final S5-4①/S5-11（F4）：hold 喺 workforce 消失（404/RELEASED）→ HIGH alert + StaffNotice
+        //   （fail-soft — 警報/通知失敗唔阻其餘 hold 推進；**唔** resolve held_timeout）
+        await notifyHoldExpired(ev);
       } else if (wf.status === "IN_APRICOT") {
         await prisma.flowHoldEvent.update({ where: { id: ev.id }, data: { status: "IN_APRICOT" } });
         summary.toInApricot += 1;
@@ -95,9 +104,95 @@ export async function sweepFlowHolds(): Promise<SweepSummary> {
 }
 
 /**
+ * ★ cwi-final S5-4①/S5-11（F4）：hold 喺 workforce 消失（本地轉 EXPIRED）→ HIGH alert + StaffNotice。
+ * - alert type=hold_expired_unhandled（S1-1a upsertAlert 慣例；detail 帶 holdId 冪等 + 零病人 PII）
+ * - StaffNotice：有 conversationId → 發該對話（+ notice:new 實時 push）；無 → 店級（conversationId null）
+ * - **唔 resolve `held_timeout`**（spec 明確 — 「需要人跟」alert 只准人手 resolve）
+ * fail-soft：任何失敗 log 唔 throw（sweep 唔准郁）。
+ */
+async function notifyHoldExpired(
+  ev: {
+    id: string;
+    clinicId: string | null;
+    clinicCode: string;
+    date: string;
+    startMin: number;
+    endMin: number;
+    providerName: string;
+    workforceHoldId: string | null;
+    conversationId: string | null;
+  },
+): Promise<void> {
+  try {
+    await upsertAlert({
+      type: "hold_expired_unhandled",
+      severity: "HIGH",
+      clinicId: ev.clinicId,
+      clinicCode: ev.clinicCode,
+      detail: {
+        holdId: ev.id,
+        workforceHoldId: ev.workforceHoldId,
+        clinicCode: ev.clinicCode,
+        date: ev.date,
+        startMin: ev.startMin,
+        endMin: ev.endMin,
+        providerName: ev.providerName,
+      },
+    });
+    // StaffNotice.clinicId 必填 — FlowHoldEvent.clinicId null（搵唔到店）→ 按 code 兜底
+    let clinicId = ev.clinicId;
+    if (!clinicId) {
+      const c = await prisma.clinic.findUnique({ where: { code: ev.clinicCode }, select: { id: true } });
+      clinicId = c?.id ?? null;
+    }
+    if (!clinicId) {
+      log.warn({ holdId: ev.id, clinic: ev.clinicCode }, "hold-sweep: EXPIRED 通知跳過 — 搵唔到 clinicId");
+      return;
+    }
+    await prisma.staffNotice.create({
+      data: {
+        clinicId,
+        conversationId: ev.conversationId, // null = 店級通知（spec：無對話 → 發店級）
+        kind: "SYSTEM",
+        title: "網上預約佔位已自動釋放 — 如果病人仲要呢個時段，請即刻入 Apricot",
+        meta: {
+          holdId: ev.id,
+          workforceHoldId: ev.workforceHoldId,
+          clinicCode: ev.clinicCode,
+          providerName: ev.providerName,
+          date: ev.date,
+          startMin: ev.startMin,
+          endMin: ev.endMin,
+        } as Prisma.InputJsonValue,
+      },
+    });
+    // 有對話 → commit-then-emit（routing 慣例）— 實時 push 該對話
+    if (ev.conversationId) {
+      const convRow = await prisma.conversation.findUnique({
+        where: { id: ev.conversationId },
+        select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+      });
+      if (convRow) {
+        await publishConvEvent(convRef(convRow), "notice:new", {
+          clinicId,
+          conversationId: ev.conversationId,
+          kind: "SYSTEM",
+        });
+      }
+    }
+  } catch (err) {
+    log.error(
+      { holdId: ev.id, err: err instanceof Error ? err.message : String(err) },
+      "hold-sweep: EXPIRED alert/notice 失敗（fail-soft — 唔阻 sweep）"
+    );
+  }
+}
+
+/**
  * held_timeout alert 同步（全部店）：
  * - 逐 clinic getHeld → HELD 且 age>12h → upsert alert（MEDIUM/HIGH）
- * - 已唔喺 held list 嘅 held_timeout 未解決 alert → auto-resolve
+ * - ★ cwi-final S5-11（F4）：唔再 auto-resolve — hold 消失已轉 EXPIRED 行 hold_expired_unhandled
+ *   HIGH alert；held_timeout 係「需要人跟」alert，只准人手 resolve（R-28 同一原則）
  */
 async function syncHeldAlerts(_unused: unknown, summary: SweepSummary): Promise<void> {
   const clinics = await prisma.clinic.findMany({ select: { id: true, code: true } });
@@ -124,10 +219,8 @@ async function syncHeldAlerts(_unused: unknown, summary: SweepSummary): Promise<
     if (typeof hid === "string") byHoldId.set(hid, a);
   }
 
-  const seen = new Set<string>();
   for (const { clinicCode, clinicId, item, holdTimeoutHours } of allHeld) {
     if (item.status !== "HELD" || item.ageHours <= HELD_MEDIUM_AGE_HOURS) continue;
-    seen.add(item.holdId);
     const severity = item.ageHours > holdTimeoutHours ? "HIGH" : "MEDIUM";
     const detail = {
       holdId: item.holdId,
@@ -155,12 +248,8 @@ async function syncHeldAlerts(_unused: unknown, summary: SweepSummary): Promise<
     }
   }
 
-  // 消失嘅 hold → auto-resolve
-  for (const [holdId, a] of byHoldId) {
-    if (seen.has(holdId)) continue;
-    await prisma.alert.update({ where: { id: a.id }, data: { resolvedAt: new Date() } });
-    summary.alerts.resolved += 1;
-  }
+  // ★ cwi-final S5-11（F4）：auto-resolve 已移除（spec：唔好 resolve held_timeout）— byHoldId 只供上方 upsert 用
+  void byHoldId;
   summary.alerts.open = Math.max(0, open.length + summary.alerts.created - summary.alerts.resolved);
 }
 
@@ -230,9 +319,11 @@ export function minToHHmm(min: number): string {
 }
 
 /**
- * conversation 渲染用：每個 WA 號最新一條非終態 hold（HELD/IN_APRICOT/COMMITTED）。
- * join key = patientPhone（= Contact.waId）。RELEASED/EXPIRED 唔帶（卡消失；過期行警報路徑）。
- * clinicId 傳入 = STAFF scope（fail-closed）；ADMIN 傳 undefined。
+ * conversation 渲染用：每個對話最新一條非終態 hold（HELD/IN_APRICOT/COMMITTED）。
+ * ★ cwi-final S5-11（F4）：主配對 = conversationId（同號多病人唔會串卡）；
+ *   舊行（conversationId null = F2 前）fallback phone 配對（patientPhone = Contact.waId）。
+ * RELEASED/EXPIRED 唔帶（卡消失；過期行警報路徑）。
+ * clinicId 傳入 = STAFF scope（fail-closed：本公司店）；ADMIN 傳 undefined。
  */
 export interface HoldEventView {
   id: string;
@@ -242,7 +333,11 @@ export interface HoldEventView {
   startMin: number;
   endMin: number;
   patientName: string | null;
-  patientPhone: string;
+  patientPhone: string | null; // ★ S5-11（F4）：retention-purge 終態 90 日 → null（PII 清）
+  // ★ cwi-final S5-11（F4）：卡片顯示「病人留嘅電話」（Flow 打嘅電話；同 patientPhone = WA 號分清）
+  contactPhone: string | null;
+  // ★ cwi-final S5-11（F4）：卡片顯示 clinic code（跨店 staff 分辨 hold 屬邊間店）
+  clinicCode: string;
   notes: string | null;
   source: string;
   committedAt: string | null;
@@ -252,21 +347,42 @@ export interface HoldEventView {
   rescheduleOfApptLabel: string | null;
 }
 
-export async function latestHoldsByPhone(
-  waIds: string[],
+export async function latestHoldsByConversation(
+  convs: { id: string; waId?: string | null }[],
   clinicId?: string | string[] | null
 ): Promise<Map<string, HoldEventView>> {
-  if (waIds.length === 0) return new Map();
+  if (convs.length === 0) return new Map();
+  const convIds = convs.map((c) => c.id);
   const rows = await prisma.flowHoldEvent.findMany({
     where: {
-      patientPhone: { in: waIds },
+      conversationId: { in: convIds },
       status: { in: ["HELD", "IN_APRICOT", "COMMITTED"] },
-      // cwi-h6-20260830：string[] = 多店員工（in）；string = 單店 / ADMIN 指定
+      // cwi-h6-20260830：string[] = 多店員工（in）；string = 單店 / ADMIN 指定；undefined = 全店（ADMIN）
       ...(clinicId ? { clinicId: Array.isArray(clinicId) ? { in: clinicId } : clinicId } : {}),
     },
     orderBy: { createdAt: "desc" },
     take: 500,
   });
+  // ★ cwi-final S5-11（F4）：舊行（conversationId null = F2 前）fallback phone 配對（只限呢批對話嘅 WA 號）
+  const waIds = [...new Set(convs.map((c) => c.waId ?? null).filter((w): w is string => !!w))];
+  if (waIds.length > 0) {
+    const legacyRows = await prisma.flowHoldEvent.findMany({
+      where: {
+        conversationId: null,
+        patientPhone: { in: waIds },
+        status: { in: ["HELD", "IN_APRICOT", "COMMITTED"] },
+        ...(clinicId ? { clinicId: Array.isArray(clinicId) ? { in: clinicId } : clinicId } : {}),
+      },
+      orderBy: { createdAt: "desc" },
+      take: 500,
+    });
+    rows.push(...legacyRows);
+  }
+  // fallback phone 配對：waId → 呢批對話入面第一個同號 conv（舊行用）
+  const convIdByPhone = new Map<string, string>();
+  for (const c of convs) {
+    if (c.waId && !convIdByPhone.has(c.waId)) convIdByPhone.set(c.waId, c.id);
+  }
   const m = new Map<string, HoldEventView>();
   // ★ cwi-final S5-8②（F2）：改期 context 紅標 — 舊單日期/時間靠 join BookingRequest 補
   //   （FlowHoldEvent 本身無舊單 date/time 欄；電話落嘅 Apricot 單無 BR → label null → 卡顯示單號）
@@ -287,8 +403,10 @@ export async function latestHoldsByPhone(
     }
   }
   for (const r of rows) {
-    if (m.has(r.patientPhone)) continue; // 已排序 desc — 第一條 = 最新
-    m.set(r.patientPhone, {
+    // 主配對 = conversationId；舊行 fallback = phone → 呢批對話入面第一個同號 conv（purged 行 patientPhone=null → 無 fallback，靠 conversationId）
+    const key = r.conversationId ?? (r.patientPhone ? convIdByPhone.get(r.patientPhone) : undefined);
+    if (!key || m.has(key)) continue; // 已排序 desc — 第一條 = 最新
+    m.set(key, {
       id: r.id,
       status: r.status as HoldEventView["status"],
       providerName: r.providerName,
@@ -297,6 +415,8 @@ export async function latestHoldsByPhone(
       endMin: r.endMin,
       patientName: r.patientName,
       patientPhone: r.patientPhone,
+      contactPhone: r.contactPhone,
+      clinicCode: r.clinicCode,
       notes: r.notes,
       source: r.source,
       committedAt: r.committedAt ? r.committedAt.toISOString() : null,

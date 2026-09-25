@@ -67,6 +67,7 @@ import { getBookableSlots, claimSlot, filterBookableSlots, WorkforceApiError, re
 import { getSlotFreshness, invalidateAvailabilityDay } from "@/lib/availability";
 import { hit, clientIpFromHeaders } from "@/lib/rate-limit";
 import { verifyWaSignature } from "@/lib/wa-signature";
+import { publishConvEvent, convRef } from "@/lib/notify";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -415,7 +416,7 @@ export async function POST(req: NextRequest) {
         }
         // claim 201 → FlowHoldEvent（T3 表 — 預約卡「線上已佔·等你入 Apricot」；flowToken 冪等 upsert）
         const startMin = hhmmToMin(time);
-        await prisma.flowHoldEvent.upsert({
+        const holdRow = await prisma.flowHoldEvent.upsert({
           where: { flowToken: plain.flow_token! },
           create: {
             flowToken: plain.flow_token!,
@@ -430,6 +431,8 @@ export async function POST(req: NextRequest) {
             status: "HELD",
             patientName: name,
             patientPhone,
+            // ★ cwi-final S5-11（F4）：病人喺 Flow 打嘅電話（同 patientPhone = WA 號 fallback 分清；卡顯示「病人留嘅電話」）
+            contactPhone: patientPhoneInput || null,
             notes: notes || null,
             // ★ cwi-final S5-8②（F2）：改期 context 由 FlowSession 帶入
             //   （hold 卡紅標 + commit 成功後 102 舊單；conversationId 俾 S5-11（F4）sweep 用）
@@ -445,6 +448,22 @@ export async function POST(req: NextRequest) {
             conversationId: conv.id,
           },
         });
+        // ★ cwi-final S5-11（F4）：claim 成功 → 實時 push（client 補載 hold 卡）— commit-then-emit；
+        //   fail-soft（推播失敗唔阻 patient response；REST refresh 兜底）；payload 零病人 PII
+        try {
+          await publishConvEvent(convRef(conv), "hold:new", {
+            holdEventId: holdRow.id,
+            conversationId: conv.id,
+            clinicCode: clinic.code,
+            providerName: claim.providerName,
+            date,
+            startMin,
+            endMin: startMin + 30,
+            status: "HELD",
+          });
+        } catch (err) {
+          log.warn({ err: err instanceof Error ? err.message : String(err), convId: conv.id }, "flow endpoint: hold:new push 失敗（REST refresh 兜底）");
+        }
         await prisma.auditLog
           .create({
             data: {
