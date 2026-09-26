@@ -97,9 +97,10 @@ export async function sendBookingFlow(opts: {
     );
     config = defaultFlowConfig(token);
   }
-  // D.3：撳格預選 — 塞入第一屏預選（canvas 側；舊 canvas 忽略未知欄）
+  // D.3：撳格預選 — ★ cwi-final S5-10：flow_action="navigate" + flow_action_payload{screen, data}
+  //   （新 Meta format；排班表預選時段專用。screen 落日期屏預選 — canvas 側對齊見 G2 真機驗證）
   if (opts.prefill) {
-    config = { ...config, flow_action_payload: { data: { ...opts.prefill } } };
+    config = { ...config, flow_action: "navigate", flow_action_payload: { screen: "SCR_DATE", data: { ...opts.prefill } } };
   }
   const session = await prisma.flowSession.create({
     data: {

@@ -14,8 +14,12 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { releaseHold, WorkforceOutcomeUnknown } from "@/lib/workforce/client";
+import { publishConvEvent, convRef } from "@/lib/notify";
 
 export const EXPIRY_HOURS = 48;
+
+/** ★ cwi-final S5-14⑥（P2「PENDING 過期」）：過期 L1 草稿（staff 審後發 — 唔 auto-send）。 */
+const EXPIRY_DRAFT_TEXT = "對唔住，你之前嘅預約請求我哋未能及時確認，而家已經過期。如仍想預約，請再發訊息話我哋想約嘅時間，我哋會再幫你安排 🙏";
 
 export interface ExpiryResult {
   expiredBookings: number;
@@ -50,6 +54,49 @@ export async function runExpiry(now: Date = new Date()): Promise<ExpiryResult> {
         },
       });
       log.warn({ bookingId: b.id, clinicId: b.clinicId }, "booking: EXPIRED（48h 未處理）— admin 提醒");
+      // ★ cwi-final S5-14⑥（P2「PENDING 過期」）：StaffNotice（staff 要跟進）+ 病人 L1 草稿（未能確認預約）。
+      //   兩者都 fail-soft（過期清理唔因通知失敗而重試卡死）；幂等靠 updateMany WHERE status=PENDING（只首次過期執行）。
+      try {
+        const notice = await prisma.staffNotice.create({
+          data: {
+            clinicId: b.clinicId,
+            conversationId: b.conversationId,
+            kind: "SYSTEM",
+            title: `預約過期（${EXPIRY_HOURS}h 未處理）— 請跟進病人`,
+            meta: { bookingId: b.id, conversationId: b.conversationId, reason: `${EXPIRY_HOURS}h 未處理` },
+          },
+        });
+        const convRow = await prisma.conversation.findUnique({
+          where: { id: b.conversationId },
+          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+        });
+        if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId: b.conversationId, kind: "SYSTEM", noticeId: notice.id });
+      } catch (e) {
+        log.warn({ bookingId: b.id, err: e instanceof Error ? e.message : String(e) }, "expiry: StaffNotice create failed（fail-soft）");
+      }
+      try {
+        // L1 草稿：掛喺該對話最後一條病人訊息（inReplyToMessageId unique/conversation — 已有 draft 時 P2002 → fail-soft）
+        const lastIn = await prisma.message.findFirst({
+          where: { conversationId: b.conversationId, direction: "IN", channel: "API" },
+          orderBy: { createdAt: "desc" },
+          select: { id: true },
+        });
+        if (lastIn) {
+          await prisma.aiDraft.create({
+            data: {
+              conversationId: b.conversationId,
+              inReplyToMessageId: lastIn.id,
+              draftText: EXPIRY_DRAFT_TEXT,
+              model: "expiry-draft",
+              latencyMs: 0,
+              status: "PROPOSED",
+            },
+          });
+        }
+      } catch (e) {
+        // P2002（該訊息已有 draft）或其他 → 唔阻過期清理
+        log.warn({ bookingId: b.id, err: (e as { code?: string })?.code ?? (e instanceof Error ? e.message : String(e)) }, "expiry: L1 draft create skipped（fail-soft）");
+      }
     }
   }
 

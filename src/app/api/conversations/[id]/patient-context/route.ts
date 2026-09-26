@@ -5,7 +5,7 @@ import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { phoneHash } from "@/lib/phone-hash";
 import { hkDateOffset } from "@/lib/availability";
-import { lookupPatient, fetchAppointments, WorkforceApiError } from "@/lib/workforce/client";
+import { lookupPatient, fetchAppointments, fetchCompanies, WorkforceApiError, type PatientLookupResult } from "@/lib/workforce/client";
 
 /**
  * GET /api/conversations/[id]/patient-context — 側欄 patient-context（booking-ui MD §1 A）
@@ -32,14 +32,16 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
   if (!contact) return NextResponse.json({ error: "contact not found" }, { status: 404 });
 
-  const clinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId }, select: { code: true } });
+  const clinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId }, select: { code: true, companyId: true } });
   if (!clinic) return NextResponse.json({ error: "clinic not found" }, { status: 500 });
 
   // ★ raw phone 只喺呢度轉 hash（phone-hash.ts 同 clinic-workforce 逐字一樣 — 同 phone → 同 hash）
   const hash = phoneHash(contact.waId);
 
   // lookup（fail → degraded，唔 throw）
-  let matches: { patientApricotId: string; patientCode: string; patientName: string; lastVisit: { date: string; providerName: string; visitReasons: string[] } | null }[] | null = null;
+  // ★ S5-13②：EnrichedMatch = CWM lookup 結果 + W 端計算嘅跨公司黃標（outsideCompany — CWM 唔回，W 計算）
+  type EnrichedMatch = PatientLookupResult["matches"][number] & { outsideCompany?: boolean };
+  let matches: EnrichedMatch[] | null = null;
   let degraded = false;
   try {
     const lk = await lookupPatient(hash);
@@ -50,6 +52,34 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       { conversationId: conv.id, clinic: clinic.code, err: e instanceof WorkforceApiError ? `status=${e.status}` : e instanceof Error ? e.name : "unknown" },
       "patient-context: lookup degraded（workforce 離線/錯誤）"
     );
+  }
+
+  // ★ cwi-final S5-13②：跨公司黃標（C-8 唔阻）— 當前對話公司（sourceId = CWM Company.id）嘅 CWM clinic 集合。
+  //   null = 判斷唔到（店未配公司 / sourceId 未配對 / companies API 失敗）→ 唔標黃（fail-soft）。
+  //   visitedClinicIds 空（冇任何到診行）→ 唔標（「無記錄」已有其他顯示）。
+  let companyClinicIds: Set<string> | null = null;
+  if (matches && matches.some((m) => (m.visitedClinicIds ?? []).length > 0)) {
+    const company = clinic.companyId ? await prisma.company.findUnique({ where: { id: clinic.companyId }, select: { sourceId: true } }) : null;
+    if (company?.sourceId) {
+      try {
+        const orgs = await fetchCompanies();
+        const mine = orgs.companies.find((c) => c.id === company.sourceId);
+        if (mine) companyClinicIds = new Set(mine.clinics.map((c) => c.id));
+      } catch (e) {
+        log.warn(
+          { conversationId: conv.id, clinic: clinic.code, err: e instanceof WorkforceApiError ? `status=${e.status}` : e instanceof Error ? e.name : "unknown" },
+          "patient-context: companies degraded（黃標唔顯示）"
+        );
+      }
+    }
+  }
+  if (matches) {
+    for (const m of matches) {
+      const visited = m.visitedClinicIds ?? [];
+      if (companyClinicIds !== null && visited.length > 0 && visited.every((v) => !companyClinicIds.has(v))) {
+        m.outsideCompany = true;
+      }
+    }
   }
 
   const pinned = conv.pinnedPatientApricotId

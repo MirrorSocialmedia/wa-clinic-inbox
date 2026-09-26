@@ -69,10 +69,12 @@ export function hkDateOffset(days: number, now: Date = new Date()): string {
   return addDays(hkTodayStr(now), days);
 }
 
-/** 窗口：聽日 ~ +30 日（HK 日界 — 同 Flow DatePicker min=聽日 max=+30 對齊；30 日 ⊆ 契約 31 日上限） */
+/** 窗口：今日 ~ +30 日（HK 日界）。
+ *  ★ cwi-final S5-14（P2）：由今日開始（同 endpoint dateMin = hkTodayStr() 一致 —
+ *  舊「聽日起」會令病人喺 DatePicker 揀到今日（min=今日）但 L2/precheck 窗口冇今日 → 拒/空）。 */
 export function syncWindow(now: Date = new Date()): { start: string; end: string; dates: string[] } {
   const today = hkTodayStr(now);
-  const start = addDays(today, 1);
+  const start = today;
   const end = addDays(today, 30);
   const dates: string[] = [];
   for (let d = start; d <= end; d = addDays(d, 1)) dates.push(d);
@@ -279,6 +281,34 @@ export async function getSlotFreshness(
       "availability: getSlotFreshness fail（回 null/非 stale — UI 照顯示）",
     );
     return { maxSyncedAt: null, stale: false };
+  }
+}
+
+/**
+ * ★ cwi-final S5-14（P2「空檔新鮮度」）：per-day 新鮮度 — 某日 L2 row 嘅 MIN(syncedAt)
+ *（該日最舊 row = 該日數據年齡；window MAX 會瞞住個別日 stale — 舊 getSlotFreshness 只回 window MAX）。
+ * 某日冇 row = unknown（syncedAt: null）→ caller 當 stale 處理（refresh 該日）。
+ * fail-soft：查唔到 → { syncedAt: null, stale: false }。
+ */
+export async function getSlotDayFreshness(
+  clinicId: string,
+  date: string,
+): Promise<{ date: string; syncedAt: Date | null; stale: boolean }> {
+  try {
+    const [row, state] = await Promise.all([
+      prisma.availabilitySlot.aggregate({
+        where: { clinicId, date },
+        _min: { syncedAt: true },
+      }),
+      prisma.workforceSyncState.findUnique({ where: { clinicId }, select: { lastStale: true } }),
+    ]);
+    return { date, syncedAt: row._min.syncedAt, stale: state?.lastStale ?? false };
+  } catch (e) {
+    log.warn(
+      { clinicId, date, err: e instanceof Error ? e.message : String(e) },
+      "availability: getSlotDayFreshness fail（回 unknown — caller 當 stale）",
+    );
+    return { date, syncedAt: null, stale: false };
   }
 }
 

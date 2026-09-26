@@ -258,7 +258,17 @@ async function main(): Promise<void> {
     check("handledBy/At 寫入", bk1After?.handledByStaffId === staff1.id && bk1After?.handledAt !== null);
     const msg1 = await prisma.message.findFirst({ where: { conversationId: conv1.id, direction: "OUT", aiAutoSent: true } });
     check("確認訊息已發出（QUEUED）", msg1 !== null && msg1.status === "QUEUED");
-    check("訊息文字正確", msg1?.body === `已為你預約 ${Number(SLOT_DATE.split("-")[1])}月${Number(SLOT_DATE.split("-")[2])}日 ${SLOT_TIME} ${PROVIDER_NAME}，到時見 🙂`, msg1?.body ?? "null");
+    // ★ S5-14⑦：確認文字含診所名 + 地址（greetingConfig.address — 冇就只名）
+    const gcAddr = (() => {
+      const v = (clinic?.greetingConfig as Record<string, unknown> | null)?.["address"];
+      return typeof v === "string" && v.trim() ? v.trim() : null;
+    })();
+    const clinicTail = gcAddr ? `（${clinic?.name}，地址：${gcAddr}）` : clinic?.name ? `（${clinic.name}）` : "";
+    check(
+      "訊息文字正確（含診所名/地址）",
+      msg1?.body === `已為你預約 ${Number(SLOT_DATE.split("-")[1])}月${Number(SLOT_DATE.split("-")[2])}日 ${SLOT_TIME} ${PROVIDER_NAME}${clinicTail}，到時見 🙂`,
+      msg1?.body ?? "null",
+    );
     const l2Left = await prisma.availabilitySlot.count({ where: { clinicId: clinic.id, date: SLOT_DATE } });
     check("L2 該日已 invalidate", l2Left === 0, `left=${l2Left}`);
     const got = await getSlots(clinic.id, { start: SLOT_DATE, end: SLOT_DATE });

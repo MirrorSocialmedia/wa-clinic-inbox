@@ -36,6 +36,7 @@ import { sendBookingFlow, FlowsDisabledError } from "@/lib/flows/send";
 import { publishConvEvent, convRef } from "@/lib/notify";
 import { enqueueOutboundSend } from "@/lib/queue";
 import { syncWindow, getSlots, hkDateOffset, slotAvailable } from "@/lib/availability";
+import { resolveDurationMin } from "@/lib/booking/durations";
 import { phoneHash } from "@/lib/phone-hash";
 import { afterBookingWrite } from "@/lib/booking/booking-ops";
 import { rescheduledReply } from "@/lib/booking/booking-text";
@@ -76,8 +77,8 @@ interface DecryptedReply {
 
 const TIME_OF_DAY_VALUES = ["MORNING", "AFTERNOON", "EVENING"] as const;
 
-/** 改期時長（同 create route — Flow 唔收時長） */
-const RESCHEDULE_DURATION_MIN = 15;
+// ★ cwi-final S5-14（P2「時長」）：改期時長 = 原單時長（end-start）→ 冇就 30（durations.ts 統一；
+//   舊 RESCHEDULE_DURATION_MIN=15 廢掉 — 比多數療程短，病人被切短）
 
 /** 自動覆病人（precheck 失敗 / 源離線）— 簡短、唔含 PII */
 export const SLOT_TAKEN_REPLY = "唔好意思，呢個時段啱啱有人預約咗，而家滿咗。請重新揀一個時間 🙏";
@@ -87,6 +88,11 @@ export const REQUIREMENT_DUP_REPLY = "呢個日期同時段偏好已經收到咗
 /**
  * 主入口（inbound worker 喺 store message 之後 call；errors 唔會 throw 出嚟 —
  * message 已經安全落地，flow 處理係 best-effort + log）。
+ *
+ * ★ cwi-final S5-9（audit3 P1-13）：真實 WhatsApp 嘅 nfm_reply 係**明文**
+ *   （response_json = SUCCESS 畫面 params 嘅 JSON string — 加密只喺 data_exchange endpoint）。
+ *   呢個入口只處理**加密格式**（payload + wrapped_key）— 而家只喺 WA_MOCK=1 用
+ *   （mock-flow-client --encrypted / 舊 e2e）；明文請用 handleFlowReplyPlain。
  */
 export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOutcome> {
   const { clinicId, conversationId, waId, responseJson } = input;
@@ -105,6 +111,38 @@ export async function handleFlowReply(input: NfmReplyInput): Promise<FlowReplyOu
     log.warn({ conversationId, err: e instanceof Error ? e.message : String(e) }, "flow-reply: decrypt failed");
     return { status: "rejected", reason: "decrypt_failed" };
   }
+
+  return handleFlowReplyCore({ clinicId, conversationId, waId, reply });
+}
+
+/**
+ * ★ cwi-final S5-9：明文 nfm_reply 入口（真實 Meta 格式）。
+ * `reply` = response_json 解開後嘅 SUCCESS 畫面 params（{flow_token, providerId, …}）。
+ * 解密之後嘅邏輯（token 驗證：JWT + FlowSession + waId 對 conversation contact）同加密路徑同一份 —
+ * 見 handleFlowReplyCore（同 handleFlowReply 共享）。
+ */
+export async function handleFlowReplyPlain(input: {
+  clinicId: string;
+  conversationId: string;
+  waId: string;
+  reply: Record<string, unknown>;
+}): Promise<FlowReplyOutcome> {
+  const { clinicId, conversationId, waId, reply } = input;
+  if (typeof reply !== "object" || reply === null || Array.isArray(reply)) {
+    log.warn({ conversationId }, "flow-reply(plain): response_json 唔係 JSON object — reject");
+    return { status: "rejected", reason: "incomplete_payload" };
+  }
+  return handleFlowReplyCore({ clinicId, conversationId, waId, reply: reply as DecryptedReply });
+}
+
+/** 解密之後嘅共用邏輯（handleFlowReply / handleFlowReplyPlain 同一份 — S5-9） */
+async function handleFlowReplyCore(input: {
+  clinicId: string;
+  conversationId: string;
+  waId: string;
+  reply: DecryptedReply;
+}): Promise<FlowReplyOutcome> {
+  const { clinicId, conversationId, waId, reply } = input;
 
   const { flow_token, providerId, providerName, date, time, timeOfDay } = reply;
   // 變體判定（self-describing）：timeOfDay 在 + time 唔喺 = 純收需求變體（資料源離線 Flow）
@@ -427,8 +465,8 @@ async function handleReschedule(p: {
 }): Promise<FlowReplyOutcome> {
   const { session, conv, contactWaId, oldApptId, clinicId, clinicCode, providerApricotId, date, time, flowToken } = p;
 
-  // 舊單回查（side 攞 oldDate / clinicCode — reschedule 契約要；contactWaId 已喺 step 3 驗證 = 病人本人）
-  let oldAppt: { apricotApptId: string; clinicCode: string; date: string; start: string };
+  // 舊單回查（side 攞 oldDate / clinicCode + 原單時長（start/end — S5-14）— reschedule 契約要；contactWaId 已喺 step 3 驗證 = 病人本人）
+  let oldAppt: { apricotApptId: string; clinicCode: string; date: string; start: string; end: string };
   try {
     const data = await fetchAppointments(phoneHash(contactWaId), hkDateOffset(-7), hkDateOffset(30));
     const found = data.appointments.find((a) => a.apricotApptId === oldApptId);
@@ -465,7 +503,7 @@ async function handleReschedule(p: {
         providerApricotId,
         date,
         start: time,
-        durationMin: RESCHEDULE_DURATION_MIN,
+        durationMin: resolveDurationMin({ start: oldAppt.start, end: oldAppt.end }),
         oldDate: oldAppt.date,
         patient: { patientApricotId: conv.pinnedPatientApricotId! },
       },

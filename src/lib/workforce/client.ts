@@ -142,7 +142,15 @@ export const CompaniesResponse = z.object({
 });
 export type CompaniesResult = z.infer<typeof CompaniesResponse>;
 
-const LastVisitSchema = z.object({ date: z.string(), providerName: z.string(), visitReasons: z.array(z.string()) });
+/** ★ cwi-final S5-13②：lastVisit 加 clinicId/clinicCode（「最近到診：{店}」）；
+ *  match 加 visitedClinicIds（全行 distinct clinicId — 跨公司黃標判斷）；gender「有就回」（B-9，PII 白名單未加欄前永遠無）。 */
+const LastVisitSchema = z.object({
+  date: z.string(),
+  providerName: z.string(),
+  visitReasons: z.array(z.string()),
+  clinicId: z.string().optional(),
+  clinicCode: z.string().optional(),
+});
 export const PatientLookupResponse = z.object({
   v: z.literal(1),
   matches: z.array(z.object({
@@ -150,6 +158,8 @@ export const PatientLookupResponse = z.object({
     patientCode: z.string(),
     patientName: z.string(),
     lastVisit: LastVisitSchema.nullable(),
+    visitedClinicIds: z.array(z.string()).optional(),
+    gender: z.string().optional(),
   })),
 });
 export type PatientLookupResult = z.infer<typeof PatientLookupResponse>;
@@ -521,14 +531,33 @@ async function withTimeout<T>(p: Promise<T>, ms: number, path: string): Promise<
  * 4xx/5xx 時只 parse error body 嘅 `code` 欄（分類標籤，供路由分支）— body 本身唔入 log、唔洩傳。
  */
 // 🔴 鐵律 7：CWM 外部調用限速 ≥400ms/call（in-process gate；mock 路豁免）。
+// ★ cwi-final S5-14④（P2「Endpoint 10 秒預算」）：lastCwmCallAt 時間戳 gate → **promise chain**。
+//   舊 timestamp 版：並發 N 支各自算 wait（lastCwmCallAt+400 - now）→ 同刻 burst 第二三支 wait 相近
+//   → 實際間隔可能 < 400ms（gate 名存實亡）+ 每支都等自己個 timer（疊加延遲）。
+//   chain 版：每支 enqueue 入同一條 promise 鏈 → 嚴格串行（間隔保證）+ 零重複 timer；
+//   鏈尾清（chainUsers 歸零 → 鏈重設 Promise.resolve()）防 promise 圖無界生長。
 const CWM_MIN_INTERVAL_MS = Math.max(0, Number(process.env.WORKFORCE_MIN_INTERVAL_MS ?? 400));
 let lastCwmCallAt = 0;
+let cwmChain: Promise<void> = Promise.resolve();
+let cwmChainUsers = 0;
 async function cwmRateGate(): Promise<void> {
   if (process.env.WORKFORCE_MOCK === "1") return;
   if (CWM_MIN_INTERVAL_MS <= 0) return;
-  const wait = lastCwmCallAt + CWM_MIN_INTERVAL_MS - Date.now();
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  lastCwmCallAt = Date.now();
+  const prev = cwmChain;
+  const mine = prev.then(
+    () =>
+      new Promise<void>((r) => {
+        const wait = lastCwmCallAt + CWM_MIN_INTERVAL_MS - Date.now();
+        if (wait > 0) setTimeout(r, wait);
+        else r();
+      }),
+  );
+  cwmChainUsers++;
+  cwmChain = mine.finally(() => {
+    lastCwmCallAt = Date.now();
+    if (--cwmChainUsers <= 0) cwmChain = Promise.resolve();
+  });
+  return mine;
 }
 
 async function wfFetch(
@@ -919,17 +948,27 @@ function appendAll(params: Record<string, string>, key: string, val: string): vo
   params[key] = params[key] ? `${params[key]},${val}` : val;
 }
 
-/** E 類報價查詢（CWM /quotes — per patient 或 batch；零原始電話）。 */
+/** E 類報價查詢（CWM /quotes — per patient 或 batch；零原始電話）。
+ *  ★ cwi-final S5-13①：加 clinicIds（cuid）/ clinicCodes（shortName 兼容）— CWM 端 `where.clinicId in` 服務端 filter。 */
 export async function fetchQuotes(opts?: {
   patientApricotId?: string;
   status?: string;
   limit?: number;
+  clinicIds?: string[];
+  clinicCodes?: string[];
 }): Promise<QuotesResult> {
   const params: Record<string, string> = {};
   if (opts?.patientApricotId) params.patientApricotId = opts.patientApricotId;
   if (opts?.status) params.status = opts.status;
   if (opts?.limit) params.limit = String(opts.limit);
+  if (opts?.clinicIds?.length) params.clinicIds = opts.clinicIds.join(",");
+  if (opts?.clinicCodes?.length) params.clinicCodes = opts.clinicCodes.join(",");
   return QuotesResponse.parse(await wfGet(`/api/external/v1/quotes`, params));
+}
+
+/** ★ cwi-final S5-13①：單條報價（CWM GET /quotes/{id} — 同列表 item shape）。 */
+export async function fetchQuote(id: string): Promise<WorkforceQuote> {
+  return QuoteSchema.parse(await wfGet(`/api/external/v1/quotes/${encodeURIComponent(id)}`, {}));
 }
 
 /** 報價確認隊列決定：✓ confirm / ✎ correct / ✗ discard（teachTerm = 順手教字典）。 */

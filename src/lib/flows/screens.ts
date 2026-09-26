@@ -115,8 +115,30 @@ export interface ConfirmScreenData {
   error_message: string;
 }
 
-/** RadioButtonsGroup data-source 上限 20 items（Flow spec）— 超出截前 20。 */
-const RADIO_CAP = 20;
+/**
+ * ★ cwi-final S5-14①（P2「Flow 時段畫面」）：「醫生 · 時段」組合 list — 每個 item = 一個可約 slot
+ *（真實審計發現：舊兩組 radio（醫生＋時段）各截 20 個 → 組合爆炸；改組合 list 每頁 20 +「更多」）。
+ * - id = `${providerId}|${start}`（canvas 選中後原樣回傳 `selected`，endpoint 拆）
+ * - 「更多」= canvas 重送 user_action: "submit_date"（同 date + page: N+1）
+ * - 向下兼容：providers/times 去重 list 保留（e2e T677 grep time 字串照過；舊 canvas 照用）
+ */
+export interface SlotScreenDataV2 {
+  date_display: string;
+  date: string;
+  /** 組合 list 當前頁（≤ page_size 個） */
+  options: OptionItem[];
+  page: number; // 1-based
+  page_size: number;
+  has_more: boolean;
+  /** 向下兼容（e2e / 舊 canvas）：去重醫生/時段 list（各截 20） */
+  providers: OptionItem[];
+  times: OptionItem[];
+  has_error: boolean;
+  error_message: string;
+}
+
+/** 組合 list 每頁上限（= RadioButtonsGroup data-source 上限 20 — Flow spec） */
+export const SLOT_PAGE_SIZE = 20;
 
 /**
  * v2 INIT dates[]：今日起 30 日內（今日含，上限 30 個選項）、至少一個空檔（任何醫生任一時間）嘅日子。
@@ -152,8 +174,42 @@ export function slotScreenData(opts: {
   return {
     date_display: `日期：${fmtDateFull(opts.date)}`,
     date: opts.date,
-    providers: opts.providers.slice(0, RADIO_CAP).map((p) => ({ id: p.id, title: p.name })),
-    times: [...opts.times].sort().slice(0, RADIO_CAP).map((t) => ({ id: t, title: t })),
+    providers: opts.providers.slice(0, SLOT_PAGE_SIZE).map((p) => ({ id: p.id, title: p.name })),
+    times: [...opts.times].sort().slice(0, SLOT_PAGE_SIZE).map((t) => ({ id: t, title: t })),
+    has_error: opts.error != null,
+    error_message: opts.error ?? "",
+  };
+}
+
+/**
+ * ★ S5-14①：組合 list 版 SCR_SLOT data（每頁 20 + has_more）。
+ * 決定性排序：醫生名（zh-HK localeCompare）→ 時段（HH:mm 升冪）。
+ * 驗證不受分頁影響：endpoint submit_slot 照對該日**全量** slots 重查（唔係當前頁）。
+ */
+export function slotScreenDataPaged(opts: {
+  date: string;
+  slots: { providerId: string; providerName: string; start: string }[];
+  page?: number;
+  error?: string;
+}): SlotScreenDataV2 {
+  const all = [...opts.slots].sort(
+    (a, b) => a.providerName.localeCompare(b.providerName, "zh-HK") || (a.start < b.start ? -1 : a.start > b.start ? 1 : 0),
+  );
+  const providerMap = new Map<string, string>();
+  for (const s of all) if (!providerMap.has(s.providerId)) providerMap.set(s.providerId, s.providerName);
+  const times = [...new Set(all.map((s) => s.start))].sort();
+  const page = Math.max(1, Math.floor(opts.page ?? 1) || 1);
+  const startIdx = (page - 1) * SLOT_PAGE_SIZE;
+  const pageItems = all.slice(startIdx, startIdx + SLOT_PAGE_SIZE);
+  return {
+    date_display: `日期：${fmtDateFull(opts.date)}`,
+    date: opts.date,
+    options: pageItems.map((s) => ({ id: `${s.providerId}|${s.start}`, title: `${s.providerName} · ${s.start}` })),
+    page,
+    page_size: SLOT_PAGE_SIZE,
+    has_more: all.length > startIdx + SLOT_PAGE_SIZE,
+    providers: [...providerMap.entries()].map(([id, name]) => ({ id, title: name })).slice(0, SLOT_PAGE_SIZE),
+    times: times.slice(0, SLOT_PAGE_SIZE).map((t) => ({ id: t, title: t })),
     has_error: opts.error != null,
     error_message: opts.error ?? "",
   };

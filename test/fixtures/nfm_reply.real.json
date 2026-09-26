@@ -1,0 +1,45 @@
+{
+  "_comment": "cwi-final S5-9（audit3 P1-13）— 真實 WhatsApp nfm_reply 格式記錄（2026-09 真機 audit）。明文 JSON：response_json = SUCCESS 畫面 params 嘅 JSON string（加密只喺 data_exchange endpoint，唔喺 nfm_reply）。所有值係假值／已遮蓋（零真 PII）。mock-flow-client complete（預設）發同一格式。",
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "PHONE_NUMBER_ID_REDACTED",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15551234567",
+              "phone_number_id": "PHONE_NUMBER_ID_REDACTED"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "E2E Patient"
+                },
+                "wa_id": "85261234567"
+              }
+            ],
+            "messages": [
+              {
+                "from": "85261234567",
+                "id": "wamid.FLOW_REPLY_REAL_SAMPLE",
+                "timestamp": "1758870000",
+                "type": "interactive",
+                "interactive": {
+                  "type": "nfm_reply",
+                  "nfm_reply": {
+                    "name": "flow",
+                    "body": "Sent",
+                    "response_json": "{\"flow_token\":\"REDACTED_JWT\",\"providerId\":\"mock-pract-TKW-1\",\"providerName\":\"陳明軒（主理）\",\"date\":\"2026-09-26\",\"time\":\"15:00\",\"name\":\"E2E Patient\",\"patient_phone\":\"\",\"notes\":\"e2e t675\"}"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

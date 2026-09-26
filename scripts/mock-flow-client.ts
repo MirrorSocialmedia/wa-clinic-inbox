@@ -14,7 +14,8 @@
  *   pnpm flow-client step ... --bad-token        # T27：壞 token → 401
  *   pnpm flow-client complete --clinic TKW --conv <convId> --token <jwt> \
  *     --provider <id> --providerName <name> --date <YYYY-MM-DD> --time <HH:mm> \
- *     --wa-id <W> [--wamid <unique>] [--name <姓名>] [--notes <備註>]
+ *     --wa-id <W> [--wamid <unique>] [--name <姓名>] [--notes <備註>] \
+ *     [--encrypted]（舊加密格式 — 預設發真 Meta 明文格式（S5-9）；--encrypted 只喺 WA_MOCK=1 行舊路徑）
  *   pnpm flow-client stepx --clinic TKW --token <jwt> --action INIT|data_exchange|BACK \
  *     [--screen SCR_DATE|SCR_SLOT|SCR_CONFIRM] [--data '<json>'] [--bad-token]
  *     [--no-token]（ping / error_notification：平台層 action，payload 唔帶 flow_token — cwi-flowping-20260828）
@@ -207,7 +208,24 @@ async function complete(): Promise<void> {
   if (opts.notes) replyPayload.notes = opts.notes;
   // T4（providerslot-20260830）：claimed 變體 — submit_confirm 時已 claim；flow-reply 認 holdId 走 claimed 分支
   if (opts.holdId) replyPayload.holdId = opts.holdId;
-  const { payload, iv: payloadIv } = encryptGcm(aesKey, iv, replyPayload);
+
+  // ★ cwi-final S5-9（audit3 P1-13）：真 WhatsApp nfm_reply 係**明文**（response_json = params JSON string；
+  //   加密只喺 data_exchange endpoint）— 預設發真格式（test/fixtures/nfm_reply.real.json）。
+  //   --encrypted：舊加密格式（payload+wrapped_key）— 只喺 WA_MOCK=1 行舊路徑（回歸用）。
+  const nfmReply: Record<string, unknown> = {};
+  if (opts.encrypted) {
+    const { payload, iv: payloadIv } = encryptGcm(aesKey, iv, replyPayload);
+    nfmReply.response_json = {
+      payload,
+      iv: payloadIv,
+      key_id: kp.kid,
+      wrapped_key: wrapAesKey(kp.publicPem, aesKey),
+    };
+  } else {
+    nfmReply.name = "flow";
+    nfmReply.body = "Sent";
+    nfmReply.response_json = JSON.stringify(replyPayload);
+  }
 
   const bizNumber = (clinic.waDisplayNumber ?? "").replace(/\D/g, "");
   const ts = Math.floor(Date.now() / 1000).toString();
@@ -231,15 +249,8 @@ async function complete(): Promise<void> {
                   type: "interactive",
                   interactive: {
                     type: "nfm_reply",
-                    // ★ 真實 WhatsApp 格式：response_json 嵌喺 nfm_reply 入面（同 worker parser 對齊）
-                    nfm_reply: {
-                      response_json: {
-                        payload,
-                        iv: payloadIv,
-                        key_id: kp.kid,
-                        wrapped_key: wrapAesKey(kp.publicPem, aesKey),
-                      },
-                    },
+                    // ★ 真實 WhatsApp 格式：預設明文（S5-9）；--encrypted = 舊加密格式（WA_MOCK=1 回歸）
+                    nfm_reply: nfmReply as { response_json?: unknown },
                   },
                 },
               ],

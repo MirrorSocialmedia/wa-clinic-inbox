@@ -30,15 +30,17 @@ import { getRedis, enqueueOutboundSend, QUEUE_PREFIX, type BookingWriteJobData }
 import { publishConvEvent, convRef } from "@/lib/notify";
 import { getWindowState } from "@/lib/wa/window";
 import { afterBookingWrite } from "@/lib/booking/booking-ops";
-import { buildRemarks, confirmMessageText } from "@/lib/booking/booking-text";
+import { buildRemarks, confirmMessageText, clinicAddressFromGreetingConfig } from "@/lib/booking/booking-text";
 import { bookingConfirmClientMessageId } from "@/lib/booking/booking-id";
 import { sendAutoIfStillEligible } from "@/lib/ai/auto-send-gate";
 import { createBooking, WorkforceApiError, WorkforceOutcomeUnknown } from "@/lib/workforce/client";
+import { resolveDurationMin } from "@/lib/booking/durations";
 import { BOOKING_WRITE_CONCURRENCY } from "./concurrency";
 
 const ENQUEUE_TIMEOUT_MS = 1500;
-/** 預約時長（分鐘）— 同 confirm-core / flow 慣例（15 分鐘） */
-const DEFAULT_DURATION_MIN = 15;
+// ★ cwi-final S5-14（P2「時長」）：舊 DEFAULT_DURATION_MIN=15 廢掉 — 統一 durations.ts（原單時長 > 預設 30）。
+//   呢條路徑（新卡）無原單 → 30；改期時長喺 flow-reply handleReschedule（原單 end-start）。
+//   slotHash 用同一個解出值 → 重試冪等 key 穩定（同 booking 行輸入固定 → 解出值固定）。
 /** lockDuration：job 最長 ≈ 3 次重試 ×（90s write timeout + 5s 間隔）+ DB 裕度 → 10 分鐘 */
 const BOOKING_WRITE_LOCK_MS = 600_000;
 
@@ -173,6 +175,8 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
 
   const conv = await prisma.conversation.findUnique({ where: { id: booking.conversationId } });
   const clinic = await prisma.clinic.findUnique({ where: { id: booking.clinicId } });
+  // ★ S5-14⑦：確認文字加診所名 + 地址（greetingConfig.address — 冇就舊文字）
+  const clinicText = { clinicName: clinic?.name ?? null, clinicAddress: clinicAddressFromGreetingConfig((clinic?.greetingConfig ?? null) as Record<string, unknown> | null) };
   if (!conv || !clinic || !conv.pinnedPatientApricotId || !booking.requestedTime) {
     // fail-closed：前置已唔成立（pinned 移除 / conv 刪除 / 時段缺）→ FAILED（唔重試 — 重試都係一樣）
     await prisma.bookingRequest
@@ -184,8 +188,9 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
   }
 
   // ── ★ 冪等 key（S5-1）：wa-inbox-${id}-${idemAttempt}-${slotHash} — 重試同 key → 同 apricotApptId ──
+  const durationMin = resolveDurationMin({});
   const slotHash = createHash("sha256")
-    .update(`${booking.providerApricotId}|${booking.requestedDate}|${booking.requestedTime}|${DEFAULT_DURATION_MIN}`)
+    .update(`${booking.providerApricotId}|${booking.requestedDate}|${booking.requestedTime}|${durationMin}`)
     .digest("hex")
     .slice(0, 8);
   const idempotencyKey = `wa-inbox-${booking.id}-${booking.idemAttempt}-${slotHash}`;
@@ -198,7 +203,7 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
       providerApricotId: booking.providerApricotId,
       date: booking.requestedDate,
       start: booking.requestedTime,
-      durationMin: DEFAULT_DURATION_MIN,
+      durationMin,
       visitReasonId,
       remarks: buildRemarks(booking.chiefComplaint, visitReasonCode),
       patient: { patientApricotId: conv.pinnedPatientApricotId },
@@ -323,7 +328,7 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
       triggerMsgId,
       levelCategory: "BOOKING_REQUEST",
       minLevel: "L4",
-      text: confirmMessageText(booking),
+      text: confirmMessageText({ ...booking, ...clinicText }),
       source: "L4_CONFIRM",
       bookingSessionId: actor.sessionId,
     }).catch((e) => ({ sent: false as const, reason: `gate-error:${e instanceof Error ? e.message : String(e)}` }));
@@ -359,7 +364,7 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
         direction: "OUT",
         channel: "API",
         type: "text",
-        body: confirmMessageText(booking),
+        body: confirmMessageText({ ...booking, ...clinicText }),
         status: "QUEUED",
         sentByStaffId: actor.staffId,
         aiAutoSent: false,

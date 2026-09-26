@@ -24,6 +24,7 @@ import {
   cancelMessageText,
   confirmMessageText,
   rescheduledReply,
+  clinicAddressFromGreetingConfig,
 } from "../src/lib/booking/booking-text";
 
 let failures = 0;
@@ -88,6 +89,24 @@ async function main(): Promise<void> {
     "confirm: 純時段偏好",
     confirmMessageText({ requestedDate: "2026-09-02", requestedTime: null, providerName: "陳醫生", timeOfDay: "MORNING" }) ===
       "已為你預約 9月2日 上晝 陳醫生，具體時段職員會再同你確認 🙂"
+  );
+  // ★ S5-14⑦：診所名 + 地址（greetingConfig）
+  check(
+    "confirm: 加診所名+地址",
+    confirmMessageText({ requestedDate: "2026-09-02", requestedTime: "10:30", providerName: "陳醫生", clinicName: "仁愛門診", clinicAddress: "旺角上海街1號" }) ===
+      "已為你預約 9月2日 10:30 陳醫生（仁愛門診，地址：旺角上海街1號），到時見 🙂"
+  );
+  check(
+    "confirm: 只有診所名（無地址）",
+    confirmMessageText({ requestedDate: "2026-09-02", requestedTime: null, providerName: "陳醫生", timeOfDay: "EVENING", clinicName: "仁愛門診" }) ===
+      "已為你預約 9月2日 夜晚 陳醫生（仁愛門診），具體時段職員會再同你確認 🙂"
+  );
+  check(
+    "greetingConfig address 提取（key 冇 → null）",
+    clinicAddressFromGreetingConfig(null) === null &&
+      clinicAddressFromGreetingConfig({ address: "  " }) === null &&
+      clinicAddressFromGreetingConfig({ address: 42 }) === null &&
+      clinicAddressFromGreetingConfig({ address: " 旺角上海街1號 " }) === "旺角上海街1號"
   );
   check(
     "cancel 文字",

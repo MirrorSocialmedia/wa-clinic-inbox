@@ -578,7 +578,7 @@ export function DetailPane({
                   <div className="text-[10px] text-t3">最近就診</div>
                   <div className="text-t2">
                     {ctx.pinned.lastVisit
-                      ? `${ctx.pinned.lastVisit.date} · ${ctx.pinned.lastVisit.providerName}（${ctx.pinned.lastVisit.visitReasons.join("、")}）`
+                      ? `${ctx.pinned.lastVisit.date} · ${ctx.pinned.lastVisit.providerName}（${ctx.pinned.lastVisit.visitReasons.join("、")}）${ctx.pinned.lastVisit.clinicCode ? ` · 最近到診：${ctx.pinned.lastVisit.clinicCode}` : ""}`
                       : "—（Apricot 無記錄）"}
                   </div>
                 </div>
@@ -600,20 +600,28 @@ export function DetailPane({
               <div className="rounded-[18px] bg-panel border border-line p-3 text-xs space-y-2">
                 <div className="text-[10px] text-t3">查到匹配舊客 — 撳〔釘住〕先可以用代落單</div>
                 {(ctx.matches ?? []).map((m) => (
-                  <div key={m.patientApricotId} className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="text-t1 truncate">{m.patientName}</div>
-                      <div className="text-[10px] text-t3 truncate">
-                        {m.lastVisit ? `上次 ${m.lastVisit.date} · ${m.lastVisit.providerName}` : "無就診記錄"}
+                  <div key={m.patientApricotId} className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-t1 truncate">{m.patientName}</div>
+                        <div className="text-[10px] text-t3 truncate">
+                          {m.lastVisit
+                            ? `上次 ${m.lastVisit.date} · ${m.lastVisit.providerName}${m.lastVisit.clinicCode ? ` · 最近到診：${m.lastVisit.clinicCode}` : ""}`
+                            : "無就診記錄"}
+                        </div>
+                        {m.outsideCompany && (
+                          // ★ cwi-final S5-13②：跨公司黃標（C-8 唔阻 match — 只提示）
+                          <div className="text-[10px] text-warn-text mt-0.5">⚠ 呢位病人未喺本公司診所睇過</div>
+                        )}
                       </div>
+                      <button
+                        onClick={() => void pinPatient(m)}
+                        disabled={pinBusy !== null}
+                        className="shrink-0 text-[11px] px-2.5 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-50"
+                      >
+                        {pinBusy === m.patientApricotId ? "釘住中…" : "釘住"}
+                      </button>
                     </div>
-                    <button
-                      onClick={() => void pinPatient(m)}
-                      disabled={pinBusy !== null}
-                      className="shrink-0 text-[11px] px-2.5 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-50"
-                    >
-                      {pinBusy === m.patientApricotId ? "釘住中…" : "釘住"}
-                    </button>
                   </div>
                 ))}
               </div>

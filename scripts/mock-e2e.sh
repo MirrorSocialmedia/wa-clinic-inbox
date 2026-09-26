@@ -991,7 +991,8 @@ DC_DATE=$(printf '%s' "${F_DATA:-}" | grep -oE '"data_count":[0-9]+' | cut -d: -
 #   DB 嘅 PENDING/CONFIRMED booking（persistent DB 多輪累積）會令無過濾嘅 count 多计，
 #   造成 26≠27 假 fail（2026-08-19 午夜邊界實遇；Batch B 修復）
 HK_TODAY=$(TZ=Asia/Hong_Kong date +%F)
-WIN_START=$(TZ=Asia/Hong_Kong date -d "$HK_TODAY + 1 day" +%F)
+# ★ cwi-final S5-14⑧（P2「可約日期窗口」）：syncWindow 由**今日**開始（同 endpoint dateMin 一致）→ 斷言下界改今日
+WIN_START=$HK_TODAY
 WIN_END=$(TZ=Asia/Hong_Kong date -d "$HK_TODAY + 30 day" +%F)
 DBDATES=$(q "SELECT count(DISTINCT \"date\")::text c FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"providerApricotId\"='$DOC_A' AND \"isOpen\" AND \"bookedCount\"=0 AND \"date\">='$WIN_START' AND \"date\"<='$WIN_END'" | jf c)
 [ -n "$DC_DATE" ] && [ "$DC_DATE" = "$DBDATES" ] || { echo "    ❌ T27 date 列表唔等於 DB 有空日集合（endpoint=$DC_DATE DB=$DBDATES）"; T27=1; }
@@ -3664,7 +3665,9 @@ EOJSON
   check "PC-G4 StaffNotice(BOOKING_AUTO) title" "$(q "SELECT title FROM \"StaffNotice\" WHERE \"conversationId\"='$PC4_CONV' AND kind='BOOKING_AUTO'" | jf title)" "AI 已自動落單 ${PC4_MO_N}月${PC4_DD_N}日 15:00 ${PC4_NAME}"
   wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$PC4_CONV' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" '[{"c":"4"}]' 45 || { fail "PC-G4 確認訊息未 SENT"; PC_FAIL=1; }
   PC4_R4=$(pc_sess_reply "$PC4_CONV" 4)
-  case "$PC4_R4" in "已為你預約 ${PC4_MO_N}月${PC4_DD_N}日 15:00 ${PC4_NAME}，到時見 🙂") pass "PC-G4 病人確認訊息逐字（confirm-core）";; *) fail "PC-G4 確認訊息錯：${PC4_R4:0:80}"; PC_FAIL=1;; esac
+  # ★ S5-14⑦：確認文字含診所名 + 地址（greetingConfig.address — 照 DB 現值動態組）
+  PC4_CLINIC_TAIL=$(q "SELECT CASE WHEN (\"greetingConfig\"->>'address') IS NOT NULL AND btrim(\"greetingConfig\"->>'address')<>'' THEN '（'||\"name\"||'，地址：'||btrim(\"greetingConfig\"->>'address')||'）' ELSE '（'||\"name\"||'）' END AS t FROM \"Clinic\" WHERE id='$PC4_CID'" | jf t)
+  case "$PC4_R4" in "已為你預約 ${PC4_MO_N}月${PC4_DD_N}日 15:00 ${PC4_NAME}${PC4_CLINIC_TAIL}，到時見 🙂") pass "PC-G4 病人確認訊息逐字（confirm-core + 診所名/地址）";; *) fail "PC-G4 確認訊息錯：${PC4_R4:0:120}"; PC_FAIL=1;; esac
   check "PC-G4 確認訊息 aiAutoSent + session 追溯" "$(q "SELECT (\"aiAutoSent\" AND \"bookingSessionId\"='$PC4_SESS')::text v FROM \"Message\" WHERE \"conversationId\"='$PC4_CONV' AND \"bookingSessionId\"='$PC4_SESS' AND \"aiAutoSent\"" | jf v)" "true"
   check "PC-G4 session COMPLETED" "$(q "SELECT \"status\"::text s FROM \"BookingSession\" WHERE id='$PC4_SESS'" | jf s)" "COMPLETED"
   check "PC-G4 PatientFact（COMPLETED 觸發）" "$(q "SELECT count(*)::text c FROM \"PatientFact\" WHERE \"contactId\"='$(pc_contact_of "$PC4_WA" "$PC4_CID")' AND text='預約偏好：${PC4_NAME}'" | jf c)" "1"
@@ -8563,6 +8566,143 @@ EOJSON
   q "DELETE FROM \"Contact\" WHERE \"clinicId\"='$TKW_CLINIC_ID' AND \"waId\"='$T680_WA'" >/dev/null 2>&1
   [ "$T680" = 0 ] && pass "T680 S5-12 同號多病人 → L4 唔自動落單（出卡 + 要揀人）" || { fail "T680 有項失敗（見上 ❌）"; }
 fi
+
+# ── T675. S5-9：nfm_reply 明文（真 Meta 格式）— claim 時即 COMPLETED + 再撳 📅 → 新 Flow ──
+echo "[S5-9] T675: 真格式明文 nfm_reply → FlowSession COMPLETED（claim 時）→ 再撳 📅 發新 Flow..."
+T675=0
+T675_D=""; T675_T=""
+pick_claim_slot T675_D T675_T
+if [ -z "${T675_T:-}" ]; then
+  fail "T675 claim slot fixture 空"
+else
+  T675_WA="8526955${EPOCH}"
+  T675C="t675-c-${EPOCH}"; T675_CONV="t675-conv-${EPOCH}"
+  q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T675C', '$TKW_CLINIC_ID', '$T675_WA', 'E2E T675', ARRAY[]::text[])" >/dev/null 2>&1
+  q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T675_CONV', '$TKW_CLINIC_ID', '$T675C', 'OPEN', now(), now())" >/dev/null 2>&1
+  # (a) 第一下 📅 → token A（SENT）
+  curl -s -o /tmp/e2e-t675-flow1.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$T675_CONV/flows" -H 'Content-Type: application/json'
+  T675_TOKA=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$T675_CONV' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t)
+  if [ -z "$T675_TOKA" ]; then
+    fail "T675 setup：flowToken 缺（$(head -c 200 /tmp/e2e-t675-flow1.json)）"
+  else
+    check "T675 FlowSession A = SENT" "$(q "SELECT \"status\"::text s FROM \"FlowSession\" WHERE \"flowToken\"='$T675_TOKA'" | jf s)" "SENT"
+    # (b) 三屏 → submit_confirm → claim SUCCESS（pick_claim_slot 固定 provider = mock-pract-TKW-1 — 同 T677 先例）
+    T675_PROV="mock-pract-TKW-1"
+    T675_HOLD=""
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T675_TOKA" --action INIT 2>&1 || true)
+    stepx_parse "$OUT" /tmp/e2e-t675-init.json || { echo "    ❌ T675 INIT fail"; T675=1; }
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T675_TOKA" --action data_exchange --screen SCR_DATE --data "{\"user_action\":\"submit_date\",\"date\":\"$T675_D\"}" 2>&1 || true)
+    stepx_parse "$OUT" /tmp/e2e-t675-slot.json || { echo "    ❌ T675 submit_date fail"; T675=1; }
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T675_TOKA" --action data_exchange --screen SCR_SLOT --data "{\"user_action\":\"submit_slot\",\"date\":\"$T675_D\",\"provider_id\":\"$T675_PROV\",\"time\":\"$T675_T\"}" 2>&1 || true)
+    stepx_parse "$OUT" /tmp/e2e-t675-confirm.json || { echo "    ❌ T675 submit_slot fail"; T675=1; }
+    OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T675_TOKA" --action data_exchange --screen SCR_CONFIRM --data "{\"user_action\":\"submit_confirm\",\"date\":\"$T675_D\",\"provider_id\":\"$T675_PROV\",\"time\":\"$T675_T\",\"name\":\"E2E T675\",\"patient_phone\":\"\",\"notes\":\"t675\"}" 2>&1 || true)
+    if stepx_parse "$OUT" /tmp/e2e-t675-success.json; then
+      check "T675 submit_confirm → SUCCESS" "$(jf screen < /tmp/e2e-t675-success.json)" "SUCCESS"
+      T675_HOLD=$(jf holdId < /tmp/e2e-t675-success.json)
+      [ -n "$T675_HOLD" ] && [ "$T675_HOLD" != "undefined" ] || { echo "    ❌ T675 SUCCESS 冇 holdId"; T675=1; }
+    else
+      echo "    ❌ T675 submit_confirm fail（=${OUT%%$'\n'*}）"; T675=1
+    fi
+    # ★ S5-9 核心：claim 成功即 COMPLETED（唔依賴 nfm_reply 到達）
+    check "T675 FlowSession A = COMPLETED（S5-9：claim 時完成，唔依賴 nfm_reply）" "$(q "SELECT \"status\"::text s FROM \"FlowSession\" WHERE \"flowToken\"='$T675_TOKA'" | jf s)" "COMPLETED"
+    # (c) 真格式明文 nfm_reply（mock-flow-client 預設 = 真 Meta 格式，同 test/fixtures/nfm_reply.real.json；claimed 變體帶 holdId）
+    pnpm -s flow-client complete --clinic TKW --conv "$T675_CONV" --token "$T675_TOKA" --provider "mock-pract-TKW-1" --providerName "E2E T675 Dr" --date "$T675_D" --time "$T675_T" --holdId "$T675_HOLD" --wamid "wamid.E2E_T675_DONE_${EPOCH}" >/dev/null 2>&1 || { echo "    ❌ T675 明文 nfm_reply webhook"; T675=1; }
+    check "T675 明文 nfm_reply 唔重複佔位（FlowHoldEvent = 1）" "$(q "SELECT count(*)::text c FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T675_TOKA'" | jf c)" "1"
+    check "T675 無 reschedule context → 零 StaffNotice" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$T675_CONV'" | jf c)" "0"
+    check "T675 session A 仍 COMPLETED（重複 nfm_reply 冪等）" "$(q "SELECT \"status\"::text s FROM \"FlowSession\" WHERE \"flowToken\"='$T675_TOKA'" | jf s)" "COMPLETED"
+    # (d) 再撳 📅 → 發新 Flow（session B SENT + 新 token + 新 interactive 訊息）
+    sleep 1
+    curl -s -o /tmp/e2e-t675-flow2.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$T675_CONV/flows" -H 'Content-Type: application/json'
+    T675_TOKB=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$T675_CONV' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t)
+    if [ -n "$T675_TOKB" ] && [ "$T675_TOKB" != "$T675_TOKA" ]; then
+      pass "T675 再撳 📅 → 新 Flow token（B ≠ A）"
+    else
+      echo "    ❌ T675 再撳 📅 未發新 Flow（TOKB=$T675_TOKB）"; T675=1
+    fi
+    [ -n "$T675_TOKB" ] && [ "$T675_TOKB" != "$T675_TOKA" ] && \
+      check "T675 FlowSession B = SENT" "$(q "SELECT \"status\"::text s FROM \"FlowSession\" WHERE \"flowToken\"='$T675_TOKB'" | jf s)" "SENT"
+    # ★ 只計 OUT（病人收到嘅 Flow 訊息）— IN 嘅 nfm_reply Meta 都係 type=interactive（msgTypeOf 原樣落庫），唔計
+    check "T675 interactive 訊息 = 2（兩下 📅 兩條 Flow）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T675_CONV' AND type='interactive' AND \"direction\"='OUT'" | jf c)" "2"
+    # cleanup（hermetic：hold/claims/session/對話鏈 — T675 係最後一個 test，claims file 可整份清）
+    node -e 'try{const fs=require("fs");const p=".dev/workforce-mock-claims.json";if(fs.existsSync(p)){const a=JSON.parse(fs.readFileSync(p,"utf8"));const next=a.filter(e=>e.holdId!==process.argv[1]);fs.writeFileSync(p,JSON.stringify(next))}}catch(e){}' "$T675_HOLD" 2>/dev/null
+    q "DELETE FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T675_TOKA'" >/dev/null 2>&1
+    q "DELETE FROM \"FlowSession\" WHERE \"conversationId\"='$T675_CONV'" >/dev/null 2>&1
+    q "DELETE FROM \"Message\" WHERE \"conversationId\"='$T675_CONV'" >/dev/null 2>&1
+    q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$T675_CONV'" >/dev/null 2>&1
+    q "DELETE FROM \"Conversation\" WHERE id='$T675_CONV'" >/dev/null 2>&1
+    q "DELETE FROM \"Contact\" WHERE id='$T675C'" >/dev/null 2>&1
+    [ "$T675" = 0 ] && pass "T675 S5-9 真格式明文 nfm_reply → claim 時 COMPLETED + 再撳 📅 發新 Flow" || { fail "T675 有項失敗（見上 ❌）"; }
+  fi
+fi
+
+# ── T676. S5-10：Flow wire payload = 新 Meta 格式（contract test 對 recorded request body）──
+# mock mode 下 sendFlowMessage 會將將會發嘅 wire body 落 .dev/graph-mock-flow-payload.json —
+# 對 recorded request body 斷言新格式（flow_message_version=3 + body.text + action.parameters）。
+echo "[S5-10] T676: Flow wire payload = 新 Meta 格式（recorded request body contract）..."
+T676=0
+rm -f .dev/graph-mock-flow-payload.json
+t676_assert() { # $1=label $2=expected-token (data_exchange) | NAVIGATE $3=date $4=start $5=providerId
+  node -e '
+const fs=require("fs");
+const [label,mode,expTok,expDate,expStart,expProv]=process.argv.slice(1);
+let p;
+try{p=JSON.parse(fs.readFileSync(".dev/graph-mock-flow-payload.json","utf8"))}catch(e){console.log("ERR:no-payload-file");process.exit(0)}
+const i=p.interactive,a=i&&i.action,pa=a&&a.parameters;
+const errs=[];
+if(p.messaging_product!=="whatsapp")errs.push("messaging_product");
+if(p.type!=="interactive")errs.push("type");
+if(!i||i.type!=="flow")errs.push("interactive.type");
+if(i&&i.flow)errs.push("舊格式 interactive.flow 唔應該喺度");
+if(!i||!i.body||typeof i.body.text!=="string"||!i.body.text)errs.push("body.text 必填");
+if(!a||a.name!=="flow")errs.push("action.name");
+if(!pa)errs.push("parameters");
+else{
+  if(pa.flow_message_version!=="3")errs.push("flow_message_version");
+  if(mode!=="NAVIGATE" && pa.flow_token!==expTok)errs.push("flow_token");
+  if(pa.flow_id!==(process.env.FLOW_ID||"111111111111"))errs.push("flow_id");
+  if(pa.flow_cta!==(process.env.FLOW_CTA||"預約"))errs.push("flow_cta");
+  if(mode==="NAVIGATE"){
+    if(pa.flow_action!=="navigate")errs.push("flow_action=navigate");
+    const fp=pa.flow_action_payload;
+    if(!fp||fp.screen!=="SCR_DATE")errs.push("flow_action_payload.screen");
+    if(!fp||!fp.data||fp.data.start!==expStart)errs.push("payload.data.start");
+    if(!fp||!fp.data||fp.data.date!==expDate)errs.push("payload.data.date");
+    if(!fp||!fp.data||fp.data.providerId!==expProv)errs.push("payload.data.providerId");
+  } else if (pa.flow_action!=="data_exchange") errs.push("flow_action=data_exchange");
+  if(pa.mode!==undefined)errs.push("mode 應無（WA_FLOW_DRAFT 未設）");
+}
+console.log(errs.length?"ERR:"+errs.join(","):"OK");
+' "$1" "$2" "$3" "$4" "$5" "$6" 2>/dev/null
+}
+T676C="t676-c-${EPOCH}"; T676_CONV="t676-conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T676C', '$TKW_CLINIC_ID', '8526956${EPOCH}', 'E2E T676', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T676_CONV', '$TKW_CLINIC_ID', '$T676C', 'OPEN', now(), now())" >/dev/null 2>&1
+# (a) 正常 Flow（病人自助 — data_exchange）
+curl -s -o /tmp/e2e-t676-flow1.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$T676_CONV/flows" -H 'Content-Type: application/json'
+T676_TOKA=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$T676_CONV' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t)
+if [ -z "$T676_TOKA" ]; then
+  fail "T676 setup：flowToken 缺（$(head -c 200 /tmp/e2e-t676-flow1.json)）"
+else
+  T676_R=$(t676_assert "data_exchange" "DATA_EXCHANGE" "$T676_TOKA" "" "" "")
+  check "T676 正常 Flow wire payload = 新 Meta 格式（recorded body）" "$T676_R" "OK"
+  [ "$T676_R" = "OK" ] || T676=1
+  # (b) 排班表預選 Flow（navigate + flow_action_payload）— 先完成 session A 防冪等重用
+  q "UPDATE \"FlowSession\" SET \"status\"='COMPLETED', \"completedAt\"=now() WHERE \"flowToken\"='$T676_TOKA'" >/dev/null 2>&1
+  T676_D=$(TZ=Asia/Hong_Kong date -d '+2 days' +%F)
+  curl -s -o /tmp/e2e-t676-flow2.json -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$T676_CONV/flows" -H 'Content-Type: application/json' -d "{\"prefill\":{\"date\":\"$T676_D\",\"providerId\":\"mock-pract-TKW-1\",\"start\":\"12:00\"}}"
+  T676_TOKB=$(q "SELECT \"flowToken\" t FROM \"FlowSession\" WHERE \"conversationId\"='$T676_CONV' ORDER BY \"createdAt\" DESC LIMIT 1" | jf t)
+  T676_R2=$(t676_assert "navigate" "NAVIGATE" "" "$T676_D" "12:00" "mock-pract-TKW-1")
+  check "T676 預選 Flow = navigate + flow_action_payload{screen,data}（recorded body）" "$T676_R2" "OK"
+  [ "$T676_R2" = "OK" ] || T676=1
+  [ "$T676_TOKB" != "$T676_TOKA" ] || { echo "    ❌ T676 預選 Flow 重用咗舊 session"; T676=1; }
+  # cleanup
+  q "DELETE FROM \"FlowSession\" WHERE \"conversationId\"='$T676_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\"='$T676_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id='$T676_CONV'" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE id='$T676C'" >/dev/null 2>&1
+  [ "$T676" = 0 ] && pass "T676 S5-10 Flow wire payload = 新 Meta 格式（data_exchange + navigate 兩變體）" || { fail "T676 有項失敗（見上 ❌）"; }
+fi
+rm -f .dev/graph-mock-flow-payload.json
 
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

@@ -66,7 +66,12 @@ interface WaTimestampedMessage {
   sticker?: { id?: string; media_id?: string };
   interactive?: {
     type?: string;
-    nfm_reply?: { response_json?: string | { payload?: string; iv?: string; key_id?: string; wrapped_key?: string } };
+    nfm_reply?: {
+      // ★ cwi-final S5-9（audit3 P1-13）：真 Meta 格式 = { name: "flow", body: "Sent", response_json: "<明文 JSON string>" }
+      name?: string;
+      body?: string;
+      response_json?: string | { payload?: string; iv?: string; key_id?: string; wrapped_key?: string };
+    };
   };
   location?: { latitude?: string; longitude?: string };
   contact?: { vcard?: string };
@@ -605,18 +610,30 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
         const raw = nfmReply.response_json;
         const envelope =
           typeof raw === "string" ? (JSON.parse(raw) as Record<string, unknown>) : (raw as Record<string, unknown>);
-        const { handleFlowReply } = await import("@/lib/booking/flow-reply");
-        const outcome = await handleFlowReply({
-          clinicId: clinic.id,
-          conversationId: result.conv.id,
-          waId,
-          responseJson: {
-            payload: String(envelope.payload ?? ""),
-            iv: String(envelope.iv ?? ""),
-            key_id: envelope.key_id ? String(envelope.key_id) : undefined,
-            wrapped_key: String(envelope.wrapped_key ?? ""),
-          },
-        });
+        // ★ cwi-final S5-9（audit3 P1-13）：真 WhatsApp 嘅 nfm_reply 係**明文**（response_json = SUCCESS 畫面
+        //   params 嘅 JSON string — 加密只喺 data_exchange endpoint）；加密格式（payload + wrapped_key）
+        //   只喺 WA_MOCK=1 行舊路徑（mock-flow-client --encrypted / 舊 e2e 回歸）。
+        const isEncrypted = typeof envelope.payload === "string" && typeof envelope.wrapped_key === "string";
+        const flowReply = await import("@/lib/booking/flow-reply");
+        const outcome =
+          isEncrypted && process.env.WA_MOCK === "1"
+            ? await flowReply.handleFlowReply({
+                clinicId: clinic.id,
+                conversationId: result.conv.id,
+                waId,
+                responseJson: {
+                  payload: String(envelope.payload ?? ""),
+                  iv: String(envelope.iv ?? ""),
+                  key_id: envelope.key_id ? String(envelope.key_id) : undefined,
+                  wrapped_key: String(envelope.wrapped_key ?? ""),
+                },
+              })
+            : await flowReply.handleFlowReplyPlain({
+                clinicId: clinic.id,
+                conversationId: result.conv.id,
+                waId,
+                reply: envelope,
+              });
         log.info(
           { clinic: clinic.code, wamid, outcome: outcome.status, reason: (outcome as { reason?: string }).reason },
           "inbound: nfm_reply handled"

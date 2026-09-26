@@ -278,15 +278,49 @@ export async function getPhoneQualityRating(phoneNumberId: string, timeoutMs = 1
 
 export interface FlowMessageConfig {
   flow_token: string;    // 簽咗 conversationId+clinicId 嘅 JWT（data_exchange 驗證用）
-  flow_cdn_url: string;  // WhatsApp Manager publish 後嘅 CDN URL（或 .flow.json）
+  flow_cdn_url: string;  // WhatsApp Manager publish 後嘅 CDN URL（或 .flow.json）— 新 wire format 唔發（保留：outbound worker 完整性校驗 + canvas variant 判斷）
   flow_id: string;       // Flow id（publish 後固定）
   flow_cta: string;      // 按鈕文字（「預約」）
-  flow_action?: string;  // 預設 NAVIGATE
+  /** ★ cwi-final S5-10："data_exchange"（病人自助 Flow，預設）/ "navigate"（+flow_action_payload） */
+  flow_action?: string;
   /**
-   * D.3（cwi-schedv2-20260903）：撳格預選 — 塞入第一屏預選（date/providerId/start）。
-   * 只喺 staff 由排班板撳格發 Flow 時有；canvas 收唔到時忽略（向后兼容）。
+   * D.3（cwi-schedv2-20260903）：撳格預選 — 塞入預選（date/providerId/start）。
+   * 只喺 staff 由排班板撳格發 Flow 時有（flow_action="navigate"）；canvas 收唔到時忽略（向后兼容）。
+   * ★ S5-10：加 screen — 新 Meta format 嘅 flow_action_payload = { screen, data }。
    */
-  flow_action_payload?: { data: { date: string; providerId: string; start: string } };
+  flow_action_payload?: { screen: string; data: { date: string; providerId: string; start: string } };
+}
+
+/**
+ * ★ cwi-final S5-10（audit3 P1-14）：Meta interactive flow wire payload（flow_message_version=3）。
+ * 舊格式 interactive.flow{…} 真機 139000 擋；新格式：
+ *   interactive.body.text（必填）+ action{name:"flow", parameters{flow_message_version,
+ *   flow_token, flow_id, flow_cta, flow_action, mode?}}；
+ *   flow_action="navigate" 時加 flow_action_payload{screen, data}（排班表預選時段用）。
+ * 抽成純 function = contract test 可對 recorded request body（T676）。
+ */
+export function buildFlowPayload(to: string, flow: FlowMessageConfig): Record<string, unknown> {
+  const parameters: Record<string, unknown> = {
+    flow_message_version: "3",
+    flow_token: flow.flow_token,
+    flow_id: flow.flow_id,
+    flow_cta: flow.flow_cta,
+    flow_action: flow.flow_action ?? "data_exchange",
+  };
+  if (process.env.WA_FLOW_DRAFT === "1") parameters.mode = "draft";
+  if (flow.flow_action === "navigate" && flow.flow_action_payload) {
+    parameters.flow_action_payload = flow.flow_action_payload;
+  }
+  return {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "flow",
+      body: { text: process.env.FLOW_BODY_TEXT ?? "撳下面掣揀時間 🦷" },
+      action: { name: "flow", parameters },
+    },
+  };
 }
 
 export function defaultFlowConfig(flow_token: string): FlowMessageConfig {
@@ -295,7 +329,7 @@ export function defaultFlowConfig(flow_token: string): FlowMessageConfig {
     flow_cdn_url: process.env.FLOW_CDN_URL ?? "https://cdn.whatsapp.net/mock/clinic-booking.flow.json",
     flow_id: process.env.FLOW_ID ?? "111111111111",
     flow_cta: process.env.FLOW_CTA ?? "預約",
-    flow_action: "NAVIGATE",
+    flow_action: "data_exchange",
   };
 }
 
@@ -314,7 +348,7 @@ export function requirementFlowConfig(flow_token: string): FlowMessageConfig {
     flow_cdn_url: reqCdn,
     flow_id: reqId,
     flow_cta: process.env.FLOW_CTA ?? "預約",
-    flow_action: "NAVIGATE",
+    flow_action: "data_exchange",
   };
 }
 
@@ -340,6 +374,15 @@ export async function sendFlowMessage(opts: {
       throw new Error("MOCK_GRAPH_TIMEOUT: simulated Graph API failure (WA_GRAPH_MOCK_FAIL=1)");
     }
     await new Promise((r) => setTimeout(r, 10));
+    // ★ cwi-final S5-10：mock 模式都 build 真 wire payload 並落檔（T676 contract test 對 recorded
+    //   request body 用；.dev/ 已 gitignore — 零 repo 污染）。最後一条 flow 生效（T676 一次一條）。
+    try {
+      const { writeFileSync, mkdirSync } = await import("node:fs");
+      mkdirSync(".dev", { recursive: true });
+      writeFileSync(".dev/graph-mock-flow-payload.json", JSON.stringify(buildFlowPayload(to, flow), null, 2));
+    } catch (e) {
+      log.warn({ err: e instanceof Error ? e.message : String(e) }, "graph: mock flow payload 落檔失敗（唔阻 send）");
+    }
     const wamid = `mock-wamid-${randomBytes(10).toString("hex")}`;
     log.info(
       { phoneNumberId, wamid, flowId: flow.flow_id, mock: true },
@@ -354,22 +397,8 @@ export async function sendFlowMessage(opts: {
       Authorization: `Bearer ${accessToken()}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "flow",
-        flow: {
-          flow_token: flow.flow_token,
-          flow_cdn_url: flow.flow_cdn_url,
-          flow_id: flow.flow_id,
-          flow_cta: flow.flow_cta,
-          flow_action: flow.flow_action ?? "NAVIGATE",
-          ...(process.env.WA_FLOW_DRAFT === "1" ? { mode: "draft" } : {}),
-        },
-      },
-    }),
+    // ★ cwi-final S5-10：新 Meta 格式（interactive.body.text + action.parameters；舊格式真機 139000）
+    body: JSON.stringify(buildFlowPayload(to, flow)),
     // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
     signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
   });

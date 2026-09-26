@@ -27,20 +27,11 @@ import { getWindowState } from "@/lib/wa/window";
 import { enqueueOutboundSend } from "@/lib/queue";
 import { publishConvEvent, convRef } from "@/lib/notify";
 import { bookingConfirmClientMessageId } from "@/lib/booking/booking-id";
+import { confirmMessageText, clinicAddressFromGreetingConfig } from "@/lib/booking/booking-text";
 
 export const dynamic = "force-dynamic";
 
-/** 確認訊息文字（MD §8.3 格式：「已為你預約 X 月 X 日 HH:mm 陳醫生，到時見 🙂」）
- *  純收需求變體（requestedTime = null + timeOfDay）：「…上晝…，具體時段職員會再同你確認 🙂」 */
-const TIME_OF_DAY_LABEL: Record<string, string> = { MORNING: "上晝", AFTERNOON: "下晝", EVENING: "夜晚" };
-function confirmMessageText(b: { requestedDate: string; requestedTime: string | null; providerName: string; timeOfDay?: string | null }): string {
-  const [, mo, d] = b.requestedDate.split("-");
-  if (b.requestedTime) {
-    return `已為你預約 ${Number(mo)}月${Number(d)}日 ${b.requestedTime} ${b.providerName}，到時見 🙂`;
-  }
-  const tod = TIME_OF_DAY_LABEL[b.timeOfDay ?? ""] ?? "";
-  return `已為你預約 ${Number(mo)}月${Number(d)}日 ${tod} ${b.providerName}，具體時段職員會再同你確認 🙂`;
-}
+// ★ cwi-final S5-14⑦：本地重複 confirmMessageText 廢掉 — 單一文字來源 = booking-text.ts（加診所名/地址）
 
 const ENQUEUE_TIMEOUT_MS = 1500;
 
@@ -64,6 +55,8 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   if (!clinic) {
     return NextResponse.json({ error: "conversation missing" }, { status: 500 });
   }
+  // ★ S5-14⑦：確認文字加診所名 + 地址（greetingConfig.address — 冇就舊文字）
+  const clinicText = { clinicName: clinic.name, clinicAddress: clinicAddressFromGreetingConfig((clinic.greetingConfig ?? null) as Record<string, unknown> | null) };
 
   // ── ★ S5-6：條件 CONFIRMED（PENDING + writeState 唔係 WRITING）— 雙擊/並發第二枝 count=0 → ALREADY ──
   const now = new Date();
@@ -143,7 +136,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
           sent: false,
           reason: "window_closed",
           hint: "24 小時客服窗口已過 — 請用帶確認內容嘅 utility template 覆病人",
-          suggestedText: confirmMessageText(booking),
+          suggestedText: confirmMessageText({ ...booking, ...clinicText }),
         },
       },
       { status: 422 }
@@ -157,7 +150,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
         direction: "OUT",
         channel: "API",
         type: "text",
-        body: confirmMessageText(booking),
+        body: confirmMessageText({ ...booking, ...clinicText }),
         status: "QUEUED",
         sentByStaffId: ctx.staff.id,
         // cwi-window-20260901（P1）：staff 確認預約覆（窗口內）= SERVICE

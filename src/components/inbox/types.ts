@@ -180,12 +180,25 @@ export interface DutyInfo {
   entries: { staffName: string; role: string; shiftStart: string; shiftEnd: string }[];
 }
 
-/** ★ booking-ui（A）：patient-context — lookup match（零 raw phone；姓名 = PII 白名單 v2 許可） */
+/** ★ booking-ui（A）：patient-context — lookup match（零 raw phone；姓名 = PII 白名單 v2 許可）
+ *  ★ cwi-final S5-13②：lastVisit 加 clinicId/clinicCode（「最近到診：{店}」）；
+ *  visitedClinicIds = 全部到診行 distinct clinicId（CWM cuid）；outsideCompany = 黃標（C-8 唔阻）；
+ *  gender「有就回」（B-9 稱呼 — PII 白名單未加欄前永遠無）。 */
 export interface PatientMatch {
   patientApricotId: string;
   patientCode: string;
   patientName: string;
-  lastVisit: { date: string; providerName: string; visitReasons: string[] } | null;
+  lastVisit: {
+    date: string;
+    providerName: string;
+    visitReasons: string[];
+    clinicId?: string;
+    clinicCode?: string;
+  } | null;
+  visitedClinicIds?: string[];
+  /** ★ S5-13②：黃標 — visitedClinicIds 全部唔喺當前對話嘅公司（C-8 唔阻跨公司 match，只提示） */
+  outsideCompany?: boolean;
+  gender?: string;
 }
 
 /** ★ booking-ui（E）：Apricot 預約卡（側欄 upcoming — status 0/102 only） */

@@ -21,7 +21,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { requireAuth, scopedClinicSet, assertCanWriteConversation, type AuthContext } from "@/lib/rbac";
 import prisma from "@/lib/prisma";
 import { handle } from "@/lib/api-error";
-import { fetchQuotes, decideQuote, WorkforceApiError } from "@/lib/workforce/client";
+import { fetchQuotes, fetchQuote, decideQuote, WorkforceApiError, type WorkforceQuote } from "@/lib/workforce/client";
 
 export const dynamic = "force-dynamic";
 
@@ -39,10 +39,25 @@ export const GET = handle(async (req: NextRequest) => {
   const status = sp.get("status") ?? undefined;
   const limit = sp.get("limit") ? Math.min(Number(sp.get("limit")) || 200, 500) : 200;
   const codes = await scopedCodes(ctx);
-  // workforce 未支援 clinic filter（W 側 S5-13 會加）→ 受限用戶攞 500 條再 filter
-  const data = await fetchQuotes({ status, limit: codes ? 500 : limit });
-  const quotes = codes ? data.quotes.filter((q) => codes.has(q.clinicCode)).slice(0, limit) : data.quotes;
-  return NextResponse.json({ ...data, quotes });
+  // ★ cwi-final S5-13①：workforce 已支援 clinic filter — 受限用戶先試 server-side（clinicCodes = shortName 兼容）；
+  //   400 CLINIC_CODE_NOT_FOUND（W 碼對唔到 CWM shortName — 數據未對齊）→ fallback 舊「攞 500 條再 filter」（S0-7 保證）。
+  if (!codes) {
+    const data = await fetchQuotes({ status, limit });
+    return NextResponse.json(data);
+  }
+  let quotes: WorkforceQuote[];
+  try {
+    const data = await fetchQuotes({ status, limit: 500, clinicCodes: [...codes] });
+    quotes = data.quotes.slice(0, limit);
+  } catch (e) {
+    if (e instanceof WorkforceApiError && e.status === 400 && e.code === "CLINIC_CODE_NOT_FOUND") {
+      const data = await fetchQuotes({ status, limit: 500 });
+      quotes = data.quotes.filter((q) => codes.has(q.clinicCode)).slice(0, limit);
+    } else {
+      throw e;
+    }
+  }
+  return NextResponse.json({ v: 1, quotes });
 });
 
 export const POST = handle(async (req: NextRequest) => {
@@ -60,10 +75,16 @@ export const POST = handle(async (req: NextRequest) => {
   }
   const codes = await scopedCodes(ctx);
   if (codes) {
-    // workforce 未有 GET /quotes/{id}（S5-13 會加）→ 暫時用 pending+confirmed+corrected 500 條搵
-    const all = await fetchQuotes({ status: "pending,confirmed,corrected", limit: 500 });
-    const q = all.quotes.find((x) => x.id === body.id);
-    if (!q || !codes.has(q.clinicCode)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    // ★ cwi-final S5-13①：workforce GET /quotes/{id} 單條（同列表 shape）— 取代舊「500 條逐條搵」。
+    //   404 → 403（唔洩漏 scope 外報價存在性 — 同舊口徑）。
+    let q: WorkforceQuote;
+    try {
+      q = await fetchQuote(body.id);
+    } catch (e) {
+      if (e instanceof WorkforceApiError && e.status === 404) return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      throw e;
+    }
+    if (!codes.has(q.clinicCode)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
   // ★ D-5：全局術語字典只限全集團 ADMIN（S3-4 同源）
   const canTeach = ctx.staff.role === "ADMIN" && ctx.scopeType === "ALL";

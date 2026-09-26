@@ -892,7 +892,17 @@ async function scanQuotedNotBooked(
   const delayMs = delayToMs(rule.delayValue, rule.delayUnit);
   let quotes: WorkforceQuote[];
   try {
-    quotes = (await fetchQuotes({ status: "confirmed,corrected,pending", limit: 500 })).quotes;
+    // ★ cwi-final S5-13①：workforce 已支援 clinic filter — 試 server-side（clinicCodes）；
+    //   400 CLINIC_CODE_NOT_FOUND（碼未對齊）→ fallback 舊全量 500 條（下游已逐店 filter）。
+    try {
+      quotes = (await fetchQuotes({ status: "confirmed,corrected,pending", limit: 500, clinicCodes: clinics.map((c) => c.code) })).quotes;
+    } catch (e2) {
+      if (e2 instanceof WorkforceApiError && e2.status === 400 && e2.code === "CLINIC_CODE_NOT_FOUND") {
+        quotes = (await fetchQuotes({ status: "confirmed,corrected,pending", limit: 500 })).quotes;
+      } else {
+        throw e2;
+      }
+    }
   } catch (e) {
     if (e instanceof WorkforceApiError && (e.status === 404 || e.status === 503 || e.status === 0)) {
       counters.workforceFail = (counters.workforceFail ?? 0) + 1;
