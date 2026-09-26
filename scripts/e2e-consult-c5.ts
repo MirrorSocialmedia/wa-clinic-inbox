@@ -23,11 +23,11 @@
  * 輸出：C5-OK (N pass) / C5-FAIL: <reason>
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
-import os from "node:os";
 import { PrismaClient } from "@prisma/client";
+import { chromium, chromiumPath } from "./_pw";
 
 const prisma = new PrismaClient();
 
@@ -37,11 +37,6 @@ const BASE = (process.argv.includes("--base")
 ).replace(/\/$/, "");
 
 /* host 全局 playwright-core（repo 唔帶依賴）— 同 e2e-schedule-ui.ts 同一 pattern */
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
-/* eslint-enable @typescript-eslint/no-require-imports */
 
 // ── constants ─────────────────────────────────────────────────────────
 const CLINIC_CODE = "e2ec5";
@@ -246,23 +241,6 @@ async function residueCheck(): Promise<number> {
 }
 
 // ── UI helper ─────────────────────────────────────────────────────────
-function findChromium(): string {
-  const base = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(base)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(base, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 
 interface LocatorLike {
   first: () => LocatorLike;
@@ -360,7 +338,7 @@ void (async () => {
 
   // ── S2 簽署（UI） ──────────────────────────────────────────────────
   console.log("\n[S2] 簽署（UI：確認 → approvedAt；改欄位 → 清空）");
-  const browser = (await chromium.launch({ headless: true, executablePath: findChromium() })) as unknown as {
+  const browser = (await chromium.launch({ headless: true, executablePath: chromiumPath() })) as unknown as {
     newContext: (o: Record<string, unknown>) => Promise<{ addCookies: (c: unknown[]) => Promise<void>; newPage: () => Promise<PageLike>; close: () => Promise<void> }>;
     close: () => Promise<void>;
   };

@@ -7,14 +7,10 @@
 import "./e2e-origin-shim";
 import { PrismaClient } from "@prisma/client";
 import { execSync } from "child_process";
-import { readFileSync, readdirSync } from "fs";
-import os from "os";
+import { readFileSync } from "fs";
 import path from "path";
+import { chromium, chromiumPath } from "./_pw";
 
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 const prisma = new PrismaClient();
 const BASE = process.env.BASE ?? "http://127.0.0.1:3100";
@@ -41,15 +37,6 @@ function mock(cmd: string): void {
   execSync(`./node_modules/.bin/tsx scripts/mock-inbound.ts ${cmd}`, { timeout: 60000, stdio: "pipe" });
 }
 
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(baseDir).filter((d) => d.startsWith("chromium-")).sort().reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try { readFileSync(exe); return exe; } catch { /* next */ }
-  }
-  throw new Error("chromium binary 搵唔到");
-}
 
 function readCredLine(label: string): string {
   const lines = readFileSync(path.join(REPO, ".dev", "credentials.txt"), "utf8").split("\n");
@@ -142,7 +129,7 @@ async function main(): Promise<void> {
   // ── browser ─────────────────────────────────────────────────────────────
   const admin = await login("admin@wa-clinic.local", readCredLine("ADMIN"));
   const browser: BrowserLike = await (chromium as { launch: (o: Record<string, unknown>) => Promise<BrowserLike> }).launch({
-    executablePath: findChromium(),
+    executablePath: chromiumPath(),
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });

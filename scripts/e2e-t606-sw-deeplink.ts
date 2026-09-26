@@ -19,16 +19,12 @@
  * 輸出：T606-OK / T606-FAIL: <reason>
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { execSync } from "node:child_process";
 import { PrismaClient } from "@prisma/client";
+import { chromium, chromiumPath } from "./_pw";
 
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:3100";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -125,23 +121,6 @@ async function loginSession(email: string, password: string): Promise<string> {
   return m[1];
 }
 
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(baseDir)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 
 interface PageLike {
   goto: (url: string, o: Record<string, unknown>) => Promise<unknown>;
@@ -179,7 +158,7 @@ async function waitSel(P: PageLike, sel: string, timeoutMs = 120_000): Promise<b
 }
 
 async function main(): Promise<void> {
-  const exe = findChromium();
+  const exe = chromiumPath();
 
   // ── setup：hermetic fixture（2 對話 × 1 訊息 canary） ─────────────────
   console.log("[setup] 清舊 fixture...");

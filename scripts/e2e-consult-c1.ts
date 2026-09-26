@@ -21,11 +21,10 @@
  */
 import "./e2e-origin-shim";
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { PrismaClient } from "@prisma/client";
+import { chromium, chromiumPath } from "./_pw";
 
-const nodeRequire = createRequire(import.meta.url);
 
 try {
   process.loadEnvFile(new URL("../.env", import.meta.url).pathname);
@@ -511,16 +510,10 @@ async function main(): Promise<void> {
   // ── 截圖（playwright + cookie） ─────────────────────────────────────────
   console.log("\n[截圖]");
   const shot = async (convId: string, name: string) => {
-    const { chromium } = nodeRequire("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-      chromium: { launch: (o: Record<string, unknown>) => Promise<{ newContext: (o: Record<string, unknown>) => Promise<{ addCookies: (c: unknown[]) => Promise<void>; newPage: () => Promise<{ goto: (u: string, o?: Record<string, unknown>) => Promise<void>; screenshot: (o: { path: string }) => Promise<void>; close: () => Promise<void> }>; close: () => Promise<void> }>; close: () => Promise<void> }> };
-    };
-    const cache = `${process.env.HOME}/.cache/ms-playwright`;
-    const exes = readdirSync(cache)
-      .filter((d) => d.startsWith("chromium-"))
-      .map((d) => `${cache}/${d}/chrome-linux64/chrome`)
-      .filter((p) => existsSync(p));
-    if (exes.length === 0) throw new Error("chromium binary 搵唔到");
-    const B = await chromium.launch({ headless: true, executablePath: exes[exes.length - 1] });
+    const B = await (chromium as {
+      launch: (o: Record<string, unknown>) => Promise<{ newContext: (o: Record<string, unknown>) => Promise<{ addCookies: (c: unknown[]) => Promise<void>; newPage: () => Promise<{ goto: (u: string, o?: Record<string, unknown>) => Promise<void>; screenshot: (o: { path: string }) => Promise<void>; close: () => Promise<void> }>; close: () => Promise<void> }>; close: () => Promise<void> }>;
+      close: () => Promise<void>;
+    }).launch({ headless: true, executablePath: chromiumPath() });
     const C = await B.newContext({ viewport: { width: 1440, height: 900 } });
     await C.addCookies([{ name: "wa_inbox_session", value: staffCookie, domain: "127.0.0.1", path: "/" }]);
     const page = await C.newPage();

@@ -17,18 +17,14 @@
  * 輸出：T601T607-OK / T601T607-FAIL: <reason>
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync } from "node:fs";
+
 import path from "node:path";
-import os from "node:os";
 import { createRequire } from "node:module";
 import { PrismaClient } from "@prisma/client";
 
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 const argon2 = createRequire(path.join(process.cwd(), "package.json"))("argon2");
 import { phoneHashes } from "../src/lib/phone-hash";
+import { chromium, chromiumPath } from "./_pw";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:3100";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -98,23 +94,6 @@ async function loginSession(email: string, password: string): Promise<string> {
   throw new Error("login 3 次都 429");
 }
 
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(baseDir)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 
 interface LocLike {
   count: () => Promise<number>;
@@ -190,7 +169,7 @@ async function openConvExpectCard(P: PageLike, targetName: string, otherName: st
 }
 
 async function main(): Promise<void> {
-  const exe = findChromium();
+  const exe = chromiumPath();
 
   // ── (1) seed：ADMIN ALL + 2 對話 + 2 SUGGESTED task ─────────────────────
   console.log("[setup] 清舊 fixture + seed...");

@@ -15,19 +15,15 @@
  *   兩患者嘅 profileName 必須含「E2E-DUTY-A」/「E2E-DUTY-B」（click selector 用）。
  * Override flag = .dev/duty-mock-override.json（duty/client.ts mock 分支讀；DUTY_MOCK=1 only）。
  */
-import { readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { chromium, chromiumPath } from "./_pw";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 const FLAG_PATH = path.join(REPO_ROOT, ".dev", "duty-mock-override.json");
 
 // host 全局 playwright-core（repo 唔帶 — 避免新增依賴）— 絕對路徑 require；
 // tsc 無法解析非 repo 模組嘅型別 → 窄化 cast。呢部 sandbox 定點路径。
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 function arg(name: string): string {
   const i = process.argv.indexOf(name);
@@ -41,24 +37,6 @@ function arg(name: string): string {
 
 // 註：--conv2 可以傳（文檔一致性）但 script 唔用 — 對話項用患者名 click（見下）
 
-/** 搵最新 chromium binary（~/.cache/ms-playwright 下 chromium-NNN/chrome-linux64/chrome）。 */
-function findChromium(): string {
-  const base = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(base)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(base, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* try next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 
 const OVERLAP_STAFF = [
   { staffName: "陳志強", role: "醫生", shiftStart: "08:00", shiftEnd: "16:00" },
@@ -95,7 +73,7 @@ async function main(): Promise<void> {
 
   const browser = await chromium.launch({
     headless: true,
-    executablePath: findChromium(),
+    executablePath: chromiumPath(),
   }) as unknown as {
     newContext: (o: Record<string, unknown>) => Promise<{
       newPage: () => Promise<PageLite>;

@@ -30,15 +30,12 @@
  * ★ PII 鐵律：斷言本身就用 fixture 病人資料做 canary（t164 零 PII regex）。
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import Redis from "ioredis";
+import { chromium, chromiumPath } from "./_pw";
 
 /* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 // ── args ─────────────────────────────────────────────────────────────────
 function arg(name: string): string {
@@ -100,23 +97,6 @@ const CLINIC_SHORT = "TKW";
 const MF_SHORT = "MF";
 
 // ── chromium / cookie ────────────────────────────────────────────────────
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(baseDir)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 
 function readSession(cookieFile: string): string {
   const jar = readFileSync(cookieFile, "utf8");
@@ -325,7 +305,7 @@ async function waitForListReady(P: PageLike, waitText: string, timeoutMs = 120_0
   }
 }
 
-async function openBrowser(exe: string, cookieFile: string, url: string, mode: "granted" | "denied", prefPreset: string, opts?: { noSw?: boolean; swBody?: string; viewport?: { width: number; height: number } }): Promise<{ B: unknown; C: CtxLike; P: PageLike }> {
+async function openBrowser(exe: string | undefined, cookieFile: string, url: string, mode: "granted" | "denied", prefPreset: string, opts?: { noSw?: boolean; swBody?: string; viewport?: { width: number; height: number } }): Promise<{ B: unknown; C: CtxLike; P: PageLike }> {
   const sessionValue = readSession(cookieFile);
   if (!sessionValue) throw new Error(`cookie 檔搵唔到 wa_inbox_session: ${cookieFile}`);
   const B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<{ newContext: (o: Record<string, unknown>) => Promise<CtxLike>; close: () => Promise<void> }> }).launch({
@@ -678,7 +658,7 @@ async function waitForConvOpen(P: PageLike, name: string, timeoutMs = 120_000): 
 
 // ── scenarios ────────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
-  const exe = findChromium();
+  const exe = chromiumPath();
   const browsers: unknown[] = [];
   const closeAll = async () => {
     for (const b of browsers) {

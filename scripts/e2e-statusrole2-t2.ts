@@ -24,9 +24,8 @@
  * fixture：`sr2t2` 前綴 id + email — 段尾 hermetic sweep（assert 零殘留）
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import http from "node:http";
 import { createHmac } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
@@ -347,6 +346,7 @@ async function waitForDb(label: string, fn: () => Promise<boolean>, timeoutMs = 
 import { createECDH, randomBytes } from "node:crypto";
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { chromium, chromiumPath } from "./_pw";
 
 function ensureTlsFiles(): { key: Buffer; cert: Buffer } {
   const TLS_DIR = "/tmp/e2e-push-tls";
@@ -642,34 +642,10 @@ interface CtxLike {
   addCookies: (c: { name: string; value: string; domain: string; path: string }[]) => Promise<void>;
   close: () => Promise<void>;
 }
-interface PwChromium {
-  chromium: {
-    launch(opts: { executablePath: string; args: string[] }): Promise<{
-      newContext(opts: { viewport: { width: number; height: number } }): Promise<CtxLike>;
-      close(): Promise<void>;
-    }>;
-  };
-}
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(baseDir).filter((d) => d.startsWith("chromium-")).sort().reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到");
-}
 
 async function screenshots(tkwCookie: string, supCookie: string): Promise<void> {
   console.log("\n[SHOT] 截圖 ×4");
-  /* eslint-disable @typescript-eslint/no-require-imports -- repo 慣例 */
-  const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as PwChromium;
-  const browser = await chromium.launch({ executablePath: findChromium(), args: ["--no-sandbox"] });
+  const browser = (await chromium.launch({ executablePath: chromiumPath(), args: ["--no-sandbox"] })) as unknown as { newContext: (o: Record<string, unknown>) => Promise<CtxLike>; close: () => Promise<void> };
   try {
     // 1+2：staff-tkw inbox（T242 badge + T244 auto-resolve 備註）
     const ctx1 = await browser.newContext({ viewport: { width: 1440, height: 900 } });

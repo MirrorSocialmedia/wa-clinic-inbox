@@ -14,17 +14,13 @@
  *   COPYONLY-UI-OK / COPYONLY-UI-FAIL: <reason>
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { chromium, chromiumPath } from "./_pw";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 
 // host 全局 playwright-core（repo 唔帶依賴）— 同 e2e-schedule-ui.ts 同一 pattern
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 function arg(name: string): string {
   const i = process.argv.indexOf(name);
@@ -36,23 +32,6 @@ function arg(name: string): string {
   return v;
 }
 
-function findChromium(): string {
-  const base = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(base)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(base, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 
 interface PageLike {
   goto: (url: string, o?: Record<string, unknown>) => Promise<void>;
@@ -77,7 +56,7 @@ async function main(): Promise<void> {
   const sessionValue = (line ?? "").trim().split(/\s+/).pop() ?? "";
   if (!sessionValue) throw new Error("cookie 檔搵唔到 wa_inbox_session");
 
-  const browser = (await chromium.launch({ headless: true, executablePath: findChromium() })) as unknown as {
+  const browser = (await chromium.launch({ headless: true, executablePath: chromiumPath() })) as unknown as {
     newContext: (o: Record<string, unknown>) => Promise<{
       addCookies: (c: unknown[]) => Promise<void>;
       newPage: () => Promise<PageLike>;

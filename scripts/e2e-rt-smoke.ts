@@ -10,7 +10,6 @@
  *   --wait-name 'E2E Realtime 張三'
  */
 import { readFileSync } from "node:fs";
-/* eslint-disable @typescript-eslint/no-require-imports */
 type PageLike = {
   goto(url: string, o: Record<string, unknown>): Promise<unknown>;
   waitForTimeout(ms: number): Promise<void>;
@@ -26,12 +25,13 @@ type CtxLike = {
   close(): Promise<void>;
 };
 type BrowserLike = { close(): Promise<void> };
+// ★ cwi-final S6-1：playwright-core 改 repo devDependency（單一入口 scripts/_pw.ts）；
+// executablePath 讀 env PW_CHROMIUM（冇就 playwright-core registry 預設）。
 // ★ a2 fix：playwright-core module 本身冇 .launch — 要解構 chromium（同 e2e-notify-ui.ts 口徑）
-const { chromium: pw } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch(o: Record<string, unknown>): Promise<BrowserLike & { newContext(o: Record<string, unknown>): Promise<CtxLike> }> };
-};
+import { chromium as _pwRaw, chromiumPath } from "./_pw";
+const pw = _pwRaw as { launch(o: Record<string, unknown>): Promise<BrowserLike & { newContext(o: Record<string, unknown>): Promise<CtxLike> }> };
 
-const EXE = "/home/kenneth/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome";
+const EXE = chromiumPath();
 
 let failReason = "";
 function fail(r: string): never {
@@ -54,7 +54,7 @@ function parseJar(file: string): string | null {
 }
 
 async function openBrowser(
-  exe: string,
+  exe: string | undefined,
   cookieFile: string,
   url: string,
 ): Promise<{ B: BrowserLike; C: CtxLike; P: PageLike }> {

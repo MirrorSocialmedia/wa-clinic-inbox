@@ -28,6 +28,7 @@ import { PrismaClient } from "@prisma/client";
 import { EVENT_SCHEMAS } from "@/lib/realtime-events";
 import { buildMessageNewPayload } from "@/lib/realtime-payload";
 import { publishConvEvent, convRef } from "@/lib/notify";
+import { chromium, chromiumPath } from "./_pw";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:3100";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -37,10 +38,6 @@ try {
   /* 靠 process env */
 }
 
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 const COMPANY_CODE = "E2ES17-CO";
 const CLINIC_A = "E2ES17-A";
@@ -160,22 +157,6 @@ interface BrowserLike {
   close: () => Promise<void>;
 }
 
-function findChromium(): string {
-  const os = require("os") as typeof import("os");
-  const fs = require("fs") as typeof import("fs");
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = fs.readdirSync(baseDir).filter((d): boolean => d.startsWith("chromium-")).sort().reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      fs.readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到");
-}
 
 // ══ UNIT 部分 ════════════════════════════════════════════════════════════════
 
@@ -336,7 +317,7 @@ async function runE2e(fx: { clinicA: string; assnId: string }): Promise<void> {
   console.log("E2E：ids-only conv:updated → row 負責人／unread 唔變：");
   const cookie = await login(VIEWER_EMAIL);
   const browser: BrowserLike = await (chromium as { launch: (o: Record<string, unknown>) => Promise<BrowserLike> }).launch({
-    executablePath: findChromium(),
+    executablePath: chromiumPath(),
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });

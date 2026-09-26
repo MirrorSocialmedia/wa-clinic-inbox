@@ -28,7 +28,6 @@
 import "./e2e-origin-shim";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import http from "node:http";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";

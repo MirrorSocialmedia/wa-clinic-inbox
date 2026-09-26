@@ -26,6 +26,7 @@
 import "./e2e-origin-shim";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
+import { chromium, chromiumPath } from "./_pw";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:3100";
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -35,10 +36,6 @@ try {
   /* 靠 process env */
 }
 
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 const COMPANY_CODE = "E2ES13-CO";
 const CLINIC_A = "E2ES13-A"; // 自己店
@@ -222,22 +219,6 @@ interface BrowserLike {
   close: () => Promise<void>;
 }
 
-function findChromium(): string {
-  const os = require("os") as typeof import("os");
-  const fs = require("fs") as typeof import("fs");
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = fs.readdirSync(baseDir).filter((d) => d.startsWith("chromium-")).sort().reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      fs.readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到");
-}
 
 async function main(): Promise<void> {
   console.log(`[T611] S1-3 唔喺列表嘅對話撳入去空白（320 conv fixture）— base=${BASE}`);
@@ -278,7 +259,7 @@ async function main(): Promise<void> {
 
   // ── browser ─────────────────────────────────────────────────────────────
   const browser: BrowserLike = await (chromium as { launch: (o: Record<string, unknown>) => Promise<BrowserLike> }).launch({
-    executablePath: findChromium(),
+    executablePath: chromiumPath(),
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });

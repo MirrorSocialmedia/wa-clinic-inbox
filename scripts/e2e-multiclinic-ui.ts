@@ -20,14 +20,9 @@
  * ★ PII 鐵律：fixture 全合成（E2E MC 前綴）。
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync } from "node:fs";
-import path from "node:path";
-import os from "node:os";
+import { readFileSync } from "node:fs";
+import { chromium, chromiumPath } from "./_pw";
 
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 // ── args ─────────────────────────────────────────────────────────────────
 function arg(name: string): string {
@@ -70,23 +65,6 @@ function fail(r: string): never {
 }
 
 // ── chromium / cookie ────────────────────────────────────────────────────
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(baseDir)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 
 function readSession(cookieFile: string): string {
   const jar = readFileSync(cookieFile, "utf8");
@@ -140,7 +118,7 @@ async function launchWithCookie(cookieFile: string): Promise<{
   B: { close: () => Promise<void> };
   P: PageLike;
 }> {
-  const exe = findChromium();
+  const exe = chromiumPath();
   const sessionValue = readSession(cookieFile);
   if (!sessionValue) fail("cookie 檔冇 session（未 login？）");
   const B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<{ newContext: (o: Record<string, unknown>) => Promise<CtxLike>; close: () => Promise<void> }> }).launch({

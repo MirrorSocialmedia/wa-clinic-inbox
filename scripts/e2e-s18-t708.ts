@@ -12,10 +12,10 @@
  * fixture：`t708` 前綴 id — 段尾 hermetic sweep（assert 零殘留）
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { PrismaClient } from "@prisma/client";
+import { chromium, chromiumPath } from "./_pw";
 
 const REPO = path.join(import.meta.dirname, "..");
 const BASE = process.env.E2E_BASE ?? "http://127.0.0.1:3100";
@@ -81,20 +81,6 @@ async function cookieFor(email: string, password: string): Promise<string> {
   return c;
 }
 
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(baseDir).filter((d) => d.startsWith("chromium-")).sort().reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  fail("chromium binary 搵唔到");
-}
 
 async function setupFixtures(tkwId: string, staffTkwId: string): Promise<void> {
   // ★ 基線確定性：清晒全庫 SUGGESTED task（dev e2e 環境；count 只由我地 3 條決定）
@@ -162,9 +148,7 @@ async function main(): Promise<void> {
   const listBody = (await listRes.json()) as { counts?: { followup?: number } };
   check("server counts.followup === 3", listBody.counts?.followup === 3, listBody.counts);
 
-  /* eslint-disable @typescript-eslint/no-require-imports -- repo 慣例：playwright-core 從 openclaw global node_modules 載入 */
-  const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as PwModule;
-  const browser = await chromium.launch({ executablePath: findChromium(), args: ["--no-sandbox"] });
+  const browser = (await chromium.launch({ executablePath: chromiumPath(), args: ["--no-sandbox"] })) as unknown as { newContext: (o: Record<string, unknown>) => Promise<{ newPage: () => Promise<PwPageMin>; addCookies: (c: { name: string; value: string; domain: string; path: string }[]) => Promise<void>; close: () => Promise<void> }>; close: () => Promise<void> };
   try {
     const ctx = await browser.newContext({ viewport: { width: 360, height: 700 } });
     const page = await ctx.newPage();
@@ -234,18 +218,6 @@ type PwPageMin = {
   waitForTimeout(n: number): Promise<void>;
   goto(u: string, o?: { waitUntil?: string; timeout?: number }): Promise<void>;
   screenshot(o: { path: string }): Promise<void>;
-};
-type PwModule = {
-  chromium: {
-    launch(opts: { executablePath: string; args: string[] }): Promise<{
-    newContext(o: { viewport: { width: number; height: number } }): Promise<{
-      newPage(): Promise<PwPageMin>;
-      addCookies(c: { name: string; value: string; domain: string; path: string }[]): Promise<void>;
-      close(): Promise<void>;
-    }>;
-    close(): Promise<void>;
-  }>;
-  };
 };
 
 main().catch((e) => {

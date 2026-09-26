@@ -24,16 +24,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import "./e2e-origin-shim";
 import path from "node:path";
-import fs from "node:fs";
 import { createRequire } from "node:module";
 import { PrismaClient } from "@prisma/client";
 import { phoneHashes } from "../src/lib/phone-hash";
+import { chromium, chromiumPath } from "./_pw";
 
 const require = createRequire(path.join(process.cwd(), "package.json"));
 const argon2 = require("argon2");
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<any> };
-};
 
 try {
   process.loadEnvFile(path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", ".env"));
@@ -69,20 +66,6 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const prisma = new PrismaClient();
 
-function findChromium(): string {
-  const exe = path.join(
-    process.env.HOME ?? "/home/kenneth",
-    ".cache/ms-playwright/chromium-1228/chrome-linux64/chrome"
-  );
-  if (!fs.existsSync(exe)) {
-    // fallback：搵最新 chromium-*
-    const baseDir = path.join(process.env.HOME ?? "/home/kenneth", ".cache", "ms-playwright");
-    const d = fs.readdirSync(baseDir).filter((x) => x.startsWith("chromium-")).sort().reverse()[0];
-    if (d) return path.join(baseDir, d, "chrome-linux64", "chrome");
-    throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-  }
-  return exe;
-}
 
 async function cleanupFixture(): Promise<void> {
   await prisma.$executeRawUnsafe(
@@ -198,8 +181,8 @@ async function main(): Promise<void> {
   ok("fixture 對話 ×2 + SUGGESTED task ×2（窗開 + assignee=STAFF）");
 
   // ── (2) 瀏覽器 ──────────────────────────────────────────────────────────
-  const exe = findChromium();
-  const B = await chromium.launch({ headless: true, executablePath: exe });
+  const exe = chromiumPath();
+  const B = (await chromium.launch({ headless: true, executablePath: exe })) as { newContext: (o: Record<string, unknown>) => Promise<any>; close: () => Promise<void> };
   const res = await fetch(`${BASE}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

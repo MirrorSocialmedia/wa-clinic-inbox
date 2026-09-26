@@ -25,9 +25,9 @@ import "./e2e-origin-shim";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
+import { chromium as pw, chromiumPath } from "./_pw";
 
 const argon2 = createRequire(path.join(process.cwd(), "package.json"))("argon2");
 
@@ -95,15 +95,8 @@ async function main(): Promise<void> {
   const srv = await fetch(`${BASE}/api/auth/login`, { method: "POST", body: "{}" }).catch(() => null);
   if (!srv) fail("dev server 3100 唔喺");
   void srv;
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const exeDir = fs
-    .readdirSync(baseDir)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .pop();
-  if (!exeDir) fail("chromium 搵唔到（~/.cache/ms-playwright）");
-  const exe = path.join(baseDir, exeDir, "chrome-linux64", "chrome");
-  if (!fs.existsSync(exe)) fail(`chromium binary 搵唔到：${exe}`);
+  // S6-1：browser 路徑 = PW_CHROMIUM（未設 → playwright-core registry 預設）
+  const exe = chromiumPath();
   console.log("[T0] 基建 OK");
 
   // ── 冪等洗（上輪殘留 self-heal）────────────────────────────────────────
@@ -332,11 +325,6 @@ async function main(): Promise<void> {
   }
 
   // ── UI helpers ─────────────────────────────────────────────────────────
-  async function launchPw() {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pw = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core");
-    return (pw as any).chromium;
-  }
   /** 手機 viewport 選中對話（列表 button:has-text；喺 chat view 先返回列表） */
   async function selectConv(pg: Page, name: string, diag?: { errors: string[]; apis: string[] }): Promise<void> {
     /** Next 15 dev loadManifest race / 對話列表 API 瞬時 500（已知 flake；fetchConversations 靜默返空）
@@ -422,8 +410,7 @@ async function main(): Promise<void> {
   // ═══════════════════════════════════════════════════════════════════════
   console.log("\n[T6] UI 手機（chip + 抽屜 + 首行 + 展開 audit）");
   {
-    const chromium = await launchPw();
-    const browser = await chromium.launch({ headless: true, executablePath: exe, args: ["--no-sandbox"] });
+    const browser = (await pw.launch({ headless: true, executablePath: exe, args: ["--no-sandbox"] })) as unknown as { newContext: (o: Record<string, unknown>) => Promise<any>; close: () => Promise<void> };
     const ctx = await browser.newContext({
       viewport: { width: 390, height: 844 },
       isMobile: true,
@@ -549,8 +536,7 @@ async function main(): Promise<void> {
   // ═══════════════════════════════════════════════════════════════════════
   console.log("\n[T7] UI 手機：刷新五態 + 60s 倒數 + >24h 自動靜默刷新");
   {
-    const chromium = await launchPw();
-    const browser = await chromium.launch({ headless: true, executablePath: exe, args: ["--no-sandbox"] });
+    const browser = (await pw.launch({ headless: true, executablePath: exe, args: ["--no-sandbox"] })) as unknown as { newContext: (o: Record<string, unknown>) => Promise<any>; close: () => Promise<void> };
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     await ctx.grantPermissions(["notifications"], { origin: BASE });
     await ctx.addCookies([{ name: "wa_inbox_session", value: superCookie, domain: "127.0.0.1", path: "/" }]);
@@ -703,8 +689,7 @@ async function main(): Promise<void> {
   // ═══════════════════════════════════════════════════════════════════════
   console.log("\n[T8] UI 桌面：右側欄 備註／病人記錄／AI 分頁");
   {
-    const chromium = await launchPw();
-    const browser = await chromium.launch({ headless: true, executablePath: exe, args: ["--no-sandbox"] });
+    const browser = (await pw.launch({ headless: true, executablePath: exe, args: ["--no-sandbox"] })) as unknown as { newContext: (o: Record<string, unknown>) => Promise<any>; close: () => Promise<void> };
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     await ctx.grantPermissions(["notifications"], { origin: BASE });
     await ctx.addCookies([{ name: "wa_inbox_session", value: superCookie, domain: "127.0.0.1", path: "/" }]);

@@ -34,18 +34,14 @@
  *   -extra-providers.json。
  */
 import "./e2e-origin-shim";
-import { readFileSync, writeFileSync, rmSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import path from "node:path";
-import os from "node:os";
+import { chromium, chromiumPath } from "./_pw";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 
 // host 全局 playwright-core（repo 唔帶依賴）— 同 e2e-duty-refresh.ts 同一 pattern
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 const FLAG_429 = path.join(REPO_ROOT, ".dev", "workforce-mock-refresh-429.json");
 const FLAG_409 = path.join(REPO_ROOT, ".dev", "workforce-mock-refresh-409.json");
@@ -62,23 +58,6 @@ function arg(name: string, dflt = ""): string {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : dflt;
 }
 
-function findChromium(): string {
-  const base = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(base)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(base, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 
 /** 窄化（只用呢度用到嘅方法） */
 interface P {
@@ -136,7 +115,9 @@ try {
 
 function psql(sql: string): string {
   if (!DATABASE_URL) throw new Error("DATABASE_URL 缺（.env）— DB 斷言無法行");
-  return execSync(`psql "${DATABASE_URL}" -tA -v ON_ERROR_STOP=1`, {
+  // ★ cwi-final S6-2：DATABASE_URL 帶 Prisma pool 參數（?connection_limit=15&pool_timeout=10）— libpq 唔識會炸，strip 掉
+  const url = DATABASE_URL.split("?")[0];
+  return execSync(`psql "${url}" -tA -v ON_ERROR_STOP=1`, {
     input: sql,
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"],
@@ -213,7 +194,7 @@ async function main(): Promise<void> {
   const _hmT = new Date().toLocaleString("en-GB", { timeZone: "Asia/Hong_Kong", hour: "2-digit", minute: "2-digit", hour12: false });
   const nowMinT = Number(_hmT.slice(0, 2)) * 60 + Number(_hmT.slice(3, 5));
 
-  const browser = (await chromium.launch({ headless: true, executablePath: findChromium() })) as unknown as {
+  const browser = (await chromium.launch({ headless: true, executablePath: chromiumPath() })) as unknown as {
     newContext: (o: Record<string, unknown>) => Promise<{
       addCookies: (c: unknown[]) => Promise<void>;
       newPage: () => Promise<PageLike>;

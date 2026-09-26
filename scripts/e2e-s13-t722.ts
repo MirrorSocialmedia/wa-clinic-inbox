@@ -21,17 +21,14 @@
  * PII 鐵律：fixture 全 fake（fake waId 8 位、fake 姓名、固定 mock 文案）— 零真病人資料。
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync } from "node:fs";
+
 import { spawn } from "node:child_process";
 import path from "node:path";
-import os from "node:os";
 import { createRequire } from "node:module";
 import { PrismaClient } from "@prisma/client";
+import { chromium, chromiumPath } from "./_pw";
 
 /* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 const { io } = require("socket.io-client") as {
   io: (url: string, o: Record<string, unknown>) => {
     on: (e: string, cb: (...a: never[]) => void) => void;
@@ -262,21 +259,6 @@ interface BrowserLike {
   close: () => Promise<void>;
 }
 
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = fsReaddir(baseDir).filter((d) => d.startsWith("chromium-")).sort().reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到");
-}
-const fsReaddir = (d: string): string[] => readdirSync(d);
 
 /** Next 15 dev loadManifest race（已知 flake — TOOLS.md）：error page 偵測 + reload 重試。 */
 async function gotoRetry(P: Page, url: string, maxTries = 3): Promise<void> {
@@ -329,7 +311,7 @@ async function main(): Promise<void> {
 
   // ── 瀏覽器開住 /inbox（UI 堆疊卡片數驗證）────────────────────────────────
   const browser: BrowserLike = await (chromium as { launch: (o: Record<string, unknown>) => Promise<BrowserLike> }).launch({
-    executablePath: findChromium(),
+    executablePath: chromiumPath(),
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });

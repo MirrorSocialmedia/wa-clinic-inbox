@@ -68,11 +68,20 @@ async function main() {
       });
     }
     // cwi-h6-20260830：StaffClinic 綁定行（login clinicIds 靠呢行；冪等 upsert）
-    await prisma.staffClinic.upsert({
+    // ★ cwi-final S6-2：app admin API 口徑 = 頭間店 isPrimary、其餘 false（StaffClinic_one_primary unique partial index）—
+    //   舊版無條件 isPrimary:true → 雙綁（T290a）會撞 unique index 靜默失敗 → 改：已存在行保持原狀（唔搶 primary），
+    //   新行只有該 staff 未有其他 primary 先 primary
+    const existingBinding = await prisma.staffClinic.findUnique({
       where: { staffId_clinicId: { staffId: staff.id, clinicId: clinicRow.id } },
-      update: { isPrimary: true },
-      create: { staffId: staff.id, clinicId: clinicRow.id, isPrimary: true },
     });
+    if (!existingBinding) {
+      const otherPrimaryCount = await prisma.staffClinic.count({
+        where: { staffId: staff.id, isPrimary: true },
+      });
+      await prisma.staffClinic.create({
+        data: { staffId: staff.id, clinicId: clinicRow.id, isPrimary: otherPrimaryCount === 0 },
+      });
+    }
     console.log(`STAFF_ID=${staff.id}`);
     return;
   }

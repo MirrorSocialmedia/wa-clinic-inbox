@@ -14,14 +14,9 @@
  *
  * 輸出（mock-e2e.sh grep 用）：USAGE-UI-OK / USAGE-UI-FAIL: <reason>
  */
-import { readFileSync, readdirSync } from "node:fs";
-import path from "node:path";
-import os from "node:os";
+import { readFileSync } from "node:fs";
+import { chromium, chromiumPath } from "./_pw";
 
-/* eslint-disable @typescript-eslint/no-require-imports */
-const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as {
-  chromium: { launch: (o: Record<string, unknown>) => Promise<unknown> };
-};
 
 function arg(name: string): string {
   const i = process.argv.indexOf(name);
@@ -36,23 +31,6 @@ function req(name: string): string {
   return v;
 }
 
-function findChromium(): string {
-  const base = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(base)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(base, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 
 interface LocatorLike {
   waitFor: (o?: Record<string, unknown>) => Promise<unknown>;
@@ -79,7 +57,7 @@ async function main(): Promise<void> {
   const sessionValue = (line ?? "").trim().split(/\s+/).pop() ?? "";
   if (!sessionValue) throw new Error("cookie file 無 wa_inbox_session");
 
-  const browser = await (chromium.launch({ headless: true, executablePath: findChromium() }) as Promise<{
+  const browser = await (chromium.launch({ headless: true, executablePath: chromiumPath() }) as Promise<{
     newContext: (o?: Record<string, unknown>) => Promise<ContextLike>;
     close: () => Promise<void>;
   }>);

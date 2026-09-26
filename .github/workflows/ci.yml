@@ -1,0 +1,33 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres: { image: postgres:16, env: { POSTGRES_PASSWORD: pw, POSTGRES_DB: wa }, ports: ["15432:5432"], options: "--health-cmd pg_isready" }
+      redis: { image: redis:7, ports: ["6379:6379"] }
+    env:
+      DATABASE_URL: "postgresql://postgres:pw@localhost:15432/wa?connection_limit=15&pool_timeout=10"
+      REDIS_URL: redis://localhost:6379
+      AI_MOCK: "1"
+      WA_MOCK: "1"
+      DUTY_MOCK: "1"
+      ALLOW_MOCK_IN_PROD: "1"
+      RETENTION_CONV_MONTHS: "24"
+      RETENTION_MEDIA_MONTHS: "12"
+      # S6-1 deviation（記錄在案）：runner 無 ms-playwright registry → 指 system chrome
+      #（spec S6-1「executablePath 讀 env PW_CHROMIUM（冇就用 playwright 預設）」機制；
+      #   mock-e2e.sh --ci 內嘅 browser e2e 經 scripts/_pw.ts chromiumPath() 消費呢個 env）
+      PW_CHROMIUM: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm migrate:deploy && pnpm db:seed
+      - run: pnpm typecheck && pnpm lint
+      - run: for f in scripts/unit-*.ts; do pnpm tsx "$f" || exit 1; done
+      - run: pnpm test:ordering
+      - run: pnpm tsx scripts/e2e-authz-matrix.ts   # T630
+      - run: bash scripts/mock-e2e.sh --ci

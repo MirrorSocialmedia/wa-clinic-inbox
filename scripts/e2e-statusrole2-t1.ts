@@ -23,11 +23,11 @@
  * fixture：`sr2t1` 前綴 id + email — 段尾 hermetic sweep（assert 零殘留）
  */
 import "./e2e-origin-shim";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { PrismaClient } from "@prisma/client";
 import argon2 from "argon2";
+import { chromium, chromiumPath } from "./_pw";
 
 const REPO = path.join(import.meta.dirname, "..");
 const BASE = process.env.E2E_BASE ?? "http://127.0.0.1:3100";
@@ -391,34 +391,10 @@ interface CtxLike {
   addCookies: (c: { name: string; value: string; domain: string; path: string }[]) => Promise<void>;
   close: () => Promise<void>;
 }
-interface PwChromium {
-  chromium: {
-    launch(opts: { executablePath: string; args: string[] }): Promise<{
-      newContext(opts: { viewport: { width: number; height: number } }): Promise<CtxLike>;
-      close(): Promise<void>;
-    }>;
-  };
-}
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = readdirSync(baseDir).filter((d) => d.startsWith("chromium-")).sort().reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到");
-}
 
 async function t240Ui(adminCookie: string): Promise<void> {
   console.log("\n[T240] UI：膠囊兩行 + 溢出選單 + 已解決連結");
-  /* eslint-disable @typescript-eslint/no-require-imports -- repo 慣例：playwright-core 從 openclaw global node_modules 載入 */
-  const { chromium } = require("/usr/lib/node_modules/openclaw/node_modules/playwright-core") as PwChromium;
-  const browser = await chromium.launch({ executablePath: findChromium(), args: ["--no-sandbox"] });
+  const browser = (await chromium.launch({ executablePath: chromiumPath(), args: ["--no-sandbox"] })) as unknown as { newContext: (o: Record<string, unknown>) => Promise<CtxLike>; close: () => Promise<void> };
   try {
     // ── 桌面 viewport（1280×900）──
     const ctxPw = await browser.newContext({ viewport: { width: 1280, height: 900 } });

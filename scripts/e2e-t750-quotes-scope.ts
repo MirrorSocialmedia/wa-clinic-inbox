@@ -20,11 +20,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import "./e2e-origin-shim";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { PrismaClient } from "@prisma/client";
-import { chromium } from "./_pw"; // ★ cwi-final F-5：playwright-core 單一入口（PW_CORE 可覆蓋）
+import { chromium, chromiumPath } from "./_pw"; // ★ cwi-final F-5→S6-1：playwright-core 單一入口（PW_CORE / PW_CHROMIUM 可覆蓋）
 
 const require = createRequire(path.join(process.cwd(), "package.json"));
 const argon2 = require("argon2");
@@ -68,24 +67,6 @@ function check(name: string, cond: boolean, detail?: unknown): void {
 }
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** playwright-core 搵 chromium binary（同 e2e-t600 慣例；S6-1 收埋入 scripts/_pw.ts） */
-function findChromium(): string {
-  const baseDir = path.join(os.homedir(), ".cache", "ms-playwright");
-  const dirs = fs.readdirSync(baseDir)
-    .filter((d) => d.startsWith("chromium-"))
-    .sort()
-    .reverse();
-  for (const d of dirs) {
-    const exe = path.join(baseDir, d, "chrome-linux64", "chrome");
-    try {
-      fs.readFileSync(exe);
-      return exe;
-    } catch {
-      /* next */
-    }
-  }
-  throw new Error("chromium binary 搵唔到（~/.cache/ms-playwright）");
-}
 interface PageLike {
   goto: (url: string, o: Record<string, unknown>) => Promise<unknown>;
   locator: (sel: string) => { count: () => Promise<number>; click: (o?: Record<string, unknown>) => Promise<void> };
@@ -261,7 +242,7 @@ async function main(): Promise<void> {
       { staffId: U_GR, email: E_GR, name: "E2E T750 舊格式 ADMIN", role: "ADMIN", clinicId: null, loginAt: Date.now() },
       { password: secret, ttl: 24 * 3600 }
     );
-    const exe = findChromium();
+    const exe = chromiumPath();
     const B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<Browser> }).launch({
       headless: true,
       executablePath: exe,
