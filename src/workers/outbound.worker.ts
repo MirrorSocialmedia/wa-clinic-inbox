@@ -283,9 +283,16 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       status: "FAILED",
       errorCode: "SEND_FAILED",
     });
-    // ★ cwi-final S1-15：最終失敗 → SYSTEM notice 畀發送者（sentByStaffId）或 assignee
-    //   （口徑照 AI_FAILED notice；兩者都無 — 純 AI 無人手對話 — 唔建 notice 免噪音）。
-    const noticeTarget = msg.sentByStaffId ?? conv.assigneeId;
+    // ★ cwi-final S1-15 → S6-9 ①：最終失敗 → SYSTEM notice 標題帶店名（「訊息發送失敗 · {店}」）。
+    //   target 口徑：sentByStaffId → assignee → 店內任一 active staff（meta.targetStaffId 留痕）；
+    //   notice 本身係 clinic-scoped（全店 staff 可見，per-staff 已讀 StaffNoticeRead）— 全無 staff 先唔建。
+    const noticeTarget =
+      msg.sentByStaffId ??
+      conv.assigneeId ??
+      (await prisma.staffClinic
+        .findFirst({ where: { clinicId: clinic.id, staff: { active: true } }, select: { staffId: true }, orderBy: { createdAt: "asc" } })
+        .then((r) => r?.staffId ?? null)
+        .catch(() => null));
     if (noticeTarget) {
       const finalCode = err instanceof Error ? truncateCode(err.message) : "UNKNOWN";
       await prisma.staffNotice
@@ -294,8 +301,8 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
             clinicId: clinic.id,
             conversationId: conv.id,
             kind: "SYSTEM",
-            title: "訊息發送失敗 — 請人手睇",
-            meta: { reason: "SEND_FAILED", msgId: msg.id, wamid: msg.waMessageId ?? null, errorCode: finalCode },
+            title: `訊息發送失敗 · ${clinic.name}`,
+            meta: { reason: "SEND_FAILED", msgId: msg.id, wamid: msg.waMessageId ?? null, errorCode: finalCode, targetStaffId: noticeTarget },
           },
         })
         .catch((nErr) =>

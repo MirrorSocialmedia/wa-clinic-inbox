@@ -729,6 +729,10 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/conversations/nope/messages" }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
   },
+  "GET /api/conversations/[id]/bundle": {
+    fixture: () => ({ url: "/api/conversations/nope/bundle" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404 }, // S6-7：latest page + drafts + receipts + suggestion 一請求
+  },
   "GET /api/conversations/[id]/note-read-receipts": {
     fixture: () => ({ url: "/api/conversations/nope/note-read-receipts" }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
@@ -852,6 +856,10 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: `/api/messages/${F.msgPre}/void`, method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 403 }, // S3-9：assertConversationAccess 先行 → 403（外店）
   },
+  "POST /api/messages/[id]/retry": {
+    fixture: () => ({ url: "/api/messages/nope/retry", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 403 }, // S6-9①：FAILED retry（assertCanWriteConversation 先行 → SUPERVISOR 403）
+  },
   "POST /api/messages/send": {
     fixture: () => ({ url: "/api/messages/send", method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 400 }, // 快照：S3-9（replay lookup + send lock 順序）
@@ -899,6 +907,10 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
   "GET /api/search": {
     fixture: () => ({ url: "/api/search?q=t630" }),
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 }, // 快照：S3-6（30/min rate limit）
+  },
+  "PATCH /api/staff/me/prefs": {
+    fixture: () => ({ url: "/api/staff/me/prefs", method: "PATCH", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, SUPERVISOR: 200, ADMIN_ALL: 200 }, // S6-9③：自己 uiPrefs shallow merge（空 body = 無變更 200）
   },
   "GET /api/staff": {
     fixture: () => ({ url: "/api/staff" }),

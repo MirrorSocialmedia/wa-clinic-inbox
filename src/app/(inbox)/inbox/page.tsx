@@ -48,7 +48,7 @@ export default async function InboxPage({
   };
   const s = await resolveListScope(scopeCtx, null);
   const followupDue = await loadFollowupDue(s);
-  const [{ rows, nextCursor }, counts, clinics, staff] = await Promise.all([
+  const [{ rows, nextCursor }, counts, clinics, staff, me] = await Promise.all([
     loadConversationRows(s, followupDue),
     loadCounts(s, followupDue),
     // 店 tabs（clinic 集合 — STAFF / 受限 = scopedSet；ALL / SUPERVISOR = 全店）
@@ -57,6 +57,8 @@ export default async function InboxPage({
       : prisma.clinic.findMany({ orderBy: { code: "asc" } }),
     // staffMap 唔限 clinic scope（三態 chip 需要全店 staff 名；同 API 對齊）
     prisma.staffUser.findMany({ where: { active: true }, select: { id: true, name: true, role: true, clinicId: true } }),
+    // ★ cwi-final S6-9（③）：per-staff UI 偏好（enterSends 等）
+    prisma.staffUser.findUnique({ where: { id: session.staffId }, select: { uiPrefs: true } }),
   ]);
   // providerslot-20260830 T3：hold 卡 — STAFF 限本頁 rows 嘅店（fail-closed，同現行行為）
   const initialConversations = await toConversationDTOs(
@@ -79,6 +81,8 @@ export default async function InboxPage({
         clinicIds: session.role === "STAFF" ? scopedClinicIds : [],
         // ★ cwi-final S1-2（裁決 11）：「派俾我 N」膠囊 — resolveListScope 單一來源（所有角色）
         myGroupIds: s.myGroupIds,
+        // ★ cwi-final S6-9（③）：enterSends 偏好初值（null = 預設 true）
+        uiPrefs: me?.uiPrefs as { enterSends?: boolean } | null,
       }}
       initialClinics={clinics}
       initialConversations={initialConversations}

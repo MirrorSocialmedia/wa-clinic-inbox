@@ -56,7 +56,7 @@ import {
 // ★ cwi-final S1-1c：client 同 server 共用同一套 monotonic status 規則（只升唔降）
 import { nextStatus } from "@/lib/wa/status-rank";
 import { ConversationList } from "./conversation-list";
-import { ChatPane } from "./chat-pane";
+import { ChatPane, type ChatPaneHandle } from "./chat-pane";
 import { DetailPane } from "./detail-pane";
 import { PatientDrawer } from "./patient-drawer";
 
@@ -1486,16 +1486,14 @@ export function InboxClient({
     []
   );
 
-  const fetchMessagesLatest = useCallback(async (convId: string): Promise<number> => {
-    try {
-      const res = await fetch(`/api/conversations/${convId}/messages?limit=${PAGE_SIZE}`);
-      if (!res.ok) return 0;
-      const data = (await res.json()) as { messages: MessageItem[]; hasMore: boolean };
-      // F-8（cwi-notify-fix）：merge by messageId — socket 已 append 入 state 嘅行（server list
-      // 未反映 / refetch race 回舊 list）唔會因整包覆蓋消失；id 撞車 server row 為準。
-      // 換對話要先喺 call site setMessages([]) 清空（避免 A 嘅行漏入 B）。
+  /**
+   * F-8 merge + cursor 推進 + hasMore 單調（latest 頁）— fetchMessagesLatest / fetchBundle（S6-7）共用。
+   * 回傳新增行數（reconcile tick 計 [rt] reconcile added N）。
+   */
+  const applyLatestPage = useCallback(
+    (convId: string, data: { messages: MessageItem[]; hasMore: boolean }): number => {
       if (selectedIdRef.current !== convId) return 0; // fetch 期間已換咗對話 → 舊結果棄
-      // ★ cwi-realtime-v2 §3：回傳新增行數（reconcile tick 計 [rt] reconcile added N）
+      // ★ cwi-realtime-v2 §3：回傳新增行數
       const prevIds = new Set(messagesRef.current.map((m) => m.id));
       const addedCount = data.messages.filter((m) => !prevIds.has(m.id)).length;
       setMessages((prev) => {
@@ -1503,9 +1501,11 @@ export function InboxClient({
         for (const m of data.messages) map.set(m.id, m);
         return [...map.values()].sort(msgSortCmp);
       });
-      setHasMore(data.hasMore);
+      // ★ cwi-final S6-7：hasMore 單調 OR — latest 頁唔會把已 true 嘅 hasMore 降回 false（用戶已向上捲載過
+      //   歷史時，降 false 會令已載歷史永久觸唔到；換對話時 selectConversation 先 setHasMore(false) 重置）。
+      setHasMore((prev) => prev || data.hasMore);
       if (data.messages.length > 0) {
-        // v2 §2：游標 = 該頁最大 createdAt（latest 頁 server 按 waTimestamp 排序 — 尾行唔一定係 max）
+        // v2 §2：游標 = 該頁最大 createdAt（latest 頁 server 按 createdAt desc 攞 — 尾行唔一定係 max）
         const maxCreated = data.messages.reduce(
           (mx, m) => Math.max(mx, new Date(m.createdAt).getTime() || 0),
           0
@@ -1513,13 +1513,21 @@ export function InboxClient({
         bumpCursor(convId, maxCreated); // 只喺結果實際應用時
       }
       return addedCount;
+    },
+    [bumpCursor]
+  );
+
+  const fetchMessagesLatest = useCallback(async (convId: string): Promise<number> => {
+    try {
+      const res = await fetch(`/api/conversations/${convId}/messages?limit=${PAGE_SIZE}`);
+      if (!res.ok) return 0;
+      const data = (await res.json()) as { messages: MessageItem[]; hasMore: boolean };
+      return applyLatestPage(convId, data);
     } catch {
       /* ignore */
     }
     return 0;
-    // ★ 審計 B-3：補 'bumpCursor' 依賴（禁 eslint-disable）— 已實證 bumpCursor = useCallback([]) 只操作
-    //   lastMsgTsRef（useRef Map）→ reference 恆 stable，加依賴 runtime 零 re-create，closure 版本永唔會錯
-  }, [bumpCursor]);
+  }, [applyLatestPage]);
 
   // ── ★ cwi-followup-v3：建議卡操作（過窗 template 直發 / 跳過 / 窗口內採用發送回執）──
   const suggestionAction = useCallback(
@@ -1791,24 +1799,25 @@ export function InboxClient({
     //   只操作兩個 useRef + markRead（body 只 fetch + setConversations，無 state/props closure）→ reference 恆 stable
   }, [refetchDelta, fetchMessagesLatest, markReadDebounced]);
 
-  // ── ★ cwi-realtime-v2 §3：20 秒 reconcile 安全網 ─────────────────────────
-  // tab 可見 + 有選中對話 → 每 20s merge 最新一頁（fetchMessagesLatest 已係 by-id merge
-  //   唔會覆蓋）+ 對話列表同款 delta（noCatchUp — 訊息補漏由 fetchMessagesLatest 負責，
-  //   唔雙重計 added）。任何 socket race / 事件遺失 → 漏 = 最多遲 20 秒。
+  // ── ★ cwi-realtime-v2 §3 → cwi-final S6-7：20 秒 reconcile 安全網 ───────────────
+  // tab 可見 + 有選中對話 → 每 20s `after` catch-up（只拉 createdAt > 游標增量 — 唔再每次拉 latest 50；
+  //   catchUp 內部：游標 0 / state 空 → 仍行 latest 一頁（RT-3 保底））+ 對話列表同款 delta
+  //   （noCatchUp — 避免雙重計 added）。任何 socket race / 事件遺失 → 漏 = 最多遲 20 秒。
+  //   hasMore 唔會俾 reconcile 覆寫（after 路徑零 hasMore 寫入；latest 兜底路徑走 applyLatestPage 單調 OR）。
   // N > 0 就係捉到一次 race — [rt] reconcile log 累積幾日就知係邊種 race。
   useEffect(() => {
     const tick = async () => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
       const sel = selectedIdRef.current;
       let added = 0;
-      if (sel) added += await fetchMessagesLatest(sel);
+      if (sel) added += await catchUp(sel);
       added += await refetchDelta({ noCatchUp: true });
       // eslint-disable-next-line no-console -- v2 §3 reconcile 留痕（N>0 = 捉到一次 race；string log — spy 按字符串捕）
       console.debug(`[rt] reconcile added ${added}`);
     };
     const t = setInterval(() => { void tick(); }, 20_000);
     return () => clearInterval(t);
-  }, [fetchMessagesLatest, refetchDelta]);
+  }, [catchUp, refetchDelta]);
 
   // ★ cwi-audit2-20260908 T3（A-5）：「createdAt 軸洞已補」per-conversation 標記（換對話時 selectConversation 清）。
   // 最新 50 用 waTimestamp 軸（hotfix 行為唔郁）— 病人手機時鐘偏差可令已載入集喺 createdAt 軸上
@@ -1877,6 +1886,43 @@ export function InboxClient({
     }
   }, []);
 
+  // ── ★ cwi-final S6-7：開對話 bundle（1 round trip = messages latest + drafts + receipts + suggestion）──
+  // 失敗（404/500/網絡）→ fallback 舊 4 平行 fetch（行為保底）。
+  const fetchBundle = useCallback(
+    async (convId: string): Promise<void> => {
+      try {
+        const res = await fetch(`/api/conversations/${convId}/bundle`);
+        if (!res.ok) throw new Error(`bundle ${res.status}`);
+        const data = (await res.json()) as {
+          messages: MessageItem[];
+          hasMore: boolean;
+          drafts: DraftInfo[];
+          receipts: NoteReceipt[];
+          suggestion: FollowupSuggestion | null;
+        };
+        if (selectedIdRef.current !== convId) return; // fetch 期間已換對話 → 棄（四段都唔落）
+        applyLatestPage(convId, { messages: data.messages, hasMore: data.hasMore });
+        // drafts（D-6 堆疊口徑同 fetchPendingDrafts：新到舊、最多 3 + index 重置 0）
+        setPendingDrafts((prev) => {
+          const next = { ...prev };
+          if (data.drafts.length > 0) next[convId] = data.drafts.slice(0, 3);
+          else delete next[convId];
+          return next;
+        });
+        setDraftIndex((prev) => ({ ...prev, [convId]: 0 }));
+        setReceipts(data.receipts);
+        setSuggestion(data.suggestion);
+      } catch {
+        // fallback：舊 4 平行（bundle route 缺席 / 500 — 行為保底）
+        void fetchMessagesLatest(convId);
+        void fetchPendingDrafts(convId);
+        void fetchNoteReceipts(convId);
+        void fetchSuggestion(convId);
+      }
+    },
+    [applyLatestPage, fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts, fetchSuggestion]
+  );
+
   // ── ★ H2：note 進入 viewport → 冪等 read POST（server 側 upsert；重複打唔多行） ──
   const markNoteRead = useCallback(async (messageId: string) => {
     try {
@@ -1887,6 +1933,8 @@ export function InboxClient({
   }, []);
 
   // ── ★ H2：跳到被 mention 嘅 note 位置（bell / browser Notification 撳） ──────
+  // ★ cwi-final S6-7：virtualized thread — 目標 row 未必掛 DOM（數據緊攞 / off-viewport）：
+  //   先試 ChatPane API（scrollToIndex + flash）；未中 → 每 300ms 重試至多 6 次；再未中 fallback 舊 DOM 路徑。
   const jumpToMention = useCallback(
     async (convId: string, msgId: string) => {
       if (selectedIdRef.current !== convId) {
@@ -1894,7 +1942,15 @@ export function InboxClient({
         //   — 舊式只補兩個 fetch 唔清 messages（merge 語義 → 上一病人嘅行會留喺畫面）
         selectConvRef.current(convId);
       }
+      const tryApi = (n: number): boolean => {
+        const ok = chatPaneApiRef.current?.scrollToMessage(msgId) ?? false;
+        if (ok) return true;
+        if (n <= 0) return false;
+        window.setTimeout(() => void tryApi(n - 1), 300);
+        return true; // 已排 async 重試
+      };
       window.setTimeout(() => {
+        if (tryApi(6)) return;
         const el = document.getElementById(`msg-${msgId}`);
         if (!el) return;
         el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1902,7 +1958,7 @@ export function InboxClient({
         window.setTimeout(() => el.classList.remove("msg-flash"), 1600);
       }, 450);
     },
-    [] // ★ cwi-audit2-20260908 T1：只經 selectConvRef（ref 恆定）→ 唔需要 reactive deps
+    [] // ★ cwi-audit2-20260908 T1：只經 selectConvRef / chatPaneApiRef（ref 恆定）→ 唔需要 reactive deps
   );
 
   const onBellClick = useCallback(() => {
@@ -2000,14 +2056,12 @@ export function InboxClient({
       setSelectedConvId(convId);
       selectedIdRef.current = convId; // F-8：ref 同步（fetch guard 要即時准）
       setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge — 唔清會混兩對話）
+      setHasMore(false); // ★ cwi-final S6-7：hasMore 單調口徑下換對話必須重置（否則上一對話嘅 true 漏入新對話）
       setGapDividerAfterMs(null); // T2：換對話清中間斷層分隔線
       holeFilledRef.current.clear(); // T3：換對話清補洞標記
       setNotice(null);
-      void fetchMessagesLatest(convId);
-      void fetchPendingDrafts(convId);
-      void fetchSuggestion(convId); // ★ cwi-followup-v3：跟進建議卡
-      // ★ H2：開對話 → 拉已讀回執（tick）+ 清該對話未讀 mention（bell/黃點）
-      void fetchNoteReceipts(convId);
+      // ★ cwi-final S6-7：開對話 1 round trip（bundle = messages+drafts+receipts+suggestion；失敗自動 fallback 4 平行）
+      void fetchBundle(convId);
       setMentionUnread((prev) => {
         if (!prev[convId]) return prev;
         const next = { ...prev };
@@ -2016,10 +2070,11 @@ export function InboxClient({
       });
       void markRead(convId);
     },
-    [ensureConversationLoaded, fetchMessagesLatest, fetchPendingDrafts, fetchNoteReceipts, fetchSuggestion]
+    [ensureConversationLoaded, fetchBundle]
   );
   // ★ Part B：socket handler（[] deps）要最新 selectConversation — ref 避 stale closure
   const selectConvRef = useRef<(id: string) => void>(() => {});
+  const chatPaneApiRef = useRef<ChatPaneHandle | null>(null); // ★ cwi-final S6-7：virtualized thread 跳行（mention bell / 通知卡）
   selectConvRef.current = (id: string) => {
     void selectConversation(id);
   };
@@ -2306,6 +2361,53 @@ export function InboxClient({
     } catch {
       return { ok: false, error: "網絡錯誤" };
     }
+  }, []);
+
+  // ── ★ cwi-final S6-9 ①：FAILED 訊息重試（POST /api/messages/[id]/retry）──────────
+  // 200 → 本地氣泡轉 QUEUED（server 已條件更新；之後 socket message:status 推 SENT/FAILED）；
+  // 失敗（422 過窗 / 409 非 FAILED / 423 lock）→ 氣泡維持 FAILED + 錯誤文案。
+  const retryMessage = useCallback(async (messageId: string): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await fetch(`/api/messages/${messageId}/retry`, { method: "POST" });
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!res.ok) {
+        const msg =
+          data?.error === "WINDOW_CLOSED"
+            ? "24 小時窗口已過 — 重發唔出（用過窗三出路）"
+            : data?.error === "NOT_RETRYABLE"
+              ? "訊息狀態已變 — 唔可以重試"
+              : data?.error === "SEND_LOCKED"
+                ? "此對話已有負責人 — 撳〔接手〕先至發得到"
+                : data?.error ?? `重試失敗（${res.status}）`;
+        return { ok: false, error: msg };
+      }
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, status: "QUEUED" as const, errorCode: null } : m)));
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "網絡錯誤" };
+    }
+  }, []);
+
+  // ── ★ cwi-final S6-9 ③：enterSends 偏好（per-staff；SSR 初值 user.uiPrefs；optimistic toggle + PATCH）──
+  const [enterSends, setEnterSends] = useState<boolean>(() => user.uiPrefs?.enterSends ?? true);
+  const toggleEnterSends = useCallback(() => {
+    setEnterSends((prev) => {
+      const next = !prev;
+      void (async () => {
+        try {
+          const res = await fetch("/api/staff/me/prefs", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enterSends: next }),
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        } catch {
+          setEnterSends(prev); // 回滾
+          setNotice("偏好儲存失敗 — 再試一次");
+        }
+      })();
+      return next;
+    });
   }, []);
 
   // ── Phase 3：發 Booking Flow（📅 掣） ─────────────────────
@@ -2695,6 +2797,7 @@ export function InboxClient({
 
       <ChatPane
         key={`chat-${selectedConv?.id ?? "none"}`} // ★ cwi-final S1-1e（=S1-6）：換對話 remount — 舊對話殘留 messages 唔會漏入新 pane
+        ref={chatPaneApiRef} // ★ cwi-final S6-7：virtualized thread 跳行 API（mention bell / 通知卡）
         onBack={() => {
           // ★ cwi-audit2-20260908 T1：取消選中都要同步 ref（render-body sync 已移除）
           //   — 否則舊對話嘅 socket 訊息會 append 入「未選中」狀態
@@ -2723,6 +2826,11 @@ export function InboxClient({
         suggestionBusy={suggestionBusy}
         // cwi-inboxfix-20260905（MD §5.3）：標記已作廢（§7：8s 撤回已作廢）
         onVoidMessage={voidMessage}
+        // ★ cwi-final S6-9 ①：FAILED 氣泡〔重試〕
+        onRetryMessage={retryMessage}
+        // ★ cwi-final S6-9 ③：Enter 發送／Enter 換行 偏好
+        enterSends={enterSends}
+        onToggleEnterSends={toggleEnterSends}
         userRole={user.role}
         staffName={user.name}
         // ★ cwi-final S1-13（D-6）：草稿堆疊（新到舊、最多 3）+ 目前 index（render 時 clamp）

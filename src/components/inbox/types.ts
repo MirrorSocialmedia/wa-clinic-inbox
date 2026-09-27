@@ -281,6 +281,8 @@ export interface UserCtx {
   clinicIds: string[];
   /** ★ cwi-routing-20260906（MD §4.3）：我係邊啲技能組嘅成員（「派俾我」膠囊 client 端計數/backup；ADMIN/SUPERVISOR = []） */
   myGroupIds?: string[];
+  /** ★ cwi-final S6-9（③）：per-staff UI 偏好（StaffUser.uiPrefs；e.g. { enterSends: boolean }；null = 預設） */
+  uiPrefs?: { enterSends?: boolean } | null;
 }
 
 /** socket message:new payload（同 worker notify 對齊） */

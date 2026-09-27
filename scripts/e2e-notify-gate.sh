@@ -45,12 +45,15 @@ run_notify_gate() {
   # C 多店：綁 MF（e2e:staff create 已寫 TKW primary；補第二間）
   q "INSERT INTO \"StaffClinic\" (\"staffId\",\"clinicId\",\"isPrimary\") VALUES ('$N_STAFF_C','$MF_CLINIC_ID',false) ON CONFLICT (\"staffId\",\"clinicId\") DO NOTHING" >/dev/null 2>&1
   # B / C 登入（密碼 = H1 fixture — e2e:staff create 固定用 H1_B_PASSWORD）
+  # （standalone 模式下冇 mock-e2e curl wrapper → 手補 Origin/XFF；wrapper 模式下自帶 header 唔會雙補）
   CODE=$(curl -s -o /dev/null -w '%{http_code}' -c /tmp/e2e-cookie-notify-b.txt \
     -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+    -H "Origin: $BASE" -H 'X-Forwarded-For: 10.63.11.55' \
     -d "{\"email\":\"$N_B_EMAIL\",\"password\":\"$H1B_PASS\"}")
   check "N-0 staff B 登入 → 200" "$CODE" "200"
   CODE=$(curl -s -o /dev/null -w '%{http_code}' -c /tmp/e2e-cookie-notify-c.txt \
     -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+    -H "Origin: $BASE" -H 'X-Forwarded-For: 10.63.12.55' \
     -d "{\"email\":\"$N_C_EMAIL\",\"password\":\"$H1B_PASS\"}")
   check "N-0 staff C 登入 → 200" "$CODE" "200"
 
@@ -216,10 +219,12 @@ if [ "${N_STANDALONE:-}" = "1" ]; then
   COOKIE_ADMIN=/tmp/e2e-cookie-admin.txt
   CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_TKW" \
     -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+    -H "Origin: $BASE" -H 'X-Forwarded-For: 10.63.9.55' \
     -d "{\"email\":\"$TKW_EMAIL\",\"password\":\"$TKW_PASS\"}")
   [ "$CODE" = "200" ] || { echo "FATAL: TKW staff login $CODE（dev server 未起？）"; exit 2; }
   CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_ADMIN" \
     -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+    -H "Origin: $BASE" -H 'X-Forwarded-For: 10.63.10.55' \
     -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\"}")
   [ "$CODE" = "200" ] || { echo "FATAL: ADMIN login $CODE"; exit 2; }
   run_notify_gate

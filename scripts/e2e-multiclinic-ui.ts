@@ -143,14 +143,27 @@ interface CtxLike {
   close: () => Promise<void>;
 }
 
-/** 等列表行（contact name 出現）— dev 首載 / socket sync */
+/** 等列表行（contact name 出現）— dev 首載 / socket sync
+ *  ★ S6-7（G4）virtualization 兼容：viewport 外嘅行唔會掛 DOM — 行可能喺列表任何位置
+ *    （ADMIN 全店視圖幾百行；lastInboundAt NULL 嘅行 sort 沉底）→ 分步捲動輪詢（+600px/步，
+ *    到底後返頂部循環），直到行入 viewport 掛 DOM。短列表（行喺頂部 viewport）首圈即中、零額外捲動。 */
 async function waitRow(P: PageLike, name: string, what: string, timeoutMs = 60_000): Promise<LocatorLike> {
   const t0 = Date.now();
+  const loc = P.locator("button", { hasText: name });
   for (;;) {
-    const loc = P.locator("button", { hasText: name });
     if ((await loc.count()) > 0) return loc;
     if (Date.now() - t0 > timeoutMs) fail(`等列表行「${name}」逾時（${what}）`);
-    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await P.evaluate(() => {
+        // react-virtuoso 4.18：<Virtuoso> 嘅 root props 直接掛喺 scroller div 上（冇獨立 wrapper root）
+        // → data-e2e="conv-list" 同 data-virtuoso-scroller 喺同一個元素 → 雙屬性 co-occurrence 定位
+        const el = document.querySelector<HTMLElement>('[data-e2e="conv-list"][data-virtuoso-scroller]');
+        if (!el) return;
+        const max = el.scrollHeight - el.clientHeight;
+        el.scrollTop = el.scrollTop >= max - 4 ? 0 : el.scrollTop + 600;
+      });
+    } catch { /* scroller 未掛（列表未 render 完）— 照輪詢 */ }
+    await new Promise((r) => setTimeout(r, 250));
   }
 }
 

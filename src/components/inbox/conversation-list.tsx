@@ -1,12 +1,265 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, BellRing, CalendarDays, MessageCircle, Search, Settings, X } from "lucide-react";
 import type { ClinicInfo, ConversationItem, ConvStatus, StaffNoticeItem } from "./types";
 import { relTime } from "./time";
 // ★ cwi-final S1-2（L-3）：膠囊 predicate — client 同 server 共用單一來源（計數不變式）
 import { matchCapsule, type CapsuleKey } from "@/lib/inbox/capsule";
+import { Virtuoso } from "react-virtuoso";
 import type { NotifyPrefs } from "@/lib/notify-client";
+
+// ── ★ cwi-final S6-7：單行對話卡片（React.memo）────────────────────────────────────
+// 由列表 items 循環抽出 — virtualization 後只有 viewport 內行掛 DOM；
+// memo 保證單行數據變（未讀 +1 / 窗口 tone 變）唔會連帶 re-render 其他行。
+interface ConversationRowProps {
+  c: ConversationItem;
+  selected: boolean;
+  onSelect: (id: string) => void;
+  userRole: "ADMIN" | "STAFF" | "SUPERVISOR";
+  activeClinicId: string | "all";
+  myClinicIds: string[];
+  clinicById?: Map<string, { code: string; name: string }>;
+  myStaffId: string;
+  mentionUnread: Record<string, number>;
+}
+
+const ConversationRow = memo(function ConversationRow(props: ConversationRowProps) {
+  const { c, selected, onSelect, userRole, activeClinicId, myClinicIds, clinicById, myStaffId, mentionUnread } = props;
+
+          const intentMeta = c.intent ? INTENT_META[c.intent] : null;
+          const urgentRow = c.urgent && c.status !== "RESOLVED";
+          // cwi-multiclinic-20260903（MD A.6.4）：badge 導出（零新欄）
+          // 店名 badge：STAFF → 線唔喺自己綁定店；ADMIN → 只喺「全部診所」視圖
+          const showClinicBadge =
+            userRole === "STAFF"
+              ? myClinicIds.length > 0 && !myClinicIds.includes(c.clinicId)
+              : activeClinicId === "all";
+          const clinicBadgeText = showClinicBadge
+            ? (clinicById?.get(c.clinicId)?.code ?? c.clinicCode ?? c.clinicName ?? null)
+            : null;
+          // cwi-inboxfix-20260905（MD I-4）：跨店指派俾我 — 整行左彩邊 + 「你（由 X 派嚟）」
+          // ★ cwi-realtime-v2 §4：跨店語義（「線唔喺自己綁定店」）只對 STAFF 成立 —
+          //   ADMIN/SUPERVISOR clinicIds=[]（全店視圖）→ 唔好標「跨店 / 由 X 派嚟」。
+          const crossToMe =
+            userRole === "STAFF" &&
+            c.assigneeId === myStaffId &&
+            myClinicIds.length > 0 &&
+            !myClinicIds.includes(c.clinicId);
+          // 待跟進：未指派 + 最後一條訊息係客人來訊（lastInboundAt >= lastMessageAt）
+          const needsFollow =
+            !c.assigneeId &&
+            !!c.lastInboundAt &&
+            new Date(c.lastInboundAt).getTime() >= new Date(c.lastMessageAt).getTime();
+          const timeCls =
+            c.window.tone === "red"
+              ? "text-danger-text font-medium"
+              : c.window.tone === "yellow"
+                ? "text-warn-text font-medium"
+                : "text-t3";
+          return (
+            <button
+              key={c.id}
+              onClick={() => onSelect(c.id)}
+              className={`w-full text-left flex gap-3 p-3.5 rounded-[20px] border-[1.5px] ${
+                urgentRow
+                  ? "bg-danger-soft border-warn"
+                  : selected
+                    ? "bg-brand-soft border-transparent"
+                    : "border-transparent hover:bg-black/[.04]"
+              } ${crossToMe ? "border-l-[3px] border-l-brand" : ""} ${c.status === "RESOLVED" ? "opacity-50" : ""}`}
+            >
+              {/* avatar + WA channel badge（急症行 avatar 轉陶土橙；外圈跟行底色） */}
+              <div className="relative shrink-0 self-start">
+                <div
+                  className={`w-[38px] h-[38px] rounded-full flex items-center justify-center text-[14px] font-medium ${
+                    urgentRow
+                      ? "bg-danger text-panel"
+                      : selected
+                        ? "bg-brand text-panel"
+                        : avatarCls(c.contact?.waId ?? c.id)
+                  }`}
+                >
+                  {avatarChar(c)}
+                </div>
+                <span
+                  className={`absolute -right-0.5 -bottom-0.5 w-[13px] h-[13px] rounded-full flex items-center justify-center ${
+                    urgentRow ? "bg-danger-soft" : selected ? "bg-brand-soft" : "bg-panel"
+                  }`}
+                >
+                  <span className="w-[9px] h-[9px] rounded-full bg-wa" title="WhatsApp" />
+                </span>
+              </div>
+
+              <div className="min-w-0 flex-1">
+                {/* row 1：名 + 時間（窗口 tone 變色）+ ★ H2 黃點（未讀 mention） */}
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`text-[13.5px] truncate font-bold ${
+                      urgentRow ? "text-danger-text" : selected ? "text-brand-text" : "text-t1"
+                    }`}
+                  >
+                    {c.contact?.profileName || c.contact?.waId || "（未知聯絡人）"}
+                  </span>
+                  {(mentionUnread[c.id] ?? 0) > 0 && (
+                    <span
+                      className="w-2 h-2 rounded-full bg-warn shrink-0"
+                      title={`${mentionUnread[c.id]} 個未讀 @mention`}
+                    />
+                  )}
+                  <span
+                    className={`ml-auto text-[11px] shrink-0 ${
+                      urgentRow
+                        ? "text-danger-text font-semibold"
+                        : selected
+                          ? "text-brand-text"
+                          : timeCls
+                    }`}
+                    title="24h 窗口狀態：黃 <6h / 紅 已過窗"
+                  >
+                    {relTime(c.lastMessageAt)}
+                  </span>
+                </div>
+                {/* row 2：preview + unread（WhatsApp 官方綠 badge） */}
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span
+                    className={`text-xs truncate flex-1 min-w-0 ${
+                      urgentRow
+                        ? "text-danger-text"
+                        : selected
+                          ? "text-brand-text"
+                          // ★ cwi-final S1-12：粗體色用 per-staff myUnread（公海 SLA 仍用 unreadCount）
+                          : c.myUnread > 0
+                            ? "text-t2"
+                            : "text-t3"
+                    }`}
+                  >
+                    {previewOf(c)}
+                  </span>
+                  {/* ★ cwi-final S1-12：badge = per-staff 未讀（A 開過對話唔代表 B 讀咗） */}
+                  {c.myUnread > 0 && (
+                    <span className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-wa text-white text-[11px] font-semibold flex items-center justify-center">
+                      {c.myUnread > 99 ? "99+" : c.myUnread}
+                    </span>
+                  )}
+                </div>
+                {/* row 3：badges + 負責人常駐 chip（cwi-inboxfix-20260905 I-3：永遠 render 三態） */}
+                <div className="flex items-center gap-1 mt-1 flex-wrap">
+                  {/* cwi-multiclinic-20260903（MD A.6.4）：跨店線店名 badge — STAFF：線唔喺自己綁定店；
+                      ADMIN/SUPERVISOR：只喺「全部診所」視圖顯（逐店視圖本身就單一店）
+                      cwi-inboxfix-20260905（I-4）：文案加「↔ 跨店 ·」前綴
+                      ★ cwi-realtime-v2 §4：前綴只限 STAFF — ADMIN 只顯示店名 badge（TKW） */}
+                  {clinicBadgeText && (
+                    <span
+                      className="text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t2 font-semibold inline-flex items-center gap-0.5"
+                      title={userRole === "STAFF" ? `跨店線：${c.clinicName ?? clinicBadgeText}` : `店：${c.clinicName ?? clinicBadgeText}`}
+                    >
+                      {userRole === "STAFF" ? `↔ 跨店 · ${clinicBadgeText}` : clinicBadgeText}
+                    </span>
+                  )}
+                    {/* cwi-multiclinic-20260903（MD A.6.4）：「待跟進」— 未指派 + 最後一條係客人來訊（前端導出，零新欄） */}
+                    {needsFollow && (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-warn-soft text-warn-text font-medium"
+                        title="客人有來訊但無人接手 — 撳〔接手〕或者指派"
+                      >
+                        待跟進
+                      </span>
+                    )}
+                    {urgentRow && (
+                      <>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-danger text-panel font-semibold">
+                          急症
+                        </span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-panel text-t2">
+                          AI 未出草稿
+                        </span>
+                      </>
+                    )}
+                    {c.pendingBooking && (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-ok-soft text-ok-text font-medium inline-flex items-center gap-0.5"
+                        title={`新預約請求：${c.pendingBooking.providerName} ${c.pendingBooking.requestedDate} ${c.pendingBooking.requestedTime ?? (c.pendingBooking.timeOfDay ?? "")}`}
+                      >
+                        <CalendarDays size={10} strokeWidth={2.75} /> 預約請求
+                      </span>
+                    )}
+                    {intentMeta && !urgentRow && (
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full ${intentMeta.cls}`}
+                        title={`AI intent: ${c.intent}`}
+                      >
+                        {intentMeta.label}
+                      </span>
+                    )}
+                    {c.status === "PENDING" && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-warn-soft text-warn-text">
+                        等回覆
+                      </span>
+                    )}
+                    {/* ★ cwi-routing-20260906（MD §4.3）：路由 badge — ⚠ 已升級 / 🎯 組 / 🎯 單人當值（常駐；未路由 = 無） */}
+                    {c.escalatedAt ? (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-danger-soft text-danger-text font-semibold inline-flex items-center gap-0.5 flex-none"
+                        title={`投訴已升級（${new Date(c.escalatedAt).toLocaleString()}）— 待主管組接手`}
+                      >
+                        ⚠ 已升級{c.routedGroupName ? ` · ${c.routedGroupName}` : ""}
+                      </span>
+                    ) : c.routedStaffId ? (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-brand-soft text-brand-text font-medium inline-flex items-center gap-0.5 flex-none"
+                        title={`路由指定：${c.routedStaffName ?? "當值同事"}（當值中 — 優先跟進）`}
+                      >
+                        🎯 {c.routedStaffName ?? "當值"}
+                      </span>
+                    ) : c.routedGroupId ? (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-brand-soft text-brand-text font-medium inline-flex items-center gap-0.5 flex-none"
+                        title={`路由標記：${c.routedGroupName ?? "技能組"}（未指派 — 撳入去覆一句即接手）`}
+                      >
+                        🎯 {c.routedGroupName ?? "組"}
+                      </span>
+                    ) : null}
+                    {/* ★ cwi-statusrole2-20260910（MD §3）：badge「↻ 重新開啟」— reopenedAt 24h 內顯示（client derive；
+                        已解決對話病人再嚟訊 → 即時彈返出嚟 + 呢個 badge） */}
+                    {c.reopenedAt && Date.now() - new Date(c.reopenedAt).getTime() < 24 * 3600_000 && (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-ok-soft text-ok-text font-semibold inline-flex items-center gap-0.5 flex-none"
+                        title={`病人再嚟訊自動翻開（${new Date(c.reopenedAt).toLocaleString()}）`}
+                      >
+                        ↻ 重新開啟
+                      </span>
+                    )}
+                    {/* ★ cwi-inboxfix-20260905（MD I-3）：負責人常駐三態 — 永遠 render：
+                        ⚑ 未指派（橙）/ ● 你（重點色，跨店加「由 X 派嚟」）/ ● 某某（灰） */}
+                    {c.assigneeId == null ? (
+                      <span
+                        className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-warn-soft text-warn-text font-semibold inline-flex items-center gap-0.5"
+                        title="未有人負責 — 撳入去覆一句即自動接手"
+                      >
+                        ⚑ 未指派
+                      </span>
+                    ) : c.assigneeId === myStaffId ? (
+                      <span
+                        className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-ok-soft text-ok-text font-medium inline-flex items-center gap-0.5"
+                        title={crossToMe ? `你係呢個對話嘅負責人（由 ${c.clinicCode ?? c.clinicName ?? "其他店"} 派嚟）` : "你係呢個對話嘅負責人"}
+                      >
+                        ● {crossToMe ? `你（由 ${c.clinicCode ?? c.clinicName ?? "其他店"} 派嚟）` : "你"}
+                      </span>
+                    ) : (
+                      <span
+                        className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t3 font-medium inline-flex items-center gap-0.5"
+                        title={`負責人：${c.assigneeName}（你只可發內部備註）`}
+                      >
+                        ● {c.assigneeName} 處理緊
+                      </span>
+                    )}
+                </div>
+              </div>
+            </button>
+          );
+        
+});
 
 interface Props {
   /** 手機：入咗聊天就藏列表（桌面永遠顯示） */
@@ -324,6 +577,9 @@ export function ConversationList(p: Props) {
       return new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime();
     });
   }, [p.conversations, p.searchResults, p.statusFilter, p.assignedFilter, p.myStaffId, p.myGroupIds, p.scopeClinicIds, p.activeClinicId]);
+
+  // ★ cwi-final S6-7：stable ref — ConversationRow memo 依賴（props 陣列每 render 新建會令全行 invalid）
+  const myClinicIdsStable = useMemo(() => p.myClinicIds ?? [], [p.myClinicIds]);
 
   return (
     <aside
@@ -750,258 +1006,46 @@ export function ConversationList(p: Props) {
         </div>
       </div>
 
-      {/* list — 卡片式行（66px 行高 / 38px 頭像 / gap 分隔，無 border-b） */}
-      <div
-        className="flex-1 overflow-y-auto min-h-0 px-2.5 pb-3 flex flex-col gap-[3px]"
-        onScroll={(e) => {
-          // ★ cwi-final S1-2（裁決 5）：近底 30px 觸發（caller 決定用途 — 目前只 resolved view 追頁）
-          if (!p.onScrollBottom) return;
-          const el = e.currentTarget;
-          if (el.scrollHeight - el.scrollTop - el.clientHeight <= 30) p.onScrollBottom();
-        }}
-      >
-        {items.length === 0 && (
-          <div className="flex flex-col items-center gap-2 py-10 text-t3">
-            <MessageCircle size={28} strokeWidth={2.75} />
-            <div className="text-sm">{p.search ? "冇搜到相關病人" : "冇對話"}</div>
-          </div>
-        )}
-        {items.map((c) => {
-          const intentMeta = c.intent ? INTENT_META[c.intent] : null;
-          const urgentRow = c.urgent && c.status !== "RESOLVED";
-          const selected = p.selectedId === c.id;
-          // cwi-multiclinic-20260903（MD A.6.4）：badge 導出（零新欄）
-          // 店名 badge：STAFF → 線唔喺自己綁定店；ADMIN → 只喺「全部診所」視圖
-          const myClinicIds = p.myClinicIds ?? [];
-          const showClinicBadge =
-            p.userRole === "STAFF"
-              ? myClinicIds.length > 0 && !myClinicIds.includes(c.clinicId)
-              : p.activeClinicId === "all";
-          const clinicBadgeText = showClinicBadge
-            ? (p.clinicById?.get(c.clinicId)?.code ?? c.clinicCode ?? c.clinicName ?? null)
-            : null;
-          // cwi-inboxfix-20260905（MD I-4）：跨店指派俾我 — 整行左彩邊 + 「你（由 X 派嚟）」
-          // ★ cwi-realtime-v2 §4：跨店語義（「線唔喺自己綁定店」）只對 STAFF 成立 —
-          //   ADMIN/SUPERVISOR clinicIds=[]（全店視圖）→ 唔好標「跨店 / 由 X 派嚟」。
-          const crossToMe =
-            p.userRole === "STAFF" &&
-            c.assigneeId === p.myStaffId &&
-            myClinicIds.length > 0 &&
-            !myClinicIds.includes(c.clinicId);
-          // 待跟進：未指派 + 最後一條訊息係客人來訊（lastInboundAt >= lastMessageAt）
-          const needsFollow =
-            !c.assigneeId &&
-            !!c.lastInboundAt &&
-            new Date(c.lastInboundAt).getTime() >= new Date(c.lastMessageAt).getTime();
-          const timeCls =
-            c.window.tone === "red"
-              ? "text-danger-text font-medium"
-              : c.window.tone === "yellow"
-                ? "text-warn-text font-medium"
-                : "text-t3";
-          return (
-            <button
-              key={c.id}
-              onClick={() => p.onSelect(c.id)}
-              className={`w-full text-left flex gap-3 p-3.5 rounded-[20px] border-[1.5px] ${
-                urgentRow
-                  ? "bg-danger-soft border-warn"
-                  : selected
-                    ? "bg-brand-soft border-transparent"
-                    : "border-transparent hover:bg-black/[.04]"
-              } ${crossToMe ? "border-l-[3px] border-l-brand" : ""} ${c.status === "RESOLVED" ? "opacity-50" : ""}`}
-            >
-              {/* avatar + WA channel badge（急症行 avatar 轉陶土橙；外圈跟行底色） */}
-              <div className="relative shrink-0 self-start">
-                <div
-                  className={`w-[38px] h-[38px] rounded-full flex items-center justify-center text-[14px] font-medium ${
-                    urgentRow
-                      ? "bg-danger text-panel"
-                      : selected
-                        ? "bg-brand text-panel"
-                        : avatarCls(c.contact?.waId ?? c.id)
-                  }`}
-                >
-                  {avatarChar(c)}
-                </div>
-                <span
-                  className={`absolute -right-0.5 -bottom-0.5 w-[13px] h-[13px] rounded-full flex items-center justify-center ${
-                    urgentRow ? "bg-danger-soft" : selected ? "bg-brand-soft" : "bg-panel"
-                  }`}
-                >
-                  <span className="w-[9px] h-[9px] rounded-full bg-wa" title="WhatsApp" />
-                </span>
-              </div>
-
-              <div className="min-w-0 flex-1">
-                {/* row 1：名 + 時間（窗口 tone 變色）+ ★ H2 黃點（未讀 mention） */}
-                <div className="flex items-center gap-1.5">
-                  <span
-                    className={`text-[13.5px] truncate font-bold ${
-                      urgentRow ? "text-danger-text" : selected ? "text-brand-text" : "text-t1"
-                    }`}
-                  >
-                    {c.contact?.profileName || c.contact?.waId || "（未知聯絡人）"}
-                  </span>
-                  {(p.mentionUnread[c.id] ?? 0) > 0 && (
-                    <span
-                      className="w-2 h-2 rounded-full bg-warn shrink-0"
-                      title={`${p.mentionUnread[c.id]} 個未讀 @mention`}
-                    />
-                  )}
-                  <span
-                    className={`ml-auto text-[11px] shrink-0 ${
-                      urgentRow
-                        ? "text-danger-text font-semibold"
-                        : selected
-                          ? "text-brand-text"
-                          : timeCls
-                    }`}
-                    title="24h 窗口狀態：黃 <6h / 紅 已過窗"
-                  >
-                    {relTime(c.lastMessageAt)}
-                  </span>
-                </div>
-                {/* row 2：preview + unread（WhatsApp 官方綠 badge） */}
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <span
-                    className={`text-xs truncate flex-1 min-w-0 ${
-                      urgentRow
-                        ? "text-danger-text"
-                        : selected
-                          ? "text-brand-text"
-                          // ★ cwi-final S1-12：粗體色用 per-staff myUnread（公海 SLA 仍用 unreadCount）
-                          : c.myUnread > 0
-                            ? "text-t2"
-                            : "text-t3"
-                    }`}
-                  >
-                    {previewOf(c)}
-                  </span>
-                  {/* ★ cwi-final S1-12：badge = per-staff 未讀（A 開過對話唔代表 B 讀咗） */}
-                  {c.myUnread > 0 && (
-                    <span className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-wa text-white text-[11px] font-semibold flex items-center justify-center">
-                      {c.myUnread > 99 ? "99+" : c.myUnread}
-                    </span>
-                  )}
-                </div>
-                {/* row 3：badges + 負責人常駐 chip（cwi-inboxfix-20260905 I-3：永遠 render 三態） */}
-                <div className="flex items-center gap-1 mt-1 flex-wrap">
-                  {/* cwi-multiclinic-20260903（MD A.6.4）：跨店線店名 badge — STAFF：線唔喺自己綁定店；
-                      ADMIN/SUPERVISOR：只喺「全部診所」視圖顯（逐店視圖本身就單一店）
-                      cwi-inboxfix-20260905（I-4）：文案加「↔ 跨店 ·」前綴
-                      ★ cwi-realtime-v2 §4：前綴只限 STAFF — ADMIN 只顯示店名 badge（TKW） */}
-                  {clinicBadgeText && (
-                    <span
-                      className="text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t2 font-semibold inline-flex items-center gap-0.5"
-                      title={p.userRole === "STAFF" ? `跨店線：${c.clinicName ?? clinicBadgeText}` : `店：${c.clinicName ?? clinicBadgeText}`}
-                    >
-                      {p.userRole === "STAFF" ? `↔ 跨店 · ${clinicBadgeText}` : clinicBadgeText}
-                    </span>
-                  )}
-                    {/* cwi-multiclinic-20260903（MD A.6.4）：「待跟進」— 未指派 + 最後一條係客人來訊（前端導出，零新欄） */}
-                    {needsFollow && (
-                      <span
-                        className="text-[10px] px-2 py-0.5 rounded-full bg-warn-soft text-warn-text font-medium"
-                        title="客人有來訊但無人接手 — 撳〔接手〕或者指派"
-                      >
-                        待跟進
-                      </span>
-                    )}
-                    {urgentRow && (
-                      <>
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-danger text-panel font-semibold">
-                          急症
-                        </span>
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-panel text-t2">
-                          AI 未出草稿
-                        </span>
-                      </>
-                    )}
-                    {c.pendingBooking && (
-                      <span
-                        className="text-[10px] px-2 py-0.5 rounded-full bg-ok-soft text-ok-text font-medium inline-flex items-center gap-0.5"
-                        title={`新預約請求：${c.pendingBooking.providerName} ${c.pendingBooking.requestedDate} ${c.pendingBooking.requestedTime ?? (c.pendingBooking.timeOfDay ?? "")}`}
-                      >
-                        <CalendarDays size={10} strokeWidth={2.75} /> 預約請求
-                      </span>
-                    )}
-                    {intentMeta && !urgentRow && (
-                      <span
-                        className={`text-[10px] px-2 py-0.5 rounded-full ${intentMeta.cls}`}
-                        title={`AI intent: ${c.intent}`}
-                      >
-                        {intentMeta.label}
-                      </span>
-                    )}
-                    {c.status === "PENDING" && (
-                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-warn-soft text-warn-text">
-                        等回覆
-                      </span>
-                    )}
-                    {/* ★ cwi-routing-20260906（MD §4.3）：路由 badge — ⚠ 已升級 / 🎯 組 / 🎯 單人當值（常駐；未路由 = 無） */}
-                    {c.escalatedAt ? (
-                      <span
-                        className="text-[10px] px-2 py-0.5 rounded-full bg-danger-soft text-danger-text font-semibold inline-flex items-center gap-0.5 flex-none"
-                        title={`投訴已升級（${new Date(c.escalatedAt).toLocaleString()}）— 待主管組接手`}
-                      >
-                        ⚠ 已升級{c.routedGroupName ? ` · ${c.routedGroupName}` : ""}
-                      </span>
-                    ) : c.routedStaffId ? (
-                      <span
-                        className="text-[10px] px-2 py-0.5 rounded-full bg-brand-soft text-brand-text font-medium inline-flex items-center gap-0.5 flex-none"
-                        title={`路由指定：${c.routedStaffName ?? "當值同事"}（當值中 — 優先跟進）`}
-                      >
-                        🎯 {c.routedStaffName ?? "當值"}
-                      </span>
-                    ) : c.routedGroupId ? (
-                      <span
-                        className="text-[10px] px-2 py-0.5 rounded-full bg-brand-soft text-brand-text font-medium inline-flex items-center gap-0.5 flex-none"
-                        title={`路由標記：${c.routedGroupName ?? "技能組"}（未指派 — 撳入去覆一句即接手）`}
-                      >
-                        🎯 {c.routedGroupName ?? "組"}
-                      </span>
-                    ) : null}
-                    {/* ★ cwi-statusrole2-20260910（MD §3）：badge「↻ 重新開啟」— reopenedAt 24h 內顯示（client derive；
-                        已解決對話病人再嚟訊 → 即時彈返出嚟 + 呢個 badge） */}
-                    {c.reopenedAt && Date.now() - new Date(c.reopenedAt).getTime() < 24 * 3600_000 && (
-                      <span
-                        className="text-[10px] px-2 py-0.5 rounded-full bg-ok-soft text-ok-text font-semibold inline-flex items-center gap-0.5 flex-none"
-                        title={`病人再嚟訊自動翻開（${new Date(c.reopenedAt).toLocaleString()}）`}
-                      >
-                        ↻ 重新開啟
-                      </span>
-                    )}
-                    {/* ★ cwi-inboxfix-20260905（MD I-3）：負責人常駐三態 — 永遠 render：
-                        ⚑ 未指派（橙）/ ● 你（重點色，跨店加「由 X 派嚟」）/ ● 某某（灰） */}
-                    {c.assigneeId == null ? (
-                      <span
-                        className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-warn-soft text-warn-text font-semibold inline-flex items-center gap-0.5"
-                        title="未有人負責 — 撳入去覆一句即自動接手"
-                      >
-                        ⚑ 未指派
-                      </span>
-                    ) : c.assigneeId === p.myStaffId ? (
-                      <span
-                        className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-ok-soft text-ok-text font-medium inline-flex items-center gap-0.5"
-                        title={crossToMe ? `你係呢個對話嘅負責人（由 ${c.clinicCode ?? c.clinicName ?? "其他店"} 派嚟）` : "你係呢個對話嘅負責人"}
-                      >
-                        ● {crossToMe ? `你（由 ${c.clinicCode ?? c.clinicName ?? "其他店"} 派嚟）` : "你"}
-                      </span>
-                    ) : (
-                      <span
-                        className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t3 font-medium inline-flex items-center gap-0.5"
-                        title={`負責人：${c.assigneeName}（你只可發內部備註）`}
-                      >
-                        ● {c.assigneeName} 處理緊
-                      </span>
-                    )}
-                </div>
-              </div>
-            </button>
-          );
-        })}
-      </div>
+      {/* list — ★ cwi-final S6-7：virtualization（react-virtuoso；endReached ≈ 舊近底 30px 觸發；行高可變 — 量測式） */}
+      {items.length === 0 ? (
+        <div className="flex flex-col items-center gap-2 py-10 text-t3">
+          <MessageCircle size={28} strokeWidth={2.75} />
+          <div className="text-sm">{p.search ? "冇搜到相關病人" : "冇對話"}</div>
+        </div>
+      ) : (
+        <Virtuoso
+          className="flex-1 min-h-0"
+          // ★ G4 gen5（virtuoso 根因修，2026-09-28 實測）：舊版 components.List/Item 自訂 wrapper
+          //   吞咗 virtuoso 量測契約（List 嘅 callback ref + Item DOM 節點嘅 data-index/data-known-size
+          //   屬性 — Bo() 讀 List 直接子節點量行高）→ 零行被量測 → 總高 0 → 只 render 1 行（空白列表）。
+          //   改 VA6 形態：padding 移咗落 scroller style（px-2.5→10px / pb-3→12px）+ 行距 pb-[3px]
+          //   移入 itemContent wrapper（.virtuoso-repro VA6 實測綠：rows=8 listH=4267 = 全列表）。
+          style={{ paddingLeft: 10, paddingRight: 10, paddingBottom: 12 }}
+          data={items}
+          computeItemKey={(_, c) => c.id}
+          initialTopMostItemIndex={0}
+          data-e2e="conv-list" // e2e 鉸點：react-virtuoso 4.18 將 root props 直接掛 scroller div（同一元素）— waitRow 用 [data-e2e="conv-list"][data-virtuoso-scroller] 雙屬性定位捲動容器
+          endReached={() => {
+            // ★ cwi-final S1-2（裁決 5）：近底觸發（caller in-progress guard 防重入 — 只 resolved view 接）
+            if (p.onScrollBottom) p.onScrollBottom();
+          }}
+          itemContent={(_, c) => (
+            <div style={{ paddingBottom: 3 }}>
+              <ConversationRow
+                c={c}
+                selected={p.selectedId === c.id}
+                onSelect={p.onSelect}
+                userRole={p.userRole}
+                activeClinicId={p.activeClinicId}
+                myClinicIds={myClinicIdsStable}
+                clinicById={p.clinicById}
+                myStaffId={p.myStaffId}
+                mentionUnread={p.mentionUnread}
+              />
+            </div>
+          )}
+        />
+      )}
     </aside>
   );
 }

@@ -258,6 +258,8 @@ model StaffUser {
   // ★ cwi-notify-v2-20260903：push 偏好（DB = server 推送之源；localStorage 只做即時 UI）。
   //   Json: { mutedClinics: string[], adminMsgClinics: string[] } — desktop/sound 係 per-device，唔入 DB。
   pushPrefs         Json?
+  // ★ cwi-final S6-9（③）：per-staff UI 偏好 — Json: { enterSends?: boolean }（預設 true = 現行為）
+  uiPrefs           Json?
   pushSubscriptions PushSubscription[]
 }
 

@@ -122,16 +122,20 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 /**
  * outbound 發送 job 統一 enqueue 入口：
  * - 即刻送（冇 delay — 8s 撤回窗口已作廢）
- * - jobId: messageId — 冪等（client retry / 重複調用唔會建重複 job）
- * 註：reminder cron / AI AUTO 覆都行同一入口。
+ * - jobId 預設 messageId — 冪等（client retry / 重複調用唔會建重複 job）
+ * - ⚠️ **重新 enqueue 已存在嘅 message（retry / sweep 類）必傳 fresh 唯一 jobId**：
+ *   完成 job 嘅 key 會保留（removeOnComplete count:20）→ 用同一 jobId 再 add 會撞 BullMQ
+ *   `handleDuplicatedJob`（Lua 實證：jobIdKey EXISTS → 靜默 return 舊 jobId，唔入 wait list、唔 throw）
+ *   → 訊息永久卡 QUEUED。（2026-09-28 G4 gen5 T693 事故實測；同 booking-write 註釋嘅 trap。）
+ * 註：reminder cron / AI AUTO 覆都行同一入口（全部係首次 enqueue 新 message → 預設 jobId 安全）。
  */
-export async function enqueueOutboundSend(messageId: string): Promise<void> {
+export async function enqueueOutboundSend(messageId: string, jobId?: string): Promise<void> {
   // ★ cwi-final S1-15 (P0-07) 測試 hook：ENQUEUE_DELAY_MS 人工拉長 enqueue 延遲
   //   （e2e T716：2000 > caller 1500ms race timeout → 202 enqueueUncertain 路徑實測）。
   //   production 未設 = 0（零行為改變）。
   const delayMs = Math.max(0, parseInt(process.env.ENQUEUE_DELAY_MS ?? "0", 10) || 0);
   if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
-  await outboundQueue.add("send", { messageId }, { jobId: messageId });
+  await outboundQueue.add("send", { messageId }, { jobId: jobId ?? messageId });
 }
 
 // ── ★ cwi-final S5-1（F1）：booking-write job ─────────────────────────────────────

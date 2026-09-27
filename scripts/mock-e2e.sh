@@ -252,6 +252,15 @@ TSX=./node_modules/.bin/tsx
 PORT="${PORT:-3100}"
 BASE="http://127.0.0.1:${PORT}"
 
+# ★ G4 gen5（2026-09-28 實測）：dev server heap 提到 16G（對齊 CEO「3100 16G」環境口徑）—
+#   node 22 默認 heap ≈4GB，Phase E 長跑 server 喺全套件 workload 下 ~20 min OOM
+#   （run #2 實測：T697 reload 編譯期 FATAL heap OOM → 3100 死 → 後續測試假紅）。
+#   冪等：已設 max-old-space-size 就唔疊。
+case "${NODE_OPTIONS:-}" in
+  *max-old-space-size*) ;;
+  *) export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=16384" ;;
+esac
+
 # ★ cwi-final S3-9：healthz 詳細 body token gate — 從 .env.local 取 HEALTHZ_TOKEN（gitignored）；
 # 未設時唔附加參數（gate 停用，dev 便利）。
 HEALTHZ_TOKEN="$(grep -oP '^HEALTHZ_TOKEN=\K.*' .env.local 2>/dev/null | tail -1)"
@@ -477,6 +486,14 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_MF" \
   -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$MF_EMAIL\",\"password\":\"$MF_PASS\"}")
 check "T1b login staff-mf → 200" "$CODE" "200"
+
+# ★ G4 gen4 pre-flight（2026-09-27，gen3 97-FAIL 事故防再犯）：TOTP 衛生 —
+#   上輪若被 kill 喺 T50 confirm 同 cleanup 之間，admin totpSecretEnc 會留落 persistent DB
+#   → T1c 純密碼登入必 401 → $COOKIE_ADMIN 空 → admin-scoped 全鏈 401（= gen3 97 FAIL 根因）。
+#   同一套 unset SQL 跟 T50 hermetic cleanup（~L1810）。
+ADMIN_ID_PRE=$(q "SELECT id FROM \"StaffUser\" WHERE email='$ADMIN_EMAIL'" | jf id)
+[ -n "$ADMIN_ID_PRE" ] && q "UPDATE \"StaffUser\" SET \"totpSecretEnc\" = NULL, \"totpPendingEnc\" = NULL WHERE id='$ADMIN_ID_PRE'" >/dev/null
+echo "  [pre] admin TOTP hygiene"
 
 # Phase 2b：ADMIN login + 重置所有 clinic 回 DRAFT（冪等起點 — 上輪 e2e 可能留低 AUTO）
 COOKIE_ADMIN=/tmp/e2e-cookie-admin.txt
@@ -9018,6 +9035,105 @@ q "DELETE FROM \"Message\" WHERE \"conversationId\"='$T692_CONV'" >/dev/null 2>&
 q "DELETE FROM \"Conversation\" WHERE id='$T692_CONV'" >/dev/null 2>&1
 q "DELETE FROM \"Contact\" WHERE id='$T692C'" >/dev/null 2>&1
 [ "$T692" = 0 ] && pass "T692 worker 生命週期 + heartbeat（SIGINT graceful / kill-9 503 / redis 自愈）" || fail "T692 有項失敗（見上 ❌）"
+
+# ── T693. S6-9 ① FAILED retry：FAILED → retry → SENT；並發 retry 兩次 → 一個 409 ──
+echo "[P9] T693: FAILED retry（WA_GRAPH_MOCK_FAIL 口徑 = T78）..."
+T693=0
+# 1) failing worker（重試 3 次後永久 FAILED）
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+WA_GRAPH_MOCK_FAIL=1 nohup pnpm worker >/tmp/e2e-worker-t693-fail.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t693-fail.log 2>/dev/null && break; sleep 1; done
+# 2) hermetic 病人 + inbound（窗口開）
+T693_WAID="8526309${EPOCH}"
+T693_WAMID="wamid.E2E_T693_${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$T693_WAID" --text "e2e T693 retry" --wamid "$T693_WAMID" --name "E2E T693" >/dev/null 2>&1 || { fail "T693 mock-inbound POST"; T693=1; }
+T693_CONV=$(q "SELECT c.id::text id FROM \"Conversation\" c WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$T693_WAID')" | jf id)
+[ -n "$T693_CONV" ] || { fail "T693 對話搵唔到"; T693=1; }
+# 3) 兩條 send → 皆 FAILED（failing worker）
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$T693_CONV\",\"body\":\"e2e T693 A\"}"
+check "T693 send A → 202（入隊）" "$H1_CODE" "202"
+T693_MID_A=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$T693_CONV\",\"body\":\"e2e T693 B\"}"
+T693_MID_B=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+if wait_for "SELECT (SELECT count(*) FROM \"Message\" WHERE id IN ('$T693_MID_A','$T693_MID_B') AND \"status\"='FAILED' AND \"waMessageId\" IS NULL)::text c" '[{"c":"2"}]' 90; then
+  pass "T693 mock 失敗 → 兩條 OUT 皆 FAILED（waMessageId NULL）"
+else
+  fail "T693 兩條訊息未齊 FAILED（A=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T693_MID_A'" | jf s) / B=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T693_MID_B'" | jf s)）"; T693=1
+fi
+# 4) StaffNotice 新標題口徑（訊息發送失敗 · {店}）
+T693_NOTICE=$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE \"conversationId\"='$T693_CONV' AND \"kind\"='SYSTEM' AND \"title\" LIKE '訊息發送失敗 · %'" | jf c)
+if [ "${T693_NOTICE:-0}" -ge 2 ] 2>/dev/null; then
+  pass "T693 StaffNotice 標題=「訊息發送失敗 · {店}」（≥2 條 — A/B 各一）"
+else
+  fail "T693 StaffNotice 標題/數目不對（count=${T693_NOTICE:-?}）"; T693=1
+fi
+# 5) 還原正常 worker
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-t693-rt.log 2>&1 &
+WORKER_PID=$!
+for i in $(seq 1 30); do grep -q "all workers running" /tmp/e2e-worker-t693-rt.log 2>/dev/null && break; sleep 1; done
+# 6) retry A → 200 → SENT
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/$T693_MID_A/retry"
+check "T693 retry A（FAILED）→ 200" "$H1_CODE" "200"
+if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T693_MID_A'" '[{"s":"SENT"}]' 60; then
+  pass "T693 retry A → SENT（worker 重發成功）"
+else
+  fail "T693 retry A 未 SENT（=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T693_MID_A'" | jf s)）"; T693=1
+fi
+check "T693 retry A waMessageId 已補" "$(q "SELECT (\"waMessageId\" IS NOT NULL)::text n FROM \"Message\" WHERE id='$T693_MID_A'" | jf n)" "true"
+check "T693 audit SEND_RETRY 已寫" "$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE \"action\"='SEND_RETRY' AND \"entityId\"='$T693_MID_A'" | jf c)" "1"
+# 7) 並發 retry B ×2 → 一個 200 一個 409（條件 updateMany 原子佔位）
+( h1_req "$COOKIE_TKW" POST "$BASE/api/messages/$T693_MID_B/retry"; echo "$H1_CODE" > /tmp/e2e-t693-r1; ) &
+T693_W1=$!
+( h1_req "$COOKIE_TKW" POST "$BASE/api/messages/$T693_MID_B/retry"; echo "$H1_CODE" > /tmp/e2e-t693-r2; ) &
+T693_W2=$!
+wait "$T693_W1" "$T693_W2" 2>/dev/null || true
+sleep 2
+T693_R1=$(cat /tmp/e2e-t693-r1 2>/dev/null); T693_R2=$(cat /tmp/e2e-t693-r2 2>/dev/null)
+T693_SORTED=$(printf "%s\n%s\n" "$T693_R1" "$T693_R2" | sort | tr '\n' ' ')
+[ "$T693_SORTED" = "200 409 " ] && pass "T693 並發 retry ×2 → 1×200 + 1×409（NOT_RETRYABLE 佔位）" || { fail "T693 並發 retry 碼不對（=$T693_R1/$T693_R2）"; T693=1; }
+# 8) 贏家 → SENT；再 retry（已 SENT）→ 409
+if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T693_MID_B'" '[{"s":"SENT"}]' 60; then
+  pass "T693 贏家 retry B → SENT"
+else
+  fail "T693 贏家 retry B 未 SENT（=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T693_MID_B'" | jf s)）"; T693=1
+fi
+h1_req "$COOKIE_TKW" POST "$BASE/api/messages/$T693_MID_B/retry"
+check "T693 已 SENT 再 retry → 409" "$H1_CODE" "409"
+# 9) 自清
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$T693_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"NoteReadReceipt\" WHERE \"messageId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\"='$T693_CONV')" >/dev/null 2>&1
+q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$T693_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$T693_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$T693_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$T693_WAID'" >/dev/null 2>&1
+[ "$T693" = 0 ] && pass "T693 FAILED retry 全鏈（FAILED→200→SENT / 並發 409 / 已 SENT 409 / notice 標題）" || fail "T693 有項失敗（見上 ❌）"
+
+# ── T697. S6-9 ②/③ IME guard + enterSends（Playwright 瀏覽器級）──
+echo "[P9] T697: composer UI（IME/enterSends/toggle/持久化）..."
+T697_WAID="8526308${EPOCH}"
+T697_WAMID="wamid.E2E_T697_${EPOCH}"
+T697_CONV=""
+pnpm -s mock-inbound message --clinic TKW --from "$T697_WAID" --text "e2e T697 composer" --wamid "$T697_WAMID" --name "E2E T697" >/dev/null 2>&1 || { fail "T697 mock-inbound POST"; }
+for _i in $(seq 1 30); do
+  T697_CONV=$(q "SELECT c.id::text id FROM \"Conversation\" c WHERE \"contactId\" IN (SELECT id FROM \"Contact\" WHERE \"waId\"='$T697_WAID')" | jf id)
+  [ -n "$T697_CONV" ] && break; sleep 1
+done
+if [ -z "$T697_CONV" ]; then
+  fail "T697 對話搵唔到"
+else
+  T697_UI=$(pnpm -s e2e:composer-ui --base "$BASE" --cookie "$COOKIE_TKW" --conv "$T697_CONV" 2>&1 | grep -E "COMPOSER-UI-(OK|FAIL)" | head -1)
+  check "T697 UI：IME Enter 唔發 + enterSends toggle + Ctrl/⌘+Enter + reload 持久化" "$T697_UI" "COMPOSER-UI-OK"
+fi
+q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$T697_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"NoteReadReceipt\" WHERE \"messageId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\"='$T697_CONV')" >/dev/null 2>&1
+q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$T697_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$T697_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$T697_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE \"waId\"='$T697_WAID'" >/dev/null 2>&1
 
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

@@ -8,14 +8,17 @@
  *  1. stale QUEUED：OUT + API + QUEUED + createdAt ∈ (now-6h, now-120s) → 重加 enqueue（take 200）。
  *     - 下界 120s = 留正常 job 被 worker 撿走嘅時間（正常發送 <5s）；
  *     - 上界 6h = 過老 = 歷史殘留（唔再重加 — 留俾 staff 人工睇 inbox）。
- *     - "Job already exists"（job 仲喺隊列 waiting/active/delayed）= 即将/正在執行 —
- *       吞 + log.info（唔係重複發送；completed job 保留期 removeOnComplete count:20 內先會撞）。
+ *     - 重加用 fresh 唯一 jobId（非 messageId）— 2026-09-28 G4 gen5 修正：原 jobId=messageId
+ *       會撞「已存在但唔會再執行」嘅 key（completed 保留期 removeOnComplete count:20 →
+ *       BullMQ handleDuplicatedJob 靜默 no-op；waiting/active/delayed = 即将/正在執行）。
+ *       舊版撞 key 一律當「skip」— 撞完成 key 嗰份 = 訊息永久卡死 = sweep 失職。
+ *       fresh jobId 即使雙重 enqueue 都唔會雙發：worker 原子 claim（QUEUED→SENDING）= 防火牆。
  *  2. stuck SENDING：updatedAt < now-5min（claim 咗但無 terminal — worker 發送中途 crash /
  *     Graph 冇回應）→ UNKNOWN + errorCode SENDING_TIMEOUT + upsertAlert(outbound_unknown, HIGH)。
  *     UNKNOWN row：outbound worker claim guard 見到無 wamid 唔會雙發；若 sent webhook 之後
  *     先返嚟會按 status-rank 升返 SENT（UNKNOWN rank=1 < SENT）。
  *
- * 冪等：重加靠 jobId=messageId（BullMQ dedup）；stuck 標記係 updateMany（重跑 = 0 行）；
+ * 冪等：重加靠 fresh 唯一 jobId（2026-09-28 修正 — 見上）；stuck 標記係 updateMany（重跑 = 0 行）；
  * alert 靠 upsertAlert (type, clinicId=null) 未解決只一條。
  * 零 PII：log 只計數 / messageId。
  *
@@ -53,7 +56,7 @@ export async function runOutboundSweep(now: Date = new Date()): Promise<Outbound
   });
   for (const m of stale) {
     try {
-      await enqueueOutboundSend(m.id);
+      await enqueueOutboundSend(m.id, `${m.id}-sweep${Date.now().toString(36)}`);
     } catch (err) {
       const msgText = err instanceof Error ? err.message : String(err);
       if (/Job already exists/i.test(msgText)) {

@@ -1,6 +1,7 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, memo, useRef, useState, type RefObject } from "react";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
   AlertTriangle,
   Bell,
@@ -14,6 +15,7 @@ import {
   MessageCircle,
   MoreHorizontal,
   Paperclip,
+  RotateCw,
   Send,
   Sparkles,
   StickyNote,
@@ -117,6 +119,13 @@ interface Props {
   onVoidMessage: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
   /** ★ H1：自己嘅 staffId（Send Lock 三狀態判定：自己負責/別人負責/unassigned） */
   myStaffId: string;
+  /** ★ cwi-final S6-9（③）：per-staff 偏好 enterSends（預設 true = 現行為「Enter 發送」）；
+   *  parent 負責持久化（PATCH /api/staff/me/prefs，optimistic） */
+  enterSends?: boolean;
+  /** ★ cwi-final S6-9（③）：composer 右下細字 toggle「Enter 發送／Enter 換行」（撳即存） */
+  onToggleEnterSends?: () => void;
+  /** ★ cwi-final S6-9（①）：FAILED 氣泡〔重試〕→ POST /api/messages/[id]/retry（成功 → 氣泡轉 QUEUED） */
+  onRetryMessage?: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
   /** ★ H1：發內部備註（lock 模式 composer 用；INTERNAL — 唔出 WhatsApp）
    *  ★ H2：mentions = @ 咗嘅 staffId 陣列（後端會再校驗同店 active） */
   onSendNote: (body: string, mentions?: string[]) => Promise<{ ok: boolean; error?: string }>;
@@ -364,8 +373,279 @@ function UndoControls({
  * 對話欄（MD §6.4）v2 — WhatsApp 式氣泡 + brand AI 草稿卡。
  * 邏輯同 v1 完全一樣（auto-fill draft / scroll pin / 分頁 / flow / booking）。
  */
-export function ChatPane(p: Props) {
+// ★ cwi-final S6-9（③）：手機（max-md，<768px）偵測 — 一律 Enter 換行（發靠發送掣）
+function useIsMobile(): boolean {
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    setMobile(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setMobile(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return mobile;
+}
+
+// ── ★ cwi-final S6-7：單條訊息 row（React.memo）──────────────────────────────────
+// 由 chat thread 訊息循環抽出 — virtualization 後只有 viewport 內 row 掛 DOM；
+// memo 保證「一行狀態變 / 到新行」唔會連帶 re-render 其他已掛 row（props 全 stable：
+// row 物件 immutable、callback 全 useCallback、名冊 useMemo）。
+interface MessageBubbleProps {
+  m: MessageItem;
+  prev: MessageItem | null;
+  gapBefore: boolean;
+  assigneeId: string | null;
+  staff: StaffInfo[];
+  staffNameById: Map<string, string>;
+  readReceipts: NoteReceipt[];
+  myStaffId: string;
+  retryBusyId: string | null;
+  retryMessage: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  onVoidMessage: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  onRetryMessage?: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  openGolden: (id: string) => void;
+  onInsertCorrection: (body: string) => void;
+  // H2 note 已讀回執 reporter（virtualization：每行自 observe；root = virtuoso scroller；50% 可見 → 冪等 POST）
+  scrollerElRef: RefObject<HTMLDivElement | null>;
+  noteReadSentRef: RefObject<Set<string>>;
+  onNoteReadRef: RefObject<(id: string) => void>;
+}
+
+/** H2：note 50% 入 viewport → 冪等 POST read（per-row 一個 observer；noteReadSentRef 去重） */
+function NoteReadReporter({
+  elRef,
+  id,
+  scrollerElRef,
+  noteReadSentRef,
+  onNoteReadRef,
+}: Pick<MessageBubbleProps, "scrollerElRef" | "noteReadSentRef" | "onNoteReadRef"> & {
+  elRef: RefObject<HTMLDivElement | null>;
+  id: string;
+}) {
+  useEffect(() => {
+    const el = elRef.current;
+    const root = scrollerElRef.current;
+    if (!el) return;
+    let done = false;
+    const fire = () => {
+      if (done || noteReadSentRef.current.has(id)) return;
+      done = true;
+      noteReadSentRef.current.add(id);
+      onNoteReadRef.current(id);
+    };
+    if (!root || typeof IntersectionObserver === "undefined") {
+      fire();
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const en of entries) {
+          if (en.isIntersecting) {
+            fire();
+            io.disconnect();
+          }
+        }
+      },
+      { root, threshold: 0.5 }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [id, elRef, scrollerElRef, noteReadSentRef, onNoteReadRef]);
+  return null;
+}
+
+const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
+  const {
+    m,
+    prev,
+    gapBefore,
+    assigneeId,
+    staff,
+    staffNameById,
+    readReceipts,
+    myStaffId,
+    retryBusyId,
+    retryMessage,
+    onVoidMessage,
+    onRetryMessage,
+    openGolden,
+    onInsertCorrection,
+    scrollerElRef,
+    noteReadSentRef,
+    onNoteReadRef,
+  } = props;
+  const noteElRef = useRef<HTMLDivElement>(null);
+
+          const isOut = m.direction === "OUT";
+          const isEcho = m.channel === "APP_ECHO";
+          const isHistory = m.channel === "HISTORY";
+          const isNote = m.channel === "INTERNAL"; // ★ H1：內部備註（黃底🔒，視覺上同病人訊息完全區隔）
+          const isFlow = m.type === "interactive";
+          const isAuto = isOut && m.aiAutoSent === true;
+          const media = mediaSrc(m.mediaPath);
+          // ★ T2：中間斷層分隔線插喺此 row 之前（gapBefore = parent 計好傳入）
+          // ★ H1：INTERNAL note — 黃底 + 🔒 + 發送者名（staff 對 staff；病人睇唔到）
+          if (isNote) {
+            // ★ H2：tick 語義（似 WhatsApp）— 藍 ✓✓ = 全部被 mention staff 已讀；無 mention → 現任 assignee 已讀
+            const tick = noteTickState(m, assigneeId, readReceipts);
+            const gotIds = new Set(tick.readBy.map((r) => r.staffId));
+            const readList = tick.readBy
+              .map((r) => `${staffNameById.get(r.staffId) ?? "Staff"} · ${relTime(r.readAt)}`)
+              .join("、");
+            const pendingList = tick.requiredStaff
+              .filter((s) => !gotIds.has(s))
+              .map((s) => staffNameById.get(s) ?? "Staff")
+              .join("、");
+            const tickTitle = tick.allRead
+              ? `已讀：${readList || "—"}`
+              : pendingList
+                ? `等待已讀：${pendingList}${readList ? `（已讀：${readList}）` : ""}`
+                : "等待已讀…";
+            return (
+              <Fragment key={m.id}>
+                {gapBefore && (
+                  <div key={`${m.id}::hole-divider`} role="separator" className="text-center text-[11px] text-t3 py-1">
+                    ⋯ 中間有訊息未載入，向上捲查看 ⋯
+                  </div>
+                )}
+                <div id={`msg-${m.id}`} data-note-id={m.id} ref={noteElRef} className="flex justify-end">
+                <div className="max-w-[70%] px-3.5 py-2.5 rounded-[20px] border border-warn bg-danger-soft text-t1">
+                  <div className="text-[10.5px] font-semibold text-warn-text mb-1 inline-flex items-center gap-1">
+                    🔒 內部備註 · 唔會發去 WhatsApp
+                  </div>
+                  {m.body && <div className="break-words text-[13px] leading-[1.6]">{renderNoteBody(m.body, staff)}</div>}
+                  <div className="flex items-center gap-1 mt-1.5 justify-end">
+                    {m.sentByStaffId && (
+                      <span className="text-[10px] text-t2">{staffNameById.get(m.sentByStaffId) ?? "Staff"} · </span>
+                    )}
+                    <span className="text-[10px] text-t3">{bubbleTime(m.waTimestamp, prev?.waTimestamp)}</span>
+                    {/* ★ H2：已讀 tick — 灰 ✓ = 已發出；綠 ✓✓ = 全部目標已讀（hover 彈已讀名單） */}
+                    <span title={tickTitle} className="inline-flex align-middle">
+                      {tick.allRead ? (
+                        <CheckCheck size={13} strokeWidth={2.75} className="text-brand-hover" />
+                      ) : (
+                        <Check size={13} strokeWidth={2.75} className="text-t3" />
+                      )}
+                    </span>
+                  </div>
+                </div>
+                <NoteReadReporter elRef={noteElRef} id={m.id} scrollerElRef={scrollerElRef} noteReadSentRef={noteReadSentRef} onNoteReadRef={onNoteReadRef} />
+                </div>
+              </Fragment>
+            );
+          }
+          return (
+            <Fragment key={m.id}>
+              {gapBefore && (
+                <div key={`${m.id}::hole-divider`} role="separator" className="text-center text-[11px] text-t3 py-1">
+                  ⋯ 中間有訊息未載入，向上捲查看 ⋯
+                </div>
+              )}
+            <div id={`msg-${m.id}`} className={`group flex ${isOut ? "justify-end" : "justify-start"}`}>
+              <div
+                className={`max-w-[70%] px-3.5 py-2.5 text-[13.5px] leading-[1.6] ${
+                  isOut
+                    ? "bg-bubble-out text-ok-text rounded-[22px] rounded-br-[6px]"
+                    : "bg-bubble-in text-t1 shadow-sm rounded-[22px] rounded-bl-[6px]"
+                } ${isFlow ? "border border-brand/40" : ""} ${isHistory ? "opacity-60" : ""}`}
+              >
+                {isAuto && (
+                  <div className="text-[10.5px] text-ok-text font-semibold mb-1 inline-flex items-center gap-1">
+                    <Sparkles size={11} strokeWidth={2.75} /> 自動覆（系統）
+                  </div>
+                )}
+                {isEcho && (
+                  // ★ W-S4-5 (A2)：APP_ECHO 氣泡標「📱 手機 App」（店員手機 App 覆）
+                  <div className="text-[10px] text-ok-text font-medium mb-0.5">📱 手機 App</div>
+                )}
+                {isHistory && <div className="text-[10px] text-t3 mb-0.5">歷史訊息</div>}
+                {isFlow ? (
+                  <div className="text-[13.5px] inline-flex items-center gap-1.5">
+                    <CalendarDays size={14} strokeWidth={2.75} className="text-brand-text shrink-0" />
+                    {isOut ? "預約連結（WhatsApp Flow）已發" : "病人完成預約 Flow（nfm_reply）"}
+                  </div>
+                ) : m.type === "text" && m.body ? (
+                  <div className="whitespace-pre-wrap break-words">{m.body}</div>
+                ) : (
+                  <div className="flex flex-col gap-1">
+                    {media ? (
+                      m.type === "image" ? (
+                        <img src={media} alt="" className="rounded-xl max-h-64 max-w-full" />
+                      ) : m.type === "audio" ? (
+                        <audio controls src={media} className="max-w-full" />
+                      ) : (
+                        <a
+                          href={media}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-brand-text underline text-xs inline-flex items-center gap-1"
+                        >
+                          <Paperclip size={11} strokeWidth={2.75} /> 檔案（{m.type}）
+                        </a>
+                      )
+                    ) : (
+                      <span className="text-xs text-t3 inline-flex items-center gap-1">
+                        <Paperclip size={11} strokeWidth={2.75} /> {m.type}（媒體未落地）
+                      </span>
+                    )}
+                    {m.body && <div className="whitespace-pre-wrap break-words">{m.body}</div>}
+                  </div>
+                )}
+                <div className={`flex items-center gap-1 mt-1 ${isOut ? "justify-end" : ""}`}>
+                  <span className="text-[10px] text-t3">
+                    {isAuto ? `AI 自動發出 · ${bubbleTime(m.waTimestamp, prev?.waTimestamp)}` : bubbleTime(m.waTimestamp, prev?.waTimestamp)}
+                  </span>
+                  {isOut && m.channel === "API" && <Ticks status={m.status} errorCode={m.errorCode} />}
+                  {/* ★ cwi-final S6-9 ①：FAILED 氣泡〔重試〕（UNKNOWN 唔加 — 結果未知禁重發） */}
+                  {isOut && m.channel === "API" && m.status === "FAILED" && onRetryMessage && (
+                    <button
+                      onClick={() => void retryMessage(m.id)}
+                      disabled={retryBusyId === m.id}
+                      title="重發呢條訊息（24 小時窗口內先發得；重試後轉「發送中」）"
+                      className="text-[10px] text-danger hover:underline disabled:opacity-50 inline-flex items-center gap-0.5"
+                    >
+                      <RotateCw size={10} strokeWidth={2.75} /> {retryBusyId === m.id ? "重試中…" : "重試"}
+                    </button>
+                  )}
+                  {/* ★ cwi-inboxfix-20260905（MD §5.2/§5.3）：自己發嘅 OUT 文字 — 8 秒撤回倒數 / 過窗 ⋯ 掣 */}
+                  {isOut && m.channel === "API" && m.type === "text" && m.sentByStaffId === myStaffId && (
+                    <UndoControls
+                      m={m}
+                      onVoid={onVoidMessage}
+                      onInsertCorrection={onInsertCorrection}
+                    />
+                  )}
+                  {/* ★ Part F（F.5）：IN 文字 bubble hover「＋測試集」（deid 預填彈窗） */}
+                  {!isOut && m.type === "text" && !!m.body && (
+                    <button
+                      onClick={() => void openGolden(m.id)}
+                      title="加入 GoldenCase 測試集（自動去識別化 + AI 當時判斷預填）"
+                      className="text-[10px] text-t3 hover:text-brand-text opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      ＋測試集
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+            </Fragment>
+          );
+        
+});
+
+/**
+ * ★ cwi-final S6-7：thread virtualization 後的 imperative 介面（mention 跳行 — 目標 row 未必已掛 DOM）。
+ */
+export interface ChatPaneHandle {
+  /** 滾到指定訊息（align center + flash）；false = 目標唔喺已載行內（caller fallback） */
+  scrollToMessage: (messageId: string) => boolean;
+}
+
+export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, ref) {
   const [draft, setDraft] = useState("");
+  // ★ cwi-final S6-9（③）：enterSends 有效值 = 偏好 AND 非手機（手機永遠 Enter 換行）
+  const isMobile = useIsMobile();
+  const enterSendsActive = (p.enterSends ?? true) && !isMobile;
   // ★ cwi-final S1-13（D-6）：堆疊入目前展示緊嘅卡（parent 已 clamp index）
   const shownDraft = p.pendingDrafts[p.draftIndex] ?? null;
   const [sending, setSending] = useState(false);
@@ -468,8 +748,13 @@ export function ChatPane(p: Props) {
   const [flagMenuOpen, setFlagMenuOpen] = useState(false);
   const [flagBusy, setFlagBusy] = useState(false);
   const [flagMsg, setFlagMsg] = useState<string | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const pinnedRef = useRef(false);
+  // ★ cwi-final S6-7：thread virtualization（react-virtuoso normal mode — startReached 載舊 / followOutput 貼最新）
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const scrollerElRef = useRef<HTMLDivElement | null>(null);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const prevScrollHeightRef = useRef<number | null>(null);
+  // ★ cwi-final S6-9 ①：FAILED 氣泡〔重試〕進行中 id（disable 該氣泡掣）
+  const [retryBusyId, setRetryBusyId] = useState<string | null>(null);
   const autoFilledDraftRef = useRef<string | null>(null);
   // ★ cwi-final S1-13（D-6）：最後一次由草稿填入 composer 嘅原文 — 切換時判定「有冇改字」用
   const filledTextRef = useRef<string | null>(null);
@@ -489,6 +774,25 @@ export function ChatPane(p: Props) {
   useEffect(() => {
     onNoteReadRef.current = p.onNoteRead;
   });
+  // ★ cwi-final S6-9 ①：〔重試〕— POST /api/messages/[id]/retry（成功 → 氣泡轉 QUEUED，parent 回執更新 state）
+  //   stable callback（ref 模式 — deps 零，MessageBubble memo 有效）
+  const onRetryMessageRef = useRef(p.onRetryMessage);
+  useEffect(() => {
+    onRetryMessageRef.current = p.onRetryMessage;
+  });
+  const retryMessage = useCallback(
+    async (id: string): Promise<{ ok: boolean; error?: string }> => {
+      const fn = onRetryMessageRef.current;
+      if (!fn) return { ok: false, error: "retry 未啟用" };
+      setRetryBusyId(id);
+      try {
+        return await fn(id);
+      } finally {
+        setRetryBusyId((v) => (v === id ? null : v));
+      }
+    },
+    []
+  );
 
   // ★ cwi-final S1-1e（=S1-6）render 防呆：濾走「別對話」訊息（慢回應 race 殘留）—
   //   layer 1（async guard）之後嘅最後一道防線；同 conversation 之外嘅 row 唔 render。
@@ -503,10 +807,45 @@ export function ChatPane(p: Props) {
     }
   }, [visible.length, p.messages.length]);
 
-  useEffect(() => {
-    const el = listRef.current;
-    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [visible]);
+  // ★ cwi-final S6-7：staffNameById memo（MessageBubble memo 依賴穩定 ref）— 必喺 early return 之前（條件 hook 會 break hook order）
+  const staffNameById = useMemo(() => new Map(p.staff.map((s) => [s.id, s.name])), [p.staff]);
+
+  // ★ cwi-final S6-7：載舊（prepend）後補償錨點 — scrollTop += scrollHeight delta（react-window 口徑）。
+  //   virtuoso 量不到 off-screen 行 → 只有 scrollHeight 可用；誤差 = 估計高 vs 實量（幾 px，可接受）。
+  useLayoutEffect(() => {
+    const prev = prevScrollHeightRef.current;
+    if (prev == null) return;
+    prevScrollHeightRef.current = null;
+    const sc = scrollerElRef.current;
+    if (sc) sc.scrollTop += sc.scrollHeight - prev;
+  }, [visible.length]);
+
+  // ★ cwi-final S6-7：「更正草稿」插入 composer + focus（stable callback — MessageBubble memo 有效）
+  const onInsertCorrection = useCallback((body: string) => {
+    setDraft(body);
+    requestAnimationFrame(() => taRef.current?.focus());
+  }, []);
+
+  // ★ cwi-final S6-7：跳指定訊息（mention bell / 通知卡）— index 先 scrollToIndex，再 flash（row 掛完先有 DOM）
+  useImperativeHandle(
+    ref,
+    () => ({
+      scrollToMessage: (messageId: string) => {
+        const idx = visible.findIndex((m) => m.id === messageId);
+        if (idx < 0) return false;
+        virtuosoRef.current?.scrollToIndex({ index: idx, align: "center", behavior: "smooth" });
+        window.setTimeout(() => {
+          const el = document.getElementById(`msg-${messageId}`);
+          if (el) {
+            el.classList.add("msg-flash");
+            window.setTimeout(() => el.classList.remove("msg-flash"), 1600);
+          }
+        }, 350);
+        return true;
+      },
+    }),
+    [visible]
+  );
 
   useEffect(() => {
     setDraft("");
@@ -514,33 +853,12 @@ export function ChatPane(p: Props) {
     setMentionState(null);
     setMentionIdx(0);
     setTemplateOptions(null);
-    pinnedRef.current = true;
+    setIsAtBottom(true); // ★ cwi-final S6-7：換對話（= remount 前）貼最新
     autoFilledDraftRef.current = null;
     filledTextRef.current = null; // ★ cwi-final S1-13（D-6）：換對話 → 填入基準重置
     adoptedFollowupRef.current = null; // ★ cwi-followup-v3：換對話 → 建議採用旗清掉
     noteReadSentRef.current = new Set();
   }, [p.conversation?.id]);
-
-  // ★ H2：note 進入 viewport → 冪等 POST read（IntersectionObserver；只 observe INTERNAL note 氣泡）
-  useEffect(() => {
-    const el = listRef.current;
-    if (!el) return;
-    const obs = new IntersectionObserver(
-      (entries) => {
-        for (const en of entries) {
-          if (!en.isIntersecting) continue;
-          const noteId = (en.target as HTMLElement).dataset.noteId;
-          if (!noteId || noteReadSentRef.current.has(noteId)) continue;
-          noteReadSentRef.current.add(noteId);
-          onNoteReadRef.current(noteId);
-          obs.unobserve(en.target);
-        }
-      },
-      { root: el, threshold: 0.5 }
-    );
-    el.querySelectorAll<HTMLElement>("[data-note-id]").forEach((n) => obs.observe(n));
-    return () => obs.disconnect();
-  }, [visible, p.conversation?.id]);
 
   useEffect(() => {
     if (!shownDraft) {
@@ -655,7 +973,6 @@ export function ChatPane(p: Props) {
     }
   }
   const assigneeName = c.assigneeName ?? null;
-  const staffNameById = new Map(p.staff.map((s) => [s.id, s.name]));
   // ★ cwi-audit2-20260908 T2（A-3 超額）：中間斷層分隔線位置 = 第一條 createdAt > 邊界嘅 row
   //   （messages 已按 createdAt 主序排 → findIndex 直接得）；無匹配 = 唔 render。
   const gapDividerIdx =
@@ -946,171 +1263,95 @@ export function ChatPane(p: Props) {
         </span>
       </div>
 
-      {/* messages */}
-      <div
-        ref={listRef}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-          if (el.scrollTop < 40 && p.hasMore && !p.loadingOlder) p.onScrollTop();
-        }}
-        className="flex-1 overflow-y-auto min-h-0 px-4 py-4 md:px-6 space-y-3"
-      >
-        {p.loadingOlder && <div className="text-center text-[11px] text-t3">載入舊訊息…</div>}
-        {visible.length === 0 && !p.loadingOlder && (
+      {/* messages — ★ cwi-final S6-7：virtualization（react-virtuoso normal mode — 只有 viewport 內 row 掛 DOM）
+          startReached = 載舊（prepend 用 scrollHeight delta 補償錨點）；followOutput = 貼最新（atBottom 先跟） */}
+      <div className="flex-1 min-h-0 relative">
+        {visible.length === 0 && !p.loadingOlder ? (
           <div className="text-center text-t3 text-sm py-8">（呢個對話仲冇訊息）</div>
-        )}
-        {visible.map((m, i) => {
-          const isOut = m.direction === "OUT";
-          const isEcho = m.channel === "APP_ECHO";
-          const isHistory = m.channel === "HISTORY";
-          const isNote = m.channel === "INTERNAL"; // ★ H1：內部備註（黃底🔒，視覺上同病人訊息完全區隔）
-          const isFlow = m.type === "interactive";
-          const isAuto = isOut && m.aiAutoSent === true;
-          const prev = visible[i - 1];
-          const media = mediaSrc(m.mediaPath);
-          // ★ T2：中間斷層分隔線插喺此 row 之前（見 gapDividerIdx）
-          const gapBefore = gapDividerIdx === i;
-          // ★ H1：INTERNAL note — 黃底 + 🔒 + 發送者名（staff 對 staff；病人睇唔到）
-          if (isNote) {
-            // ★ H2：tick 語義（似 WhatsApp）— 藍 ✓✓ = 全部被 mention staff 已讀；無 mention → 現任 assignee 已讀
-            const tick = noteTickState(m, c.assigneeId, p.readReceipts);
-            const gotIds = new Set(tick.readBy.map((r) => r.staffId));
-            const readList = tick.readBy
-              .map((r) => `${staffNameById.get(r.staffId) ?? "Staff"} · ${relTime(r.readAt)}`)
-              .join("、");
-            const pendingList = tick.requiredStaff
-              .filter((s) => !gotIds.has(s))
-              .map((s) => staffNameById.get(s) ?? "Staff")
-              .join("、");
-            const tickTitle = tick.allRead
-              ? `已讀：${readList || "—"}`
-              : pendingList
-                ? `等待已讀：${pendingList}${readList ? `（已讀：${readList}）` : ""}`
-                : "等待已讀…";
-            return (
-              <Fragment key={m.id}>
-                {gapBefore && (
-                  <div key={`${m.id}::hole-divider`} role="separator" className="text-center text-[11px] text-t3 py-1">
-                    ⋯ 中間有訊息未載入，向上捲查看 ⋯
-                  </div>
-                )}
-                <div id={`msg-${m.id}`} data-note-id={m.id} className="flex justify-end">
-                <div className="max-w-[70%] px-3.5 py-2.5 rounded-[20px] border border-warn bg-danger-soft text-t1">
-                  <div className="text-[10.5px] font-semibold text-warn-text mb-1 inline-flex items-center gap-1">
-                    🔒 內部備註 · 唔會發去 WhatsApp
-                  </div>
-                  {m.body && <div className="break-words text-[13px] leading-[1.6]">{renderNoteBody(m.body, p.staff)}</div>}
-                  <div className="flex items-center gap-1 mt-1.5 justify-end">
-                    {m.sentByStaffId && (
-                      <span className="text-[10px] text-t2">{staffNameById.get(m.sentByStaffId) ?? "Staff"} · </span>
-                    )}
-                    <span className="text-[10px] text-t3">{bubbleTime(m.waTimestamp, prev?.waTimestamp)}</span>
-                    {/* ★ H2：已讀 tick — 灰 ✓ = 已發出；綠 ✓✓ = 全部目標已讀（hover 彈已讀名單） */}
-                    <span title={tickTitle} className="inline-flex align-middle">
-                      {tick.allRead ? (
-                        <CheckCheck size={13} strokeWidth={2.75} className="text-brand-hover" />
-                      ) : (
-                        <Check size={13} strokeWidth={2.75} className="text-t3" />
-                      )}
-                    </span>
-                  </div>
-                </div>
-                </div>
-              </Fragment>
-            );
-          }
-          return (
-            <Fragment key={m.id}>
-              {gapBefore && (
-                <div key={`${m.id}::hole-divider`} role="separator" className="text-center text-[11px] text-t3 py-1">
-                  ⋯ 中間有訊息未載入，向上捲查看 ⋯
-                </div>
-              )}
-            <div id={`msg-${m.id}`} className={`group flex ${isOut ? "justify-end" : "justify-start"}`}>
-              <div
-                className={`max-w-[70%] px-3.5 py-2.5 text-[13.5px] leading-[1.6] ${
-                  isOut
-                    ? "bg-bubble-out text-ok-text rounded-[22px] rounded-br-[6px]"
-                    : "bg-bubble-in text-t1 shadow-sm rounded-[22px] rounded-bl-[6px]"
-                } ${isFlow ? "border border-brand/40" : ""} ${isHistory ? "opacity-60" : ""}`}
-              >
-                {isAuto && (
-                  <div className="text-[10.5px] text-ok-text font-semibold mb-1 inline-flex items-center gap-1">
-                    <Sparkles size={11} strokeWidth={2.75} /> 自動覆（系統）
-                  </div>
-                )}
-                {isEcho && (
-                  // ★ W-S4-5 (A2)：APP_ECHO 氣泡標「📱 手機 App」（店員手機 App 覆）
-                  <div className="text-[10px] text-ok-text font-medium mb-0.5">📱 手機 App</div>
-                )}
-                {isHistory && <div className="text-[10px] text-t3 mb-0.5">歷史訊息</div>}
-                {isFlow ? (
-                  <div className="text-[13.5px] inline-flex items-center gap-1.5">
-                    <CalendarDays size={14} strokeWidth={2.75} className="text-brand-text shrink-0" />
-                    {isOut ? "預約連結（WhatsApp Flow）已發" : "病人完成預約 Flow（nfm_reply）"}
-                  </div>
-                ) : m.type === "text" && m.body ? (
-                  <div className="whitespace-pre-wrap break-words">{m.body}</div>
-                ) : (
-                  <div className="flex flex-col gap-1">
-                    {media ? (
-                      m.type === "image" ? (
-                        <img src={media} alt="" className="rounded-xl max-h-64 max-w-full" />
-                      ) : m.type === "audio" ? (
-                        <audio controls src={media} className="max-w-full" />
-                      ) : (
-                        <a
-                          href={media}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-brand-text underline text-xs inline-flex items-center gap-1"
-                        >
-                          <Paperclip size={11} strokeWidth={2.75} /> 檔案（{m.type}）
-                        </a>
-                      )
-                    ) : (
-                      <span className="text-xs text-t3 inline-flex items-center gap-1">
-                        <Paperclip size={11} strokeWidth={2.75} /> {m.type}（媒體未落地）
-                      </span>
-                    )}
-                    {m.body && <div className="whitespace-pre-wrap break-words">{m.body}</div>}
-                  </div>
-                )}
-                <div className={`flex items-center gap-1 mt-1 ${isOut ? "justify-end" : ""}`}>
-                  <span className="text-[10px] text-t3">
-                    {isAuto ? `AI 自動發出 · ${bubbleTime(m.waTimestamp, prev?.waTimestamp)}` : bubbleTime(m.waTimestamp, prev?.waTimestamp)}
-                  </span>
-                  {isOut && m.channel === "API" && <Ticks status={m.status} errorCode={m.errorCode} />}
-                  {/* ★ cwi-inboxfix-20260905（MD §5.2/§5.3）：自己發嘅 OUT 文字 — 8 秒撤回倒數 / 過窗 ⋯ 掣 */}
-                  {isOut && m.channel === "API" && m.type === "text" && m.sentByStaffId === p.myStaffId && (
-                    <UndoControls
-                      m={m}
-                      onVoid={p.onVoidMessage}
-                      onInsertCorrection={(body) => {
-                        setDraft(body);
-                        requestAnimationFrame(() => taRef.current?.focus());
-                      }}
-                    />
-                  )}
-                  {/* ★ Part F（F.5）：IN 文字 bubble hover「＋測試集」（deid 預填彈窗） */}
-                  {!isOut && m.type === "text" && !!m.body && (
-                    <button
-                      onClick={() => void openGolden(m.id)}
-                      title="加入 GoldenCase 測試集（自動去識別化 + AI 當時判斷預填）"
-                      className="text-[10px] text-t3 hover:text-brand-text opacity-0 group-hover:opacity-100 transition-opacity"
-                    >
-                      ＋測試集
-                    </button>
-                  )}
-                </div>
+        ) : (
+          <>
+            {p.loadingOlder && (
+              <div className="absolute top-2 left-1/2 -translate-x-1/2 z-10 bg-panel border border-line rounded-full px-3 py-1 text-[11px] text-t3 shadow-sm pointer-events-none">
+                載入舊訊息…
               </div>
-            </div>
-            </Fragment>
-          );
-        })}
+            )}
+            <Virtuoso
+              ref={virtuosoRef}
+              className="h-full"
+              data={visible}
+              computeItemKey={(_, m) => m.id}
+              initialTopMostItemIndex={Math.max(0, visible.length - 1)}
+              scrollerRef={(el) => {
+                scrollerElRef.current = el as HTMLDivElement | null;
+              }}
+              components={{
+                // ★ G4 gen5（virtuoso 根因修，2026-09-28 實測）：自訂 components 必轉發 virtuoso 量測契約 —
+                //   List：callback ref（list 級 ResizeObserver 掛喺呢個 DOM 節點）；
+                //   Item：data-index/data-known-size（Bo() 讀 List 直接子節點嘅屬性量行高）。
+                //   舊版兩者都吞咗 → 零行被量測 → 總高 0 → 只 render 1 行（空白列表）。
+                //   （.virtuoso-repro VA8 實測綠：rows=9 listH=4101 = 全列表）
+                List: (pr) => (
+                  <div ref={pr.ref} style={pr.style} data-testid={pr["data-testid"]} className="px-4 py-4 md:px-6">
+                    {pr.children}
+                  </div>
+                ),
+                Item: (pr) => (
+                  <div
+                    style={pr.style}
+                    data-index={pr["data-index"]}
+                    data-known-size={pr["data-known-size"]}
+                    data-item-index={pr["data-item-index"]}
+                    className="pb-3"
+                  >
+                    {pr.children}
+                  </div>
+                ),
+              }}
+              startReached={() => {
+                if (p.hasMore && !p.loadingOlder) {
+                  // ★ S6-7：prepend 前記 scrollHeight — render 完後 scrollTop += delta（react-window 口徑 — 錨點唔跳）
+                  const sc = scrollerElRef.current;
+                  if (sc) prevScrollHeightRef.current = sc.scrollHeight;
+                  p.onScrollTop();
+                }
+              }}
+              atBottomThreshold={60}
+              atBottomStateChange={setIsAtBottom}
+              followOutput={(isAtBottom) => isAtBottom}
+              itemContent={(i, m) => (
+                <MessageBubble
+                  m={m}
+                  prev={visible[i - 1] ?? null}
+                  gapBefore={i === gapDividerIdx}
+                  assigneeId={c.assigneeId}
+                  staff={p.staff}
+                  staffNameById={staffNameById}
+                  readReceipts={p.readReceipts}
+                  myStaffId={p.myStaffId}
+                  retryBusyId={retryBusyId}
+                  retryMessage={retryMessage}
+                  onVoidMessage={p.onVoidMessage}
+                  onRetryMessage={p.onRetryMessage}
+                  openGolden={openGolden}
+                  onInsertCorrection={onInsertCorrection}
+                  scrollerElRef={scrollerElRef}
+                  noteReadSentRef={noteReadSentRef}
+                  onNoteReadRef={onNoteReadRef}
+                />
+              )}
+            />
+            {!isAtBottom && (
+              <button
+                onClick={() => virtuosoRef.current?.scrollToIndex({ index: visible.length - 1, align: "end", behavior: "smooth" })}
+                className="absolute bottom-3 right-4 z-10 rounded-full bg-brand text-panel text-[11px] font-medium px-3 py-1.5 shadow-md inline-flex items-center gap-1"
+                title="捲到最新訊息"
+              >
+                ↓ 最新
+              </button>
+            )}
+          </>
+        )}
       </div>
-
       {/* composer 區 */}
       <div className="shrink-0 bg-panel border-t border-line p-3">
         {/* Phase 3：預約卡 / 發 Flow 提示 — ★ booking-ui（D）：兩態卡（PENDING 綠邊 / CONFIRMED 撤銷倒數）
@@ -1443,6 +1684,8 @@ export function ChatPane(p: Props) {
                   setMentionIdx(0);
                 }}
                 onKeyDown={(e) => {
+                  // ★ cwi-final S6-9（②）：IME 組字中（keyCode 229 = Safari 舊版）唔當發送
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                   // ★ H2：dropdown 開住時 — 方向鍵/Enter/Tab 揀 candidate，唔係發送
                   if (mentionState && mentionCandidates.length > 0) {
                     if (e.key === "ArrowDown") {
@@ -1474,6 +1717,7 @@ export function ChatPane(p: Props) {
                 }}
                 rows={1}
                 placeholder="寫內部備註…"
+                data-testid="c5-composer-note"
                 className="w-full resize-none rounded-full bg-panel border border-warn px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-warn"
               />
               <button
@@ -1506,21 +1750,38 @@ export function ChatPane(p: Props) {
                     adoptedFollowupRef.current = null;
                   }
                   setDraft(v);
+                  // ★ cwi-final S6-9（③）：textarea 自動增高（最多 6 行 ≈ 136px = 6×20 行高 + 16 內距）
+                  const el = e.currentTarget;
+                  el.style.height = "auto";
+                  el.style.height = `${Math.min(el.scrollHeight, 136)}px`;
                 }}
                 onKeyDown={(e) => {
+                  // ★ cwi-final S6-9（②）：IME 組字中（keyCode 229 = Safari 舊版）唔當發送
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                   // ★ cwi-final S1-13（D-6）：Alt+↑／Alt+↓ = 堆疊切換（↑ 較新 / ↓ 較舊）
                   if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
                     e.preventDefault();
                     switchDraft(p.draftIndex + (e.key === "ArrowDown" ? 1 : -1));
                     return;
                   }
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    void send();
+                  if (e.key === "Enter") {
+                    if (e.shiftKey) return; // 換行（browser default）
+                    if (e.ctrlKey || e.metaKey) {
+                      // ★ cwi-final S6-9（③）：Ctrl/⌘+Enter = 發送（Enter 換行模式快捷）
+                      e.preventDefault();
+                      void send();
+                      return;
+                    }
+                    if (enterSendsActive) {
+                      e.preventDefault();
+                      void send();
+                    }
                   }
                 }}
                 rows={1}
-                placeholder="輸入訊息…（Enter 發送，Shift+Enter 換行）"
+                placeholder={
+                  enterSendsActive ? "輸入訊息…（Enter 發送，Shift+Enter 換行）" : "輸入訊息…（Enter 換行，Ctrl/⌘+Enter 發送）"
+                }
                 data-testid="c5-composer"
                 className="flex-1 resize-none rounded-full bg-panel-2 border border-transparent px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
               />
@@ -1534,6 +1795,20 @@ export function ChatPane(p: Props) {
                 <Send size={15} strokeWidth={2.75} />
               </button>
             </div>
+            {/* ★ cwi-final S6-9（③）：右下細字 toggle「Enter 發送／Enter 換行」（撳即存 PATCH /api/staff/me/prefs） */}
+            {p.onToggleEnterSends && (
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={p.onToggleEnterSends}
+                  title={(p.enterSends ?? true) ? "改：Enter 換行（Ctrl/⌘+Enter 發送）" : "改：Enter 發送"}
+                  data-testid="c5-entersends-toggle"
+                  className="text-[10px] text-t3 hover:text-t2"
+                >
+                  {(p.enterSends ?? true) ? "Enter 發送" : "Enter 換行"}
+                </button>
+              </div>
+            )}
           </div>
           )
         ) : (
@@ -1666,4 +1941,4 @@ export function ChatPane(p: Props) {
       <div className="sr-only">{relTime(c.lastMessageAt)}</div>
     </section>
   );
-}
+});
