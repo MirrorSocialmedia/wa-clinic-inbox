@@ -12,6 +12,8 @@
 # 4. ★ 一律 restore 落 scratch DB `wa_inbox_restore_test`（唔會郁生產 DB）
 # 5. 抽 5 表（Message / Conversation / Contact / AiDraft / BookingRequest）row count 同源 DB 對
 # 6. 全部對 → exit 0 + "RESTORE-TEST OK"；任何唔對 → exit 1
+# 7. ★ cwi-final S6-4：成功時 drill 記錄 append 入 docs/drills/restore-drill-YYYY-MM.md
+#    （每月 restore drill 留痕；DRILL_LOG="" 可關閉）
 #
 # 用法：bash scripts/restore-wa-test.sh [path-to-dump]
 #
@@ -135,10 +137,13 @@ esac
 
 # ── 5 表 row count 對數 ─────────────────────────────────────────────────
 FAIL=0
+declare -A SRC_COUNTS DST_COUNTS
 printf "[restore-test] %-18s %-10s %-10s %s\n" "TABLE" "SOURCE" "SCRATCH" "CHECK"
 for t in "${TABLES[@]}"; do
   SRC_N=$(psql -d "$_dbname" -tAc "SELECT count(*) FROM \"$t\";" 2>/dev/null)
   DST_N=$(psql -d "$SCRATCH_DB" -tAc "SELECT count(*) FROM \"$t\";" 2>/dev/null)
+  SRC_COUNTS[$t]="${SRC_N:-?}"
+  DST_COUNTS[$t]="${DST_N:-?}"
   if [ "$SRC_N" = "$DST_N" ] && [ -n "$SRC_N" ]; then
     printf "[restore-test] %-18s %-10s %-10s ✅\n" "$t" "$SRC_N" "$DST_N"
   else
@@ -152,6 +157,22 @@ psql -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS $SCRATCH_DB;" >/
 cleanup
 
 if [ "$FAIL" = 0 ]; then
+  # ── ★ cwi-final S6-4：drill 記錄（每月 restore drill 留痕入 docs/drills/） ──
+  DRILL_LOG="${DRILL_LOG:-docs/drills/restore-drill-$(date +%Y-%m).md}"
+  if [ -n "$DRILL_LOG" ]; then
+    mkdir -p "$(dirname "$DRILL_LOG")"
+    {
+      echo ""
+      echo "## $(date -u +%Y-%m-%dT%H:%M:%SZ) restore drill — OK"
+      echo ""
+      echo "- dump: \`${DUMP}\`"
+      echo "- 5 表 row count 對數："
+      for t in "${TABLES[@]}"; do
+        echo "  - \`${t}\`: source=${SRC_COUNTS[$t]} scratch=${DST_COUNTS[$t]}"
+      done
+    } >> "$DRILL_LOG"
+    echo "[restore-test] drill record → $DRILL_LOG"
+  fi
   echo "RESTORE-TEST OK: 5 表 row count 全對（$SCRATCH_DB 已清）"
   exit 0
 else

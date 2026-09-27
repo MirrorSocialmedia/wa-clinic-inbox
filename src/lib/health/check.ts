@@ -11,6 +11,8 @@
  *  5. disk 餘量          — < 10% → HIGH
  *  6. backup 失敗 flag   — scripts/backup-wa.sh 失敗時寫 flag 檔（C-2）→ HIGH
  *                          （flag 清咗 → 下個 cycle auto-resolve）
+ *  7. backup stale（★ cwi-final S6-4）— 最後成功 marker 超過 26 小時 → HIGH
+ *                          （marker 不存在 = 從未成功 backup → 唔計，同 webhook stale「無 traffic 唔算」同語義）
  *
  * 警報生命周期（冪等）：
  * - breach 中：同 (type, clinicId) 已有未解決 alert → 唔重覆開（每 5 分鐘 cycle 只彈一次）
@@ -39,6 +41,8 @@ export const WEBHOOK_STALE_MIN = 30;      // 有 traffic 但 > 30 分鐘無事�
 export const QUEUE_DEPTH_LIMIT = 100;     // waiting + failed
 export const WORKFORCE_DEGRADED_MIN = 15; // 上次成功 workforce sync > 15 分鐘（持續降級 → alert）
 export const DISK_FREE_PCT_LIMIT = 10;    // 剩餘 < 10%
+/** ★ cwi-final S6-4：backup 最後成功 marker 超過 26 小時 → HIGH（VPS 每晚一次 + 1 日緩衝） */
+export const BACKUP_STALE_HOURS = 26;
 
 // ★ cwi-final S1-1a：inbound / media queue 納入健康自檢（深度 > 100 → queue_depth MEDIUM）。
 const CHECKED_QUEUES = ["ai", "outbound", "inbound", "media"] as const;
@@ -233,6 +237,31 @@ export async function runHealthCheck(
     });
   }
 
+  // ── 7. backup stale（★ cwi-final S6-4）：最後成功 > 26 小時 → HIGH ──────
+  // marker = backup-wa.sh 成功時寫（$WA_BACKUP_LAST_SUCCESS 或 $BACKUP_DIR 同層 backup-last-success.txt）。
+  // marker 不存在 = 從未成功 backup（新部署）→ 唔計（同 webhook stale「無 traffic 唔算」同語義）。
+  const lastSuccessPath = backupLastSuccessPath();
+  let backupStaleHrs: number | null = null;
+  try {
+    const raw = await readFile(lastSuccessPath, "utf8");
+    const ts = Date.parse(raw.trim());
+    if (Number.isFinite(ts)) {
+      const hrs = (now.getTime() - ts) / 3_600_000;
+      backupStaleHrs = Math.round(hrs);
+      if (hrs > BACKUP_STALE_HOURS) {
+        breaches.push({
+          type: "backup_stale",
+          severity: "HIGH",
+          clinicId: null,
+          clinicCode: null,
+          detail: { hoursSince: backupStaleHrs, thresholdHours: BACKUP_STALE_HOURS },
+        });
+      }
+    }
+  } catch {
+    /* 無 marker = 從未成功 backup — 唔計 */
+  }
+
   // ── retention env（S0-11）──
   const retentionMismatch = retentionPolicyMismatches();
   if (retentionMismatch.length > 0) {
@@ -281,6 +310,7 @@ export async function runHealthCheck(
       workforceSyncMin: wfMin,
       disk: diskInfo,
       backupFlag: backupReason,
+      backupStaleHrs,
       created: created.map((c) => c.type),
       resolved,
     },
@@ -290,7 +320,7 @@ export async function runHealthCheck(
   return {
     created,
     resolved,
-    checks: { webhook: webhookInfo, queues: queueInfo, breaker: breaker.state, workforceSyncMin: wfMin, disk: diskInfo, backupFlag: backupReason },
+    checks: { webhook: webhookInfo, queues: queueInfo, breaker: breaker.state, workforceSyncMin: wfMin, disk: diskInfo, backupFlag: backupReason, backupStaleHrs },
   };
 }
 
@@ -303,4 +333,15 @@ export function backupFailFlagPath(): string {
   if (override) return override;
   const backupDir = (process.env.BACKUP_DIR ?? "").trim() || ".dev/backups";
   return path.join(path.dirname(backupDir), "backup-failed.flag");
+}
+
+/**
+ * ★ cwi-final S6-4：backup 最後成功 marker 路徑 — 同 backup-wa.sh 預設公式一致：
+ * $WA_BACKUP_LAST_SUCCESS 或 $BACKUP_DIR（預設 .dev/backups）同層 backup-last-success.txt。
+ */
+export function backupLastSuccessPath(): string {
+  const override = (process.env.WA_BACKUP_LAST_SUCCESS ?? "").trim();
+  if (override) return override;
+  const backupDir = (process.env.BACKUP_DIR ?? "").trim() || ".dev/backups";
+  return path.join(path.dirname(backupDir), "backup-last-success.txt");
 }

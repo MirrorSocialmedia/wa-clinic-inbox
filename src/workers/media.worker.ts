@@ -21,6 +21,7 @@ import { publishConvEvent, convRef } from "@/lib/notify";
 import { downloadWaMedia } from "@/lib/wa/media";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
+import path from "node:path";
 import { MEDIA_CONCURRENCY } from "./concurrency";
 
 interface MediaJobData {
@@ -69,7 +70,8 @@ async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
   if (dl.mediaPath) {
     await prisma.message.update({
       where: { id: messageId },
-      data: { mediaPath: dl.mediaPath, mediaStatus: "READY" },
+      // ★ cwi-final S6-3②：mediaKey = 檔 basename（/api/media unique 查詢鍵）
+      data: { mediaPath: dl.mediaPath, mediaKey: dl.mediaKey ?? path.basename(dl.mediaPath), mediaStatus: "READY" },
     });
     log.info({ messageId, wamid, path: dl.mediaPath }, "media: download complete");
     // ★ R2：commit 之後先 emit（上面 update 已 commit；publish 唔喺任何 $transaction 入面）

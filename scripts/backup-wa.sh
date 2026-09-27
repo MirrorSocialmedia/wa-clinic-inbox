@@ -16,6 +16,11 @@
 # 3. retention：dump 檔 30 日（舊檔清）
 # 4. media：$WA_MEDIA_DIR（預設 /srv/wa-media）→ snapshot 落 backup dir，同 30 日 retention；
 #    有 age 時 media 一樣入加密軌（病人相 = 醫療資料，明文 snapshot 唔准出產）
+# 5. ★ cwi-final S6-4：異地複製（offsite — R2/B2；rclone dest path；credentials 全部 env，
+#    repo 零真值）：BACKUP_REMOTE_URL 未設 = skip（本地 sandbox 軌）；設咗但失敗 = FATAL
+#    （本地 backup 已完，但 offsite 副本缺 = 唔算完整 backup）+ 寫 fail flag
+#    → health-check backup_failed alert 會響
+# 6. 成功 → 寫 last-success marker（health-check：最後成功 > 26 小時 → Alert backup_stale）
 # 5. 失敗警報（安全審計 C-2）：任何失敗 → 寫 flag 檔（$BACKUP_DIR 同層 backup-failed.flag，
 #    內容只係 metadata：ts/reason/node_env — 零 log 原文）→ App 5 分鐘 health-check
 #    見到 flag → 開 Alert(type=backup_failed, HIGH) + notifyAlert（走現有 alert 系統，冪等）；
@@ -42,6 +47,8 @@ AGE_KEY_FILE="${AGE_KEY_FILE:-.dev/age.key}"
 STAMP=$(date +%Y%m%d-%H%M%S)
 # 失敗 flag（App health-check 讀）— WA_BACKUP_FAIL_FLAG 可覆蓋（E2E 用）
 FAIL_FLAG="${WA_BACKUP_FAIL_FLAG:-$(dirname "$BACKUP_DIR")/backup-failed.flag}"
+# ★ cwi-final S6-4：成功 marker（health-check backup_stale 讀）— 同 fail flag 同層
+LAST_SUCCESS="${WA_BACKUP_LAST_SUCCESS:-$(dirname "$BACKUP_DIR")/backup-last-success.txt}"
 
 # 失敗時寫 flag（App 端轉 Alert）— 寫唔到只係 warning（backup 本身已失敗，唔疊第二個錯）
 mark_failed() {
@@ -184,6 +191,30 @@ fi
 PRUNED=$(find "$BACKUP_DIR" -maxdepth 1 -name "wa-inbox-*.dump*" -mtime +"$RETENTION_DAYS" -print -delete | wc -l | tr -d ' ')
 PRUNED_M=$(find "$BACKUP_DIR/media" -maxdepth 1 -name "wa-media-*" -mtime +"$RETENTION_DAYS" -print -delete | wc -l | tr -d ' ')
 echo "[backup] retention: pruned $PRUNED dump(s), $PRUNED_M media snapshot(s) older than ${RETENTION_DAYS}d"
-# 成功 → 清失敗 flag（App health-check 見到 breach 消失 → backup_failed alert auto-resolve）
+
+# ── 5. ★ cwi-final S6-4：異地複製（offsite — R2/B2；rclone） ───────────────
+# BACKUP_REMOTE_URL = rclone dest（例：r2bucket:wa-inbox/backups / b2:mybucket/wa-inbox）。
+#   先喺 VPS 配好 rclone remote（rclone config），credentials 住 env — repo 零真值：
+#     R2: BACKUP_REMOTE_ACCESS_KEY_ID / BACKUP_REMOTE_SECRET_ACCESS_KEY（rclone remote 內配 provider=AWS + endpoint）
+#     B2: BACKUP_REMOTE_B2_KEY_ID / BACKUP_REMOTE_B2_APPLICATION_KEY
+# 未設 BACKUP_REMOTE_URL = 本地 sandbox 軌（skip，唔算失敗）。設咗但失敗 = FATAL
+# （本地 backup 留低，但 offsite 副本缺 — 醫院場景唔算完整 backup；fail flag → health alert）。
+REMOTE_URL="${BACKUP_REMOTE_URL:-}"
+if [ -z "$REMOTE_URL" ]; then
+  echo "[backup] 異地複製：BACKUP_REMOTE_URL 未設 — skip（offsite 副本未啟用）"
+else
+  command -v rclone >/dev/null 2>&1 || { echo "FATAL: 異地複製已啟用但 rclone 未安裝" >&2; mark_failed "rclone_not_installed"; exit 1; }
+  if rclone copy "$BACKUP_DIR" "$REMOTE_URL" --max-duration 30m >/tmp/wa-backup-remote.log 2>&1; then
+    echo "[backup] 異地複製 OK → $REMOTE_URL"
+  else
+    echo "FATAL: 異地複製失敗（本地 backup 保留 — 見 /tmp/wa-backup-remote.log）" >&2
+    tail -5 /tmp/wa-backup-remote.log >&2
+    mark_failed "remote_replication_failed"
+    exit 1
+  fi
+fi
+
+# ── 6. 成功 → 清失敗 flag + 寫 last-success marker ────────────────────
 rm -f "$FAIL_FLAG"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LAST_SUCCESS" 2>/dev/null || echo "WARNING: 寫唔到 last-success marker：$LAST_SUCCESS" >&2
 echo "[backup] DONE"

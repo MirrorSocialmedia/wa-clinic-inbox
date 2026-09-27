@@ -107,6 +107,9 @@ interface WaPayload {
 
 const MEDIA_TYPES = new Set(["image", "video", "audio", "document"]);
 
+// ★ cwi-final S6-4：lastWebhookEventAt 熱行保護 — 同店 60 秒內唔重寫（webhook 暴風保護；健康檢查粒度 5 分鐘）
+const WEBHOOK_EVENT_REFRESH_MS = 60_000;
+
 const STATUS_MAP: Record<string, Message["status"]> = {
   sent: "SENT",
   delivered: "DELIVERED",
@@ -969,21 +972,22 @@ async function handleHistory(clinic: Clinic, value: NonNullable<WaChange["value"
       .reduce<Date | null>((a, r) => (a === null || r.waTimestamp > a ? r.waTimestamp : a), null);
     if (!maxInboundTs) {
       // 全部係 OUT（店員發嘅）— 只更新 lastMessageAt + lastOutboundAt
+      // ★ cwi-final S6-4：GREATEST 補第二參數（單參數 GREATEST 喺 PG 係 syntax error — 呢條 UPDATE 會 throw）
       await prisma.$executeRaw`
         UPDATE "Conversation" SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}),
-            "lastOutboundAt" = GREATEST(COALESCE("lastOutboundAt", ${maxTs})) WHERE "id" = ${conv.id}`;
+            "lastOutboundAt" = GREATEST(COALESCE("lastOutboundAt", ${maxTs}), ${maxTs}) WHERE "id" = ${conv.id}`;
     } else if (maxOutboundTs) {
       await prisma.$executeRaw`
         UPDATE "Conversation"
         SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}),
-            "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${maxInboundTs})),
-            "lastOutboundAt" = GREATEST(COALESCE("lastOutboundAt", ${maxOutboundTs}))
+            "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${maxInboundTs}), ${maxInboundTs}),
+            "lastOutboundAt" = GREATEST(COALESCE("lastOutboundAt", ${maxOutboundTs}), ${maxOutboundTs})
         WHERE "id" = ${conv.id}`;
     } else {
       await prisma.$executeRaw`
         UPDATE "Conversation"
         SET "lastMessageAt" = GREATEST("lastMessageAt", ${maxTs}),
-            "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${maxInboundTs}))
+            "lastInboundAt" = GREATEST(COALESCE("lastInboundAt", ${maxInboundTs}), ${maxInboundTs})
         WHERE "id" = ${conv.id}`;
     }
     imported.push({ patientMasked: patientWaId.length > 3 ? `${patientWaId.slice(0, 3)}***` : "***", count: rows.length });
@@ -1104,9 +1108,14 @@ async function processInboundEvent(payload: unknown): Promise<void> {
 
       // Phase 4：webhook 最後事件時間（5 分鐘健康自檢 stale 判斷用）—
       // 任何 field 嘅事件都算 traffic。寫失敗唔阻主 pipeline（fire-and-forget）。
-      prisma.clinic
-        .update({ where: { id: clinic.id }, data: { lastWebhookEventAt: new Date() } })
-        .catch((e) => log.warn({ clinic: clinic.code, err: e instanceof Error ? e.message : String(e) }, "inbound: lastWebhookEventAt update failed (ignored)"));
+      // ★ cwi-final S6-4：熱行保護 — 同店 60 秒內唔重寫（webhook 暴風 = 不斷重寫同一行；
+      //   健康檢查粒度係 5 分鐘，60 秒窗口無語義損失）
+      const lastEvent = clinic.lastWebhookEventAt;
+      if (!lastEvent || Date.now() - lastEvent.getTime() >= WEBHOOK_EVENT_REFRESH_MS) {
+        prisma.clinic
+          .update({ where: { id: clinic.id }, data: { lastWebhookEventAt: new Date() } })
+          .catch((e) => log.warn({ clinic: clinic.code, err: e instanceof Error ? e.message : String(e) }, "inbound: lastWebhookEventAt update failed (ignored)"));
+      }
 
       try {
         if (value?.messages?.length) await handleMessages(clinic, value);

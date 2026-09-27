@@ -81,6 +81,8 @@
 #   T49 (AS-3③) mock mode 禁用 per-account lockout：5 次 fail 無 lockout/loginfail Redis key；
 #       非 mock 路徑單元測（WA_MOCK=0 獨立 process）：第 5 次觸發 / TTL≤900 / NX 唔刷新 / email 變體 / 成功重計
 #   T49b (L-2) search ILIKE escape：q=% 同 q=_ 當字面（0 hit）；control 正常 query 照中
+#   T690 (cwi-final S6-3①) 電話搜尋：「9123 4567」/「+852-9123-4567」都搵到 85291234567；跨店結果 0（hermetic seed/cleanup）
+#   T691 (cwi-final S6-3②) /api/media findUnique(mediaKey) EXPLAIN = Index Scan（Message_mediaKey_key）
 #
 # App Review 三件套（2026-08-20）：
 #   T52 (App Review §1) privacy 公開頁：無 cookie 200 + data-deletion link + 保留期 24 月 + 保密協議句式 + 公司名定稿 + 0 PII（★ cwi-legal-20260915 後更新：舊模板 id="deletion"/12月/[公司名稱] 已改定稿內容）
@@ -1564,9 +1566,9 @@ MEDIA_WAMID="wamid.E2E_MEDIA_${EPOCH}"
 MEDIA_FILE="${MEDIA_WAMID}.jpg"
 pnpm -s mock-inbound message --clinic MF --from "$MEDIA_PAT" --text "e2e media" --wamid "$MEDIA_WAMID" --media image --name "E2E-A-MEDIA" >/dev/null || T43=1
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$MEDIA_WAMID'" '[{"c":"1"}]' 30 || { echo "    ❌ T43 media message 未入庫"; T43=1; }
-# mock mode 唔下載 → 手放檔案 + 回填 mediaPath（等同真下載完成）
+# mock mode 唔下載 → 手放檔案 + 回填 mediaPath+mediaKey（等同真下載完成 — S6-3② route findUnique(mediaKey)）
 printf 'e2e-media-bytes' > "$WA_MEDIA_DIR/$MEDIA_FILE"
-q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$MEDIA_FILE' WHERE \"waMessageId\"='$MEDIA_WAMID'" >/dev/null
+q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$MEDIA_FILE', \"mediaKey\"='$MEDIA_FILE' WHERE \"waMessageId\"='$MEDIA_WAMID'" >/dev/null
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/media/$MEDIA_FILE")
 check "T43 店 A(TKW) staff 攞店 B(MF) 媒體 → 403" "$CODE" "403"
 CODE=$(curl -s -D /tmp/e2e-t43-headers -o /tmp/e2e-t43-body -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/media/$MEDIA_FILE")
@@ -1582,7 +1584,7 @@ BIN_FILE="${BIN_WAMID}.bin"
 printf 'e2e-bin-bytes' > "$WA_MEDIA_DIR/$BIN_FILE"
 pnpm -s mock-inbound message --clinic MF --from "$MEDIA_PAT" --text "e2e media bin" --wamid "$BIN_WAMID" --name "E2E-A-MEDIA" >/dev/null || T43=1
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$BIN_WAMID'" '[{"c":"1"}]' 30 || { echo "    ❌ T43 .bin message 未入庫"; T43=1; }
-q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$BIN_FILE' WHERE \"waMessageId\"='$BIN_WAMID'" >/dev/null
+q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$BIN_FILE', \"mediaKey\"='$BIN_FILE' WHERE \"waMessageId\"='$BIN_WAMID'" >/dev/null
 # dev server manifest race（同 T43b — webhook POST 觸發 recompile，首發可能 500）：重試 ×3
 T43BIN_CODE=000
 for i in 1 2 3; do
@@ -1612,7 +1614,7 @@ MAGIC=$(head -c 3 "$WA_MEDIA_DIR/$CT_FILE" 2>/dev/null)
 check "T43b 碟上係密文（WA1 magic prefix）" "$MAGIC" "WA1"
 pnpm -s mock-inbound message --clinic MF --from "$CT_PAT" --text "e2e media enc" --wamid "$CT_WAMID" --name "E2E-A-MEDIA" >/dev/null || T43=1
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$CT_WAMID'" '[{"c":"1"}]' 30 || { echo "    ❌ T43b media message 未入庫"; T43=1; }
-q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$CT_FILE' WHERE \"waMessageId\"='$CT_WAMID'" >/dev/null
+q "UPDATE \"Message\" SET \"mediaPath\"='$WA_MEDIA_DIR/$CT_FILE', \"mediaKey\"='$CT_FILE' WHERE \"waMessageId\"='$CT_WAMID'" >/dev/null
 # ★ dev server manifest race 重試：呢一瞬間 dev server 可能正喺 recompile（webhook POST 觸發）—
 #   第一發可能打到半寫入嘅 manifest（500 catchall）；2s 後重試即好（生產 build 無呢問題）
 T43B_CODE=000
@@ -1743,6 +1745,55 @@ S3N=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=contact&q=%5F" | grep -o '
 check "T49c contact q=_（單字元通配）→ 0 hit" "$S3N" "0"
 S4N=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=contact&q=E2E-A" | grep -o '"waId":"[^"]*"' | wc -l | tr -d ' ')
 [ "$S4N" -ge 1 ] && pass "T49c control：正常 query（E2E-A）照樣 hit（escape 唔誤傷）" || fail "T49c control query 無 hit"
+
+# ── T690. cwi-final S6-3① 電話搜尋（spec T690）───────────────────────
+# 「9123 4567」/「+852-9123-4567」都搵到 85291234567；跨店結果 0。
+# hermetic：seed 2 個 fixed-id contact（TKW 本店 85291234567 + MF 別店 8528912345671 — 含同段 digits，
+# 用於跨店斷言：LIKE '%91234567%' 物理上會中佢，但 STAFF(TKW) scope 唔包含 MF 店 → 必須 0 出現）；
+# 測試完 cleanup（persistent sandbox DB — 唔留痕）。
+T690_A_CLINIC=$(q "SELECT id FROM \"Clinic\" WHERE code='TKW'" | jf id)
+T690_B_CLINIC=$(q "SELECT id FROM \"Clinic\" WHERE code='MF'" | jf id)
+if [ -n "$T690_A_CLINIC" ] && [ -n "$T690_B_CLINIC" ]; then
+  q "DELETE FROM \"Contact\" WHERE id IN ('e2et690a','e2et690b')" >/dev/null
+  q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('e2et690a','$T690_A_CLINIC','85291234567','T690 電話測試','{}'), ('e2et690b','$T690_B_CLINIC','8528912345671','T690 跨店測試','{}')" >/dev/null
+  T690_SEEDED=$(q "SELECT count(*)::text c FROM \"Contact\" WHERE id IN ('e2et690a','e2et690b')" | jf c)
+  check "T690 seed：TKW 85291234567 + MF 8528912345671（含同段 digits 91234567）" "$T690_SEEDED" "2"
+  # (a) q=「9123 4567」→ digits=91234567（≥4）→ waId LIKE '%91234567%'
+  T690_R1=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=contact&q=9123%204567")
+  T690_T1=$(echo "$T690_R1" | grep -o '"waId":"' | wc -l | tr -d ' ')
+  T690_H1=$(echo "$T690_R1" | grep -o '"waId":"85291234567"' | wc -l | tr -d ' ')
+  T690_X1=$(echo "$T690_R1" | grep -o '"waId":"8528912345671"' | wc -l | tr -d ' ')
+  check "T690(a) q='9123 4567' → 恰好 1 hit（就係 85291234567）" "$T690_T1" "1"
+  check "T690(a) hit 含 85291234567" "$T690_H1" "1"
+  check "T690(a) 跨店結果 0（MF 8528912345671 唔出現）" "$T690_X1" "0"
+  # (b) q=「+852-9123-4567」（%2B = 字面 +；searchParams 解 %2B → +，唔會解做空格）→ digits=85291234567
+  T690_R2=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=contact&q=%2B852-9123-4567")
+  T690_T2=$(echo "$T690_R2" | grep -o '"waId":"' | wc -l | tr -d ' ')
+  T690_H2=$(echo "$T690_R2" | grep -o '"waId":"85291234567"' | wc -l | tr -d ' ')
+  T690_X2=$(echo "$T690_R2" | grep -o '"waId":"8528912345671"' | wc -l | tr -d ' ')
+  check "T690(b) q='+852-9123-4567' → 恰好 1 hit（就係 85291234567）" "$T690_T2" "1"
+  check "T690(b) hit 含 85291234567" "$T690_H2" "1"
+  check "T690(b) 跨店結果 0（MF 8528912345671 唔出現）" "$T690_X2" "0"
+  # hermetic cleanup（失敗都 cleanup — trap 唔使，兩行直接清）
+  q "DELETE FROM \"Contact\" WHERE id IN ('e2et690a','e2et690b')" >/dev/null
+else
+  fail "T690 seed 失敗（TKW/MF clinic 搵唔到 — persistent DB 狀態異常）"
+fi
+
+# ── T691. cwi-final S6-3② /api/media findUnique(mediaKey) → Index Scan（spec T691）──
+# 同 route 實際 SQL 同 shape（WHERE "mediaKey" = ?）— 斷言 plan 用 unique index（舊 OR+endsWith = seq scan）。
+# ★ gen 3：q helper 返 JSON 序列化 → 索引名帶 escaped quotes（\"Message_mediaKey_key\"）→ 拆兩段 match。
+# ★ gen 3 r2：planner 選擇靠 table stats — hermetic DELETE + autovacuum ANALYZE 後表細 → Seq Scan flake
+#   （gen 2 run 撞住大表 stats 先 Index Scan）。→ hermetic bulk seed 10k 行 + ANALYZE（realistic scale）→ 斷言 → cleanup，確定性。
+T691_CONV=$(q "SELECT id::text FROM \"Conversation\" LIMIT 1" | jf id)
+[ -n "$T691_CONV" ] || fail "T691 搵唔到 Conversation（persistent DB 狀態異常）"
+if [ -n "$T691_CONV" ]; then
+  q "INSERT INTO \"Message\" (id, \"conversationId\", direction, channel, type, body, \"mediaKey\", \"mediaStatus\", status, \"waTimestamp\") SELECT 't691x${EPOCH}' || g, '$T691_CONV', 'IN', 'API', 'text', 't691', 't691x${EPOCH}' || g || '.jpg', 'READY', 'RECEIVED', now() FROM generate_series(1, 10000) g" >/dev/null
+  q "ANALYZE \"Message\"" >/dev/null
+  T691_PLAN=$(q "EXPLAIN SELECT id FROM \"Message\" WHERE \"mediaKey\" = 'e2e-t691-nonexistent.jpg'")
+  q "DELETE FROM \"Message\" WHERE id LIKE 't691x${EPOCH}%'" >/dev/null
+  echo "$T691_PLAN" | grep -q 'Index Scan using' && echo "$T691_PLAN" | grep -q 'Message_mediaKey_key' && pass "T691 mediaKey query EXPLAIN = Index Scan（Message_mediaKey_key）" || fail "T691 EXPLAIN 唔係 Index Scan: ${T691_PLAN:0:200}"
+fi
 
 # T49 嘅 5 連發 login 打满咗 IP 限流窗口（5/60s）— 等窗口清晒先俾後續 login-heavy 測試
 #（TOTP / change-password）行，避免佢哋撞到殘留計數返 429。

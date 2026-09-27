@@ -12,6 +12,10 @@
  *   3. AiDraft（RETENTION_DRAFT_DAYS，預設 90 日）：status ≠ PROPOSED 先刪
  *      （PROPOSED = staff 未審批 — 留低俾人處理，唔會自動刪）
  *   4. StaffNotice 已讀 > 90 日（§6.0；與 RETENTION_DRAFT_DAYS 同水位，未設獨立 env）
+ *   5. DeadLetter 30 日（S1-1a）
+ *   6. FlowHoldEvent 終態 90 日 PII 清（S5-11 F4）
+ *   7. ★ cwi-final S6-4：AuditLog — LOGIN* 12 月，其餘跟對話 24 月
+ *   8. ★ cwi-final S6-4：WebhookEvent 30 日
  *
  * 冪等 / 安全：
  * - 純 delete + update null — 重跑安全（冇副作用；已刪嘅行唔會再出現）
@@ -35,6 +39,10 @@ const BATCH = 500;
 const STAFF_NOTICE_READ_DAYS = 90;
 /** ★ cwi-final S1-1a：DeadLetter 30 日清（spec 固定值 — 重放窗口夠長，過期 = 接受丟）。 */
 const DEAD_LETTER_DAYS = 30;
+/** ★ cwi-final S6-4：AuditLog LOGIN* 保留 12 月（env 可調）。 */
+const AUDIT_LOGIN_MONTHS_DEFAULT = 12;
+/** ★ cwi-final S6-4：WebhookEvent 保留 30 日（env 可調）。 */
+const WEBHOOK_EVENT_DAYS_DEFAULT = 30;
 
 function monthsAgo(months: number): Date {
   const d = new Date();
@@ -77,6 +85,10 @@ export interface RetentionPurgeResult {
   aiDraftsDeleted: number;
   staffNoticesDeleted: number;
   deadLettersDeleted: number;
+  /** ★ cwi-final S6-4：AuditLog 刪數（LOGIN* 12 月 + 其餘 24 月） */
+  auditLogsDeleted: number;
+  /** ★ cwi-final S6-4：WebhookEvent 30 日清數 */
+  webhookEventsDeleted: number;
   /** ★ cwi-final S5-11（F4）：FlowHoldEvent 終態 90 日 PII 清數 */
   holdPiiCleared: number;
   batches: number;
@@ -91,13 +103,16 @@ export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
   if (mismatches.length > 0) {
     // ★ cwi-final S0-11：env 同政策唔一致 → 一行都唔刪（寧願遲刪，唔可以錯刪）
     log.error({ mismatches }, "retention-purge: SKIPPED — env 同政策唔一致");
-    return { mediaFilesDeleted: 0, mediaPathsCleared: 0, messagesDeleted: 0, noteReceiptsDeleted: 0, patientFactsDeleted: 0, aiDraftsDeleted: 0, staffNoticesDeleted: 0, deadLettersDeleted: 0, holdPiiCleared: 0, batches: 0, reportId: "", skipped: "RETENTION_ENV_MISMATCH", mismatches };
+    return { mediaFilesDeleted: 0, mediaPathsCleared: 0, messagesDeleted: 0, noteReceiptsDeleted: 0, patientFactsDeleted: 0, aiDraftsDeleted: 0, staffNoticesDeleted: 0, deadLettersDeleted: 0, auditLogsDeleted: 0, webhookEventsDeleted: 0, holdPiiCleared: 0, batches: 0, reportId: "", skipped: "RETENTION_ENV_MISMATCH", mismatches };
   }
   const convCutoff = monthsAgo(envInt("RETENTION_CONV_MONTHS", 24));
   const mediaCutoff = monthsAgo(envInt("RETENTION_MEDIA_MONTHS", 12));
   const draftCutoff = daysAgo(envInt("RETENTION_DRAFT_DAYS", 90));
   const noticeCutoff = daysAgo(STAFF_NOTICE_READ_DAYS);
   const dlCutoff = daysAgo(DEAD_LETTER_DAYS);
+  // ★ cwi-final S6-4：AuditLog（LOGIN* 12 月；其餘跟對話 24 月 = convCutoff）+ WebhookEvent 30 日
+  const auditLoginCutoff = monthsAgo(envInt("RETENTION_AUDIT_LOGIN_MONTHS", AUDIT_LOGIN_MONTHS_DEFAULT));
+  const webhookCutoff = daysAgo(envInt("RETENTION_WEBHOOK_EVENT_DAYS", WEBHOOK_EVENT_DAYS_DEFAULT));
   // ★ cwi-final S5-11（F4）：FlowHoldEvent 終態（RELEASED/EXPIRED/COMMITTED）90 日 → 清病人 PII
   //   （時鐘 = updatedAt ≈ 入終態時間；slot 本身早已放開/入咗 Apricot，病人資料無再保留價值）
   const holdPiiCutoff = daysAgo(envInt("RETENTION_HOLD_DAYS", 90));
@@ -110,6 +125,8 @@ export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
   let aiDraftsDeleted = 0;
   let staffNoticesDeleted = 0;
   let deadLettersDeleted = 0;
+  let auditLogsDeleted = 0;
+  let webhookEventsDeleted = 0;
   let holdPiiCleared = 0;
   let batches = 0;
 
@@ -240,6 +257,47 @@ export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
     if (rows.length < BATCH) break;
   }
 
+  // ── 7. AuditLog（★ cwi-final S6-4）：LOGIN* 12 月；其餘（SEND/EXPORT 等）跟對話 24 月 ──
+  // 純 delete — 重跑安全；audit 行本身無 PII（metadata only），但長期堆積係 DB 膨脹主因。
+  for (;;) {
+    const rows = await prisma.auditLog.findMany({
+      where: { action: { startsWith: "LOGIN" }, createdAt: { lt: auditLoginCutoff } },
+      select: { id: true },
+      take: BATCH,
+    });
+    if (rows.length === 0) break;
+    batches += 1;
+    const res = await prisma.auditLog.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+    auditLogsDeleted += res.count;
+    if (rows.length < BATCH) break;
+  }
+  for (;;) {
+    const rows = await prisma.auditLog.findMany({
+      where: { action: { not: { startsWith: "LOGIN" } }, createdAt: { lt: convCutoff } },
+      select: { id: true },
+      take: BATCH,
+    });
+    if (rows.length === 0) break;
+    batches += 1;
+    const res = await prisma.auditLog.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+    auditLogsDeleted += res.count;
+    if (rows.length < BATCH) break;
+  }
+
+  // ── 8. WebhookEvent（★ cwi-final S6-4：30 日）— 冪等記錄表，過期無再查價值 ─────────
+  for (;;) {
+    const rows = await prisma.webhookEvent.findMany({
+      where: { receivedAt: { lt: webhookCutoff } },
+      select: { id: true },
+      take: BATCH,
+    });
+    if (rows.length === 0) break;
+    batches += 1;
+    const res = await prisma.webhookEvent.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+    webhookEventsDeleted += res.count;
+    if (rows.length < BATCH) break;
+  }
+
   // ── OpsReport（upsert 冪等：同日重跑覆蓋） ──────────────────────────────
   const now = new Date();
   const dayStart = new Date(now);
@@ -253,15 +311,18 @@ export async function runRetentionPurge(): Promise<RetentionPurgeResult> {
     aiDraftsDeleted,
     staffNoticesDeleted,
     deadLettersDeleted,
+    auditLogsDeleted,
+    webhookEventsDeleted,
     holdPiiCleared,
     batches,
-    cutoffs: { conv: convCutoff.toISOString(), media: mediaCutoff.toISOString(), draft: draftCutoff.toISOString(), deadLetter: dlCutoff.toISOString(), holdPii: holdPiiCutoff.toISOString() },
+    cutoffs: { conv: convCutoff.toISOString(), media: mediaCutoff.toISOString(), draft: draftCutoff.toISOString(), deadLetter: dlCutoff.toISOString(), auditLogin: auditLoginCutoff.toISOString(), webhook: webhookCutoff.toISOString(), holdPii: holdPiiCutoff.toISOString() },
   };
   const text =
     `retention-purge ${now.toISOString().slice(0, 10)}：` +
     `media 檔 ${mediaFilesDeleted} / mediaPath 清 ${mediaPathsCleared} / ` +
     `Message ${messagesDeleted}（連 NoteReadReceipt ${noteReceiptsDeleted} + PatientFact ${patientFactsDeleted}）/ ` +
     `AiDraft ${aiDraftsDeleted} / StaffNotice(已讀) ${staffNoticesDeleted} / DeadLetter ${deadLettersDeleted} / ` +
+    `AuditLog ${auditLogsDeleted} / WebhookEvent ${webhookEventsDeleted} / ` +
     `FlowHoldEvent(終態 PII) ${holdPiiCleared}`;
   const report = await prisma.opsReport.upsert({
     where: { periodStart_clinicId: { periodStart: dayStart, clinicId: "" } },

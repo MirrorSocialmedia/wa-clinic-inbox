@@ -22,14 +22,16 @@
  *
  * ★ PII 鐵律：log 只帶 wamid / mediaId / bytes / path / reason，唔帶任何內容。
  */
-import { mkdir, writeFile, stat, chmod } from "node:fs/promises";
-import { existsSync, accessSync, constants as fsConstants } from "node:fs";
+import { mkdir, writeFile, stat, chmod, open as openFile } from "node:fs/promises";
+import { existsSync, accessSync, constants as fsConstants, createReadStream } from "node:fs";
 import path from "node:path";
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, type DecipherGCM } from "node:crypto";
+import { Transform, Readable } from "node:stream";
 import log from "@/lib/log";
 import { getMediaInfo, waMock } from "@/lib/wa/graph";
 
-const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
+// ★ cwi-final S6-3②：export 俾 migrate-media-encrypt.ts（>50MB 檔 skip 人工核）
+export const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
 
 const MIME_EXT: Record<string, string> = {
   "image/jpeg": "jpg",
@@ -306,6 +308,168 @@ function getMediaKeyStrictOrNull(): Buffer | null {
   return Buffer.from(raw, "hex");
 }
 
+// ── Streaming serve（cwi-final S6-3②：大檔案唔入記憶體 + 讀時計 size 防 50MB 上限） ──────
+//
+// readMediaFile 係全檔入記憶體（Buffer）— 50MB 檔 = 50MB heap × 並行請求。streaming 軌：
+//   createReadStream → [hexToBin → gcmDecrypt]（密文檔）→ sizeCounter → web ReadableStream
+// - sizeCounter：逐 chunk 計數，過 MAX_MEDIA_BYTES → destroy（response 中斷 = abort）
+// - GCM 逐 chunk update（stream mode）；flush 時 final() = auth tag 驗證（檔損/鍵錯 → stream error）
+// - ★ S6-3②：production 拒絕 serve legacy 明文檔（必須先跑 scripts/migrate-media-encrypt.ts）；
+//   dev 照 serve（C1 e2e 要求：dev+key 環境 legacy 明文照讀）
+
+const MEDIA_HEADER_BYTES = 64; // "WA1|"(4) + iv hex(24) + "|" + tag hex(32) + "|" = 62 字元，讀 64 夠用
+
+/** hex 文字 chunk → 二進制（處理 chunk 邊界切到奇數 hex 位）。 */
+class HexToBin extends Transform {
+  private carry = "";
+  _transform(chunk: Buffer, _enc: string, cb: (e?: Error | null) => void): void {
+    const text = this.carry + chunk.toString("utf8");
+    const evenLen = text.length % 2 === 0 ? text.length : text.length - 1;
+    this.carry = text.slice(evenLen);
+    if (evenLen > 0) this.push(Buffer.from(text.slice(0, evenLen), "hex"));
+    cb();
+  }
+  _flush(cb: (e?: Error | null) => void): void {
+    if (this.carry) this.push(Buffer.from("0", "hex")); // 損毀奇尾 — GCM auth 之後會拒
+    cb();
+  }
+}
+
+/** GCM stream 解密（final() 喺 flush — auth tag 失敗 = stream error）。 */
+class GcmDecryptStream extends Transform {
+  private dec: DecipherGCM;
+  constructor(dec: DecipherGCM) {
+    super();
+    this.dec = dec;
+  }
+  _transform(chunk: Buffer, _enc: string, cb: (e?: Error | null) => void): void {
+    try {
+      this.push(this.dec.update(chunk));
+      cb();
+    } catch (e) {
+      cb(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+  _flush(cb: (e?: Error | null) => void): void {
+    try {
+      this.push(this.dec.final());
+      cb();
+    } catch (e) {
+      cb(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+}
+
+/** 讀時計 size — 過上限即 destroy（response 中斷）。 */
+class SizeCounter extends Transform {
+  counted = 0;
+  private readonly limit: number;
+  constructor(limit: number) {
+    super({ highWaterMark: 256 * 1024 });
+    this.limit = limit;
+  }
+  _transform(chunk: Buffer, _enc: string, cb: (e?: Error | null) => void): void {
+    this.counted += chunk.length;
+    if (this.counted > this.limit) {
+      cb(new Error("media: size limit exceeded — download aborted"));
+      return;
+    }
+    this.push(chunk);
+    cb();
+  }
+}
+
+export interface MediaStreamHandle {
+  /** 明文 byte 流（已解密）— 直接做 response body。 */
+  stream: ReadableStream<Uint8Array>;
+  /** 洩漏時收 clean up（client abort 場景）。 */
+  cleanup: () => void;
+}
+
+/**
+ * 開媒體檔 stream（serve 時解密，對 call site 透明 — 同 readMediaFile 同語義但唔入 heap）。
+ * - 有 magic → hex→bin + GCM stream 解密（key 必需；auth 失敗 → stream error）
+ * - 冇 magic → legacy 明文（dev 照 serve + warn；★ production throw — 必須先跑遷移腳本）
+ * - 讀時計 size，過 MAX_MEDIA_BYTES → stream error（abort）
+ */
+export async function openMediaStream(fileName: string): Promise<MediaStreamHandle> {
+  const dir = mediaDirPreferred();
+  const filePath = path.join(dir, path.basename(fileName));
+
+  let head: Buffer;
+  try {
+    const fh = await openFile(filePath, "r");
+    try {
+      const buf = Buffer.alloc(MEDIA_HEADER_BYTES);
+      const { bytesRead } = await fh.read(buf, 0, MEDIA_HEADER_BYTES, 0);
+      head = buf.subarray(0, bytesRead);
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    throw new MediaDirError(filePath, "read failed");
+  }
+
+  const src = createReadStream(filePath, { start: 0, highWaterMark: 256 * 1024 });
+  const counter = new SizeCounter(MAX_MEDIA_BYTES);
+
+  if (head.length >= MEDIA_MAGIC.length && head.subarray(0, MEDIA_MAGIC.length).toString("utf8") === MEDIA_MAGIC) {
+    // 密文檔 — header = 前 62 字元（WA1|iv|tag|），cipher hex 由 byte 62 開始
+    const key = getMediaKey(); // production 冇 key → throw
+    if (!key) {
+      src.destroy();
+      log.error({ file: fileName }, "media: 檔案係密文但 MEDIA_ENC_KEY 未設 — 解唔到");
+      throw new MediaKeyError("file is encrypted but MEDIA_ENC_KEY is not set");
+    }
+    const headerStr = head.subarray(0, 62).toString("utf8");
+    const parts = headerStr.split("|");
+    if (parts.length !== 4 || parts[0] !== "WA1") {
+      src.destroy();
+      throw new MediaKeyError("media: 唔係合法加密格式（magic/欄位數錯）");
+    }
+    const iv = Buffer.from(parts[1], "hex");
+    const tag = Buffer.from(parts[2], "hex");
+    if (iv.length !== GCM_IV_BYTES || tag.length !== GCM_TAG_BYTES) {
+      src.destroy();
+      throw new MediaKeyError("media: iv/tag 長度錯");
+    }
+    const decipher = createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(tag);
+    const rest = createReadStream(filePath, { start: 62, highWaterMark: 256 * 1024 });
+    const hexToBin = new HexToBin();
+    const gcm = new GcmDecryptStream(decipher);
+    rest.on("error", (e) => log.error({ file: fileName, err: e.message }, "media: stream read error"));
+    rest.pipe(hexToBin).pipe(gcm).pipe(counter);
+    src.destroy(); // 頭部已讀咗，src 唔需要
+    counter.on("error", (e) =>
+      log.warn({ file: fileName, err: e.message, bytes: counter.counted }, "media: stream aborted（size 上限或解密失敗）")
+    );
+    return { stream: Readable.toWeb(counter) as unknown as ReadableStream<Uint8Array>, cleanup: () => rest.destroy() };
+  }
+
+  // legacy 明文
+  if (isProduction()) {
+    src.destroy();
+    log.error(
+      { file: fileName },
+      "media: ⛔ production 偵測到 legacy 明文檔 — 拒 serve（先跑 scripts/migrate-media-encrypt.ts）"
+    );
+    throw new MediaKeyError("legacy unencrypted media in production — run scripts/migrate-media-encrypt.ts first");
+  }
+  if (getMediaKeyStrictOrNull() !== null) {
+    if (!warnedLegacy) {
+      warnedLegacy = true;
+      log.warn({ file: fileName }, "media: 偵測到 legacy 明文檔（無 magic prefix）— 有 key 環境下新檔會係密文");
+    }
+  }
+  src.on("error", (e) => log.error({ file: fileName, err: e.message }, "media: stream read error"));
+  src.pipe(counter);
+  counter.on("error", (e) =>
+    log.warn({ file: fileName, err: e.message, bytes: counter.counted }, "media: stream aborted（size 上限）")
+  );
+  return { stream: Readable.toWeb(counter) as unknown as ReadableStream<Uint8Array>, cleanup: () => src.destroy() };
+}
+
 // ── boot 總檢查（server.ts 啟動時調） ─────────────────────────────────────
 
 /**
@@ -344,12 +508,12 @@ export async function bootMediaSecurityCheck(): Promise<void> {
 export async function downloadWaMedia(opts: {
   mediaId: string;
   wamid: string;
-}): Promise<{ mediaPath: string | null; skipped: boolean; reason?: string }> {
+}): Promise<{ mediaPath: string | null; mediaKey: string | null; skipped: boolean; reason?: string }> {
   const { mediaId, wamid } = opts;
 
   if (waMock()) {
     log.info({ mediaId, wamid, mock: true }, "media: mock mode — download skipped");
-    return { mediaPath: null, skipped: true, reason: "mock" };
+    return { mediaPath: null, mediaKey: null, skipped: true, reason: "mock" };
   }
 
   try {
@@ -359,17 +523,18 @@ export async function downloadWaMedia(opts: {
     const res = await fetch(info.url);
     if (!res.ok) {
       log.warn({ mediaId, wamid, httpStatus: res.status }, "media: download HTTP error");
-      return { mediaPath: null, skipped: true, reason: `http-${res.status}` };
+      return { mediaPath: null, mediaKey: null, skipped: true, reason: `http-${res.status}` };
     }
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.byteLength > MAX_MEDIA_BYTES) {
       log.warn({ mediaId, wamid, bytes: buf.byteLength }, "media: file too large, skipped");
-      return { mediaPath: null, skipped: true, reason: "too-large" };
+      return { mediaPath: null, mediaKey: null, skipped: true, reason: "too-large" };
     }
 
     const filePath = await saveMediaFile(`${wamid}.${ext}`, buf);
     log.info({ mediaId, wamid, bytes: buf.byteLength, path: filePath, encrypted: getMediaKey() !== null }, "media: saved");
-    return { mediaPath: filePath, skipped: false };
+    // ★ cwi-final S6-3②：mediaKey = 檔 basename（saveMediaFile 生成）— worker 落 DB 做 unique 查詢鍵
+    return { mediaPath: filePath, mediaKey: path.basename(filePath), skipped: false };
   } catch (err) {
     if (err instanceof MediaDirError || err instanceof MediaKeyError) {
       // fail-fast 條件（production 目錄/key）— ERROR 級：呢個係需要人處理嘅部署問題
@@ -377,12 +542,12 @@ export async function downloadWaMedia(opts: {
         { mediaId, wamid, err: err.message },
         "media: fail-fast（dir/key 部署問題）— 媒體 skip 落碟，inbox 唔受阻"
       );
-      return { mediaPath: null, skipped: true, reason: "media-fail-fast" };
+      return { mediaPath: null, mediaKey: null, skipped: true, reason: "media-fail-fast" };
     }
     log.warn(
       { mediaId, wamid, err: err instanceof Error ? err.message : String(err) },
       "media: download failed"
     );
-    return { mediaPath: null, skipped: true, reason: "error" };
+    return { mediaPath: null, mediaKey: null, skipped: true, reason: "error" };
   }
 }

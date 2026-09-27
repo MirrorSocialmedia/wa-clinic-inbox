@@ -620,6 +620,16 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 400, ADMIN_ALL: 400 }, // S3-5 第二段：空 body = code 必填 → 400；confirm 200 全鏈喺 T50/T634
   },
 
+  // ═══ cwi-final S6-4：ops 指標（metrics + telemetry）═══
+  "GET /api/admin/metrics": {
+    fixture: () => ({ url: "/api/admin/metrics" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 }, // S6-4：requireGlobalAdmin（metadata only，零 PII）
+  },
+  "POST /api/telemetry": {
+    fixture: () => ({ url: "/api/telemetry", method: "POST", body: JSON.stringify({ event: "listTruncated" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, STAFF_YMT: 200, SUPERVISOR: 200, ADMIN_COMPANY_B: 200, ADMIN_ALL: 200 }, // S6-4：已認證 staff 皆可（白名單事件計數 only；rate limit 60/min）
+  },
+
   // ═══ S3-4：術語字典 ═══
   "GET /api/admin/clinical-terms": {
     fixture: () => ({ url: "/api/admin/clinical-terms" }),

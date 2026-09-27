@@ -46,6 +46,13 @@ export async function runPendingStatusSweep(now: number = Date.now()): Promise<P
   const del = await prisma.pendingStatus.deleteMany({ where: { receivedAt: { lt: cutoff } } });
   if (del.count > 0) {
     log.warn({ count: del.count }, "pending-status-sweep: 24h 仍配對唔到 — 已丟棄");
+    // ★ cwi-final S6-4：drop 累計入 TelemetryCounter（「pendingStatusDropped」— ops metrics 表顯示；
+    //   只計數零 PII）。fire-and-forget：計數器失敗唔阻 sweep 主流程。
+    prisma.$executeRaw`
+      INSERT INTO "TelemetryCounter" ("key", "count", "updatedAt")
+      VALUES ('pendingStatusDropped', ${del.count}, now())
+      ON CONFLICT ("key") DO UPDATE SET "count" = "TelemetryCounter"."count" + EXCLUDED."count", "updatedAt" = now()
+    `.catch(() => undefined);
   }
 
   log.info({ drained, dropped: del.count }, "pending-status-sweep: done");

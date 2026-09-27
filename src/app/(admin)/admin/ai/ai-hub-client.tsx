@@ -74,6 +74,34 @@ interface TurnRecord {
   error?: string;
 }
 
+// ★ cwi-final S6-4：ops metrics 卡（GET /api/admin/metrics；global admin only）
+interface OpsQueueMetric {
+  name: string;
+  waiting: number;
+  active: number;
+  failed: number;
+  oldestAgeSec: number | null;
+  oldestAgeP95Sec: number | null;
+}
+interface OpsMetrics {
+  generatedAt: string;
+  queues: OpsQueueMetric[];
+  outboundUnknown: number;
+  aiSuccessRate: number | null;
+  aiTotalCalls: number;
+  aiOkCalls: number;
+  dlqCount: number;
+  listTruncatedReports: number;
+  pendingStatusDropped: number;
+}
+
+function fmtAge(sec: number | null): string {
+  if (sec === null) return "—";
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m${sec % 60 ? ` ${sec % 60}s` : ""}`;
+  return `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60) ? ` ${Math.floor((sec % 3600) / 60)}m` : ""}`;
+}
+
 const STATUS_META: Record<SandboxStep["status"], { ch: string; cls: string }> = {
   ok: { ch: "✓", cls: "text-ok-text" },
   paused: { ch: "⏸", cls: "text-warn-text" },
@@ -96,6 +124,8 @@ export default function AiHub({ role }: { role: string }) {
   const [summary, setSummary] = useState<HubSummary | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [swStale, setSwStale] = useState<string | null>(null);
+  // ★ cwi-final S6-4：ops metrics（global admin only — SUPERVISOR/STAFF 唔 fetch）
+  const [ops, setOps] = useState<OpsMetrics | null>(null);
 
   // ── 沙盤 state ──
   const [clinicId, setClinicId] = useState<string>("");
@@ -124,6 +154,21 @@ export default function AiHub({ role }: { role: string }) {
       setLoadErr(err instanceof Error ? err.message : String(err));
     }
   }, [clinicId]);
+
+  // ★ cwi-final S6-4：ops metrics（global admin only；失敗唔阻塞 hub 主內容）
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    void fetch("/api/admin/metrics", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d) setOps(d as OpsMetrics);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
 
   useEffect(() => {
     void loadSummary();
@@ -294,6 +339,44 @@ export default function AiHub({ role }: { role: string }) {
             </span>
           )}
         </div>
+      )}
+
+      {/* ── ★ cwi-final S6-4：ops 健康卡（global admin only；metadata only — 零 PII） ── */}
+      {isAdmin && ops && (
+        <section data-e2e="hub-metrics-card" className="bg-panel border border-line rounded-3xl p-4 text-[12px] leading-relaxed">
+          <div className="font-semibold text-t1 mb-1">📊 Ops（{new Date(ops.generatedAt).toLocaleTimeString()}）</div>
+          <div className="text-t2">
+            Queue：{" "}
+            {ops.queues.map((q, i) => (
+              <span key={q.name}>
+                {i > 0 && " · "}
+                <span className={q.waiting > 100 || q.failed > 100 ? "text-danger-text font-semibold" : ""}>
+                  {q.name} {q.waiting > 0 ? `${q.waiting}w` : "0"}
+                  {q.failed > 0 ? `/${q.failed}f` : ""}
+                </span>
+              </span>
+            ))}
+          </div>
+          <div className="text-t2">
+            最舊：{" "}
+            {ops.queues.filter((q) => q.oldestAgeSec !== null).map((q, i) => (
+              <span key={q.name}>
+                {i > 0 && " · "}
+                {q.name} {fmtAge(q.oldestAgeSec)}（p95 {fmtAge(q.oldestAgeP95Sec)}）
+              </span>
+            ))}
+            {ops.queues.every((q) => q.oldestAgeSec === null) && "—"}
+          </div>
+          <div className="text-t2">
+            Outbound UNKNOWN：{" "}
+            <span className={ops.outboundUnknown > 0 ? "text-danger-text font-semibold" : ""}>{ops.outboundUnknown}</span>
+            {" | "}AI 成功率：{" "}
+            {ops.aiSuccessRate === null ? "—" : `${(ops.aiSuccessRate * 100).toFixed(1)}%（${ops.aiOkCalls}/${ops.aiTotalCalls}）`}
+            {" | "}DLQ：{" "}
+            <span className={ops.dlqCount > 0 ? "text-warn-text font-semibold" : ""}>{ops.dlqCount}</span>
+            {" | "}listTruncated 回報：{ops.listTruncatedReports} | pendingStatus dropped：{ops.pendingStatusDropped}
+          </div>
+        </section>
       )}
 
       {/* ── 上半：沙盤（B.3/B.5）── */}

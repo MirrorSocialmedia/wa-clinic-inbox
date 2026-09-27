@@ -484,6 +484,11 @@ model Message {
   // ★ H1：內部備註 @ 咗邊啲 staffId（只 channel=INTERNAL 先有意義；UI autocomplete 入）
   mentions       String[]  @default([])
   mediaPath      String?                      // 落地 /srv/wa-media/<id>，唔存 Meta URL（會過期）
+  // ★ cwi-final S6-3②（audit3 P1-21）：media 檔 basename（serve 用 unique 查詢鍵 — /api/media/[file]
+  //   findUnique 落 Index Scan；mediaPath 全路徑保留俾 retention/備份用）。saveMediaFile 寫入時
+  //   一齊落 basename；backfill 喺 migration 20260927000000（regexp_replace 去路徑）。
+  //   unique 前先跑重複檢查（任何 >0 = STOP 報 CEO，禁自行刪數據）。
+  mediaKey       String?   @unique
   // ★ Realtime P0 (R4, cwi-rt-20260823-a1)：media 下載狀態（見 MediaStatus enum 註釋）
   mediaStatus    MediaStatus @default(READY)
   status         MsgStatus
@@ -539,6 +544,15 @@ model Message {
 // sent/delivered/read/failed webhook 已到 → 舊 code claim 留低 + Message 搵唔到 → status 永久丟。
 // 而家：同 tx 落 PendingStatus（parked）→ 三個排水點（outbound 寫入後 / APP_ECHO 後 / 2min sweep）配對時 apply + 刪行。
 // 零 PII 鐵律：只有 wamid/status/errorCode/clinicId — 禁加 contact/phone/name 任何欄。
+// ★ cwi-final S6-4：client 回報指標計數器（只計數、零 PII — 禁加任何欄位名/對話/內容）。
+// - "listTruncated"：S1-2 列表截斷 banner 出現次數（client 回報 POST /api/telemetry）— S6-6 分區觸發觀察
+// - "pendingStatusDropped"：S1-1c sweep 24h 死行 drop 累計（pending-status-sweep 寫）
+model TelemetryCounter {
+  key       String   @id
+  count     Int      @default(0)
+  updatedAt DateTime @default(now()) @updatedAt @db.Timestamptz
+}
+
 model PendingStatus {
   id         String   @id @default(cuid())
   wamid      String

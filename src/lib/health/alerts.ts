@@ -29,6 +29,7 @@ export const HEALTH_OWNED_TYPES = new Set<string>([
   "workforce_api_degraded",
   "disk_low",
   "backup_failed",
+  "backup_stale", // ★ cwi-final S6-4：最後成功 backup > 26 小時
   "retention_env_mismatch",
 ]);
 
