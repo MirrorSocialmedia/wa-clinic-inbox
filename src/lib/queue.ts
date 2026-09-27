@@ -8,13 +8,15 @@ import log from "@/lib/log";
 /**
  * WA Clinic Inbox — BullMQ 骨架（框架 MD §1/§2）
  *
- * 7 個 queue：
+ * 8 個 queue：
  * - inbound  : webhook event 解析（patient 訊息 / echo / history / status）
  * - outbound : 發訊息 + 重試 + status 回寫
  * - ai       : 意圖識別 + 草稿生成（Phase 2）
  * - ai-urgent: ★ cwi-final S1-14 急症通道獨立 lane（urgentHit 訊息 — concurrency 1，
  *              急症摘要唔排喺普通 ai job 後面；見 src/workers/concurrency.ts）
- * - cron     : 排程入口（空檔 refresh / bookings-expire / 健康自檢）
+ * - cron     : 排程 light lane（★ cwi-final S6-5 拆出 — sweep 類 2m–15m 間隔 job；worker concurrency 4）
+ * - cron-heavy: ★ cwi-final S6-5 排程 heavy lane（長批 job — 日報表 / retention-purge / followup-scan；
+ *              worker concurrency 1 — 唔阻 light lane 短周期 sweep）
  * - media    : ★ Realtime P0 (R4) media 下載獨立隊列（inbound job 只落 row + enqueue，
  *              唔喺入面做 HTTP 下載 — 大 media 唔阻 per-conversation 順序）
  * - booking-write: ★ cwi-final S5-1（F1）createBooking 異步寫 Apricot（concurrency 1 —
@@ -35,10 +37,11 @@ export function getRedis(): IORedis {
       maxRetriesPerRequest: null, // BullMQ 要求（blocking commands）
       enableReadyCheck: true,
       connectTimeout: 5000,
-      // Redis 重啟後 BullMQ 會用呢個重試；60s 內無限重試，之後 stop（PM2 負責重啟 process）
+      // ★ cwi-final S6-5：唔再喺 60 次後 return null（null = 放棄重試，process 死等 PM2 重啟）—
+      //   無限 backoff 重試（cap 10s）：Redis 重啟後 worker/web 自動重連自愈，PM2 restart 次數 = 0
+      //   （T692(c) 實測：redis 停 90s → worker 自己恢復）
       retryStrategy(times) {
-        if (times > 60) return null;
-        return Math.min(times * 500, 5000);
+        return Math.min(times * 500, 10_000);
       },
     });
     sharedRedis.on("error", (err) => {
@@ -91,6 +94,9 @@ export const aiQueue = new Queue("ai", queueOptions());
 // ★ cwi-final S1-14：急症通道獨立 queue（worker concurrency 1 — 見 ai.worker.ts startAiUrgentWorker）
 export const aiUrgentQueue = new Queue("ai-urgent", queueOptions());
 export const cronQueue = new Queue("cron", queueOptions());
+// ★ cwi-final S6-5：cron 拆兩條 queue — light（cronQueue，concurrency 4）+ heavy（concurrency 1）。
+//   兩個 worker 共用同一個 handler switch（job name 唔會排錯隊列失靈 — 見 src/workers/cron.worker.ts）。
+export const cronHeavyQueue = new Queue("cron-heavy", queueOptions());
 // ★ Realtime P0 (R4)：media 下載獨立隊列（concurrency 3 — 見 src/workers/media.worker.ts）
 export const mediaQueue = new Queue("media", queueOptions());
 // ★ cwi-final S5-1（F1）：booking-write — createBooking 異步寫 Apricot（worker concurrency 1）
@@ -102,6 +108,7 @@ export const QUEUE_NAMES = {
   ai: "ai",
   aiUrgent: "ai-urgent", // ★ cwi-final S1-14
   cron: "cron",
+  cronHeavy: "cron-heavy", // ★ cwi-final S6-5
   media: "media",
   bookingWrite: "booking-write", // ★ cwi-final S5-1（F1）
 } as const;

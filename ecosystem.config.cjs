@@ -3,12 +3,18 @@
  *
  * 兩個 process：
  * - wa-inbox  : web server（Next.js + Socket.IO，port 3100）
- * - wa-worker : BullMQ workers（inbound/outbound/ai/cron）
+ * - wa-worker : BullMQ workers（inbound/outbound/ai/ai-urgent/media/booking-write/cron/cron-heavy）
  *
  * 用法：
  *   pm2 start ecosystem.config.cjs
  *   pm2 logs wa-inbox / wa-worker
  *   pm2 reload wa-inbox   # 零 downtime（web server 單 instance，實際係 restart）
+ *
+ * ★ cwi-final S6-5：
+ * - wa-worker kill_timeout 30s（graceful shutdown 要等晒 in-flight job — Graph 慢 call 5s+ 先夠）
+ * - wa-worker 刪 max_restarts（worker 有 heartbeat + queue 無限重試自愈 — 唔再靠 PM2 崩了重啟；
+ *   真係 crash-loop 會由 uptime monitor 接警，唔係靜默重啟）
+ * - 兩 app 顯式 TZ=Asia/Hong_Kong（cron pattern 已顯式 tz，雙保險）
  */
 module.exports = {
   apps: [
@@ -29,6 +35,7 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         PORT: 3100,
+        TZ: "Asia/Hong_Kong", // ★ cwi-final S6-5
       },
       error_file: "logs/wa-inbox-error.log",
       out_file: "logs/wa-inbox-out.log",
@@ -43,14 +50,16 @@ module.exports = {
       instances: 1,
       exec_mode: "fork",
       autorestart: true,
-      max_restarts: 10,
+      // ★ cwi-final S6-5：刪 max_restarts — worker 自愈靠 heartbeat + 無限重試；
+      //   crash-loop 要接警（uptime monitor）唔好靜默重埋
       min_uptime: "10s",
       restart_delay: 4000,
-      exp_backoff_restart_delay: 100,
-      kill_timeout: 8000,
+      exp_backoff_restart_delay: 1000, // ★ cwi-final S6-5：100 → 1000（graceful shutdown 窗口夠大）
+      kill_timeout: 30000, // ★ cwi-final S6-5：8s → 30s（等晒 in-flight job）
       max_memory_restart: "1024M",
       env: {
         NODE_ENV: "production",
+        TZ: "Asia/Hong_Kong", // ★ cwi-final S6-5（cron tz 雙保險 — pattern 已顯式 Asia/Hong_Kong）
       },
       error_file: "logs/wa-worker-error.log",
       out_file: "logs/wa-worker-out.log",

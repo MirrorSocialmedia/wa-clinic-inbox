@@ -56,3 +56,20 @@ export function bootMockGuard(): void {
     process.exit(1);
   }
 }
+
+/**
+ * ★ cwi-final S6-5：production ALERT_CHANNEL 唔准係 "log"。
+ *
+ * ALERT_CHANNEL=log（或未設 — 預設 log）= 所有警報只入 log 檔，冇任何即時通知渠道 —
+ * production 出咗事冇人收到 = silent outage。呢度係 boot 時大字警報（唔 fail：
+ * ops 改 env + 重啟先修好；fail 咗連警報系統本身都冇咗）— 同 bootMockGuard 同一位置調用。
+ */
+export function bootAlertChannelGuard(): void {
+  if (process.env.NODE_ENV !== "production") return;
+  if ((process.env.ALERT_CHANNEL ?? "log").toLowerCase() === "log") {
+    log.error(
+      { alertChannel: process.env.ALERT_CHANNEL ?? "(未設 → log)" },
+      "boot: ⚠️⚠️⚠️ production ALERT_CHANNEL = log — 警報只會寫入 log 檔，冇任何即時通知渠道！必須設 ALERT_CHANNEL=telegram 或 whatsapp 後重啟。（S6-5）"
+    );
+  }
+}

@@ -1190,11 +1190,12 @@ export function startInboundWorker(): Worker {
     })();
   });
   worker.on("error", (err) => {
+    // ★ cwi-final S6-5：connection 層錯誤（e.g. Redis 瞬斷）唔再 process.exit —
+    //   shared ioredis retryStrategy 無限重試（cap 10s）自動重連自愈（T692(c) 實測）
     log.error(
       { queue: inboundQueue.name, err: err.message },
-      "inbound worker error — exiting for PM2 restart"
+      "inbound worker error（connection 層 — 無限重試自愈中；S6-5 唔再 process.exit）"
     );
-    process.exit(1);
   });
 
   return worker;

@@ -72,10 +72,11 @@ systemctl start redis          # 或 redis-server /etc/redis/redis.conf &
 redis-server --bind 127.0.0.1 --port 6379 --daemonize yes
 redis-cli ping                          # → PONG
 
-# 2. 等 worker：
+# 2. 等 worker（★ cwi-final S6-5 起：worker 唔會再因 Redis 斷線而 exit — 無限重試自愈，
+#    log 見 "redis connected" 即恢復；/healthz 503（worker 欄 down）= 外部監視檢測訊號）：
 #    - 多數情況 BullMQ 自動重連（等 ~10s，log 見 "redis connected"）
-#    - 如 worker 已退出（log "exiting for PM2 restart"）→ 重啟 worker：
-#      pm2 restart wa-worker      # 生產
+#    - 如 worker process 已唔喺（kill -9 / OOM / 手誤）→ 重啟 worker：
+#      pm2 restart wa-worker      # 生產（S6-5：PM2 冇 max_restarts — 人工/monitor 觸發）
 #      pnpm worker                      # sandbox
 
 # 3. 查 backlog：queue depth（reconnect 後 waiting 數）
@@ -96,7 +97,8 @@ _（見下方演習記錄 D2）_
 
 ### 症狀
 - 冇任何「即時」錯誤（server 照常 200/202 — webhook 照 enqueue 入 Redis）
-- **backlog 積喺 `inbound` queue（入站入口 queue）**：`redis-cli llen wa-inbox:inbound:wait` 上升
+- **★ cwi-final S6-5：/healthz 約 2 分鐘內轉 503**（worker heartbeat EX 90s 過期 + 120s 窗口）— 外部 uptime monitor 即刻接警（唔使等 queue 堆）
+- **backlog 積喺 `inbound` queue（入站入口 queue）**：`redis-cli llen wa-inbox:inbound:wait` 上升（healthz inboundLag 欄亦會 red）
 - queue >100 → 5 分鐘後 health-check `queue_depth` 警報
 - 訊息唔會丟（queue 喺 Redis；已處理嘅喺 DB）
 
@@ -104,7 +106,7 @@ _（見下方演習記錄 D2）_
 ```bash
 # PM2 部署（生產）：
 pm2 restart wa-worker          # 或 pm2 resurrect（boot 時間）
-pm2 logs wa-inbox-worker --lines 50  # 睇 "all workers started"
+pm2 logs wa-worker --lines 50  # 睇 "all workers started"
 
 # sandbox/dev：
 cd /srv/wa-clinic-inbox && pnpm worker   # （先 kill 舊：pkill -f 'src/workers/index[.]ts'）
@@ -171,7 +173,7 @@ Apricot 直連 → clinic-workforce External API（v1 availability + duty-roster
 |---|---|
 | 注入 | `pkill -f 'src/workers/index[.]ts'`（worker pid 確認先 kill） |
 | 症狀 | 冇即時錯誤；webhook 照 200（server 照 enqueue 入 Redis）；**backlog 積喺 `inbound` queue**；**inbox 網頁 HTTP 200 照常**；Message 行照寫 |
-| 恢復 | 重啟 worker（`pnpm worker`；生產 = `pm2 restart wa-inbox-worker`） |
+| 恢復 | 重啟 worker（`pnpm worker`；生產 = `pm2 restart wa-worker`） |
 | 恢復後 | 3 則 backlog 全部處理：**Message 3/3、AiDraft 3/3**（逐人核對），queue drain 返 0/0/0 |
 | **RTO** | **worker 死 6.3s；重啟+drain 完 7.3s** |
 

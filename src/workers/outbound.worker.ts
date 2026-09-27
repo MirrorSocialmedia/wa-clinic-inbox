@@ -374,11 +374,11 @@ export function startOutboundWorker(): Worker {
     log.error({ jobId: job?.id, err: err.message }, "outbound job failed");
   });
   worker.on("error", (err) => {
+    // ★ cwi-final S6-5：connection 層錯誤唔再 process.exit — shared ioredis 無限重試自愈（T692(c) 實測）
     log.error(
       { queue: outboundQueue.name, err: err.message },
-      "outbound worker error — exiting for PM2 restart"
+      "outbound worker error（connection 層 — 無限重試自愈中；S6-5 唔再 process.exit）"
     );
-    process.exit(1);
   });
 
   return worker;

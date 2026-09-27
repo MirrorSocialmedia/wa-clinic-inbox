@@ -8834,6 +8834,191 @@ else
 fi
 rm -f .dev/graph-mock-flow-payload.json
 
+# ══════════════ S6-5: T692 worker 生命週期 + heartbeat（最後一段 — 會 kill/重起 worker + redis）════════════════
+# (a) SIGINT 喺 Graph mock 慢 call（5s）中 → graceful shutdown 等 in-flight job：job 完成 + Graph 該 wamid 呼叫 = 1 次
+# (b) kill -9 worker → /healthz 503 喺 2 分鐘內（heartbeat EX 90s 過期 + 120s 窗口）
+# (c) redis 重啟 → worker 自己恢復（ioredis 無限重試）— “PM2 restart 次數 = 0”係生產軌斷言（dev 無 PM2，
+#     用“worker leaf pid 不變”做 dev 等效斷言）
+# dev redis = systemd 管理（redis-server.service，Restart=always）— `redis-cli shutdown nosave`
+#   → systemd ~1-2s 內自動重起（真 restart：新 process + 連線斷）；斷言 = MainPID 改變 + PONG + 自愈；
+#   生產軌 = docker restart wa-redis。heartbeat key 喺 nosave restart 會失 → 等下一個 ≤30s tick 重寫
+#   （故收尾 healthz 200 用 retry 循環）
+# ⚠️ 呢段 kill 真 worker — 結尾必重起 worker + 核 refreshAllClinics done + healthz 復 200（工單教訓）
+echo "[S6-5] T692: worker lifecycle + heartbeat..."
+T692=0
+T692_WLOG_A=/tmp/e2e-worker-t692a.log
+T692_WLOG_B=/tmp/e2e-worker-t692b.log
+T692_WLOG_C=/tmp/e2e-worker-t692c.log
+# worker leaf node pid（kill 必殺 leaf — kill sh/pnpm wrapper = orphan worker，G2 實錘）
+t692_leaf_pid() { ps -eo pid,cmd | grep 'node.*src/workers/index[.]ts' | grep -v grep | tail -1 | awk '{print $1}'; }
+
+# ── T692(a): SIGINT 喺慢 Graph call 中 → in-flight job 完成、Graph 唔重複 ──────────────
+if [ -f /tmp/e2e-push-tls/ca.pem ]; then export NODE_EXTRA_CA_CERTS=/tmp/e2e-push-tls/ca.pem; fi
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+WA_GRAPH_MOCK_DELAY_MS=5000 nohup pnpm worker >"$T692_WLOG_A" 2>&1 &
+WORKER_PID=$!
+A_UP=0
+for i in $(seq 1 90); do
+  grep -q "all workers running" "$T692_WLOG_A" 2>/dev/null && { A_UP=1; break; }
+  sleep 1
+done
+check "T692(a) worker 起機（Graph mock 5s 慢 call）" "$A_UP" "1"
+[ "$A_UP" = 1 ] || T692=1
+# fixture：直接插 Contact + Conversation（窗口開 — 唔走 inbound webhook，避免 AI 自動覆盤多一條 Graph call）
+T692C="t692c-${EPOCH}"; T692_CONV="t692conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T692C', '$TKW_CLINIC_ID', '8526957${EPOCH}', 'E2E T692', ARRAY[]::text[])" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T692_CONV', '$TKW_CLINIC_ID', '$T692C', 'OPEN', now(), now())" >/dev/null 2>&1
+if [ "$A_UP" = 1 ]; then
+  CODE=$(curl -s -o /tmp/e2e-t692-send.json -w '%{http_code}' -b "$COOKIE_TKW" \
+    -X POST "$BASE/api/messages/send" -H 'Content-Type: application/json' \
+    -d "{\"conversationId\":\"$T692_CONV\",\"body\":\"t692 graceful shutdown test\"}")
+  check "T692(a) staff send → 202" "$CODE" "202"
+  MSG_692=$(jf messageId < /tmp/e2e-t692-send.json)
+  [ -n "$MSG_692" ] || { fail "T692(a) send 無 messageId"; T692=1; }
+  if [ -n "$MSG_692" ]; then
+    sleep 2  # 等 worker 食到 job（入 5s Graph delay 窗口）
+    W692A=$(t692_leaf_pid)
+    [ -n "$W692A" ] || { fail "T692(a) 搵唔到 worker leaf pid"; T692=1; }
+    if [ -n "$W692A" ]; then
+      kill -INT "$W692A"
+      A_GONE=0
+      for i in $(seq 1 60); do
+        kill -0 "$W692A" 2>/dev/null || { A_GONE=1; break; }
+        sleep 1
+      done
+      check "T692(a) SIGINT 後 60s 內 worker 優雅退出（graceful shutdown）" "$A_GONE" "1"
+      [ "$A_GONE" = 1 ] || T692=1
+    fi
+  fi
+fi
+
+# ── T692(b): kill -9 → /healthz 503 喺 2 分鐘內 ──────────────────────────────
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >"$T692_WLOG_B" 2>&1 &
+WORKER_PID=$!
+B_UP=0
+for i in $(seq 1 90); do
+  if curl -sf --max-time 5 "$BASE/healthz$HEALTHZ_QS" >/dev/null 2>&1; then B_UP=1; break; fi
+  sleep 1
+done
+check "T692(b) baseline healthz 200（worker 重起）" "$B_UP" "1"
+[ "$B_UP" = 1 ] || T692=1
+if [ "$B_UP" = 1 ] && [ -n "${MSG_692:-}" ]; then
+  # in-flight job 完成（a 段 shutdown 期間完成，或者呢個新 worker 補跑）
+  if wait_for "SELECT status s, (\"waMessageId\" IS NOT NULL)::text w FROM \"Message\" WHERE id='$MSG_692'" '[{"s":"SENT","w":"true"}]' 30; then
+    pass "T692(a) in-flight job 完成（SENT + waMessageId）"
+  else
+    fail "T692(a) in-flight job 未完成（應該 SENT）"; T692=1
+  fi
+  WAMID_692=$(q "SELECT \"waMessageId\" FROM \"Message\" WHERE id='$MSG_692'" | jf waMessageId)
+  if [ -n "$WAMID_692" ]; then
+    # 該 wamid 喺 Graph mock log（「graph: send text (MOCK)」行）出現次數 = 1（shutdown 前後都唔重複發；
+    #   outbound「sent OK」行亦含 wamid — 必須先 filter Graph 行先計數）
+    G_HITS=$(grep -h "graph: send text (MOCK)" "$T692_WLOG_A" "$T692_WLOG_B" 2>/dev/null | grep -cF "\"wamid\":\"$WAMID_692\"" || true)
+    check "T692(a) Graph 對該 wamid 呼叫 = 1 次（無重複發送）" "$G_HITS" "1"
+    [ "$G_HITS" = "1" ] || T692=1
+  else
+    fail "T692(a) waMessageId 缺（斷 Graph 次數先決）"; T692=1
+  fi
+  # kill -9 → heartbeat 過期 → healthz 503
+  W692B=$(t692_leaf_pid)
+  [ -n "$W692B" ] || { fail "T692(b) 搵唔到 worker leaf pid"; T692=1; }
+  if [ -n "$W692B" ]; then
+    kill -9 "$W692B"
+    B_503=0
+    for i in $(seq 1 150); do
+      CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$BASE/healthz$HEALTHZ_QS" 2>/dev/null || echo 000)
+      [ "$CODE" = "503" ] && { B_503=1; break; }
+      sleep 1
+    done
+    check "T692(b) kill -9 → /healthz 503 喺 150s 內（heartbeat EX 90 + 120s 窗口）" "$B_503" "1"
+    [ "$B_503" = 1 ] || T692=1
+  fi
+fi
+
+# ── T692(c): redis 重啟 → worker 自己恢復（pid 不變 = dev 等效 PM2 restarts=0）────────────────
+nohup pnpm worker >"$T692_WLOG_C" 2>&1 &
+WORKER_PID=$!
+C_UP=0
+for i in $(seq 1 90); do
+  if curl -sf --max-time 5 "$BASE/healthz$HEALTHZ_QS" >/dev/null 2>&1; then C_UP=1; break; fi
+  sleep 1
+done
+check "T692(c) baseline healthz 200" "$C_UP" "1"
+[ "$C_UP" = 1 ] || T692=1
+if [ "$C_UP" = 1 ]; then
+  # 等啟動首跑 refreshAllClinics 先跑完，先再停 redis（避免 refresh 同 shutdown 交差）
+  C_PRE=0
+  for i in $(seq 1 60); do
+    grep -q "refreshAllClinics done" "$T692_WLOG_C" 2>/dev/null && { C_PRE=1; break; }
+    sleep 1
+  done
+  check "T692(c) 啟動首跑 refreshAllClinics done（redis 停前）" "$C_PRE" "1"
+  [ "$C_PRE" = 1 ] || T692=1
+  W692C=$(t692_leaf_pid)
+  C_LOG_LINES_BEFORE=$(wc -l < "$T692_WLOG_C" 2>/dev/null || echo 0)
+  # 停 redis（dev = systemd 管理：redis-server.service Restart=always — shutdown nosave 會喺 ~1-2s 被
+  #   systemd 自動重起 = 真 redis restart（新 process），正正係要測嘅場景；生產軌 = docker restart wa-redis）
+  REDIS_PID_BEFORE=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
+  redis-cli shutdown nosave 2>/dev/null || true
+  R_RESTARTED=0
+  for i in $(seq 1 30); do
+    P=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
+    # P=0 = 一過性 stopped（systemd 重起中）— 繼續等真新 PID
+    if [ "$P" != "0" ] && [ "$P" != "" ] && [ "$P" != "$REDIS_PID_BEFORE" ]; then R_RESTARTED=1; break; fi
+    sleep 1
+  done
+  check "T692(c) redis 真重啟（MainPID ${REDIS_PID_BEFORE:-unknown} → 新 process）" "$R_RESTARTED" "1"
+  [ "$R_RESTARTED" = 1 ] || T692=1
+  R_UP=0
+  for i in $(seq 1 30); do
+    redis-cli ping 2>/dev/null | grep -q PONG && { R_UP=1; break; }
+    sleep 1
+  done
+  check "T692(c) redis 返到 PONG" "$R_UP" "1"
+  [ "$R_UP" = 1 ] || T692=1
+  if [ "$R_UP" = 1 ]; then
+    # worker 應喺 redis 重啟後 120s 內自己恢復：ioredis 重連（無限重試）+ heartbeat 重寫（≤30s tick）→ healthz 200
+    C_REC=0
+    for i in $(seq 1 120); do
+      if curl -sf --max-time 5 "$BASE/healthz$HEALTHZ_QS" >/dev/null 2>&1; then C_REC=1; break; fi
+      sleep 1
+    done
+    check "T692(c) redis 重啟後 120s 內 worker 自愈（healthz 200）" "$C_REC" "1"
+    [ "$C_REC" = 1 ] || T692=1
+    W692C2=$(t692_leaf_pid)
+    check "T692(c) worker leaf pid 唔變（冇 process 重啟 — dev 等效 PM2 restarts=0）" "$W692C2" "$W692C"
+    [ "$W692C2" = "$W692C" ] || T692=1
+    # 「redis connected」必須喺重啟後嘅新 log 行先算（起機嗰行唔計）
+    if tail -n +$((C_LOG_LINES_BEFORE + 1)) "$T692_WLOG_C" 2>/dev/null | grep -q "redis connected"; then
+      pass "T692(c) worker log 重啟後見 'redis connected'（自動重連）"
+    else
+      fail "T692(c) worker log 重啟後無 'redis connected'"; T692=1
+    fi
+  fi
+fi
+
+# ── T692 收尾：最終狀態核（工單教訓：kill 完必重起 + refreshAllClinics done + healthz 200）─────────────────
+# healthz 200 用 retry 循環 — redis 重啟後 heartbeat key 可能要等下一個 ≤30s tick 先重寫（窗口內 503 係正常）
+HZF=000
+for i in $(seq 1 90); do
+  HZF=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$BASE/healthz$HEALTHZ_QS" 2>/dev/null || echo 000)
+  [ "$HZF" = "200" ] && break
+  sleep 1
+done
+check "T692 收尾：/healthz 200（worker 存活，≤90s 窗口）" "$HZF" "200"
+[ "$HZF" = "200" ] || T692=1
+grep -q "refreshAllClinics done" "$T692_WLOG_C" 2>/dev/null \
+  && pass "T692 收尾：refreshAllClinics done（worker 啟動首跑）" \
+  || { fail "T692 收尾：無 refreshAllClinics done"; T692=1; }
+# fixture 清理（hermetic）
+q "DELETE FROM \"Message\" WHERE \"conversationId\"='$T692_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Conversation\" WHERE id='$T692_CONV'" >/dev/null 2>&1
+q "DELETE FROM \"Contact\" WHERE id='$T692C'" >/dev/null 2>&1
+[ "$T692" = 0 ] && pass "T692 worker 生命週期 + heartbeat（SIGINT graceful / kill-9 503 / redis 自愈）" || fail "T692 有項失敗（見上 ❌）"
+
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"
 echo "════════════════════════════════════════════"

@@ -103,8 +103,8 @@ export function startBookingWriteWorker(): Worker {
     );
   });
   worker.on("error", (err) => {
-    log.error({ queue: "booking-write", err: err.message }, "booking-write worker error — exiting for PM2 restart");
-    process.exit(1);
+    // ★ cwi-final S6-5：connection 層錯誤唔再 process.exit — shared ioredis 無限重試自愈（T692(c) 實測）
+    log.error({ queue: "booking-write", err: err.message }, "booking-write worker error（connection 層 — 無限重試自愈中；S6-5 唔再 process.exit）");
   });
 
   return worker;

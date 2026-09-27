@@ -1438,10 +1438,9 @@ function attachAiWorkerHandlers(worker: Worker<AiJobData>, queueName: string): v
     if (conv) await publishConvEvent(conv, "notice:new", { clinicId, conversationId, kind: "SYSTEM" });
   });
   worker.on("error", (err) => {
-    // Connection-level error（e.g. Redis retry 耗盡）→ log 後 exit，PM2 重啟 process。
-    // 唔好留低一個死咗嘅 worker 冇聲冇息（silent outage 比 crash 可怕）。
-    log.error({ queue: queueName, err: err.message }, "ai worker error — exiting for PM2 restart");
-    process.exit(1);
+    // ★ cwi-final S6-5：Connection-level error（e.g. Redis 瞬斷）— 唔再 process.exit。
+    //   shared ioredis retryStrategy 無限重試（cap 10s）→ Redis 重啟後自動重連，PM2 重啟次數 = 0。
+    log.error({ queue: queueName, err: err.message }, "ai worker error（connection 層 — 無限重試自愈中；S6-5 唔再 process.exit）");
   });
 }
 

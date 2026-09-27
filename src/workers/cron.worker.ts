@@ -44,9 +44,17 @@
  *                                       （同 pending-status-sweep 同一條 light cron lane）
  *
  * 反循環：每個 job 都係 DB/queue 讀 + 冪等寫（upsert / 未解決 alert 唔重開）— 重複執行安全。
+ *
+ * ★ cwi-final S6-5：拆兩條 lane（queue `cron` light + `cron-heavy` heavy）：
+ * - light（concurrency 4）：sync-availability / bookings-expire / consult-expire / health-check /
+ *   hold-sweep / auto-release / routing-escalate / unassigned-sla / stuck-sweep /
+ *   pending-status-sweep / outbound-sweep / reminder-scan（⚠️ spec S6-5 列表未列 — 保持現行 light queue，零行為改變；分類待 CEO 拍板）
+ * - heavy（concurrency 1）：auto-resolve / quality-check / weekly-report / stats-weekly /
+ *   retention-purge / company-sync / followup-scan
+ * 兩個 worker 共用 handleCronJob — job name 路由唔依賴隊列（enqueue 錯隊列只會變 concurrency lane，唔會靜默失靈）。
  */
-import { Worker } from "bullmq";
-import { cronQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
+import { Worker, type Job, type Queue } from "bullmq";
+import { cronQueue, cronHeavyQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
 import { syncCompaniesFromWorkforce } from "@/lib/company-sync";
@@ -70,11 +78,13 @@ import { runUnassignedSlaSweep } from "@/lib/unassigned-sla";
 import { runRoutingEscalateSweep } from "@/lib/routing/escalate";
 import { runConsultExpireSweep } from "@/lib/sessions/consult-runner";
 
-export async function startCronWorker(): Promise<Worker | null> {
-  const worker = new Worker(
-    cronQueue.name,
-    async (job) => {
-      switch (job.name) {
+// ★ cwi-final S6-5：cron 拆兩條 lane — light（sweep 類短 job，concurrency 4）+ heavy（長批 job，concurrency 1）。
+const CRON_LIGHT_CONCURRENCY = 4;
+const CRON_HEAVY_CONCURRENCY = 1;
+
+/** 所有 cron job 嘅 handler（light/heavy 兩個 worker 共用 — job name 路由） */
+async function handleCronJob(job: Job): Promise<unknown> {
+  switch (job.name) {
         case "sync-availability": {
           const r = await refreshAllClinics();
           log.info(
@@ -222,18 +232,39 @@ export async function startCronWorker(): Promise<Worker | null> {
         default:
           log.warn({ jobName: job.name }, "cron worker: unknown job — skip");
       }
-    },
+}
+
+function makeCronWorker(queue: Queue, concurrency: number): Worker {
+  const worker = new Worker(
+    queue.name,
+    async (job) => handleCronJob(job),
     {
       connection: getRedis(),
       prefix: QUEUE_PREFIX,
-      concurrency: 1,
+      concurrency,
     }
   );
 
   worker.on("failed", (job, err) => {
-    log.error({ job: job?.name, err: err.message }, "cron: job failed");
+    log.error({ queue: queue.name, job: job?.name, err: err.message }, "cron: job failed");
+  });
+  worker.on("error", (err) => {
+    // ★ cwi-final S6-5：connection 層錯誤唔再 process.exit（舊 cron worker 原本連 listener 都無 —
+    //   BullMQ 6 fallback 只係 console.error 噴 raw stack 入 error log）— 補齊同其他 6 個 worker 一致：
+    //   shared ioredis 無限重試（cap 10s）自動重連自愈（T692(c) 實測）
+    log.error({ queue: queue.name, err: err.message }, "cron worker error（connection 層 — 無限重試自愈中；S6-5 唔再 process.exit）");
   });
 
-  log.info({}, "cron worker started");
+  log.info({ queue: queue.name, concurrency }, "cron worker started");
   return worker;
+}
+
+/** cron light lane — 2m–15m 間隔 sweep 類 job（concurrency 4 — job 分派見 workers/index.ts registerSchedulers） */
+export function startCronWorker(): Worker {
+  return makeCronWorker(cronQueue, CRON_LIGHT_CONCURRENCY);
+}
+
+/** cron heavy lane — 日報表 / retention-purge / followup-scan 等長批 job（concurrency 1） */
+export function startCronHeavyWorker(): Worker {
+  return makeCronWorker(cronHeavyQueue, CRON_HEAVY_CONCURRENCY);
 }
