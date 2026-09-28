@@ -3,6 +3,7 @@ import { z } from "zod";
 import argon2 from "argon2";
 import prisma from "@/lib/prisma";
 import { requireAdmin, resolveClinicIds, type ScopeType } from "@/lib/rbac";
+import { resolveCreateScopeType } from "@/lib/staff-scope";
 import { handle, toResponse } from "@/lib/api-error";
 
 /**
@@ -184,9 +185,10 @@ export const POST = handle(async (req: NextRequest) => {
     }
   }
 
-  // scope 解析：SUPERVISOR 恆 ALL（現行無 scope 概念）；default：STAFF→CLINICS、ADMIN→ALL
-  const scopeType: "ALL" | "COMPANY" | "CLINICS" =
-    d.role === "SUPERVISOR" ? "ALL" : d.scopeType ?? (d.role === "STAFF" ? "CLINICS" : "ALL");
+  // scope 解析：SUPERVISOR 恆 ALL（現行無 scope 概念）；★ FX-02：ADMIN 必須顯式帶 scopeType（冇 → 400）
+  const scope = resolveCreateScopeType(d);
+  if (!scope.ok) return NextResponse.json({ error: scope.error, message: scope.message }, { status: scope.status });
+  const scopeType = scope.scopeType;
   const scopeCompanyId = scopeType === "COMPANY" ? d.scopeCompanyId : null;
 
   // ★ cwi-final S3-1 步驟 0（臨時守衛 — spec 碼逐字）：ALLOW_SCOPED_ADMIN 未開 → scoped ADMIN 一律 400

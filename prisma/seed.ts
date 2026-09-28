@@ -104,7 +104,7 @@ function randomPassword(prefix: string): string {
   return `${prefix}-${randomBytes(6).toString("base64url")}`;
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const clinicIds = new Map<string, string>();
   const prevCreds = readPrevCreds();
 
@@ -153,11 +153,15 @@ async function main(): Promise<void> {
 
     if (existing) {
       // 重跑：只確保 clinicId 正確（密碼唔再顯示 — 冇明文記錄，唔會洩漏）
-      const needsUpdate = existing.clinicId !== clinicId || existing.active === false;
+      // ★ cwi-qa FX-02：ADMIN／SUPERVISOR 出廠範圍 = ALL — 舊 DB 若曾被建做 schema default
+      //   （CLINICS + 零 StaffClinic = 空範圍 ADMIN，mock-e2e T19 403）→ 重跑 seed 修復返 ALL。
+      const isPrivileged = u.role === "ADMIN" || u.role === "SUPERVISOR";
+      const needsScopeFix = isPrivileged && existing.scopeType !== "ALL";
+      const needsUpdate = existing.clinicId !== clinicId || existing.active === false || needsScopeFix;
       if (needsUpdate) {
         await prisma.staffUser.update({
           where: { id: existing.id },
-          data: { clinicId, active: true },
+          data: { clinicId, active: true, ...(needsScopeFix ? { scopeType: "ALL" } : {}) },
         });
       }
       // ★ email 一樣 mask（log 只准 metadata 鐵律；同 password 同一個 redaction 原則）
@@ -175,6 +179,9 @@ async function main(): Promise<void> {
         role: u.role,
         clinicId,
         active: true,
+        // ★ cwi-qa FX-02：ADMIN／SUPERVISOR 必帶 scopeType=ALL — 唔准靠 schema default
+        //   （CLINICS + 零 StaffClinic = 空範圍 ADMIN，新環境／CI／災難重建即 T19 403）。
+        ...(u.role === "ADMIN" || u.role === "SUPERVISOR" ? { scopeType: "ALL" as const } : {}),
       },
     });
     const label = u.role === "ADMIN" ? "ADMIN" : `${u.clinicCode} STAFF`;
@@ -406,11 +413,17 @@ async function main(): Promise<void> {
   console.log("[seed] done");
 }
 
-main()
-  .catch((err) => {
-    console.error("[seed] failed:", err);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+// ★ 只在直接執行（tsx prisma/seed.ts / prisma db seed）時跑 — 俾 unit test import 唔會觸發 seed。
+const isDirectRun =
+  typeof process.argv[1] === "string" &&
+  fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+if (isDirectRun) {
+  main()
+    .catch((err) => {
+      console.error("[seed] failed:", err);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}
