@@ -52,6 +52,16 @@ const eslintConfig = [
     },
   },
   {
+    // ★ cwi-qa FX-06（CI 綠修復，run 36424802676 step 9 實測）：.cjs = CommonJS by design
+    //   （PM2 config 由 PM2 以 node 直接載入 — import 語法唔得）→ require() 係正確寫法，
+    //   no-require-imports 唔適用。ecosystem.config.cjs 29/30 require("fs"/"path") 曾 2 errors
+    //   → pnpm lint（CI step 9）exit 1。注意：pnpm lint（裸 eslint）同 npx eslint . 都會捉到。
+    files: ["**/*.cjs"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
     // ★ Realtime P0 (R2, cwi-rt-20260823-a1)：commit-then-emit 鐵律 —
     //   publish 調用永遠唔准喺 $transaction callback 入面（tx 回滾 → 幻影 socket event）。
     //   規則實作：eslint-rules/no-publish-in-transaction.mjs；文檔：src/lib/notify.ts 檔頭。
