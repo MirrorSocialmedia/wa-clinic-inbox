@@ -196,24 +196,35 @@ fi
 
 # ── env ──────────────────────────────────────────────────────────────────
 set -a
-if [ "$CI_MODE" = "1" ] && [ ! -f .env ]; then
-  echo "  CI mode：生成最小 .env（secrets 本地隨機；零真值入 repo）"
-  _jw=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  _ss=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  _ph=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  _tk=$(head -c 24 /dev/urandom | base64)
-  {
-    echo "DATABASE_URL=${DATABASE_URL:-postgresql://postgres:pw@localhost:15432/wa}"
-    echo "REDIS_URL=${REDIS_URL:-redis://localhost:6379}"
-    echo "FLOW_JWT_SECRET=${_jw}"
-    echo "SESSION_SECRET=${_ss}"
-    echo "PHONE_HASH_KEY=${_ph}"
-    echo "TOTP_ENC_KEY=${_tk}"
-    echo "WORKFORCE_MOCK=1"
-    echo "AI_MOCK=${AI_MOCK:-1}"
-    echo "WA_MOCK=${WA_MOCK:-1}"
-    echo "DUTY_MOCK=${DUTY_MOCK:-1}"
-    echo "PORT=3100"
+if [ "$CI_MODE" = "1" ]; then
+  if [ ! -f .env ]; then
+    echo "  CI mode：生成最小 .env（secrets 本地隨機；零真值入 repo）"
+    _jw=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    _ss=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    _ph=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    # ★ cwi-qa FX-01：TOTP_ENC_KEY = 32 bytes base64（totp-enc.ts 要求恰 32 bytes —
+    #   舊版 24 bytes → TOTP enroll 500，全新 CI DB 必紅）
+    _tk=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+    # ★ cwi-qa FX-01（QA-23）：舊 CI .env 缺 3 key — WA_APP_SECRET（webhook x-hub-signature-256 驗證）/
+    #   WA_VERIFY_TOKEN（webhook GET 驗證）/ MEDIA_ENC_KEY（media.ts 要求恰 64 hex — T43b 碟上密文斷言）
+    _was=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    _wvt=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    _mek=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    {
+      echo "DATABASE_URL=${DATABASE_URL:-postgresql://postgres:pw@localhost:15432/wa}"
+      echo "REDIS_URL=${REDIS_URL:-redis://localhost:6379}"
+      echo "FLOW_JWT_SECRET=${_jw}"
+      echo "SESSION_SECRET=${_ss}"
+      echo "PHONE_HASH_KEY=${_ph}"
+      echo "TOTP_ENC_KEY=${_tk}"
+      echo "WA_APP_SECRET=${_was}"
+      echo "WA_VERIFY_TOKEN=${_wvt}"
+      echo "MEDIA_ENC_KEY=${_mek}"
+      echo "WORKFORCE_MOCK=1"
+      echo "AI_MOCK=${AI_MOCK:-1}"
+      echo "WA_MOCK=${WA_MOCK:-1}"
+      echo "DUTY_MOCK=${DUTY_MOCK:-1}"
+      echo "PORT=3100"
     # VAPID（Web Push e2e T190–193 要有效 keypair；dev-only 本地生成）
     node -e '
       const crypto = require("node:crypto");
@@ -226,14 +237,28 @@ if [ "$CI_MODE" = "1" ] && [ ! -f .env ]; then
       console.log("VAPID_PRIVATE_KEY=" + b64u(Buffer.from(priv.d, "base64url")));
       console.log("VAPID_SUBJECT=mailto:e2e-ci@wa-clinic.local");
     '
-  } > .env
+    } > .env
+  fi
+  # ★ cwi-qa FX-01：fixture 生成唔再綁 .env 存在性（spec：fixture 檔無就生成，唔理 .env 存唔存在）—
+  #   e2e-staff.ts create 同 mock-e2e login 讀同一檔 → 自洽；密碼隨機（零字面值入 repo）
   mkdir -p .dev
   [ -f .dev/e2e-fixtures.txt ] || {
-    # ★ S6-1：密碼隨機生成（零字面值入 repo；e2e-staff.ts create 同 mock-e2e login 讀同一檔 → 自洽）
     H1B_CI_PASS="e2e-ci-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     echo "H1_B_EMAIL=e2e-h1b-ci@wa-clinic.local" > .dev/e2e-fixtures.txt
     echo "H1_B_PASSWORD=$H1B_CI_PASS" >> .dev/e2e-fixtures.txt
   }
+  # ★ cwi-qa FX-01（QA-23）：.env.local — server 靠 next() auto-load（base-server loadEnvConfig，dev mode）：
+  #   APP_HOST = middleware Origin 比較 + socket allowRequest（冇佢 req.nextUrl.host=localhost:3000
+  #     → 全站 POST 403 + 全部 socket 被拒）；
+  #   TRUST_PROXY = login 限流信 XFF bucket（harness 補 10.63.x.55）；
+  #   INTERNAL_LLM_SECRET = S2-9 LLM proxy 信封 key（e2e-s29a 經 process.loadEnvFile 讀 — 同 server 同源；
+  #     36 bytes raw → base64 48 字 ≥ 32 bytes 要求）
+  _llm=$(head -c 36 /dev/urandom | base64 | tr -d '\n')
+  {
+    echo "APP_HOST=127.0.0.1:3100"
+    echo "TRUST_PROXY=1"
+    echo "INTERNAL_LLM_SECRET=${_llm}"
+  } > .env.local
 fi
 # shellcheck disable=SC1091
 . ./.env
@@ -3028,7 +3053,7 @@ T75_WAMID="wamid.E2E_T75_${EPOCH}"
 if ! wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$T75_WAMID'" '[{"c":"1"}]' 30; then fail "T75 setup 訊息未落庫"; R9=1; fi
 T75_CONV=$(q "SELECT c.id::text id FROM \"Message\" m JOIN \"Conversation\" c ON c.id=m.\"conversationId\" WHERE m.\"waMessageId\"='$T75_WAMID'" | jf id)
 [ -n "$T75_CONV" ] || { fail "T75 對話搵唔到"; R9=1; }
-T75_CID=$(uuidgen)
+T75_CID=$(node -e 'console.log(crypto.randomUUID())')  # ★ cwi-qa FX-01：uuidgen → node（CI 干净 runner 唔依賴 uuid-runtime 套件）
 h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$T75_CONV\",\"body\":\"e2e T75 idempotent 1\",\"clientMessageId\":\"$T75_CID\"}"
 check "T75 首次 POST → 202" "$H1_CODE" "202"
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"clientMessageId\"='$T75_CID'" '[{"c":"1"}]' 15 || fail "T75 首次 row 未 commit"
@@ -3249,6 +3274,20 @@ T81_PAT1="8526401${EPOCH}"
 T81_PAT2="8526402${EPOCH}"
 T81_W1="wamid.E2E_T81_A_${EPOCH}"
 T81_W2="wamid.E2E_T81_B_${EPOCH}"
+# ★ cwi-qa FX-01：重啟能力 gate — 本地 = redis-server 手動重啟；CI = docker restart（service container）。
+#   兩者都冇 → 整段 T81 SKIP：SHUTDOWN 後 redis 死住冇辦法恢復 → 後續所有 section
+#   （S4-2 worker job 等）全部連環假紅 — 比跳過呢個 chaos test 嚴重。
+T81_RESTART_OK=0
+if [ "$CI_MODE" = "1" ]; then
+  T81_REDIS_CID=$(docker ps -qf ancestor=redis:7 2>/dev/null | head -1)
+  [ -n "$T81_REDIS_CID" ] && T81_RESTART_OK=1
+else
+  command -v redis-server >/dev/null 2>&1 && T81_RESTART_OK=1
+fi
+if [ "$T81_RESTART_OK" = 0 ]; then
+  echo "    ⚠ T81 SKIP：冇保證嘅 redis 重啟手段（CI docker/service container、本地 redis-server 都冇）— 唔 SHUTDOWN"
+  pass "T81 SKIP（redis 重啟能力唔足 — 唔跑，防 redis 死住連環紅）"
+else
 # 1. redis SHUTDOWN NOSAVE（queue 狀態清空）
 redis-cli SHUTDOWN NOSAVE 2>/dev/null || true
 T81_DOWN=0
@@ -3274,7 +3313,14 @@ case "$T81_O2" in
   *) fail "T81 故障期間 inbound#2 未快回應：${T81_O2:-<timeout 10s>}"; R9=1 ;;
 esac
 # 3. redis 重啟（sandbox 無 supervisor — 手動；模擬 ops 重啟）
-redis-server 127.0.0.1:6379 --daemonize yes >/dev/null 2>&1 || true
+# ★ cwi-qa FX-01：舊 `redis-server 127.0.0.1:6379 --daemonize yes` 將 127.0.0.1:6379 當 config 檔 →
+#   redis 起唔返 → 之後全部 queue unavailable（本地實測 T81 之後 123 項連環紅）。
+#   CI = docker restart service container（gate 已確保 CID 存在）；本地 = 正確參數形式。
+if [ "$CI_MODE" = "1" ]; then
+  docker restart "$T81_REDIS_CID" >/dev/null 2>&1 || true
+else
+  redis-server --port 6379 --bind 127.0.0.1 --daemonize yes >/dev/null 2>&1 || true
+fi
 T81_UP=0
 for i in $(seq 1 30); do
   redis-cli ping 2>/dev/null | grep -q PONG && { T81_UP=1; break; }
@@ -3329,6 +3375,7 @@ if [ "$T81_DB_EXPECT" = 2 ]; then
 else
   pass "T81 delta refetch 跳過（200 數=${T81_DB_EXPECT} — 500 條交還 Meta 重試）"
 fi
+fi  # ← cwi-qa FX-01：T81 重啟能力 gate（T81_RESTART_OK）
 
 # ── R9 summary ─────────────────────────────────────────────────────────
 [ "$R9" = 0 ] && pass "R9 Realtime P0 chaos e2e（T75-T81）" || fail "R9 有項失敗（見上 ❌）"
@@ -9442,6 +9489,20 @@ check "T698/T695 收尾：/healthz 200（worker 存活）" "$HZF" "200"
 [ "$HZF" = "200" ] || T698=1
 [ "$T698" = 0 ] && pass "T698 outbound media API+worker（happy/PII/拒絕矩陣/replay/kill-reuse/timeout-UNKNOWN）" || fail "T698 有項失敗（見上 ❌）"
 [ "$T695" = 0 ] && pass "T695 composer media UI（預覽+發送 / 8MB 前端擋 / SUPERVISOR 無 📎）" || fail "T695 有項失敗（見上 ❌）"
+
+# ════════════════════════════════════════════════════════════════════════
+# FX 並行 lane 測試區塊（cwi-qa-fix 20260928 並行計劃 §0 規則 4）— FX-01 建立（空）。
+#   之後各階段需要起 server/browser 嘅 T 測試只准加喺自己 lane 嘅區塊入面，
+#   唔准改區塊以外（避免兩個 lane 同時改 mock-e2e.sh 撞車）。
+# ══════════════════════════════════════════════════════════
+
+# === FX LANE A ===
+# （Lane A 各階段 T 測試入度：階段 2 安全/權限 → 階段 3 AI）
+
+# ── FX LANE A：cwi-qa 階段 1 測試（FX-06 T760 / FX-07 T761 / FX-13 T765）─────────────
+# 注：呢段由 FX-06/FX-07/FX-13 commit 加入（並行計劃 §0 規則 4：lane 測試入自己區塊）。
+# === FX LANE B ===
+# （Lane B 各階段 T 測試入度：階段 2 預約/outbound → 階段 3 附件/API）
 
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

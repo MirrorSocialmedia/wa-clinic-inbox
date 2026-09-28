@@ -709,11 +709,14 @@ async function gc01(): Promise<void> {
   check("m3 stage = HANDOFF", s3.stage === "HANDOFF", s3.stage);
   // 設計：URGENT_PAIN job 已發 URGENT_ESCALATION — engine 唔重發 HANDOFF_REQUEST（runner §6 去重）
   const m3msg = await prisma.message.findUnique({ where: { id: m3.msgId } });
+  // ★ cwi-qa FX-01：`m3msg?.waMessageId!`（non-null-asserted optional chain）— null 時實際係 undefined，
+  //   Prisma 會 throw「must not be undefined」；改 ?? ""：normal path 語義相同，壞 path 由 crash 變 clean fail。
+  const m3wamid = m3msg?.waMessageId ?? "";
   const n3 = await poll(
     "GC01 m3 URGENT_ESCALATION(wamid)",
     async () =>
       (await prisma.staffNotice.findFirst({
-        where: { conversationId: m3.convId, kind: "URGENT_ESCALATION", meta: { path: ["wamid"], equals: m3msg?.waMessageId! } },
+        where: { conversationId: m3.convId, kind: "URGENT_ESCALATION", meta: { path: ["wamid"], equals: m3wamid } },
       })) ?? null,
   );
   check("m3 URGENT_ESCALATION 通知（meta.wamid 精確鎖定）", n3 !== null);

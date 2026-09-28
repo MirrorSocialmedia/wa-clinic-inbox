@@ -124,14 +124,32 @@ console.log("G4 defaults 鐵律");
 // ── G5 SCHEMA_HINTS 覆蓋 ──────────────────────────────────────────────
 console.log("G5 SCHEMA_HINTS 完整性");
 {
+  // ★ cwi-qa FX-01（舊債）：結構化欄按設計唔入 SCHEMA_HINTS（definitions.ts 註釋「scalar 欄先入 hints」—
+  //   呢啲欄喺 admin UI 有獨立自訂編輯器：questions 順序／redFlagTerms FLOOR 灰鎖／impressionTemplates／
+  //   lexicon entries）。舊 test 直接比 Object.keys(defaults) → pain-triage/lexicon 自 9ab9d37（cwi-paintriage）
+  //   起假紅。
+  // ★ cwi-qa FX-01：triage 兩個缺失 scalar hint（autoReleaseMinutes/autoResolveDays）已喺
+  //   src/lib/workflow/definitions.ts SCHEMA_HINTS 補齊（spec FX-01④ 要求修紅 — 最小改動，
+  //   見 docs/fixplan/cwi-qa-batch-1-report.md）。
+  const STRUCTURED_FIELDS: Record<string, string[]> = {
+    "pain-triage": ["questions", "redFlagTerms", "impressionTemplates"],
+    lexicon: ["entries"],
+  };
   for (const key of WORKFLOW_KEYS) {
-    const schemaFields = PARAMS_SCHEMAS[key].safeParse(PARAMS_DEFAULTS[key]).success
+    const allFields = PARAMS_SCHEMAS[key].safeParse(PARAMS_DEFAULTS[key]).success
       ? Object.keys(PARAMS_DEFAULTS[key])
       : [];
+    const scalarFields = allFields.filter((f) => !(STRUCTURED_FIELDS[key] ?? []).includes(f));
     const hintFields = SCHEMA_HINTS[key].map((h) => h.name);
+    if (scalarFields.length === 0) {
+      // 全結構化（lexicon）— hints 唔使覆蓋；只斷言冇 stale hint 指向唔存在欄位
+      check(`G5-${key} 全結構化欄 → hints 應空`, hintFields.length === 0, JSON.stringify(hintFields));
+      continue;
+    }
     check(
-      `G5-${key} hints 同 defaults 欄位一致`,
-      schemaFields.length > 0 && hintFields.length === schemaFields.length && schemaFields.every((f) => hintFields.includes(f))
+      `G5-${key} hints 同 defaults scalar 欄位一致`,
+      hintFields.length === scalarFields.length && scalarFields.every((f) => hintFields.includes(f)),
+      JSON.stringify({ scalar: scalarFields, hints: hintFields })
     );
   }
 }

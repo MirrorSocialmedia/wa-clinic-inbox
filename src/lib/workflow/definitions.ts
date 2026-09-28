@@ -233,6 +233,10 @@ export const SCHEMA_HINTS: Record<WorkflowKey, FieldHint[]> = {
     { name: "humanCooldownMs", label: "真人冷靜期（ms）— 第八閘", type: "int", min: 0, max: 24 * 3_600_000 },
     { name: "confidenceFloor", label: "置信度下閾 — 第九閘 low-confidence", type: "number", min: 0, max: 1 },
     { name: "autoThanksReply", label: "多謝/道別 AUTO 覆語", type: "string", maxLength: 120 },
+    // ★ cwi-qa FX-01（QA-01 ④）：補 G5 缺失嘅兩個 scalar hint（autoReleaseMinutes cwi-h6 / autoResolveDays
+    //   cwi-statusrole2 加欄時漏登記）— unit-workflow-definitions G5-triage 假紅根因。min/max 跟 schema。
+    { name: "autoReleaseMinutes", label: "auto-release 超時（分鐘）— cwi-h6", type: "int", min: 1, max: 24 * 60 },
+    { name: "autoResolveDays", label: "auto-resolve 日數 — cwi-statusrole2", type: "int", min: 1, max: 30 },
     { name: "unassignedSlaMinutes", label: "公海 SLA 提醒（分鐘）— 未指派超過 N 分鐘 push 全店", type: "int", min: 3, max: 120 },
   ],
   "booking-session": [

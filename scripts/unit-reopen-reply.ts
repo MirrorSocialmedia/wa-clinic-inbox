@@ -89,7 +89,9 @@ console.log("\n[3] isReopenedFirstReplySafe（三條件齊 → safe；任一唔�
   }
 
   // 組合：多條唔中 → 多 reasons（唔早退）
-  const combo = isReopenedFirstReplySafe({ intent: "PAIN", lastResolvedAt: D(1), raw: "上次話仲未好" });
+  // ★ cwi-qa FX-01：補 `now: NOW` — 舊版漏傳 → 用實際時刻（跑日 ≠ fixture 2026-09-13）→
+  //   距 lastResolvedAt(D(1)) 恆 > 7 日 → age 永遠唔 push → 斷 3 reasons 變 2（舊債：日期漂移假紅）
+  const combo = isReopenedFirstReplySafe({ intent: "PAIN", lastResolvedAt: D(1), raw: "上次話仲未好", now: NOW });
   check("組合（PAIN + 1日 + 雙訊號）→ 3 reasons（intent+age+signal）", combo.safe === false && combo.reasons.length === 3, JSON.stringify(combo.reasons));
 }
 
