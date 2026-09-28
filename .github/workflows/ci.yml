@@ -39,6 +39,10 @@ jobs:
       #   ⚠️ FX-02 上線後刪呢行（階段 2 Lane A 任務）。
       #   URL 去 query params（connection_limit/pool_timeout 係 Prisma 專用 — psql 唔識）。
       - run: psql "${DATABASE_URL%%\?*}" -c "UPDATE \"StaffUser\" SET \"scopeType\"='ALL' WHERE email='admin@wa-clinic.local';"
+      # ★ cwi-qa FX-01b（run 36425409185 step 10 實測）：unit-knowledge 前置 = TKW 知識庫骨架
+      #   （scripts/seed-knowledge.ts，44 條，冪等；unit 檔頭明載「TKW 需已 seed」）— fresh DB 冇跑
+      #   過 → pickKnowledge 5 項全紅。本地 dev DB 係歷史跑過，所以本機綠 / CI 紅。
+      - run: pnpm tsx scripts/seed-knowledge.ts
       - run: pnpm typecheck && pnpm lint
       # ★ cwi-qa FX-01（QA-01）：每個 unit 加 timeout 150 — 舊 run unit 卡死會吊住成個 job 6 小時；
       #   150s 夠最快 unit（company-sync ~30s）冷 runner 跑完，卡死個直接 kill → 清晰失敗。
