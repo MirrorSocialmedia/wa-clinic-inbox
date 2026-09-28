@@ -7,9 +7,12 @@ jobs:
     #   冇 process.exit + BullMQ queue 連接 keep event loop 活著）；240 分鐘上限兜底。
     timeout-minutes: 240
     services:
-      # ★ cwi-qa FX-01（QA-01）：health-cmd 加 -U postgres — 舊 `pg_isready` 冇 user 會 probe role "root"
-      #   → `role "root" does not exist` → service 永遠 unhealthy → job 第一步即死（run #1–#5 全紅根因 #2）。
-      postgres: { image: postgres:16, env: { POSTGRES_PASSWORD: pw, POSTGRES_DB: wa }, ports: ["15432:5432"], options: "--health-cmd 'pg_isready -U postgres' --health-interval 5s --health-retries 10" }
+      # ★ cwi-qa FX-01（QA-01）：health-cmd 必係單 token（pg_isready）— options 由 GitHub 按空白
+      #   拆 token 傳 docker create（無 shell 層）：多詞命令（例 'pg_isready -U postgres'）會拆出
+      #   unknown flag: -U → Initialize containers 14s 即紅（實測 run 36424082016）。pg_isready
+      #   唔做 auth（收到任何 server response 即 ready）→ 單 token 就夠；main 實測 4 連綠
+      #   （36300671621 / 36315857764 / 36352735331 / 36378302792，35–43s）。
+      postgres: { image: postgres:16, env: { POSTGRES_PASSWORD: pw, POSTGRES_DB: wa }, ports: ["15432:5432"], options: "--health-cmd pg_isready --health-interval 5s --health-retries 10" }
       redis: { image: redis:7, ports: ["6379:6379"] }
     env:
       DATABASE_URL: "postgresql://postgres:pw@localhost:15432/wa?connection_limit=15&pool_timeout=10"
