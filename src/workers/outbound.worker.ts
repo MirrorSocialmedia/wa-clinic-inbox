@@ -1,9 +1,12 @@
 import { Worker, type Job } from "bullmq";
+import { readFile } from "node:fs/promises";
 import { outboundQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import { OUTBOUND_CONCURRENCY } from "./concurrency";
 import { publishConvEvent, convRef } from "@/lib/notify";
 import { buildMessageNewPayload } from "@/lib/realtime-payload";
-import { sendTextMessage, sendFlowMessage, sendTemplateMessage, isPermanentGraphError, type FlowMessageConfig, type TemplateComponent } from "@/lib/wa/graph";
+import { sendTextMessage, sendFlowMessage, sendTemplateMessage, sendMediaMessage, uploadMedia, isPermanentGraphError, waMock, type FlowMessageConfig, type TemplateComponent } from "@/lib/wa/graph";
+// ★ cwi-final S6-9④：outbound 媒體解密（落碟即加密 — media.ts S6-3）
+import { getMediaKey, isEncryptedMedia, decryptMedia } from "@/lib/wa/media";
 // ★ cwi-final S1-1c：waMessageId 寫入後 drain 早過訊息嘅 status（PendingStatus）
 import { drainPendingStatuses } from "@/lib/wa/status-apply";
 import { acquireToken } from "@/lib/rate-limit";
@@ -43,7 +46,7 @@ export class UnrecoverableError extends Error {}
 async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
   const { messageId } = job.data;
 
-  const msg = await prisma.message.findUnique({ where: { id: messageId } });
+  let msg = await prisma.message.findUnique({ where: { id: messageId } });
   if (!msg) {
     log.warn({ messageId }, "outbound: message not found (already cleaned?), skipping");
     return;
@@ -58,13 +61,26 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
   if (claim.count === 0) {
     const cur = await prisma.message.findUnique({
       where: { id: messageId },
-      select: { status: true, waMessageId: true, conversationId: true },
+      select: { status: true, waMessageId: true, waMediaId: true, type: true, conversationId: true },
     });
-    if (cur?.status === "SENDING" && !cur.waMessageId) {
+    // ★ cwi-final S6-9④（T698-5）：媒體 row 上載已完成（waMediaId 已有）+ mock mode —
+    //   mock 發送係本地決定性（無外呼）：kill 喺 mock send 中段 = 肯定未發 → 重新 claim
+    //   重發（沿用 waMediaId、唔重複上載）。
+    //   非媒體 / 真 mode：上次 attempt 死咗 mid-Graph-call → 結果未知 → UNKNOWN（S1-15，防雙發）。
+    const isUploadedMedia = (cur?.type === "image" || cur?.type === "document") && !!cur?.waMediaId;
+    if (cur?.status === "SENDING" && !cur.waMessageId && isUploadedMedia && waMock()) {
+      log.info({ messageId, waMediaId: cur.waMediaId }, "outbound: mock media re-claim（upload done、send 被打斷 — 沿用 waMediaId 重發）");
+      // ★ 重讀完整行：開頭嘅 msg 係舊快照（waMediaId 仍 null）— 唔重讀會重複上載（破 T698-5）
+      msg = await prisma.message.findUnique({ where: { id: messageId } });
+      if (!msg) return;
+    } else if (cur?.status === "SENDING" && !cur.waMessageId) {
       await markOutboundUnknown(messageId, cur.conversationId, cur.waMessageId);
+      log.info({ messageId, status: cur?.status }, "outbound: not claimable — skip");
+      return;
+    } else {
+      log.info({ messageId, status: cur?.status }, "outbound: not claimable — skip");
+      return;
     }
-    log.info({ messageId, status: cur?.status }, "outbound: not claimable — skip");
-    return;
   }
   // ★ cwi-inboxfix-20260905（MD §5.2）：CANCELLED 双保險 guard —
   //   cwi-notify-fix-20260907（§7 撤回作廢）後 undo route 已刪、CANCELLED 唔會再產生；
@@ -147,7 +163,8 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
 
   // 2) 發送
   const body = msg.body;
-  if (!body) {
+  const isMedia = msg.type === "image" || msg.type === "document"; // ★ cwi-final S6-9④
+  if (!body && !isMedia) { // ★ S6-9④：圖片可以冇 caption（body=null）— 媒體豁免空 body guard
     // 空 body 嘅 OUT API message = 壞數據（API route 已擋）→ 標 FAILED 唔重試
     await prisma.message.update({
       where: { id: msg.id },
@@ -164,14 +181,54 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     return;
   }
 
+  // 3) 發送分支用嘅收窄 copy：非媒體分支經上面 guard 保證 body 非空；媒體分支唔讀呢個欄
+  //   （TS 無法經「!body && !isMedia」析取 guard 收窄 → 明確 copy 保 type）
+  const bodyText = body ?? "";
   const isFlow = msg.type === "interactive";
   const isTemplate = msg.type === "template";
   const maxAttempts = job.opts.attempts ?? 3;
   try {
     let wamid: string;
-    if (isFlow) {
+    if (isMedia) {
+      // ★ cwi-final S6-9④：圖片/PDF — 上載一次（waMediaId 持久化）→ 重試/重發沿用唔重複上載
+      if (!msg.mediaPath) throw new UnrecoverableError("MEDIA_MISSING");
+      let mediaId = msg.waMediaId;
+      if (!mediaId) {
+        const enc = await readFile(msg.mediaPath);
+        const key = getMediaKey();
+        const plain = key && isEncryptedMedia(enc) ? decryptMedia(enc, key) : enc;
+        const mime = msg.type === "image" ? (msg.mediaPath.endsWith(".png") ? "image/png" : "image/jpeg") : "application/pdf";
+        try {
+          const up = await uploadMedia({
+            phoneNumberId: clinic.waPhoneNumberId,
+            buf: plain,
+            mime,
+            filename: msg.mediaName ?? `file.${msg.mediaPath.split(".").pop()}`,
+          });
+          mediaId = up.mediaId;
+        } catch (upErr) {
+          // 上載失敗 = 未發出（可重試）— 包括 upload timeout（訊息未發；重試只係重複上載，
+          // 舊 mediaId 30 日自動過期 — 唔會雙發）。轉 plain Error → 唔會誤入下面 send-timeout
+          // 嘅 UNKNOWN 路徑（呢個路徑只係「send 後結果未知」用）。
+          throw upErr instanceof Error && upErr.name === "TimeoutError"
+            ? new Error(`media upload timeout: ${upErr.message}`)
+            : upErr;
+        }
+        // 重試唔再上載（waMediaId 持久化；Meta 30 日有效）
+        await prisma.message.update({ where: { id: msg.id }, data: { waMediaId: mediaId } });
+      }
+      const r = await sendMediaMessage({
+        phoneNumberId: clinic.waPhoneNumberId,
+        to: contactRow.waId,
+        kind: msg.type as "image" | "document",
+        mediaId,
+        caption: msg.body,
+        filename: msg.mediaName,
+      });
+      wamid = r.wamid;
+    } else if (isFlow) {
       // Phase 3：interactive flow message（body = flow config JSON — 無病人內容）
-      const flowCfg = JSON.parse(body) as FlowMessageConfig;
+      const flowCfg = JSON.parse(bodyText) as FlowMessageConfig;
       if (!flowCfg.flow_token || !flowCfg.flow_cdn_url || !flowCfg.flow_id) {
         throw new Error("BAD_FLOW_CONFIG");
       }
@@ -201,7 +258,7 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       const r = await sendTextMessage({
         phoneNumberId: clinic.waPhoneNumberId,
         to: contactRow.waId,
-        body,
+        body: bodyText,
       });
       wamid = r.wamid;
     }

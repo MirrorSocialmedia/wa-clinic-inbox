@@ -53,7 +53,7 @@ export const GET = handle(
     //   ★ S6-3②：findUnique 落 Message_mediaKey_key Index Scan（舊 OR+endsWith 會 seq scan）。
     const msg = await prisma.message.findUnique({
       where: { mediaKey: file },
-      select: { conversationId: true },
+      select: { conversationId: true, mediaName: true },
     });
     if (!msg) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
@@ -90,11 +90,15 @@ export const GET = handle(
     }
 
     // ★ AS-4：image/* + pdf → inline（預覽）；其餘 → attachment（防瀏覽器執行/渲染二進制）
+    // ★ cwi-final S6-9④：outbound 附件（mediaName 有值 — 已清洗 cleanDocName）→ 用顯示名做
+    //   Content-Disposition 檔名（病人下載見到「陳大文 報告.pdf」而非 out-<uuid>.pdf）。
+    //   mediaName 只對 OUT document 寫入（route 層）→ 其他 row 維持用 fileKey。
     const isInline = mime.startsWith("image/") || mime === "application/pdf";
+    const dispName = msg.mediaName ?? file;
     const res = new NextResponse(body, {
       headers: {
         "Content-Type": mime,
-        "Content-Disposition": `${isInline ? "inline" : "attachment"}; filename="${encodeURIComponent(file)}"`,
+        "Content-Disposition": `${isInline ? "inline" : "attachment"}; filename="${encodeURIComponent(dispName)}"`,
         // ★ AS-4：nosniff — Content-Type 由我哋決定，唔畀瀏覽器 sniff
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, max-age=3600",

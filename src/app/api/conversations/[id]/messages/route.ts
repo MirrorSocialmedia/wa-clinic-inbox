@@ -86,7 +86,14 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
-  const messages = after ? page : [...page].reverse();
+  // ★ cwi-final S6-9④：waMediaId = server-side Graph media id（30 日有效、重試沿用）— 唔回 client。
+  //   mediaName（顯示名）照回（UI 文件連結 + Content-Disposition 用）。
+  //   shallow spread（Date 欄傳引用，同原 row 行為一致）；oldest/newest 用 sanitized 同一組 object。
+  const messages = (after ? page : [...page].reverse()).map((m) => {
+    const r = { ...m } as Record<string, unknown>;
+    delete r.waMediaId;
+    return r;
+  });
 
   return NextResponse.json({
     messages,

@@ -491,6 +491,12 @@ model Message {
   //   一齊落 basename；backfill 喺 migration 20260927000000（regexp_replace 去路徑）。
   //   unique 前先跑重複檢查（任何 >0 = STOP 報 CEO，禁自行刪數據）。
   mediaKey       String?   @unique
+  // ★ cwi-final S6-9④（audit3 P2-03）：文件顯示名（已清洗 cleanDocName；只 OUT document 用）。
+  //   PII：檔名可能含病人姓名 → 只入 DB + UI + Content-Disposition；log / AuditLog 永不入。
+  mediaName      String?
+  // ★ cwi-final S6-9④：Graph /media 上載後嘅 id（重試/重發沿用 → 唔重複上載；Meta 30 日有效）。
+  //   唔回 client（messages API strip；message:new payload 亦冇呢欄）。
+  waMediaId      String?
   // ★ Realtime P0 (R4, cwi-rt-20260823-a1)：media 下載狀態（見 MediaStatus enum 註釋）
   mediaStatus    MediaStatus @default(READY)
   status         MsgStatus

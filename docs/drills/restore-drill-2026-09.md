@@ -138,3 +138,53 @@
   - `Contact`: source=10782 scratch=10782
   - `AiDraft`: source=15 scratch=15
   - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-27T23:18:30Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-071822.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=10848 scratch=10848
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T00:10:00Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-080952.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=10914 scratch=10914
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T00:54:27Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-085419.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=10981 scratch=10981
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T02:15:54Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-101546.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=11041 scratch=11041
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T02:56:52Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-105645.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=11103 scratch=11103
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3

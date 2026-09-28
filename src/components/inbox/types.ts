@@ -247,6 +247,8 @@ export interface MessageItem {
   type: string;
   body: string | null;
   mediaPath: string | null;
+  /** ★ cwi-final S6-9④：文件顯示名（已清洗；只 OUT document 有）— 氣泡文件連結顯示。waMediaId 唔回 client。 */
+  mediaName?: string | null;
   status: string;
   errorCode: string | null;
   sentByStaffId: string | null;

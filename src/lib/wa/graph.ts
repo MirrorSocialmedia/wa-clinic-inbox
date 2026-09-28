@@ -31,8 +31,9 @@ function accessToken(): string {
 // timeout（AbortSignal.timeout → TimeoutError）唔係 GraphError — 結果未知，另有 UNKNOWN 路徑。
 export class GraphError extends Error { constructor(public httpStatus: number, public code: number | null, msg: string) { super(msg); } }
 
-/** 重試無效嘅 Meta error code（invalid number / message too long / invalid token 等）。 */
-const PERMANENT_CODES = new Set([131047, 131026, 131051, 131009, 131021, 100, 132000, 132001, 132012]);
+/** 重試無效嘅 Meta error code（invalid number / message too long / invalid token 等）。
+ * ★ cwi-final S6-9④：131053 = 媒體上載錯誤（media upload error）— 重試無效 → permanent。 */
+const PERMANENT_CODES = new Set([131047, 131026, 131051, 131009, 131021, 100, 132000, 132001, 132012, 131053]);
 
 export function isPermanentGraphError(e: unknown): boolean {
   return e instanceof GraphError && e.httpStatus >= 400 && e.httpStatus < 500 && e.httpStatus !== 429 && (e.code === null || PERMANENT_CODES.has(e.code));
@@ -197,6 +198,128 @@ export async function sendTemplateMessage(opts: {
 
   const wamid = data.messages[0].id;
   log.info({ phoneNumberId, wamid, templateName }, "graph: send template OK");
+  return { wamid, mocked: false };
+}
+
+// ── ★ cwi-final S6-9④（audit3 P2-03）：outbound 媒體（圖片/PDF） ──────────────────────
+
+/**
+ * ★ cwi-final S6-9④：上載媒體 → Graph media id（multipart）。
+ * mock：決定性假 media id（前綴 mock-media-）；WA_GRAPH_MOCK_FAIL=1 注入失敗（e2e 用）。
+ * ★ PII：log 只 phone_number_id / mediaId / size — 檔名永不入 log（可能含病人名）。
+ */
+export async function uploadMedia(opts: {
+  phoneNumberId: string;
+  buf: Buffer;
+  mime: string;
+  filename: string;
+}): Promise<{ mediaId: string; mocked: boolean }> {
+  if (waMock()) {
+    if (process.env.WA_GRAPH_MOCK_FAIL === "1") {
+      throw new Error("MOCK_GRAPH_TIMEOUT: upload");
+    }
+    const mediaId = `mock-media-${randomBytes(8).toString("hex")}`;
+    log.info({ phoneNumberId: opts.phoneNumberId, mediaId, size: opts.buf.length, mock: true }, "graph: media upload (MOCK)");
+    return { mediaId, mocked: true };
+  }
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("type", opts.mime);
+  // ★ TS/Node 22：Buffer 唔係 BlobPart — copy 入新 ArrayBuffer 才過 type check
+  form.append("file", new Blob([new Uint8Array(opts.buf)], { type: opts.mime }), opts.filename);
+  const res = await fetch(`${GRAPH_BASE}/${opts.phoneNumberId}/media`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken()}` },
+    body: form,
+    signal: AbortSignal.timeout(Number(process.env.GRAPH_UPLOAD_TIMEOUT_MS ?? 30_000)),
+  });
+  const data = (await res.json().catch(() => null)) as { id?: string; error?: { code?: number; message?: string } } | null;
+  if (!res.ok || !data?.id) {
+    log.warn(
+      { phoneNumberId: opts.phoneNumberId, httpStatus: res.status, waCode: data?.error?.code ?? null, size: opts.buf.length },
+      "graph: media upload FAILED"
+    );
+    throw new GraphError(res.status, data?.error?.code ?? null, `graph upload failed: HTTP ${res.status}`); // GraphError = S1-15
+  }
+  const mediaId = data.id;
+  log.info({ phoneNumberId: opts.phoneNumberId, mediaId, size: opts.buf.length }, "graph: media upload OK");
+  return { mediaId, mocked: false };
+}
+
+/**
+ * ★ cwi-final S6-9④：發 image／document（窗口內）。
+ * mock：同 sendTextMessage 口徑（WA_GRAPH_MOCK_FAIL / WA_GRAPH_MOCK_DELAY_MS / WA_GRAPH_MOCK_WAMID）；
+ *   WA_GRAPH_MOCK_TIMEOUT=1 = 模擬 Graph 呼叫 timeout（e2e T698 用 — mock-only，production 唔會行）。
+ * ★ PII：log 只帶 kind／bodyLen — 唔帶 to（S3-5）、唔帶 caption 內文。
+ */
+export async function sendMediaMessage(opts: {
+  phoneNumberId: string;
+  to: string;
+  kind: "image" | "document";
+  mediaId: string;
+  caption?: string | null;
+  filename?: string | null;
+}): Promise<SendTextResult> {
+  const { phoneNumberId, to, kind, mediaId } = opts;
+
+  if (waMock()) {
+    // 同 sendTextMessage mock：決定性/可固定 wamid（WA_GRAPH_MOCK_WAMID）+ 輕微延遲（WA_GRAPH_MOCK_DELAY_MS）。
+    // ★ attempt 行喺 throw 之前記（T698-6「冇第二次發送」計數基線：timeout 注入 = attempt 1 次即止）。
+    const wamid = process.env.WA_GRAPH_MOCK_WAMID || `mock-wamid-${randomBytes(10).toString("hex")}`;
+    log.info(
+      { phoneNumberId, wamid, kind, mediaId, bodyLen: opts.caption?.length ?? 0, mock: true },
+      "graph: send media (MOCK) attempt"
+    );
+    // ★ e2e T698(6)：模擬 send timeout → TimeoutError → outbound 標 UNKNOWN（結果未知、唔重發）
+    if (process.env.WA_GRAPH_MOCK_TIMEOUT === "1") {
+      const e = new Error("MOCK_GRAPH_TIMEOUT: send media (WA_GRAPH_MOCK_TIMEOUT=1)");
+      e.name = "TimeoutError";
+      throw e;
+    }
+    if (process.env.WA_GRAPH_MOCK_FAIL === "1") {
+      throw new Error("MOCK_GRAPH_TIMEOUT: simulated Graph API failure (WA_GRAPH_MOCK_FAIL=1)");
+    }
+    const delayMs = Math.max(0, parseInt(process.env.WA_GRAPH_MOCK_DELAY_MS ?? "10", 10) || 0);
+    await new Promise((r) => setTimeout(r, delayMs));
+    log.info({ phoneNumberId, wamid, kind, mock: true }, "graph: send media (MOCK) OK");
+    return { wamid, mocked: true };
+  }
+
+  const media: Record<string, unknown> = { id: mediaId };
+  if (opts.caption) media.caption = opts.caption;
+  if (kind === "document" && opts.filename) media.filename = opts.filename;
+  const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken()}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ messaging_product: "whatsapp", to, type: kind, [kind]: media }),
+    // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
+    signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
+  });
+
+  const data = (await res.json().catch(() => null)) as
+    | { messages?: { id: string }[]; error?: { message?: string; code?: number } }
+    | null;
+
+  if (!res.ok || !data?.messages?.[0]?.id) {
+    // ★ PII（S3-5）：log 唔帶 to — 只 error metadata + kind
+    log.warn(
+      {
+        phoneNumberId,
+        kind,
+        httpStatus: res.status,
+        waCode: data?.error?.code ?? null,
+        errMsg: data?.error?.message ?? "unknown",
+      },
+      "graph: send media FAILED"
+    );
+    throw new GraphError(res.status, data?.error?.code ?? null, `graph send media HTTP ${res.status}`);
+  }
+
+  const wamid = data.messages[0].id;
+  log.info({ phoneNumberId, wamid, kind }, "graph: send media OK");
   return { wamid, mocked: false };
 }
 

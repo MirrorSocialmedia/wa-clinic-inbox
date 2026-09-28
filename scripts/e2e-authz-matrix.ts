@@ -864,6 +864,12 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/messages/send", method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 400 }, // 快照：S3-9（replay lookup + send lock 順序）
   },
+  "POST /api/messages/media": {
+    // ★ cwi-final S6-9④：multipart 媒體 route — matrix api() helper 無 body → formData 空
+    //   → conversationId 缺 → 400（欄位驗證先於 access/write 檢查）
+    fixture: () => ({ url: "/api/messages/media", method: "POST" }),
+    expect: { UNAUTH: 401, STAFF_TY: 400, SUPERVISOR: 400 }, // 快照：S3-9 次序（replay 喺 lock 前）
+  },
   "POST /api/notes/[id]/read": {
     fixture: () => ({ url: "/api/notes/nope/read", method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },

@@ -289,6 +289,8 @@ curl() {
     fi
     case "$a" in
       -d|--data|--data-raw|--data-binary|--data-urlencode) has_data=1 ;;
+      -F|--form) has_ct=1 ;; # ★ cwi-final S6-9④：curl -F 會自動帶 multipart/form-data; boundary=... —
+      #   若 wrapper 再補 Content-Type: application/json 會蓋過 boundary header → server formData() parse 失敗 → 400（T698 首跑 14 紅實錘）
     esac
     if [ "$prev" = "-X" ]; then
       method="${a^^}"
@@ -350,6 +352,18 @@ wait_for() { # wait_for <sql> <expected-json> <max-sec>
   done
   echo "    (last: ${val:0:200})"
   return 1
+}
+
+# ★ cwi-final S6 G5 gen2（2026-09-28）：掃走指定 contact 嘅依賴數據（hermetic sweep，冪等）。
+#   Contact/Conversation 無 DB-level FK（Conversation.contactId = plain string — 2026-09-28
+#   information_schema 實測）→ DELETE 次序純為 orphan row 衛生（殘留 Conversation/Message 會污染其他測試計數）。
+sweep_contact() { # $1 = contact id
+  q "DELETE FROM \"PatientFact\" WHERE \"contactId\"='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\" IN (SELECT id FROM \"Conversation\" WHERE \"contactId\"='$1')" >/dev/null 2>&1
+  q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\" IN (SELECT id FROM \"Conversation\" WHERE \"contactId\"='$1')" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\" IN (SELECT id FROM \"Conversation\" WHERE \"contactId\"='$1')" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE \"contactId\"='$1'" >/dev/null 2>&1
+  q "DELETE FROM \"Contact\" WHERE id='$1'" >/dev/null 2>&1
 }
 
 echo "════════════════════════════════════════════"
@@ -1771,6 +1785,14 @@ S4N=$(curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=contact&q=E2E-A" | grep -o
 T690_A_CLINIC=$(q "SELECT id FROM \"Clinic\" WHERE code='TKW'" | jf id)
 T690_B_CLINIC=$(q "SELECT id FROM \"Clinic\" WHERE code='MF'" | jf id)
 if [ -n "$T690_A_CLINIC" ] && [ -n "$T690_B_CLINIC" ]; then
+  # ★ cwi-final S6 G5 gen2（2026-09-28 實測）：(clinicId, waId) sweep — 跨 run leak 防護。
+  #   notify-gate 嘅 e2enotifyct1（waId=85291234567 TKW = T690 同號）正常段尾全清，
+  #   但 N 段中途死嘅 run（r3 實測）會留 leak → 下面 fixed-id DELETE 打唔中 →
+  #   INSERT 23505 @@unique(clinicId,waId)（q 吞 stderr 靜默）→ seed 0/2（r4 實測）。
+  #   故按 (clinicId, waId) sweep（id-independent）— 唔使知 leak 行 id 係咩。
+  for _cid in $(q "SELECT id::text FROM \"Contact\" WHERE (\"clinicId\",\"waId\") IN (('$T690_A_CLINIC','85291234567'),('$T690_B_CLINIC','8528912345671'))" | grep -oP '"id":"\K[^"]+'); do
+    [ -n "$_cid" ] && sweep_contact "$_cid"
+  done
   q "DELETE FROM \"Contact\" WHERE id IN ('e2et690a','e2et690b')" >/dev/null
   q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('e2et690a','$T690_A_CLINIC','85291234567','T690 電話測試','{}'), ('e2et690b','$T690_B_CLINIC','8528912345671','T690 跨店測試','{}')" >/dev/null
   T690_SEEDED=$(q "SELECT count(*)::text c FROM \"Contact\" WHERE id IN ('e2et690a','e2et690b')" | jf c)
@@ -9134,6 +9156,292 @@ q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$T697_CONV'" >/dev/null
 q "DELETE FROM \"Message\" WHERE \"conversationId\"='$T697_CONV'" >/dev/null 2>&1
 q "DELETE FROM \"Conversation\" WHERE id='$T697_CONV'" >/dev/null 2>&1
 q "DELETE FROM \"Contact\" WHERE \"waId\"='$T697_WAID'" >/dev/null 2>&1
+
+# ══════════════ S6-9④: T698 outbound media API+worker + T695 composer media UI（Playwright）══════════════
+# T698 (WA_MOCK=1)：
+#   1) PNG 200KB → 202/SENT + 碟上密文 + upload/send 各恰 1 次 + messages API 唔洩 waMediaId
+#   2) PDF 檔名 ../../陳大文 報告.pdf → mediaName 清洗 + worker log／AuditLog 零檔名（PII）
+#   3) 6MB PNG → 413 / 假 .pdf(MZ) → 415 / 過窗 → 422 / SUPERVISOR → 403 / 非負責人(包 ADMIN) → 423
+#   4) 同 clientMessageId 兩次 → idempotentReplay + 碟上 1 檔
+#   5) upload 後 kill worker（mock send 8s 延遲窗口）→ re-claim 沿用 waMediaId（upload 恰 1 次）
+#   6) send timeout（WA_GRAPH_MOCK_TIMEOUT=1）→ UNKNOWN、唔第二次發送
+# T695 (Playwright)：JPG 預覽+caption 發送（恰 1 request + 氣泡 img）/ 8MB 前端即時擋（零 request）/ SUPERVISOR 唔見 📎
+# ⚠️ 本段多次 kill/重起 worker — 收尾必還乾淨 worker + healthz 200（T692 教訓）
+echo "[S6-9④] T698: outbound media API + worker..."
+T698=0
+T695=0
+COOKIE_T698_SUP=""
+t698_leaf_pid() { ps -eo pid,cmd | grep 'node.*src/workers/index[.]ts' | grep -v grep | tail -1 | awk '{print $1}'; }
+t698_wait_worker() { # $1 = log（"all workers running — waiting for jobs"）
+  local i
+  for i in $(seq 1 90); do grep -q "all workers running" "$1" 2>/dev/null && return 0; sleep 1; done
+  return 1
+}
+t698_post() { # t698_post <cookie> <curl -F args...> → $T698_CODE / $T698_BODY（dev manifest flake retry ×3）
+  local cookie="$1"; shift
+  local code out attempt=0
+  out=$(mktemp /tmp/e2e-t698-api.XXXXXX)
+  while [ "$attempt" -lt 3 ]; do
+    code=$(curl -s -o "$out" -w '%{http_code}' -b "$cookie" -X POST "$BASE/api/messages/media" "$@" 2>/dev/null)
+    if { [ "$code" = "500" ] && grep -q "Unexpected end of JSON input" "$out" 2>/dev/null; } || [ "$code" = "308" ]; then
+      echo "    (dev manifest flake ${code} → retry: POST /api/messages/media)"
+      rm -f "$out"; sleep 2; attempt=$((attempt+1)); continue
+    fi
+    break
+  done
+  T698_CODE=$code
+  T698_BODY=$(cat "$out" 2>/dev/null)
+  rm -f "$out"
+}
+t698_uuid() { cat /proc/sys/kernel/random/uuid; }
+t698_mid() { printf '%s' "$1" | grep -oE '"messageId":"[^"]*"' | head -1 | cut -d'"' -f4; }
+
+# ── hermetic fixtures：乾淨 worker + 3 對話（開窗未指派 / 過窗 / 開窗已指派）+ SUPERVISOR ──
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-t698-rt.log 2>&1 &
+WORKER_PID=$!
+T698_RT_LOG=/tmp/e2e-worker-t698-rt.log
+if ! t698_wait_worker "$T698_RT_LOG"; then fail "T698 worker 起機失敗"; T698=1; fi
+
+T698_STAFF_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$TKW_EMAIL'" | jf id)
+T698_P1="t698p1-${EPOCH}"; T698_P2="t698p2-${EPOCH}"; T698_P3="t698p3-${EPOCH}"
+T698_C1="t698c1-${EPOCH}"; T698_C2="t698c2-${EPOCH}"; T698_C3="t698c3-${EPOCH}"
+# ★ cwi-final S6-9④：waId 前綴 852699x = 本段專用段（全檔掃描零使用）—
+#   8526401/402 同 T81 fixture（L3228）撞 → @@unique([clinicId, waId]) violation 靜默失敗（q 吞 stderr）
+#   → Contact 冇入庫但 Conversation 照建（schema 冇 FK）→ worker contact missing（第 2 跑實錘）
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T698_P1', '$TKW_CLINIC_ID', '8526994${EPOCH}', 'E2E T698 A', ARRAY[]::text[]) ON CONFLICT (\"clinicId\", \"waId\") DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T698_P2', '$TKW_CLINIC_ID', '8526995${EPOCH}', 'E2E T698 B', ARRAY[]::text[]) ON CONFLICT (\"clinicId\", \"waId\") DO NOTHING" >/dev/null 2>&1
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T698_P3', '$TKW_CLINIC_ID', '8526996${EPOCH}', 'E2E T698 C', ARRAY[]::text[]) ON CONFLICT (\"clinicId\", \"waId\") DO NOTHING" >/dev/null 2>&1
+# fail loudly：raw INSERT 靜默失敗唔得（q 吞 stderr）— 驗證 row 真喺度先繼續
+for PFX in "$T698_P1" "$T698_P2" "$T698_P3"; do
+  [ "$(q "SELECT count(*)::text c FROM \"Contact\" WHERE id='$PFX'" | jf c)" = "1" ] || { fail "T698 fixture: Contact $PFX 冇入庫（waId 衝突？）"; T698=1; }
+done
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T698_C1', '$TKW_CLINIC_ID', '$T698_P1', 'OPEN', now(), now())" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T698_C2', '$TKW_CLINIC_ID', '$T698_P2', 'OPEN', now() - interval '48 hours', now() - interval '48 hours')" >/dev/null 2>&1
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T698_C3', '$TKW_CLINIC_ID', '$T698_P3', 'OPEN', now(), now())" >/dev/null 2>&1
+q "UPDATE \"Conversation\" SET \"assigneeId\"='$T698_STAFF_ID', \"assigneeLastActionAt\"=now() WHERE id='$T698_C3'" >/dev/null 2>&1
+
+# SUPERVISOR fixture（argon2 hash + StaffClinic TKW + login）
+T698_SUP="t698sup-${EPOCH}"
+T698_SUP_PASS="t698sup-${EPOCH}"
+T698_SUP_HASH=$(node -e "const a=require('argon2');a.hash(process.argv[1]).then(h=>process.stdout.write(h)).catch(e=>process.stderr.write(String(e)))" "$T698_SUP_PASS" 2>/dev/null)
+if [ -n "$T698_SUP_HASH" ]; then
+  q "INSERT INTO \"StaffUser\" (id, email, \"passwordHash\", name, role, \"clinicId\", \"scopeType\", active) VALUES ('$T698_SUP', 't698.supervisor@wa-clinic.local', '$T698_SUP_HASH', 'E2E T698 SUPERVISOR', 'SUPERVISOR', '$TKW_CLINIC_ID', 'CLINICS', true) ON CONFLICT (id) DO UPDATE SET role='SUPERVISOR', \"passwordHash\"=EXCLUDED.\"passwordHash\", active=true" >/dev/null 2>&1
+  q "INSERT INTO \"StaffClinic\" (staffId, clinicId, \"isPrimary\") VALUES ('$T698_SUP', '$TKW_CLINIC_ID', true) ON CONFLICT (staffId, clinicId) DO NOTHING" >/dev/null 2>&1
+  COOKIE_T698_SUP=/tmp/e2e-cookie-t698-sup.txt
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_T698_SUP" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"t698.supervisor@wa-clinic.local\",\"password\":\"$T698_SUP_PASS\"}")
+  check "T698 SUPERVISOR login → 200" "$CODE" "200"
+  [ "$CODE" = "200" ] || T698=1
+else
+  fail "T698 SUPERVISOR argon2 hash 生成失敗"; T698=1
+fi
+
+# 測試檔（magic bytes 決定 sniff — 唔信副檔名/MIME）
+T698_PNG=/tmp/e2e-t698-small.png
+T698_PNG6=/tmp/e2e-t698-6mb.png
+T698_PDF=/tmp/e2e-t698-report.pdf
+T698_FAKE=/tmp/e2e-t698-fake.pdf
+printf '\x89PNG\r\n\x1a\n' > "$T698_PNG"; head -c 204800 /dev/zero >> "$T698_PNG"
+printf '\x89PNG\r\n\x1a\n' > "$T698_PNG6"; head -c 6291456 /dev/zero >> "$T698_PNG6"
+printf '%%PDF-1.7\ne2e t698 pdf body\n' > "$T698_PDF"; head -c 4096 /dev/zero >> "$T698_PDF"
+printf 'MZ' > "$T698_FAKE"; head -c 2048 /dev/zero >> "$T698_FAKE"
+
+# ── T698-1. PNG happy path：202 → SENT + 碟上密文 + upload/send 各恰 1 + 唔洩 waMediaId ──
+echo "  [T698-1] PNG happy path..."
+CM1=$(t698_uuid)
+t698_post "$COOKIE_TKW" -F "conversationId=$T698_C1" -F "clientMessageId=$CM1" -F "file=@$T698_PNG;type=image/png"
+check "T698-1 PNG → 202" "$T698_CODE" "202"
+T698_M1=$(t698_mid "$T698_BODY")
+if [ -n "$T698_M1" ]; then
+  T698_K1=$(q "SELECT \"mediaKey\"::text FROM \"Message\" WHERE id='$T698_M1'" | jf mediaKey)
+  check "T698-1 Message type=image" "$(q "SELECT \"type\"::text FROM \"Message\" WHERE id='$T698_M1'" | jf type)" "image"
+  case "$T698_K1" in out-*.png) check "T698-1 mediaKey=out-*.png" "ok" "ok" ;; *) check "T698-1 mediaKey=out-*.png" "bad($T698_K1)" "ok" ;; esac
+  if [ -n "$T698_K1" ]; then
+    check "T698-1 碟上檔案存在" "$([ -f "$WA_MEDIA_DIR/$T698_K1" ] && echo y || echo n)" "y"
+    check "T698-1 碟上密文（WA1 magic — S6-3 落碟即加密）" "$(head -c 3 "$WA_MEDIA_DIR/$T698_K1" 2>/dev/null)" "WA1"
+  fi
+  if wait_for "SELECT (\"status\"='SENT')::text s, (\"waMessageId\" IS NOT NULL)::text w, (\"waMediaId\" IS NOT NULL)::text m FROM \"Message\" WHERE id='$T698_M1'" '[{"s":"true","w":"true","m":"true"}]' 60; then
+    pass "T698-1 → SENT（waMessageId + waMediaId 齊）"
+  else
+    fail "T698-1 60s 未 SENT（=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T698_M1'" | jf s)）"; T698=1
+  fi
+  WM1=$(q "SELECT \"waMediaId\" FROM \"Message\" WHERE id='$T698_M1'" | jf waMediaId)
+  WAM1=$(q "SELECT \"waMessageId\" FROM \"Message\" WHERE id='$T698_M1'" | jf waMessageId)
+  if [ -n "$WM1" ] && [ -n "$WAM1" ]; then
+    check "T698-1 uploadMedia 恰 1 次" "$(grep -hF "\"mediaId\":\"$WM1\"" "$T698_RT_LOG" | grep -cF "media upload (MOCK)" || true)" "1"
+    check "T698-1 sendMediaMessage 恰 1 次（OK）" "$(grep -hF "\"wamid\":\"$WAM1\"" "$T698_RT_LOG" | grep -cF "send media (MOCK) OK" || true)" "1"
+    check "T698-1 messages API 唔洩 waMediaId" "$(curl -s -b "$COOKIE_TKW" "$BASE/api/conversations/$T698_C1/messages" | grep -cF "$WM1" || true)" "0"
+  fi
+else
+  fail "T698-1 202 冇 messageId"; T698=1
+fi
+
+# ── T698-2. PDF 檔名清洗 + PII（log／AuditLog 零檔名）──
+echo "  [T698-2] PDF filename sanitize + PII..."
+CM2=$(t698_uuid)
+t698_post "$COOKIE_TKW" -F "conversationId=$T698_C1" -F "clientMessageId=$CM2" -F "file=@$T698_PDF;type=application/pdf;filename=../../陳大文 報告.pdf"
+check "T698-2 PDF → 202" "$T698_CODE" "202"
+T698_M2=$(t698_mid "$T698_BODY")
+if [ -n "$T698_M2" ]; then
+  check "T698-2 mediaName=陳大文 報告.pdf（path 剝走）" "$(q "SELECT \"mediaName\"::text FROM \"Message\" WHERE id='$T698_M2'" | jf mediaName)" "陳大文 報告.pdf"
+  if wait_for "SELECT (\"status\"='SENT')::text s FROM \"Message\" WHERE id='$T698_M2'" '[{"s":"true"}]' 60; then
+    pass "T698-2 PDF → SENT"
+  else
+    fail "T698-2 60s 未 SENT"; T698=1
+  fi
+  check "T698-2 worker log 零檔名（PII）" "$(grep -c '陳大文' "$T698_RT_LOG" || true)" "0"
+  check "T698-2 AuditLog SEND_MEDIA=1" "$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE \"action\"='SEND_MEDIA' AND \"entityId\"='$T698_M2'" | jf c)" "1"
+  # ★ meta 斷言行 SQL 側（jsonb 內嵌引號 — jf 嘅 grep 抽唔到完整值，第 2 跑實錘「={\\」）
+  check "T698-2 AuditLog meta 零檔名（PII）" "$(q "SELECT (meta::text LIKE '%陳大文%')::text leak FROM \"AuditLog\" WHERE \"entityId\"='$T698_M2' AND \"action\"='SEND_MEDIA'" | jf leak)" "false"
+  # ★ G5 gen2：q() 輸出 = JSON array（外層 [ ]）— r4 實測 actual=[[{...}]] vs expected 漏括號 → 假紅
+  check "T698-2 AuditLog meta 只 kind/size" "$(q "SELECT (meta->>'kind'='document')::text k, (meta->>'size' IS NOT NULL)::text s FROM \"AuditLog\" WHERE \"entityId\"='$T698_M2' AND \"action\"='SEND_MEDIA'" | head -c 100)" '[{"k":"true","s":"true"}]'
+else
+  fail "T698-2 202 冇 messageId"; T698=1
+fi
+
+# ── T698-3. 拒絕矩陣：413 / 415 / 422 / 403 / 423 ──
+echo "  [T698-3] rejection matrix..."
+t698_post "$COOKIE_TKW" -F "conversationId=$T698_C1" -F "file=@$T698_PNG6;type=image/png"
+check "T698-3 6MB PNG → 413（超圖片 5MB 上限）" "$T698_CODE" "413"
+t698_post "$COOKIE_TKW" -F "conversationId=$T698_C1" -F "file=@$T698_FAKE;type=application/pdf"
+check "T698-3 假 .pdf（MZ 內容）→ 415（magic bytes 唔信副檔名）" "$T698_CODE" "415"
+t698_post "$COOKIE_TKW" -F "conversationId=$T698_C2" -F "file=@$T698_PNG;type=image/png"
+check "T698-3 過窗 → 422" "$T698_CODE" "422"
+if [ -n "$COOKIE_T698_SUP" ]; then
+  t698_post "$COOKIE_T698_SUP" -F "conversationId=$T698_C1" -F "file=@$T698_PNG;type=image/png"
+  check "T698-3 SUPERVISOR → 403（read-only）" "$T698_CODE" "403"
+fi
+t698_post "$COOKIE_ADMIN" -F "conversationId=$T698_C3" -F "file=@$T698_PNG;type=image/png"
+check "T698-3 非負責人 ADMIN → 423（send lock 唔豁免）" "$T698_CODE" "423"
+check "T698-3 拒絕 POST 零 Message row" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\" IN ('$T698_C2','$T698_C3') AND \"direction\"='OUT'" | jf c)" "0"
+
+# ── T698-4. clientMessageId 冪等 replay：第二發 200 idempotentReplay + 碟上 1 檔 ──
+echo "  [T698-4] idempotent replay..."
+CM4=$(t698_uuid)
+t698_post "$COOKIE_TKW" -F "conversationId=$T698_C1" -F "clientMessageId=$CM4" -F "file=@$T698_PNG;type=image/png"
+check "T698-4 首發 → 202" "$T698_CODE" "202"
+T698_M4=$(t698_mid "$T698_BODY")
+t698_post "$COOKIE_TKW" -F "conversationId=$T698_C1" -F "clientMessageId=$CM4" -F "file=@$T698_PNG;type=image/png"
+check "T698-4 二發 → 200" "$T698_CODE" "200"
+check "T698-4 idempotentReplay=true" "$(printf '%s' "$T698_BODY" | grep -oE '"idempotentReplay":(true|false)' | head -1 | cut -d: -f2)" "true"
+M4B=$(t698_mid "$T698_BODY")
+check "T698-4 二發同 messageId" "$M4B" "$T698_M4"
+K4=$(q "SELECT \"mediaKey\"::text FROM \"Message\" WHERE id='$T698_M4'" | jf mediaKey)
+check "T698-4 碟上只 1 檔（同 mediaKey row=1）" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"mediaKey\"='$K4'" | jf c)" "1"
+
+# ── T698-5. upload 後 kill worker → re-claim 沿用 waMediaId（upload 恰 1 次）──
+echo "  [T698-5] kill after upload → re-claim reuse waMediaId..."
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+T698_LOG_A=/tmp/e2e-worker-t698a.log
+WA_GRAPH_MOCK_DELAY_MS=8000 nohup pnpm worker >"$T698_LOG_A" 2>&1 &
+WORKER_PID=$!
+if ! t698_wait_worker "$T698_LOG_A"; then fail "T698-5 worker A（8s delay）起機失敗"; T698=1; fi
+CM5=$(t698_uuid)
+t698_post "$COOKIE_TKW" -F "conversationId=$T698_C1" -F "clientMessageId=$CM5" -F "file=@$T698_PNG;type=image/png"
+check "T698-5 → 202" "$T698_CODE" "202"
+T698_M5=$(t698_mid "$T698_BODY")
+if [ -n "$T698_M5" ]; then
+  if wait_for "SELECT (\"waMediaId\" IS NOT NULL)::text m FROM \"Message\" WHERE id='$T698_M5'" '[{"m":"true"}]' 30; then
+    pass "T698-5 upload 完成（waMediaId 已落庫 — kill 前）"
+  else
+    fail "T698-5 30s 無 waMediaId（upload 未完成）"; T698=1
+  fi
+  WM5=$(q "SELECT \"waMediaId\" FROM \"Message\" WHERE id='$T698_M5'" | jf waMediaId)
+  W5=$(t698_leaf_pid)
+  [ -n "$W5" ] && kill -9 "$W5" 2>/dev/null
+  sleep 2
+  T698_LOG_B=/tmp/e2e-worker-t698b.log
+  nohup pnpm worker >"$T698_LOG_B" 2>&1 &
+  WORKER_PID=$!
+  if ! t698_wait_worker "$T698_LOG_B"; then fail "T698-5 worker B 起機失敗"; T698=1; fi
+  if wait_for "SELECT (\"status\"='SENT')::text s, (\"waMessageId\" IS NOT NULL)::text w FROM \"Message\" WHERE id='$T698_M5'" '[{"s":"true","w":"true"}]' 180; then
+    pass "T698-5 重起後 → SENT（re-claim 重發）"
+  else
+    fail "T698-5 180s 未 SENT（=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T698_M5'" | jf s)）"; T698=1
+  fi
+  check "T698-5 upload 恰 1 次（重試唔重複上載）" "$(grep -hF "\"mediaId\":\"$WM5\"" "$T698_LOG_A" "$T698_LOG_B" 2>/dev/null | grep -cF "media upload (MOCK)" || true)" "1"
+  T698_ATTEMPTS=$(grep -hF "\"mediaId\":\"$WM5\"" "$T698_LOG_A" "$T698_LOG_B" 2>/dev/null | grep -cF "send media (MOCK) attempt" || true)
+  case "$T698_ATTEMPTS" in 1|2) check "T698-5 send attempt ∈ {1,2}（kill 時機 race — A 嘅 attempt 可能喺 kill 前未記到）" "ok" "ok" ;; *) check "T698-5 send attempt ∈ {1,2}（實際 $T698_ATTEMPTS）" "bad" "ok" ;; esac
+  WA5=$(q "SELECT \"waMessageId\" FROM \"Message\" WHERE id='$T698_M5'" | jf waMessageId)
+  check "T698-5 send OK=1（病人恰收 1 條）" "$(grep -hF "\"wamid\":\"$WA5\"" "$T698_LOG_A" "$T698_LOG_B" 2>/dev/null | grep -cF "send media (MOCK) OK" || true)" "1"
+  check "T698-5 re-claim log 存在" "$(grep -c 'mock media re-claim' "$T698_LOG_B" 2>/dev/null || true)" "1"
+fi
+
+# ── T698-6. send timeout → UNKNOWN（結果未知、唔第二次發送）──
+echo "  [T698-6] send timeout → UNKNOWN..."
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+T698_LOG_TO=/tmp/e2e-worker-t698to.log
+WA_GRAPH_MOCK_TIMEOUT=1 nohup pnpm worker >"$T698_LOG_TO" 2>&1 &
+WORKER_PID=$!
+if ! t698_wait_worker "$T698_LOG_TO"; then fail "T698-6 worker（timeout）起機失敗"; T698=1; fi
+CM6=$(t698_uuid)
+t698_post "$COOKIE_TKW" -F "conversationId=$T698_C1" -F "clientMessageId=$CM6" -F "file=@$T698_PNG;type=image/png"
+check "T698-6 → 202" "$T698_CODE" "202"
+T698_M6=$(t698_mid "$T698_BODY")
+if [ -n "$T698_M6" ]; then
+  if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T698_M6'" '[{"s":"UNKNOWN"}]' 90; then
+    pass "T698-6 send timeout → UNKNOWN"
+  else
+    fail "T698-6 90s 未 UNKNOWN（=$(q "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T698_M6'" | jf s)）"; T698=1
+  fi
+  WM6=$(q "SELECT \"waMediaId\" FROM \"Message\" WHERE id='$T698_M6'" | jf waMediaId)
+  check "T698-6 upload 已成功（waMediaId 在）" "$([ -n "$WM6" ] && echo y || echo n)" "y"
+  check "T698-6 upload 恰 1 次" "$(grep -hF "\"mediaId\":\"$WM6\"" "$T698_LOG_TO" 2>/dev/null | grep -cF "media upload (MOCK)" || true)" "1"
+  check "T698-6 send attempt 恰 1 次（唔第二次發送）" "$(grep -hF "\"mediaId\":\"$WM6\"" "$T698_LOG_TO" 2>/dev/null | grep -cF "send media (MOCK) attempt" || true)" "1"
+  check "T698-6 send OK=0（未成功）" "$(grep -cF 'send media (MOCK) OK' "$T698_LOG_TO" 2>/dev/null || true)" "0"
+fi
+
+# ── 還原乾淨 worker（T695 + 後續用）──
+pkill -f "src/workers/index.ts" 2>/dev/null || true
+sleep 1
+nohup pnpm worker >/tmp/e2e-worker-t698-final.log 2>&1 &
+WORKER_PID=$!
+if ! t698_wait_worker /tmp/e2e-worker-t698-final.log; then fail "T698 還原 worker 起機失敗"; T698=1; fi
+
+# ── T695. S6-9④ composer media UI（Playwright 瀏覽器級）──
+echo "[S6-9④] T695: composer media UI (Playwright)..."
+# 獨立對話（開窗、未指派）+ 測試檔
+T695_PAT="t695p-${EPOCH}"; T695_CONV="t695conv-${EPOCH}"
+q "INSERT INTO \"Contact\" (id, \"clinicId\", \"waId\", \"profileName\", labels) VALUES ('$T695_PAT', '$TKW_CLINIC_ID', '8526997${EPOCH}', 'E2E T695', ARRAY[]::text[]) ON CONFLICT (\"clinicId\", \"waId\") DO NOTHING" >/dev/null 2>&1
+[ "$(q "SELECT count(*)::text c FROM \"Contact\" WHERE id='$T695_PAT'" | jf c)" = "1" ] || { fail "T695 fixture: Contact $T695_PAT 冇入庫（waId 衝突？）"; T695=1; }
+q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastInboundAt\", \"lastMessageAt\") VALUES ('$T695_CONV', '$TKW_CLINIC_ID', '$T695_PAT', 'OPEN', now(), now())" >/dev/null 2>&1
+T695_JPG=/tmp/e2e-t695.jpg
+T695_BIG=/tmp/e2e-t695-8mb.png
+printf '\xFF\xD8\xFF\xE0' > "$T695_JPG"; head -c 51200 /dev/zero >> "$T695_JPG"
+printf '\x89PNG\r\n\x1a\n' > "$T695_BIG"; head -c 8388608 /dev/zero >> "$T695_BIG"
+T695_OUT=$(pnpm -s e2e:composer-media --base "$BASE" --cookie "$COOKIE_TKW" --cookie-sup "$COOKIE_T698_SUP" --conv "$T695_CONV" --jpg "$T695_JPG" --big "$T695_BIG" 2>&1 | grep -E "COMPOSER-MEDIA-(OK|FAIL)" | head -1)
+check "T695 UI：JPG 預覽+caption 發送（恰 1 request + 氣泡 img）/ 8MB 前端即時擋（零 request）/ SUPERVISOR 唔見 📎" "$T695_OUT" "COMPOSER-MEDIA-OK"
+[ "$T695_OUT" = "COMPOSER-MEDIA-OK" ] || T695=1
+check "T695-1 OUT(type=image, body=caption) 入庫" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$T695_CONV' AND \"direction\"='OUT' AND \"channel\"='API' AND \"type\"='image' AND \"body\"='e2e t695 media caption'" | jf c)" "1"
+
+# ── 自清（hermetic）──
+for C in "$T698_C1" "$T698_C2" "$T698_C3" "$T695_CONV"; do
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$C'" >/dev/null 2>&1
+  q "DELETE FROM \"NoteReadReceipt\" WHERE \"messageId\" IN (SELECT id FROM \"Message\" WHERE \"conversationId\"='$C')" >/dev/null 2>&1
+  q "DELETE FROM \"StaffNotice\" WHERE \"conversationId\"='$C'" >/dev/null 2>&1
+  q "DELETE FROM \"Message\" WHERE \"conversationId\"='$C'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id='$C'" >/dev/null 2>&1
+done
+q "DELETE FROM \"Contact\" WHERE id IN ('$T698_P1','$T698_P2','$T698_P3','$T695_PAT')" >/dev/null 2>&1
+[ -n "$T698_SUP" ] && q "DELETE FROM \"StaffClinic\" WHERE staffId='$T698_SUP'" >/dev/null 2>&1
+[ -n "$T698_SUP" ] && q "DELETE FROM \"StaffUser\" WHERE id='$T698_SUP'" >/dev/null 2>&1
+rm -f "$WA_MEDIA_DIR"/out-*.png "$WA_MEDIA_DIR"/out-*.jpg "$WA_MEDIA_DIR"/out-*.pdf \
+  "$T698_PNG" "$T698_PNG6" "$T698_PDF" "$T698_FAKE" "$T695_JPG" "$T695_BIG" /tmp/e2e-cookie-t698-sup.txt
+
+# ── 收尾：worker 健康核（T692 教訓：kill 完必重起 + healthz 200）──
+HZF=000
+for i in $(seq 1 90); do
+  HZF=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$BASE/healthz$HEALTHZ_QS" 2>/dev/null || echo 000)
+  [ "$HZF" = "200" ] && break
+  sleep 1
+done
+check "T698/T695 收尾：/healthz 200（worker 存活）" "$HZF" "200"
+[ "$HZF" = "200" ] || T698=1
+[ "$T698" = 0 ] && pass "T698 outbound media API+worker（happy/PII/拒絕矩陣/replay/kill-reuse/timeout-UNKNOWN）" || fail "T698 有項失敗（見上 ❌）"
+[ "$T695" = 0 ] && pass "T695 composer media UI（預覽+發送 / 8MB 前端擋 / SUPERVISOR 無 📎）" || fail "T695 有項失敗（見上 ❌）"
 
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

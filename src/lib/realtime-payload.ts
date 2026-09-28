@@ -33,6 +33,9 @@ export interface MessageNewPayload extends Record<string, unknown> {
     type: string;
     body: string | null;
     mediaPath: string | null;
+    // ★ cwi-final S6-9④：文件顯示名（已清洗；只 OUT document 有）— 氣泡文件連結用。
+    //   waMediaId 刻意唔喺呢度（server-side id，唔回 client）。
+    mediaName: string | null;
     mediaStatus: string;
     clientMessageId: string | null;
     status: string;
@@ -86,6 +89,7 @@ export async function buildMessageNewPayload(messageId: string): Promise<Message
       type: msg.type,
       body: msg.body,
       mediaPath: msg.mediaPath,
+      mediaName: msg.mediaName,
       mediaStatus: msg.mediaStatus,
       clientMessageId: msg.clientMessageId,
       status: msg.status,

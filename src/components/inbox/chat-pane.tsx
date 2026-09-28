@@ -14,6 +14,7 @@ import {
   Lock,
   MessageCircle,
   MoreHorizontal,
+  Loader2,
   Paperclip,
   RotateCw,
   Send,
@@ -126,6 +127,9 @@ interface Props {
   onToggleEnterSends?: () => void;
   /** ★ cwi-final S6-9（①）：FAILED 氣泡〔重試〕→ POST /api/messages/[id]/retry（成功 → 氣泡轉 QUEUED） */
   onRetryMessage?: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
+  /** ★ cwi-final S6-9④：發附件（圖片/PDF）— FormData POST /api/messages/media；
+   *  caption = composer 文字（可空）；423/422/413/415 處理同 onSend 一致 */
+  onSendMedia?: (file: File, caption: string) => Promise<{ ok: boolean; error?: string; takenOverBy?: string | null }>;
   /** ★ H1：發內部備註（lock 模式 composer 用；INTERNAL — 唔出 WhatsApp）
    *  ★ H2：mentions = @ 咗嘅 staffId 陣列（後端會再校驗同店 active） */
   onSendNote: (body: string, mentions?: string[]) => Promise<{ ok: boolean; error?: string }>;
@@ -295,8 +299,16 @@ function TracePanel({ trace }: { trace: DraftTrace }) {
 
 function mediaSrc(mediaPath: string | null): string | null {
   if (!mediaPath) return null;
+  // ★ cwi-final S6-9④：optimistic 氣泡嘅 blob: objectURL 原样透傳（本地預覽；2xx 後會換成 server mediaUrl）
+  if (mediaPath.startsWith("blob:")) return mediaPath;
   const base = mediaPath.split("/").pop() ?? mediaPath;
   return `/api/media/${encodeURIComponent(base)}`;
+}
+
+/** ★ cwi-final S6-9④：附件預覽條大小顯示（1 MB 以下 = KB） */
+function fmtSize(n: number): string {
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function initialOf(c: ConversationItem): string {
@@ -580,7 +592,8 @@ const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
                           rel="noreferrer"
                           className="text-brand-text underline text-xs inline-flex items-center gap-1"
                         >
-                          <Paperclip size={11} strokeWidth={2.75} /> 檔案（{m.type}）
+                          {/* ★ cwi-final S6-9④：顯示名（已清洗）— 冇 mediaName（如 IN 附件）→ 原「檔案（type）」 */}
+                          <Paperclip size={11} strokeWidth={2.75} /> {m.mediaName ?? `檔案（${m.type}）`}
                         </a>
                       )
                     ) : (
@@ -651,6 +664,21 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   const [sending, setSending] = useState(false);
   const [sendingNote, setSendingNote] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  // ★ cwi-final S6-9④：附件預覽條（圖片縮圖／PDF 名 + 大小 + ✕）— objectURL 生命周期：
+  //   揀檔 create → 換檔/清走/換對話/unmount revoke（effect 跟 state 做 cleanup）
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingPreviewUrl, setPendingPreviewUrl] = useState<string | null>(null);
+  const [mediaPickError, setMediaPickError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    return () => { if (pendingPreviewUrl) URL.revokeObjectURL(pendingPreviewUrl); };
+  }, [pendingPreviewUrl]);
+  // 換對話 → 預覽條歸零（附件屬於嗰個對話；防跨對話誤發）
+  useEffect(() => {
+    setPendingFile(null);
+    setPendingPreviewUrl(null);
+    setMediaPickError(null);
+  }, [p.conversation?.id]);
   const [flowError, setFlowError] = useState<string | null>(null);
   // Phase B：過窗 422 後嘅 template 揀選（server 回嘅 APPROVED+UTILITY 名單）
   const [templateOptions, setTemplateOptions] = useState<{ name: string; language: string }[] | null>(null);
@@ -956,6 +984,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   const locked = !!c.assigneeId && c.assigneeId !== p.myStaffId;
   // ★ cwi-routing-20260906 §8：SUPERVISOR 覆唔到客 — composer 轉唯讀提示（內部備註照發）
   const readOnly = p.userRole === "SUPERVISOR";
+  // ★ cwi-final S6-9④：📎 可顯示 = 非唯讀（SUPERVISOR）+ 未被鎖 + 窗口開緊 + parent 接咗 onSendMedia
+  const canAttach = !!p.onSendMedia && !locked && !readOnly && c.window.open;
   // cwi-window-20260901（P2）：COPY_ONLY 過窗草稿（發唔出 — 只准複製去手機 App）
   const isCopyOnly = shownDraft?.mode === "COPY_ONLY";
 
@@ -1042,11 +1072,57 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
     setSendingNote(false);
   }
 
+  // ── cwi-final S6-9④：附件（圖片/PDF）─────────────────────────────
+  /** 前端先驗類型 + 大小（超過即提示、唔上載）— server 仍會 magic bytes 重驗（雙保險） */
+  function acceptFile(f: File): void {
+    const isJpeg = f.type === "image/jpeg" || /\.jpe?g$/i.test(f.name);
+    const isPng = f.type === "image/png" || /\.png$/i.test(f.name);
+    const isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+    const isImage = isJpeg || isPng;
+    if (!isImage && !isPdf) {
+      setMediaPickError("請用 JPG、PNG 或者 PDF");
+      return;
+    }
+    const max = isImage ? 5 * 1024 * 1024 : 10 * 1024 * 1024;
+    if (f.size > max) {
+      setMediaPickError(isImage ? `圖片請 ≤5MB（而家 ${fmtSize(f.size)}）` : `PDF 請 ≤10MB（而家 ${fmtSize(f.size)}）`);
+      return;
+    }
+    setMediaPickError(null);
+    // 圖片先有 objectURL 縮圖（PDF = 名 + 大小）；舊 objectURL 由 effect cleanup revoke
+    setPendingFile(f);
+    setPendingPreviewUrl(f.type.startsWith("image/") ? URL.createObjectURL(f) : null);
+  }
+  function clearPending() {
+    setPendingFile(null);
+    setPendingPreviewUrl(null);
+    setMediaPickError(null);
+  }
+
   async function send() {
     const body = draft.trim();
-    if (!body || sending || !c) return;
+    // ★ S6-9④：有預覽條時空 caption 都發得（純圖片）；冇檔冇字 → 唔發
+    if ((!body && !pendingFile) || sending || !c) return;
     setSending(true);
     setSendError(null);
+    // ★ S6-9④：附件分支 — composer 文字 = caption；成功先清預覽條 + 文字
+    const fileToSend = pendingFile;
+    if (fileToSend) {
+      if (!p.onSendMedia) {
+        setSending(false);
+        return;
+      }
+      const r = await p.onSendMedia(fileToSend, body);
+      if (!r.ok) {
+        // 同打字保護：423/422/413/415 → 提示；預覽條 + 文字保留（員工可修正後重發）
+        setSendError(r.takenOverBy ? "對話已被接手 — 你而家只可發內部備註" : r.error ?? "附件發送失敗");
+      } else {
+        clearPending();
+        setDraft("");
+      }
+      setSending(false);
+      return;
+    }
     // ★ C5 §8.4：source 標記 — 由草稿採用嚟（auto-fill/採用並編輯，含改動）= adopted；
     //   自己由零打字 = typed（server 置 humanTookOver → 側欄「AI 已暫停」）。
     // ★ cwi-final S0-4（N-6）：窗口內跟進建議「採用並編輯」（free-form）同样係 adopted —
@@ -1264,8 +1340,20 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
       </div>
 
       {/* messages — ★ cwi-final S6-7：virtualization（react-virtuoso normal mode — 只有 viewport 內 row 掛 DOM）
-          startReached = 載舊（prepend 用 scrollHeight delta 補償錨點）；followOutput = 貼最新（atBottom 先跟） */}
-      <div className="flex-1 min-h-0 relative">
+          startReached = 載舊（prepend 用 scrollHeight delta 補償錨點）；followOutput = 貼最新（atBottom 先跟）
+          ★ cwi-final S6-9④：拖放檔案落對話區 = 附件（只喺可發狀態先攔截 drop） */}
+      <div
+        className="flex-1 min-h-0 relative"
+        onDragOver={(e) => {
+          if (canAttach && e.dataTransfer.types.includes("Files")) e.preventDefault();
+        }}
+        onDrop={(e) => {
+          if (!canAttach) return;
+          e.preventDefault();
+          const f = e.dataTransfer.files?.[0];
+          if (f) acceptFile(f);
+        }}
+      >
         {visible.length === 0 && !p.loadingOlder ? (
           <div className="text-center text-t3 text-sm py-8">（呢個對話仲冇訊息）</div>
         ) : (
@@ -1738,7 +1826,58 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             </div>
           ) : (
           <div className="flex flex-col gap-1.5">
+            {/* ★ cwi-final S6-9④：附件預覽條（圖片縮圖／PDF 名 + 大小 + ✕） */}
+            {pendingFile && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-panel-2 border border-line text-xs" data-e2e="media-preview">
+                {pendingPreviewUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- 同對話區 media 慣例（blob: objectURL 預覽 — next/image 唔食 blob）
+                  <img src={pendingPreviewUrl} alt="" className="h-10 w-10 rounded-md object-cover shrink-0" data-e2e="media-preview-thumb" />
+                ) : (
+                  <span className="w-10 h-10 rounded-md bg-panel border border-line flex items-center justify-center shrink-0 text-t2">
+                    <Paperclip size={15} strokeWidth={2.2} />
+                  </span>
+                )}
+                <span className="flex-1 truncate text-t1" data-e2e="media-preview-name">{pendingFile.name}</span>
+                <span className="text-t3 shrink-0">{fmtSize(pendingFile.size)}</span>
+                <button type="button" onClick={clearPending} aria-label="移除附件" data-e2e="media-preview-remove" className="text-t3 hover:text-t1 shrink-0">
+                  ✕
+                </button>
+              </div>
+            )}
+            {mediaPickError && (
+              <div className="px-3 py-1.5 rounded-xl bg-danger-soft text-danger-text text-xs" data-e2e="media-pick-error">
+                {mediaPickError}
+              </div>
+            )}
             <div className="flex items-end gap-2">
+              {/* ★ cwi-final S6-9④：📎（hidden file input — 選咗檔即出預覽條；拖放對話區同效） */}
+              {canAttach && (
+                <>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/jpeg,image/png,application/pdf"
+                    hidden
+                    data-e2e="media-file-input"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) acceptFile(f);
+                      e.target.value = ""; // 容許重揾同一個檔
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={sending}
+                    aria-label="發圖片或 PDF"
+                    title="發圖片或 PDF（JPG／PNG ≤5MB、PDF ≤10MB）"
+                    data-e2e="media-attach-btn"
+                    className="w-10 h-10 shrink-0 rounded-full text-t2 hover:text-brand-text hover:bg-panel-2 flex items-center justify-center disabled:opacity-40"
+                  >
+                    <Paperclip size={17} strokeWidth={2.2} />
+                  </button>
+                </>
+              )}
               <textarea
                 value={draft}
                 onChange={(e) => {
@@ -1787,12 +1926,13 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
               />
               <button
                 onClick={() => void send()}
-                disabled={sending || !draft.trim()}
+                disabled={sending || (!draft.trim() && !pendingFile)}
                 aria-label="發送"
                 data-testid="c5-send-btn"
                 className="w-10 h-10 max-md:w-12 max-md:h-12 shrink-0 rounded-full bg-brand hover:bg-brand-hover text-panel flex items-center justify-center disabled:opacity-40"
               >
-                <Send size={15} strokeWidth={2.75} />
+                {/* ★ S6-9④：附件發送中 → 轉圈（📎 同時 disabled） */}
+                {sending && pendingFile ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} strokeWidth={2.75} />}
               </button>
             </div>
             {/* ★ cwi-final S6-9（③）：右下細字 toggle「Enter 發送／Enter 換行」（撳即存 PATCH /api/staff/me/prefs） */}

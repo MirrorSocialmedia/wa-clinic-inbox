@@ -2282,6 +2282,119 @@ export function InboxClient({
     [user.staffId, fetchPendingDrafts]
   );
 
+  // ── ★ cwi-final S6-9④：發附件（圖片/PDF）— FormData POST /api/messages/media ─────
+  // 語義對齊 sendMessage：一次「邏輯發送」一個 clientMessageId（網絡 retry 同 key → server replay）；
+  // 423/422/413/415 回帶原因（chat-pane 提示 + 預覽條保留）。
+  const sendMedia = useCallback(
+    async (file: File, caption: string): Promise<{ ok: boolean; error?: string; takenOverBy?: string | null }> => {
+      const convId = selectedIdRef.current;
+      if (!convId) return { ok: false, error: "未選擇對話" };
+      const clientMessageId = crypto.randomUUID();
+      const kind: "image" | "document" =
+        file.type === "image/jpeg" || file.type === "image/png" || /\.(jpe?g|png)$/i.test(file.name) ? "image" : "document";
+      // optimistic 氣泡（spec：mediaPath 先用 objectURL — 撳咗發送即刻見到圖；2xx 後換 server mediaUrl）
+      const objectUrl = URL.createObjectURL(file);
+      const optimistic: MessageItem = {
+        id: `optimistic-${clientMessageId}`,
+        conversationId: convId,
+        waMessageId: null,
+        direction: "OUT",
+        channel: "API",
+        type: kind,
+        body: caption || null,
+        mediaPath: objectUrl,
+        clientMessageId,
+        status: "QUEUED",
+        errorCode: null,
+        sentByStaffId: user.staffId,
+        aiAutoSent: false,
+        waTimestamp: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, optimistic]);
+      /** 4xx = server 未建 Message → 清走 optimistic 氣泡（否則永遠冇 message:new 對消） */
+      const fail = (error: string, takenOverBy?: string | null): { ok: false; error: string; takenOverBy?: string | null } => {
+        setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+        return { ok: false, error, takenOverBy };
+      };
+      try {
+        let lastErr: unknown;
+        let res: Response | null = null;
+        for (let i = 0; i < 3; i++) {
+          try {
+            const form = new FormData();
+            form.append("conversationId", convId);
+            form.append("clientMessageId", clientMessageId);
+            if (caption) form.append("caption", caption);
+            form.append("file", file);
+            res = await fetch("/api/messages/media", { method: "POST", body: form });
+            break;
+          } catch (err) {
+            lastErr = err;
+            if (i < 2) await new Promise((r) => setTimeout(r, 500 * 2 ** i)); // 0.5s → 1s backoff（retry 同 key = 冪等）
+          }
+        }
+        if (!res) throw lastErr;
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          messageId?: string;
+          error?: string;
+          message?: string;
+          status?: string;
+          idempotentReplay?: boolean;
+          assigneeId?: string | null;
+          mediaUrl?: string;
+        } | null;
+        // ★ S1-1e 口徑：post 期間已換對話 → 唔郁新對話嘅 messages（氣泡已喺舊對話 state，自然被換走）
+        //   objectURL 一律 revoke（氣泡已唔喺任何視得見嘅 state；再入舊對話 = 重拉 messages）
+        if (selectedIdRef.current !== convId) {
+          URL.revokeObjectURL(objectUrl);
+          setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, lastMessageAt: new Date().toISOString(), preview: "附件" } : c)));
+          return { ok: res.ok, ...(res.ok ? {} : { error: data?.message ?? data?.error ?? `發送失敗（${res.status}）` }) };
+        }
+        if (res.status === 422) {
+          return fail(data?.message ?? "窗口已過，附件唔發得");
+        }
+        if (res.status === 423) {
+          const newAssigneeId = data?.assigneeId ?? null;
+          if (newAssigneeId) {
+            const name = allStaffRef.current.find((s) => s.id === newAssigneeId)?.name ?? "同事";
+            setNotice(`${name} 已接手呢個對話`);
+            setConversations((prev) =>
+              prev.map((c) =>
+                c.id === convId && c.assigneeId !== newAssigneeId
+                  ? { ...c, assigneeId: newAssigneeId, assigneeName: name, assignVersion: c.assignVersion + 1 }
+                  : c
+              )
+            );
+          }
+          return fail(data?.message ?? "此對話已有負責人", newAssigneeId);
+        }
+        if (res.status === 413 || res.status === 415) {
+          return fail(data?.message ?? data?.error ?? "個檔發唔到");
+        }
+        if (!res.ok) {
+          return fail(data?.error ?? `發送失敗（${res.status}）`);
+        }
+        // 2xx：氣泡 mediaPath 換 server mediaUrl（client 之後經 /api/media/<fileKey> 讀返）+ revoke objectURL
+        const serverUrl = data?.mediaUrl ?? null;
+        if (serverUrl) {
+          setMessages((prev) => prev.map((m) => (m.id === optimistic.id ? { ...m, mediaPath: serverUrl, status: data?.status ?? m.status } : m)));
+          URL.revokeObjectURL(objectUrl);
+        }
+        setConversations((prev) =>
+          prev.map((c) => (c.id === convId ? { ...c, lastMessageAt: optimistic.waTimestamp, preview: "附件", status: c.status === "RESOLVED" ? "OPEN" : c.status } : c))
+        );
+        return { ok: true };
+      } catch {
+        setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+        URL.revokeObjectURL(objectUrl);
+        return { ok: false, error: "網絡錯誤" };
+      }
+    },
+    [user.staffId]
+  );
+
   // ── Phase B：過窗 template 發送（422 後 UI 揀 template → 同一 route 帶 templateName）──
   const sendTemplate = useCallback(
     async (templateName: string): Promise<{ ok: boolean; error?: string }> => {
@@ -2817,6 +2930,7 @@ export function InboxClient({
         onScrollTop={() => void loadOlder()}
         window={selectedConv?.window ?? null}
         onSend={sendMessage}
+        onSendMedia={sendMedia}
         onSendTemplate={sendTemplate}
         // ★ cwi-followup-v3：對話內跟進建議卡（MD §2.2）
         suggestion={selectedConv ? suggestion : null}

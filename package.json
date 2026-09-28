@@ -57,6 +57,7 @@
     "e2e:schedule-ui": "tsx scripts/e2e-schedule-ui.ts",
     "e2e:copyonly-ui": "tsx scripts/e2e-copyonly-ui.ts",
     "e2e:composer-ui": "tsx scripts/e2e-composer-ui.ts",
+    "e2e:composer-media": "tsx scripts/e2e-composer-media.ts",
     "e2e:socket": "tsx scripts/e2e-socket.ts",
     "e2e:socket-events": "tsx scripts/e2e-socket-events.ts",
     "e2e:staff": "tsx scripts/e2e-staff.ts",
