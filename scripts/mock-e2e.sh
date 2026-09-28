@@ -9053,26 +9053,54 @@ if [ "$C_UP" = 1 ]; then
   [ "$C_PRE" = 1 ] || T692=1
   W692C=$(t692_leaf_pid)
   C_LOG_LINES_BEFORE=$(wc -l < "$T692_WLOG_C" 2>/dev/null || echo 0)
-  # 停 redis（dev = systemd 管理：redis-server.service Restart=always — shutdown nosave 會喺 ~1-2s 被
-  #   systemd 自動重起 = 真 redis restart（新 process），正正係要測嘅場景；生產軌 = docker restart wa-redis）
-  REDIS_PID_BEFORE=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
-  redis-cli shutdown nosave 2>/dev/null || true
-  R_RESTARTED=0
-  for i in $(seq 1 30); do
-    P=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
-    # P=0 = 一過性 stopped（systemd 重起中）— 繼續等真新 PID
-    if [ "$P" != "0" ] && [ "$P" != "" ] && [ "$P" != "$REDIS_PID_BEFORE" ]; then R_RESTARTED=1; break; fi
-    sleep 1
-  done
-  check "T692(c) redis 真重啟（MainPID ${REDIS_PID_BEFORE:-unknown} → 新 process）" "$R_RESTARTED" "1"
-  [ "$R_RESTARTED" = 1 ] || T692=1
-  R_UP=0
-  for i in $(seq 1 30); do
-    redis-cli ping 2>/dev/null | grep -q PONG && { R_UP=1; break; }
-    sleep 1
-  done
-  check "T692(c) redis 返到 PONG" "$R_UP" "1"
-  [ "$R_UP" = 1 ] || T692=1
+  # 停 redis — 雙軌：
+  #   dev = systemd 管理（redis-server.service Restart=always — shutdown nosave 會喺 ~1-2s 被
+  #     systemd 自動重起 = 真 redis restart（新 process），正正係要測嘅場景；生產軌 = docker restart）
+  #   CI  = runner 無 systemd，redis 係 service container（job 容器唔可以 restart 佢）→
+  #     shutdown 後確認 port 釋放，再 job 內起新 redis-server（同 port 6379、無持久化）模擬重啟；
+  #     對 worker 視角等效（connection drop → 同 port 新 process 返回）
+  if [ "$CI_MODE" = "1" ]; then
+    REDIS_PID_BEFORE=$(pgrep -x redis-server | head -1 || echo "")
+    redis-cli shutdown nosave 2>/dev/null || true
+    DOWN_OK=0
+    for i in $(seq 1 15); do
+      redis-cli ping >/dev/null 2>&1 || { DOWN_OK=1; break; }
+      sleep 1
+    done
+    check "T692(c) redis down（port 釋放）" "$DOWN_OK" "1"
+    [ "$DOWN_OK" = 1 ] || T692=1
+    R_RESTARTED=0
+    if [ "$DOWN_OK" = 1 ]; then
+      redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp --save '' \
+        --pidfile /tmp/t692-redis.pid 2>/dev/null || true
+      for i in $(seq 1 30); do
+        redis-cli ping 2>/dev/null | grep -q PONG && { R_RESTARTED=1; break; }
+        sleep 1
+      done
+    fi
+    check "T692(c) redis 真重啟（新 process 返 6379）" "$R_RESTARTED" "1"
+    [ "$R_RESTARTED" = 1 ] || T692=1
+    R_UP=$R_RESTARTED
+  else
+    REDIS_PID_BEFORE=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
+    redis-cli shutdown nosave 2>/dev/null || true
+    R_RESTARTED=0
+    for i in $(seq 1 30); do
+      P=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
+      # P=0 = 一過性 stopped（systemd 重起中）— 繼續等真新 PID
+      if [ "$P" != "0" ] && [ "$P" != "" ] && [ "$P" != "$REDIS_PID_BEFORE" ]; then R_RESTARTED=1; break; fi
+      sleep 1
+    done
+    check "T692(c) redis 真重啟（MainPID ${REDIS_PID_BEFORE:-unknown} → 新 process）" "$R_RESTARTED" "1"
+    [ "$R_RESTARTED" = 1 ] || T692=1
+    R_UP=0
+    for i in $(seq 1 30); do
+      redis-cli ping 2>/dev/null | grep -q PONG && { R_UP=1; break; }
+      sleep 1
+    done
+    check "T692(c) redis 返到 PONG" "$R_UP" "1"
+    [ "$R_UP" = 1 ] || T692=1
+  fi
   if [ "$R_UP" = 1 ]; then
     # worker 應喺 redis 重啟後 120s 內自己恢復：ioredis 重連（無限重試）+ heartbeat 重寫（≤30s tick）→ healthz 200
     C_REC=0

@@ -34,7 +34,7 @@ jobs:
         with: { node-version: 22, cache: pnpm }
       # ★ cwi-qa FX-01b：確保 redis-cli client 喺 job 容器（runner image 無 redis-tools 就裝）
       #   mock-e2e --ci [0/9] 用 redis-cli ping 探活；service 已加 health-cmd 保證 ready
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-tools
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-tools redis-server
       - run: pnpm install --frozen-lockfile
       - run: pnpm migrate:deploy && pnpm db:seed
       # ★ cwi-qa FX-01 臨時：全新 DB seed 出嘅 ADMIN 係空範圍（scopeType default CLINICS + 零 StaffClinic）
