@@ -9534,6 +9534,36 @@ check "T760 web connection SHOW statement_timeout" "$FX06_WEB_ST" "8s"
 check "T760 worker/migrate URL SHOW statement_timeout" "$FX06_WORKER_ST" "0"
 if pnpm -s migrate:deploy >/dev/null 2>&1; then pass "T760 prisma migrate deploy（worker URL）OK"; else fail "T760 prisma migrate deploy 失敗"; fi
 
+# ══ T761（FX-07）：APP_HOST 必填（production boot fail-fast + predeploy guard）═════
+# (a) production boot：NODE_ENV=production 無 APP_HOST → exit 1 + fatal log（guard 喺 Next app 建立前）
+FX07_BOOT_OUT=$(env -i HOME="$HOME" PATH="$PATH" NODE_ENV=production timeout 30 "$TSX" server.ts 2>&1)
+FX07_BOOT_CODE=$?
+if [ "$FX07_BOOT_CODE" = "1" ] && printf '%s' "$FX07_BOOT_OUT" | grep -q "APP_HOST 未設"; then
+  pass "T761 production boot 無 APP_HOST → exit 1 + fatal log"
+else
+  fail "T761 production boot guard 異常（code=$FX07_BOOT_CODE; out=${FX07_BOOT_OUT:0:120}）"
+fi
+# (b) predeploy：.env 無 APP_HOST → 點名 + exit 1
+cp .env "/tmp/e2e-fx07-env-backup.$$"
+sed -i '/^APP_HOST=/d' .env
+FX07_PRE1_OUT=$(bash scripts/predeploy-check.sh 2>&1)
+FX07_PRE1_CODE=$?
+if [ "$FX07_PRE1_CODE" != "0" ] && printf '%s' "$FX07_PRE1_OUT" | grep -q "APP_HOST 未設"; then
+  pass "T761 predeploy 無 APP_HOST → exit 1 + 點名"
+else
+  fail "T761 predeploy 無 APP_HOST guard 異常（code=$FX07_PRE1_CODE）"
+fi
+# (c) predeploy：APP_HOST=localhost → 點名 + exit 1（production 唔准 loopback）
+printf 'APP_HOST=localhost:3100\n' >> .env
+FX07_PRE2_OUT=$(bash scripts/predeploy-check.sh 2>&1)
+FX07_PRE2_CODE=$?
+if [ "$FX07_PRE2_CODE" != "0" ] && printf '%s' "$FX07_PRE2_OUT" | grep -q "APP_HOST 唔准係"; then
+  pass "T761 predeploy APP_HOST=localhost → exit 1 + 點名"
+else
+  fail "T761 predeploy APP_HOST=localhost guard 異常（code=$FX07_PRE2_CODE）"
+fi
+mv "/tmp/e2e-fx07-env-backup.$$" .env
+
 # === FX LANE B ===
 # （Lane B 各階段 T 測試入度：階段 2 預約/outbound → 階段 3 附件/API）
 

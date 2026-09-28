@@ -24,6 +24,18 @@ import log from "@/lib/log";
 const dev = process.env.NODE_ENV !== "production";
 const port = parseInt(process.env.PORT ?? "3100", 10);
 
+// ★ cwi-qa FX-07（QA-07）：production 冇 APP_HOST → 拒絕啟動（fail-fast，喺 Next app 建立前 —
+//   真 fail-fast：唔等 prepare/build 先死）。後果（QA-07 重現）：middleware fallback req.nextUrl.host
+//   （custom server 下係 Next 內部 default localhost:3000，唔係實際 host）→ 真實 Origin 對唔上
+//   → 全站 POST 403；socket allowRequest `=== process.env.APP_HOST`（undefined）→ 全部 socket 被拒。
+if (!dev && !(process.env.APP_HOST ?? "").trim()) {
+  log.fatal(
+    "boot: NODE_ENV=production 但 APP_HOST 未設 — middleware Origin 檢查會全站 403、socket 全拒。"
+    + " 設 APP_HOST（無 scheme，= Cloudflare hostname，例 wa.hkclinicworkforce.com）先重啟",
+  );
+  process.exit(1);
+}
+
 const app = next({ dev });
 const handle = app.getRequestHandler();
 

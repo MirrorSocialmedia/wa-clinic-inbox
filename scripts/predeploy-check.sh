@@ -15,10 +15,15 @@ envv() {
 echo "== .env =="
 [ "$(envv RETENTION_CONV_MONTHS)" = "24" ] && ok "RETENTION_CONV_MONTHS=24" || bad "RETENTION_CONV_MONTHS 必須 = 24（政策）"
 [ "$(envv RETENTION_MEDIA_MONTHS)" = "12" ] && ok "RETENTION_MEDIA_MONTHS=12" || bad "RETENTION_MEDIA_MONTHS 必須 = 12（政策）"
-# APP_HOST 喺 S3-6 上線之後先加入呢個 list
-for k in MEDIA_ENC_KEY PHONE_HASH_KEY WA_APP_SECRET SESSION_SECRET TOTP_ENC_KEY FLOW_JWT_SECRET; do
+# APP_HOST：cwi-qa FX-07（QA-07）— production 必填（server boot fail-fast + middleware Origin 比較）
+for k in APP_HOST MEDIA_ENC_KEY PHONE_HASH_KEY WA_APP_SECRET SESSION_SECRET TOTP_ENC_KEY FLOW_JWT_SECRET; do
   v="$(envv $k)"; [ -n "$v" ] && ok "$k 有值" || bad "$k 未設"
 done
+# ★ cwi-qa FX-07：production APP_HOST 唔准係 localhost/127.0.0.1（否則等同冇設 — Origin 全 403）
+ah="$(envv APP_HOST)"
+case "$ah" in
+  localhost*|127.0.0.1*|0.0.0.0*) bad "APP_HOST 唔准係 localhost/127.0.0.1/0.0.0.0（production）：$ah" ;;
+esac
 for k in MEDIA_ENC_KEY PHONE_HASH_KEY SESSION_SECRET; do
   v="$(envv $k)"; [ "${#v}" -ge 32 ] || bad "$k 長度 < 32"
 done
