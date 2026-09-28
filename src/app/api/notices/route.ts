@@ -1,6 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, clinicScope, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
+import {
+  requireAuth,
+  scopedClinicSet,
+  assertClinicAccess,
+  assertCanWriteConversation,
+  type AuthContext,
+} from "@/lib/rbac";
 
 /**
  * GET /api/notices — 本店未讀內部通知（AI Workflow T1 A2：媒體/急症升級/...）。
@@ -31,43 +37,54 @@ interface NoticeRow {
   createdAt: Date;
 }
 
-/** scope → raw SQL 參數（clinicScope 單一來源；null = 全店） */
-async function scopedClinicIdsForRaw(ctx: Awaited<ReturnType<typeof requireAuth>>): Promise<string[]> {
-  const scope = clinicScope(ctx);
-  return scope.clinicId ? [...scope.clinicId.in] : [];
-}
+// ★ cwi-qa FX-03：scope 單一來源改直用 scopedClinicSet（string[] | null）。
+//   null = 全店無限制（ALL / SUPERVISOR）；[] = 空範圍 = 零（fail-closed）。
+//   舊實作經 clinicScope() 展開 { in: [...] } → ADMIN 空集合變空陣列，
+//   raw SQL `$2::text[] = '{}' OR …` 將佢當全店 → 跨店洩漏（QA-03 已重現）。
+// raw SQL 參數語義：null → 唔加 clinic 條件；非 null → "clinicId" = ANY($n::text[])。
+//   （用 `$n::text[] IS NULL OR …` pin 參數類型 — 避免 42P18 未引用參數。）
 
-export const GET = handle(async (req: NextRequest) => {
-  const ctx = await requireAuth(req);
-  const url = new URL(req.url);
-  const clinicParam = url.searchParams.get("clinicId");
+export async function handleNoticesGet(
+  ctx: AuthContext,
+  clinicParam: string | null
+): Promise<NextResponse> {
   if (clinicParam) {
     // ★ cwi-hub-a-20260914（Part A）：scope-aware — 外範圍 clinicId → 403（任何受限角色）
     assertClinicAccess(ctx, clinicParam);
   }
-  const scoped = await scopedClinicIdsForRaw(ctx);
+  const set = scopedClinicSet(ctx); // null = 全店；[] = 零
+  // ★ cwi-qa FX-03：空範圍陣列唔准當全店 — fail-closed 返零資料
+  if (set !== null && set.length === 0) {
+    return NextResponse.json({ notices: [], count: 0 });
+  }
   // ★ cwi-final S1-12：per-staff 已讀 — LEFT JOIN StaffNoticeRead（我未讀先見）
   const notices = await prisma.$queryRawUnsafe<NoticeRow[]>(
     `SELECT n."id", n."clinicId", n."conversationId", n."kind", n."title", n."createdAt"
      FROM "StaffNotice" n
      LEFT JOIN "StaffNoticeRead" r ON r."noticeId" = n."id" AND r."staffId" = $1
      WHERE r."staffId" IS NULL
-       AND ($2::text[] = '{}' OR n."clinicId" = ANY($2))
+       AND ($2::text[] IS NULL OR n."clinicId" = ANY($2))
        AND ($3::text IS NULL OR n."clinicId" = $3)
      ORDER BY n."createdAt" DESC
      LIMIT 100`,
     ctx.staff.id,
-    scoped,
+    set,
     clinicParam ?? null,
   );
   return NextResponse.json({ notices, count: notices.length });
+}
+
+export const GET = handle(async (req: NextRequest) => {
+  const ctx = await requireAuth(req);
+  return handleNoticesGet(ctx, new URL(req.url).searchParams.get("clinicId"));
 });
 
-export const PATCH = handle(async (req: NextRequest) => {
-  const ctx = await requireAuth(req);
+export async function handleNoticesPatch(
+  ctx: AuthContext,
+  body: { ids?: unknown } | null
+): Promise<NextResponse> {
   // ★ cwi-final S3-3：SUPERVISOR → 403（SUPERVISOR 嘅已讀係 per-staff 語義（S1-12），唔准寫全店欄 StaffNotice.readAt）
   assertCanWriteConversation(ctx);
-  const body = (await req.json().catch(() => null)) as { ids?: unknown } | null;
   const ids = Array.isArray(body?.ids)
     ? (body!.ids as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 200)
     : null;
@@ -75,27 +92,31 @@ export const PATCH = handle(async (req: NextRequest) => {
     return NextResponse.json({ error: "ids required" }, { status: 400 });
   }
 
-  const scoped = await scopedClinicIdsForRaw(ctx);
+  const set = scopedClinicSet(ctx); // null = 全店；[] = 零
+  // ★ cwi-qa FX-03：空範圍 = 零 — 冇嘢可以標已讀（舊版會標晒全店）
+  if (set !== null && set.length === 0) {
+    return NextResponse.json({ updated: 0, shopCleared: 0 });
+  }
+
   // ★ cwi-final S1-12：冇 ids（批量清）→ 排除 URGENT_ESCALATION（急症要逐條明確確認）
   // 目標通知（scope ∩（ids 如果有）∧（批量 → 非急症））— 只回 id/conversationId/kind
-  // （scope 空 = 全店 → 唔入 placeholder，否則 PG 42P18 無法推斷未引用參數類型）
-  const typeFilter = scoped.length > 0 ? `"clinicId" = ANY($1::text[])` : `TRUE`;
+  // （set null = 全店 → 參數傳 null，SQL 用 $n::text[] IS NULL 放行）
   const targets: { id: string; conversationId: string | null; kind: string }[] =
     ids === null
       ? await prisma.$queryRawUnsafe<{ id: string; conversationId: string | null; kind: string }[]>(
           `SELECT "id", "conversationId", "kind"
            FROM "StaffNotice"
-           WHERE ${typeFilter}
+           WHERE ($1::text[] IS NULL OR "clinicId" = ANY($1))
              AND "kind" <> 'URGENT_ESCALATION'`,
-          ...(scoped.length > 0 ? [scoped] : []),
+          set,
         )
       : await prisma.$queryRawUnsafe<{ id: string; conversationId: string | null; kind: string }[]>(
           `SELECT "id", "conversationId", "kind"
            FROM "StaffNotice"
            WHERE "id" = ANY($1::text[])
-             AND ${scoped.length > 0 ? `"clinicId" = ANY($2::text[])` : `TRUE`}`,
+             AND ($2::text[] IS NULL OR "clinicId" = ANY($2))`,
           ids,
-          ...(scoped.length > 0 ? [scoped] : []),
+          set,
         );
   if (targets.length === 0) return NextResponse.json({ updated: 0, shopCleared: 0 });
 
@@ -137,4 +158,10 @@ export const PATCH = handle(async (req: NextRequest) => {
   }
 
   return NextResponse.json({ updated: targets.length, shopCleared });
+}
+
+export const PATCH = handle(async (req: NextRequest) => {
+  const ctx = await requireAuth(req);
+  const body = (await req.json().catch(() => null)) as { ids?: unknown } | null;
+  return handleNoticesPatch(ctx, body);
 });
