@@ -13,7 +13,7 @@ jobs:
       #   唔做 auth（收到任何 server response 即 ready）→ 單 token 就夠；main 實測 4 連綠
       #   （36300671621 / 36315857764 / 36352735331 / 36378302792，35–43s）。
       postgres: { image: postgres:16, env: { POSTGRES_PASSWORD: pw, POSTGRES_DB: wa }, ports: ["15432:5432"], options: "--health-cmd pg_isready --health-interval 5s --health-retries 10" }
-      redis: { image: redis:7, ports: ["6379:6379"] }
+      redis: { image: redis:7, ports: ["6379:6379"], options: "--health-cmd redis-cli --health-interval 5s --health-retries 10" }
     env:
       DATABASE_URL: "postgresql://postgres:pw@localhost:15432/wa?connection_limit=15&pool_timeout=10"
       REDIS_URL: redis://localhost:6379
@@ -32,6 +32,9 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
+      # ★ cwi-qa FX-01b：確保 redis-cli client 喺 job 容器（runner image 無 redis-tools 就裝）
+      #   mock-e2e --ci [0/9] 用 redis-cli ping 探活；service 已加 health-cmd 保證 ready
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-tools
       - run: pnpm install --frozen-lockfile
       - run: pnpm migrate:deploy && pnpm db:seed
       # ★ cwi-qa FX-01 臨時：全新 DB seed 出嘅 ADMIN 係空範圍（scopeType default CLINICS + 零 StaffClinic）

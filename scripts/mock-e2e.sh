@@ -397,7 +397,15 @@ echo "════════════════════════�
 
 # ── 0. infra ────────────────────────────────────────────────────────────
 echo "[0/9] infra..."
-redis-cli ping 2>/dev/null | grep -q PONG || { echo "FATAL: redis not running on 6379"; exit 1; }
+# ★ cwi-qa FX-01b（run 36436372967 實錘）：redis 檢查加 binary 存在性 + 30s retry
+#   舊版一槍 ping：CI service container 剛 bind 到 port 或 runner 無 redis-tools → 假 FATAL
+command -v redis-cli >/dev/null 2>&1 || { echo "FATAL: redis-cli binary 無（runner 無 redis-tools？）"; exit 1; }
+REDIS_UP=0
+for i in $(seq 1 15); do
+  redis-cli ping 2>/dev/null | grep -q PONG && { REDIS_UP=1; break; }
+  sleep 2
+done
+[ "$REDIS_UP" = 1 ] || { echo "FATAL: redis not running on 6379（30s 內無 PONG — 核 redis service/container）"; exit 1; }
 if ! pg_isready -h 127.0.0.1 -p 15432 -q 2>/dev/null; then
   echo "  starting embedded postgres..."
   nohup pnpm dev:db >/tmp/e2e-pg.log 2>&1 &
