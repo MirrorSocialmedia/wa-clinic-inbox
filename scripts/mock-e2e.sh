@@ -9501,6 +9501,39 @@ check "T698/T695 收尾：/healthz 200（worker 存活）" "$HZF" "200"
 
 # ── FX LANE A：cwi-qa 階段 1 測試（FX-06 T760 / FX-07 T761 / FX-13 T765）─────────────
 # 注：呢段由 FX-06/FX-07/FX-13 commit 加入（並行計劃 §0 規則 4：lane 測試入自己區塊）。
+
+# ══ T760（FX-06）：statement_timeout 只限 web ══════════════════════════════════
+# role 級 8s 已 RESET（migration 20260928000100）；web 8s 由 ecosystem 生成嘅 URL options 承載。
+FX06_OUT=$(node -e '
+const { readFileSync } = require("node:fs");
+const eco = require("./ecosystem.config.cjs");
+const webUrl = (eco.apps[0].env || {}).DATABASE_URL || "";
+let wv = readFileSync(".env", "utf8").match(/^DATABASE_URL=(.+)$/m)[1].trim();
+if ((wv.startsWith("\"") && wv.endsWith("\"")) || (wv.startsWith("\x27") && wv.endsWith("\x27"))) wv = wv.slice(1, -1);
+(async () => {
+  const { PrismaClient } = require("@prisma/client");
+  const show = async (url) => {
+    const p = new PrismaClient({ datasources: { db: { url } } });
+    const r = await p.$queryRawUnsafe("SHOW statement_timeout");
+    await p.$disconnect();
+    return r[0].statement_timeout;
+  };
+  const out = {
+    webHasOpt: /options=-c%20statement_timeout%3D8000/.test(webUrl),
+    web: webUrl ? await show(webUrl) : null,
+    worker: await show(wv),
+  };
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error("FX06_ERR " + e.message); process.exit(1); });
+' 2>/dev/null | tail -1)
+FX06_WEB_OPT=$(echo "$FX06_OUT" | jq -r '.webHasOpt // empty' 2>/dev/null)
+FX06_WEB_ST=$(echo "$FX06_OUT" | jq -r '.web // empty' 2>/dev/null)
+FX06_WORKER_ST=$(echo "$FX06_OUT" | jq -r '.worker // empty' 2>/dev/null)
+[ "$FX06_WEB_OPT" = "true" ] && pass "T760 web ecosystem URL 帶 statement_timeout=8s option" || fail "T760 web URL 冇 options（raw=${FX06_OUT:0:80}）"
+check "T760 web connection SHOW statement_timeout" "$FX06_WEB_ST" "8s"
+check "T760 worker/migrate URL SHOW statement_timeout" "$FX06_WORKER_ST" "0"
+if pnpm -s migrate:deploy >/dev/null 2>&1; then pass "T760 prisma migrate deploy（worker URL）OK"; else fail "T760 prisma migrate deploy 失敗"; fi
+
 # === FX LANE B ===
 # （Lane B 各階段 T 測試入度：階段 2 預約/outbound → 階段 3 附件/API）
 
