@@ -73,6 +73,59 @@ type BookRow = {
   createdAt: Date;
 };
 
+/**
+ * ★ cwi-qa FX-05（QA-05）：BullMQ `failed` 事件 handler（拆出俾 unit test 直調）。
+ *
+ * 背景：BullMQ `failed` 事件**每次 attempt 失敗都觸發**（只要 job 未最終成功）。
+ * 舊 handler 冇 attemptsMade 判斷 → 第一次失敗即 `writeState=FAILED` → 第 2、3 次
+ * attempt 見 `writeState ≠ WRITING` stale-skip。如果 createBooking 已成功而之後
+ * DB update 失敗 → Apricot 有單但 UI 紅字「落單失敗」+〔已人手落單〕可撳 → **重複預約**。
+ *
+ * 修：
+ * - attempts guard：`attemptsMade < (opts.attempts ?? 1)` → 唔係最終失敗 → 直接 return
+ *   （row 留 WRITING — 後續 attempt 正常走 stale-skip / 冪等邏輯）
+ * - 最終失敗 → `writeState=UNKNOWN`（唔係 FAILED — 唔知有冇落到 Apricot）
+ *   + StaffNotice「未確定有冇落到單 — 唔好人手落單，請撳〔重試〕」
+ */
+export async function onBookingWriteFailed(
+  job: { id?: string | null; data: BookingWriteJobData; attemptsMade: number; opts?: { attempts?: number } } | null | undefined,
+  err: Error | null
+): Promise<void> {
+  // ★ 只處理最終失敗（queue defaultJobOptions.attempts = 3）
+  if (!job || job.attemptsMade < (job.opts?.attempts ?? 1)) return;
+  const d = job.data;
+  if (!d?.bookingId) return;
+  // ★ 唔知有冇落到 → UNKNOWN（staff 界面唔會誤導「唔落到，可以人手落」）
+  await prisma.bookingRequest
+    .updateMany({
+      where: { id: d.bookingId, status: "PENDING", writeState: "WRITING" },
+      data: { writeState: "UNKNOWN", writeError: "job_failed" },
+    })
+    .catch(() => undefined);
+  log.error(
+    { jobId: job.id, bookingId: d.bookingId, attempts: job.attemptsMade, err: err?.message },
+    "booking-write job failed (final) — writeState=UNKNOWN（staff 可撳〔重試〕，同一單號）"
+  );
+  // StaffNotice（clinicId/conversationId 要查 DB row；只喺 update 真命中（UNKNOWN）先發）
+  try {
+    const b = await prisma.bookingRequest.findUnique({
+      where: { id: d.bookingId },
+      select: { id: true, clinicId: true, conversationId: true, requestedDate: true, requestedTime: true, providerName: true, status: true, writeState: true },
+    });
+    if (b && b.status === "PENDING" && b.writeState === "UNKNOWN") {
+      await createNotice(
+        b.clinicId,
+        b.conversationId,
+        "HANDOFF_REQUEST",
+        `未確定 Apricot 有冇落到單（${b.requestedDate} ${b.requestedTime ?? ""} ${b.providerName ?? ""}）— 唔好人手落單，請撳〔重試〕（同一單號）`,
+        { bookingId: b.id }
+      );
+    }
+  } catch (e) {
+    log.warn({ bookingId: d.bookingId, err: e instanceof Error ? e.message : String(e) }, "booking-write: final-failure notice failed");
+  }
+}
+
 export function startBookingWriteWorker(): Worker {
   const worker = new Worker<BookingWriteJobData>(
     "booking-write",
@@ -86,21 +139,8 @@ export function startBookingWriteWorker(): Worker {
   worker.on("completed", (job) => {
     log.info({ jobId: job.id, bookingId: job.data.bookingId }, "booking-write job completed");
   });
-  worker.on("failed", async (job, err) => {
-    // 重試 exhausted（DB 層異常等）→ 唔好卡死 WRITING：標 FAILED（staff 可撳〔重試〕重入）
-    const d = job?.data;
-    if (d?.bookingId) {
-      await prisma.bookingRequest
-        .updateMany({
-          where: { id: d.bookingId, status: "PENDING", writeState: "WRITING" },
-          data: { writeState: "FAILED", writeError: "job_failed" },
-        })
-        .catch(() => undefined);
-    }
-    log.error(
-      { jobId: job?.id, bookingId: d?.bookingId, attempts: job?.attemptsMade, err: err?.message },
-      "booking-write job failed (final) — writeState=FAILED（staff 可重試）"
-    );
+  worker.on("failed", (job, err) => {
+    void onBookingWriteFailed(job, err);
   });
   worker.on("error", (err) => {
     // ★ cwi-final S6-5：connection 層錯誤唔再 process.exit — shared ioredis 無限重試自愈（T692(c) 實測）

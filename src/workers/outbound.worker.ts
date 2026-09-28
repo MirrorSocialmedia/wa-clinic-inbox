@@ -43,6 +43,36 @@ export interface OutboundJobData {
  *  下次 attempt 會 claim-miss skip（status 已 FAILED）→ 唔會雙發。export 畀 S4-2 media 段同用。 */
 export class UnrecoverableError extends Error {}
 
+/**
+ * ★ cwi-qa FX-09（QA-09）test seam — send phase 可注入 adapter（production = 真 Graph / rate limit）。
+ * unit test 用 fake deps 模擬「acquireToken 250ms throw 一次」而唔使 module mock（node:test
+ * 冇 mock.module 可用性保證）。行為中性：realOutboundDeps 全部指向真函數。
+ */
+export interface OutboundSendDeps {
+  acquireToken: (opts: { key: string }) => Promise<void>;
+  sendTextMessage: typeof sendTextMessage;
+  sendFlowMessage: typeof sendFlowMessage;
+  sendTemplateMessage: typeof sendTemplateMessage;
+  sendMediaMessage: typeof sendMediaMessage;
+  uploadMedia: typeof uploadMedia;
+}
+
+export const realOutboundDeps: OutboundSendDeps = {
+  acquireToken,
+  sendTextMessage,
+  sendFlowMessage,
+  sendTemplateMessage,
+  sendMediaMessage,
+  uploadMedia,
+};
+
+type MessageRow = NonNullable<Awaited<ReturnType<typeof prisma.message.findUnique>>>;
+// runOutboundSend 需要的 job 欄位（結構型 — 真 BullMQ Job 可賦值；unit test 用 plain object fake）
+export type OutboundJobLike = { id?: string | null; data: OutboundJobData; attemptsMade: number; opts?: { attempts?: number } };
+// runOutboundSend 需要的 conv/clinic 欄位（catch 喺 try 外引用 — 結構子集）
+type ConvRef = { id: string; clinicId: string; contactId: string; assigneeId: string | null; routedStaffId: string | null; routedGroupId: string | null };
+type ClinicRef = { id: string; code: string; name: string; waPhoneNumberId: string | null };
+
 async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
   const { messageId } = job.data;
 
@@ -91,103 +121,129 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     return;
   }
 
-  // ★ cwi-final S4-2（outbound 二次閘）：aiAutoSent 訊息喺 claim SENDING 之後、Graph 之前再核
-  // 「仍冇人接手」— 補 send-time gate（FOR UPDATE 主防）到實際發出之間嘅窗口（outbound 排隊中
-  // 員工接手/發咗訊息/對話轉急症）。
-  // 放棄 = CANCELLED（AUTO_GATE_LATE）+ 草稿回退 PROPOSED（D-6：staff 仍可用）+ UI 事件。
-  if (msg.aiAutoSent) {
-    const c = await prisma.conversation.findUnique({
-      where: { id: msg.conversationId },
-      select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true, urgent: true, humanTookOver: true },
-    });
-    // 觸發之後有非 AI OUT（人手/系統）已覆 → 呢條 AI 覆多餘
-    const humanAfter = await prisma.message.findFirst({
-      where: { conversationId: msg.conversationId, direction: "OUT", id: { not: msg.id }, createdAt: { gt: msg.createdAt }, aiAutoSent: false, status: { notIn: ["FAILED", "CANCELLED"] } },
-      select: { id: true },
-    });
-    if (!c || c.assigneeId || c.urgent || c.humanTookOver || humanAfter) {
-      await prisma.message.update({ where: { id: msg.id }, data: { status: "CANCELLED", errorCode: "AUTO_GATE_LATE" } });
-      if (msg.aiDraftId) await prisma.aiDraft.updateMany({ where: { id: msg.aiDraftId, status: "SENT_AUTO" }, data: { status: "PROPOSED" } });
-      if (c) {
-        await publishConvEvent(convRef(c), "message:status", {
-          conversationId: c.id,
-          clinicId: c.clinicId,
-          // message:status zod 要 waMessageId 必填（QUEUED row 未發 = 用 row id 兜底，同 EMPTY_BODY 既有 pattern）
-          waMessageId: msg.waMessageId ?? msg.id,
-          status: "CANCELLED",
-          errorCode: "AUTO_GATE_LATE",
-        });
+  await runOutboundSend(job, msg, realOutboundDeps);
+}
+
+/**
+ * ★ cwi-qa FX-09（QA-09）：claim 之後嘅 send phase（deps 可注入 — production 用 realOutboundDeps）。
+ *
+ * 背景：舊版 claim 做咗 SENDING 之後、Graph 之前嘅錯誤（conv/clinic/contact 查詢 throw、
+ * acquireToken 250ms wait timeout、DB blip）全部 uncaught → job fail → 下次 attempt
+ * claim miss（SENDING + 無 wamid）→ 誤標 UNKNOWN + HIGH alert（「發咗未知道 — 禁重發」）。
+ * 但 Graph 根本未調用 = **肯定未發** — 應該正常重試。
+ *
+ * 修（方案 B）：`graphCallStarted` flag — 只喺 Graph 呼叫（send* 或 uploadMedia 分支）前一刻置 true；
+ * catch 時 `!graphCallStarted` → 肯定未發：
+ * - 非最終 attempt → 還原 QUEUED + throw（BullMQ retry 再 claim）
+ * - 最終 attempt → FAILED（肯定未發，staff 可重發）— 唔係 UNKNOWN
+ * graphCallStarted=true 之後嘅錯誤 → 原有邏輯不變（TimeoutError → UNKNOWN；transient → QUEUED；final → FAILED）。
+ */
+export async function runOutboundSend(job: OutboundJobLike, msg: MessageRow, deps: OutboundSendDeps): Promise<void> {
+  const { messageId } = job.data;
+  // ★ cwi-qa FX-09：Graph 未調用前 — pre-Graph 錯誤肯定未發（唔准入 UNKNOWN 路徑）
+  let graphCallStarted = false;
+  // conv/clinic 喺 catch 都需要引用 → try 前宣告（try 內 throw guard 保證 post-Graph 時非 null）
+  let conv: ConvRef | null = null;
+  let clinic: ClinicRef | null = null;
+
+  try {
+    conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
+    if (!conv) {
+      throw new Error(`outbound: conversation missing for message ${messageId}`);
+    }
+    clinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId } });
+    if (!clinic) {
+      throw new Error(`outbound: clinic missing for conversation ${conv.id}`);
+    }
+    const contactRow = await prisma.contact.findUnique({ where: { id: conv.contactId } });
+    if (!contactRow) {
+      throw new Error(`outbound: contact missing for conversation ${conv.id}`);
+    }
+
+    // ★ cwi-final S4-2（outbound 二次閘）：aiAutoSent 訊息喺 claim SENDING 之後、Graph 之前再核
+    // 「仍冇人接手」— 補 send-time gate（FOR UPDATE 主防）到實際發出之間嘅窗口（outbound 排隊中
+    // 員工接手/發咗訊息/對話轉急症）。
+    // 放棄 = CANCELLED（AUTO_GATE_LATE）+ 草稿回退 PROPOSED（D-6：staff 仍可用）+ UI 事件。
+    if (msg.aiAutoSent) {
+      const c = await prisma.conversation.findUnique({
+        where: { id: msg.conversationId },
+        select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true, urgent: true, humanTookOver: true },
+      });
+      // 觸發之後有非 AI OUT（人手/系統）已覆 → 呢條 AI 覆多餘
+      const humanAfter = await prisma.message.findFirst({
+        where: { conversationId: msg.conversationId, direction: "OUT", id: { not: msg.id }, createdAt: { gt: msg.createdAt }, aiAutoSent: false, status: { notIn: ["FAILED", "CANCELLED"] } },
+        select: { id: true },
+      });
+      if (!c || c.assigneeId || c.urgent || c.humanTookOver || humanAfter) {
+        await prisma.message.update({ where: { id: msg.id }, data: { status: "CANCELLED", errorCode: "AUTO_GATE_LATE" } });
+        if (msg.aiDraftId) await prisma.aiDraft.updateMany({ where: { id: msg.aiDraftId, status: "SENT_AUTO" }, data: { status: "PROPOSED" } });
+        if (c) {
+          await publishConvEvent(convRef(c), "message:status", {
+            conversationId: c.id,
+            clinicId: c.clinicId,
+            // message:status zod 要 waMessageId 必填（QUEUED row 未發 = 用 row id 兜底，同 EMPTY_BODY 既有 pattern）
+            waMessageId: msg.waMessageId ?? msg.id,
+            status: "CANCELLED",
+            errorCode: "AUTO_GATE_LATE",
+          });
+        }
+        log.info({ messageId, conversationId: msg.conversationId, humanAfter: humanAfter?.id ?? null }, "outbound: AUTO gate late — CANCELLED（human took over during send）");
+        return;
       }
-      log.info({ messageId, conversationId: msg.conversationId, humanAfter: humanAfter?.id ?? null }, "outbound: AUTO gate late — CANCELLED（human took over during send）");
+    }
+
+    // cwi-window-20260901（P4 / W-3）：單訊息鐵律觀察點 — 5s burst guard（唔擋，先觀察）。
+    // AI 自動覆拆咗多條（同對話 5s 內第 2 條 aiAutoSent OUT）= prompt 鐵律被違反 → log warn 計數，
+    // 累積多先決定加硬擋。PII：只帶 id metadata，內文永不入 log。
+    if (msg.aiAutoSent && msg.direction === "OUT") {
+      const since = new Date(Date.now() - 5_000);
+      const priorAutoOut = await prisma.message.count({
+        where: {
+          conversationId: conv.id,
+          direction: "OUT",
+          aiAutoSent: true,
+          createdAt: { gte: since },
+          id: { not: msg.id },
+        },
+      });
+      if (priorAutoOut > 0) {
+        log.warn(
+          { messageId, conversationId: conv.id, clinicId: clinic.id, windowSec: 5, priorAutoOut },
+          "outbound: multi-message burst"
+        );
+      }
+    }
+
+    // 1) rate limit（per phone_number_id, 80 msg/s）
+    await deps.acquireToken({ key: clinic.waPhoneNumberId ?? "" });
+
+    // 2) 發送
+    const body = msg.body;
+    const isMedia = msg.type === "image" || msg.type === "document"; // ★ cwi-final S6-9④
+    if (!body && !isMedia) { // ★ S6-9④：圖片可以冇 caption（body=null）— 媒體豁免空 body guard
+      // 空 body 嘅 OUT API message = 壞數據（API route 已擋）→ 標 FAILED 唔重試
+      await prisma.message.update({
+        where: { id: msg.id },
+        data: { status: "FAILED", errorCode: "EMPTY_BODY" },
+      });
+      // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（clinic room + 跨店目標）— conv 有齊五欄
+      await publishConvEvent(convRef(conv), "message:status", {
+        conversationId: conv.id,
+        clinicId: clinic.id,
+        waMessageId: msg.waMessageId ?? msg.id,
+        status: "FAILED",
+        errorCode: "EMPTY_BODY",
+      });
       return;
     }
-  }
 
-  const conv = await prisma.conversation.findUnique({ where: { id: msg.conversationId } });
-  if (!conv) {
-    throw new Error(`outbound: conversation missing for message ${messageId}`);
-  }
-  const clinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId } });
-  if (!clinic) {
-    throw new Error(`outbound: clinic missing for conversation ${conv.id}`);
-  }
-  const contactRow = await prisma.contact.findUnique({ where: { id: conv.contactId } });
-  if (!contactRow) {
-    throw new Error(`outbound: contact missing for conversation ${conv.id}`);
-  }
-
-  // cwi-window-20260901（P4 / W-3）：單訊息鐵律觀察點 — 5s burst guard（唔擋，先觀察）。
-  // AI 自動覆拆咗多條（同對話 5s 內第 2 條 aiAutoSent OUT）= prompt 鐵律被違反 → log warn 計數，
-  // 累積多先決定加硬擋。PII：只帶 id metadata，內文永不入 log。
-  if (msg.aiAutoSent && msg.direction === "OUT") {
-    const since = new Date(Date.now() - 5_000);
-    const priorAutoOut = await prisma.message.count({
-      where: {
-        conversationId: conv.id,
-        direction: "OUT",
-        aiAutoSent: true,
-        createdAt: { gte: since },
-        id: { not: msg.id },
-      },
-    });
-    if (priorAutoOut > 0) {
-      log.warn(
-        { messageId, conversationId: conv.id, clinicId: clinic.id, windowSec: 5, priorAutoOut },
-        "outbound: multi-message burst"
-      );
-    }
-  }
-
-  // 1) rate limit（per phone_number_id, 80 msg/s）
-  await acquireToken({ key: clinic.waPhoneNumberId });
-
-  // 2) 發送
-  const body = msg.body;
-  const isMedia = msg.type === "image" || msg.type === "document"; // ★ cwi-final S6-9④
-  if (!body && !isMedia) { // ★ S6-9④：圖片可以冇 caption（body=null）— 媒體豁免空 body guard
-    // 空 body 嘅 OUT API message = 壞數據（API route 已擋）→ 標 FAILED 唔重試
-    await prisma.message.update({
-      where: { id: msg.id },
-      data: { status: "FAILED", errorCode: "EMPTY_BODY" },
-    });
-    // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（clinic room + 跨店目標）— conv 有齊五欄
-    await publishConvEvent(convRef(conv), "message:status", {
-      conversationId: conv.id,
-      clinicId: clinic.id,
-      waMessageId: msg.waMessageId ?? msg.id,
-      status: "FAILED",
-      errorCode: "EMPTY_BODY",
-    });
-    return;
-  }
-
-  // 3) 發送分支用嘅收窄 copy：非媒體分支經上面 guard 保證 body 非空；媒體分支唔讀呢個欄
-  //   （TS 無法經「!body && !isMedia」析取 guard 收窄 → 明確 copy 保 type）
-  const bodyText = body ?? "";
-  const isFlow = msg.type === "interactive";
-  const isTemplate = msg.type === "template";
-  const maxAttempts = job.opts.attempts ?? 3;
-  try {
+    // 3) 發送分支用嘅收窄 copy：非媒體分支經上面 guard 保證 body 非空；媒體分支唔讀呢個欄
+    //   （TS 無法經「!body && !isMedia」析取 guard 收窄 → 明確 copy 保 type）
+    const bodyText = body ?? "";
+    const isFlow = msg.type === "interactive";
+    const isTemplate = msg.type === "template";
+    // ★ cwi-qa FX-09：Graph 呼叫（send* / uploadMedia）開始 — 自此之後嘅錯誤 = 結果未知/可重試語義
+    graphCallStarted = true;
     let wamid: string;
     if (isMedia) {
       // ★ cwi-final S6-9④：圖片/PDF — 上載一次（waMediaId 持久化）→ 重試/重發沿用唔重複上載
@@ -199,8 +255,8 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
         const plain = key && isEncryptedMedia(enc) ? decryptMedia(enc, key) : enc;
         const mime = msg.type === "image" ? (msg.mediaPath.endsWith(".png") ? "image/png" : "image/jpeg") : "application/pdf";
         try {
-          const up = await uploadMedia({
-            phoneNumberId: clinic.waPhoneNumberId,
+          const up = await deps.uploadMedia({
+            phoneNumberId: clinic.waPhoneNumberId ?? "",
             buf: plain,
             mime,
             filename: msg.mediaName ?? `file.${msg.mediaPath.split(".").pop()}`,
@@ -217,8 +273,8 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
         // 重試唔再上載（waMediaId 持久化；Meta 30 日有效）
         await prisma.message.update({ where: { id: msg.id }, data: { waMediaId: mediaId } });
       }
-      const r = await sendMediaMessage({
-        phoneNumberId: clinic.waPhoneNumberId,
+      const r = await deps.sendMediaMessage({
+        phoneNumberId: clinic.waPhoneNumberId ?? "",
         to: contactRow.waId,
         kind: msg.type as "image" | "document",
         mediaId,
@@ -232,8 +288,8 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       if (!flowCfg.flow_token || !flowCfg.flow_cdn_url || !flowCfg.flow_id) {
         throw new Error("BAD_FLOW_CONFIG");
       }
-      const r = await sendFlowMessage({
-        phoneNumberId: clinic.waPhoneNumberId,
+      const r = await deps.sendFlowMessage({
+        phoneNumberId: clinic.waPhoneNumberId ?? "",
         to: contactRow.waId,
         flow: flowCfg,
       });
@@ -246,8 +302,8 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       if (!meta?.name || !meta.language || !Array.isArray(meta.components)) {
         throw new Error("BAD_TEMPLATE_META");
       }
-      const r = await sendTemplateMessage({
-        phoneNumberId: clinic.waPhoneNumberId,
+      const r = await deps.sendTemplateMessage({
+        phoneNumberId: clinic.waPhoneNumberId ?? "",
         to: contactRow.waId,
         templateName: meta.name,
         language: meta.language,
@@ -255,8 +311,8 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       });
       wamid = r.wamid;
     } else {
-      const r = await sendTextMessage({
-        phoneNumberId: clinic.waPhoneNumberId,
+      const r = await deps.sendTextMessage({
+        phoneNumberId: clinic.waPhoneNumberId ?? "",
         to: contactRow.waId,
         body: bodyText,
       });
@@ -286,18 +342,56 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
       "outbound: sent OK"
     );
   } catch (err) {
+    // ★ cwi-qa FX-09（QA-09）：pre-Graph 錯誤（conv/clinic/contact 查詢、acquireToken 250ms
+    //   wait timeout、DB blip…）— Graph 未調用 = **肯定未發** → 唔准入 UNKNOWN 路徑
+    //   （UNKNOWN = 「發咗未知道 — 禁自動重發」，會誤禁重發 + 誤 HIGH alert）。
+    if (!graphCallStarted) {
+      const preErr = err instanceof Error ? err : new Error(String(err));
+      const isFinal = job.attemptsMade + 1 >= (job.opts?.attempts ?? 3);
+      if (!isFinal) {
+        // 非最終 → 還原 QUEUED 俾下次 attempt 重新 claim（同 transient retry 路徑）
+        await prisma.message.updateMany({
+          where: { id: msg.id, status: "SENDING" },
+          data: { status: "QUEUED" },
+        }).catch(() => undefined);
+        log.warn(
+          { clinic: clinic?.code ?? null, messageId, attempt: job.attemptsMade + 1, err: preErr.message },
+          "outbound: pre-Graph failure（Graph 未調用 — 肯定未發）— 還原 QUEUED，will retry"
+        );
+        throw preErr; // → BullMQ 指數 backoff retry
+      }
+      // 最終 attempt + 肯定未發 → FAILED（staff 可重發）— 唔係 UNKNOWN
+      await prisma.message
+        .update({ where: { id: msg.id }, data: { status: "FAILED", errorCode: truncateCode(preErr.message) } })
+        .catch(() => undefined);
+      if (conv && clinic) {
+        await publishConvEvent(convRef(conv), "message:status", {
+          conversationId: conv.id,
+          clinicId: clinic.id,
+          waMessageId: msg.waMessageId ?? msg.id,
+          status: "FAILED",
+          errorCode: "SEND_FAILED",
+        }).catch(() => undefined);
+      }
+      log.error(
+        { clinic: clinic?.code ?? null, messageId, attempts: job.attemptsMade + 1, err: preErr.message },
+        "outbound: pre-Graph failure（final — 肯定未發）— FAILED"
+      );
+      return; // 唔再 throw（job 完成，唔好令 queue 記錄成 failed）
+    }
+
     // ★ cwi-final S1-15：Graph 呼叫 timeout（AbortSignal.timeout → TimeoutError）= Graph 可能已收
     //   → 結果未知 → 直接標 UNKNOWN（同 claim-miss 路徑）+ alert + UI 事件，唔重試（防雙發）。
     if (err instanceof Error && err.name === "TimeoutError") {
       log.warn(
-        { clinic: clinic.code, messageId, attempts: job.attemptsMade + 1 },
+        { clinic: clinic?.code ?? null, messageId, attempts: job.attemptsMade + 1 },
         "outbound: graph timeout — outcome unknown, mark UNKNOWN (no retry)"
       );
       await markOutboundUnknown(msg.id, msg.conversationId, msg.waMessageId);
       return; // 唔重試
     }
     const permanent = isPermanentGraphError(err);
-    const isFinal = permanent || job.attemptsMade + 1 >= maxAttempts;
+    const isFinal = permanent || job.attemptsMade + 1 >= (job.opts?.attempts ?? 3);
     if (!isFinal) {
       // transient → 返 QUEUED 俾下次 attempt 重新 claim。
       // 條件式（只喺仍 SENDING 時）：sweeper 已標 UNKNOWN 時唔讓 zombie job 復活 QUEUED → 防雙發。
@@ -306,7 +400,7 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
         data: { status: "QUEUED" },
       });
       log.warn(
-        { clinic: clinic.code, messageId, attempt: job.attemptsMade + 1, err: err instanceof Error ? err.message : String(err) },
+        { clinic: clinic?.code ?? null, messageId, attempt: job.attemptsMade + 1, err: err instanceof Error ? err.message : String(err) },
         "outbound: send failed, will retry"
       );
       throw err; // → BullMQ 指數 backoff retry
@@ -333,44 +427,46 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
         .catch(() => undefined);
     }
     // ★ cwi-final S1-4：conv room 事件轉 publishConvEvent（clinic room + 跨店目標）— conv 有齊五欄
-    await publishConvEvent(convRef(conv), "message:status", {
-      conversationId: conv.id,
-      clinicId: clinic.id,
-      waMessageId: msg.waMessageId ?? msg.id,
-      status: "FAILED",
-      errorCode: "SEND_FAILED",
-    });
-    // ★ cwi-final S1-15 → S6-9 ①：最終失敗 → SYSTEM notice 標題帶店名（「訊息發送失敗 · {店}」）。
-    //   target 口徑：sentByStaffId → assignee → 店內任一 active staff（meta.targetStaffId 留痕）；
-    //   notice 本身係 clinic-scoped（全店 staff 可見，per-staff 已讀 StaffNoticeRead）— 全無 staff 先唔建。
-    const noticeTarget =
-      msg.sentByStaffId ??
-      conv.assigneeId ??
-      (await prisma.staffClinic
-        .findFirst({ where: { clinicId: clinic.id, staff: { active: true } }, select: { staffId: true }, orderBy: { createdAt: "asc" } })
-        .then((r) => r?.staffId ?? null)
-        .catch(() => null));
-    if (noticeTarget) {
-      const finalCode = err instanceof Error ? truncateCode(err.message) : "UNKNOWN";
-      await prisma.staffNotice
-        .create({
-          data: {
-            clinicId: clinic.id,
-            conversationId: conv.id,
-            kind: "SYSTEM",
-            title: `訊息發送失敗 · ${clinic.name}`,
-            meta: { reason: "SEND_FAILED", msgId: msg.id, wamid: msg.waMessageId ?? null, errorCode: finalCode, targetStaffId: noticeTarget },
-          },
-        })
-        .catch((nErr) =>
-          log.warn({ messageId, err: nErr instanceof Error ? nErr.message : String(nErr) }, "outbound: failed-notice create failed")
+    if (conv && clinic) {
+      await publishConvEvent(convRef(conv), "message:status", {
+        conversationId: conv.id,
+        clinicId: clinic.id,
+        waMessageId: msg.waMessageId ?? msg.id,
+        status: "FAILED",
+        errorCode: "SEND_FAILED",
+      });
+      // ★ cwi-final S1-15 → S6-9 ①：最終失敗 → SYSTEM notice 標題帶店名（「訊息發送失敗 · {店}」）。
+      //   target 口徑：sentByStaffId → assignee → 店內任一 active staff（meta.targetStaffId 留痕）；
+      //   notice 本身係 clinic-scoped（全店 staff 可見，per-staff 已讀 StaffNoticeRead）— 全無 staff 先唔建。
+      const noticeTarget =
+        msg.sentByStaffId ??
+        conv.assigneeId ??
+        (await prisma.staffClinic
+          .findFirst({ where: { clinicId: clinic.id, staff: { active: true } }, select: { staffId: true }, orderBy: { createdAt: "asc" } })
+          .then((r) => r?.staffId ?? null)
+          .catch(() => null));
+      if (noticeTarget) {
+        const finalCode = err instanceof Error ? truncateCode(err.message) : "UNKNOWN";
+        await prisma.staffNotice
+          .create({
+            data: {
+              clinicId: clinic.id,
+              conversationId: conv.id,
+              kind: "SYSTEM",
+              title: `訊息發送失敗 · ${clinic.name}`,
+              meta: { reason: "SEND_FAILED", msgId: msg.id, wamid: msg.waMessageId ?? null, errorCode: finalCode, targetStaffId: noticeTarget },
+            },
+          })
+          .catch((nErr) =>
+            log.warn({ messageId, err: nErr instanceof Error ? nErr.message : String(nErr) }, "outbound: failed-notice create failed")
+          );
+        await publishConvEvent(convRef(conv), "notice:new", { clinicId: clinic.id, conversationId: conv.id, kind: "SYSTEM" }).catch(
+          () => undefined
         );
-      await publishConvEvent(convRef(conv), "notice:new", { clinicId: clinic.id, conversationId: conv.id, kind: "SYSTEM" }).catch(
-        () => undefined
-      );
+      }
     }
     log.error(
-      { clinic: clinic.code, messageId, attempts: job.attemptsMade + 1, err: err instanceof Error ? err.message : String(err) },
+      { clinic: clinic?.code ?? null, messageId, attempts: job.attemptsMade + 1, err: err instanceof Error ? err.message : String(err) },
       "outbound: permanently failed"
     );
     if (permanent) throw new UnrecoverableError(err instanceof Error ? err.message : String(err));

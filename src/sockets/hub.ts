@@ -1,6 +1,6 @@
 import type { Server as SocketIOServer, Socket } from "socket.io";
 import type { Redis } from "ioredis";
-import { getSocketSession, type SessionData } from "@/lib/session";
+import { getSocketSession, isSessionFresh, type SessionData } from "@/lib/session";
 import { resolveSessionScope } from "@/lib/rbac";
 import { isStaffActive, invalidateActiveCache, invalidateStaffSessions, isStaffSessionCurrent, isSessionDenied } from "@/lib/rbac";
 import { CONTROL_CHANNEL, type ControlMessage, bustScopeCache } from "@/lib/notify";
@@ -40,6 +40,55 @@ const state: HubState = { io: null };
 /** staffId → 而家已連嘅 socketId 集合（停用時精準斷線用）。 */
 const staffSockets = new Map<string, Set<string>>();
 
+/** ★ cwi-qa FX-04（QA-04）：socket connect auth 鏈（io.use 核心 — 拆出俾 unit test 直調）。
+ * 順序：session（iron-session unseal，fail-closed）→ ★enrollOnly 拒（enroll 流程只可走
+ * /api/admin/totp/*，唔准拿 enroll 窗口 session 攞 realtime 數據）→ active（P0-3）→
+ * current（C-3 password reset cutoff）。任何一層 fail → { ok:false }。
+ */
+export async function checkSocketAuth(request: { headers: { cookie?: string } }): Promise<
+  { ok: true; session: SessionData } | { ok: false; error: string }
+> {
+  let session: SessionData | null;
+  try {
+    session = await getSocketSession(request);
+  } catch {
+    return { ok: false, error: "unauthorized" }; // 驗簽過程任何異常 → reject（fail-closed）
+  }
+  if (!session) {
+    return { ok: false, error: "unauthorized" };
+  }
+  // ★ cwi-qa FX-04：enrollOnly session 唔准連 socket（重現：同一 cookie Socket.IO CONNECTED）
+  if (session.enrollOnly) {
+    return { ok: false, error: "enroll required" };
+  }
+  // ★ P0-3：停用帳號即時擋（同 web API 同一個 isStaffActive check + 60s cache）
+  if (!(await isStaffActive(session.staffId))) {
+    return { ok: false, error: "account disabled" };
+  }
+  // ★ C-3 尾批：password reset 後嘅舊 session → 拒絕新連（同 web API 401 同水位）
+  if (!(await isStaffSessionCurrent(session))) {
+    return { ok: false, error: "session invalidated" };
+  }
+  return { ok: true, session };
+}
+
+/**
+ * ★ cwi-qa FX-04（QA-15）：60 秒 revalidate per-socket 驗證鏈（拆出俾 unit test 直調）。
+ * fresh（role TTL / enroll 15min — 過咗 TTL 嘅 socket 之前唔會斷，S3-2 ⑥ 要求）
+ * + current（C-3）+ denied（A1）。任何一層 fail → false → 斷線。
+ */
+export async function isSocketSessionStillValid(session: SessionData): Promise<boolean> {
+  // ★ cwi-qa FX-04：fresh 檢查補入 revalidate — 過 TTL 嘅 socket 60 秒內斷
+  if (!isSessionFresh(session)) return false;
+  try {
+    if (!(await isStaffSessionCurrent(session))) return false;
+    if (await isSessionDenied(session.sid)) return false;
+  } catch {
+    return false; // fail-closed：檢查拋錯 → 斷（重連時 middleware 會重驗）
+  }
+  return true;
+}
+
 /** ★ cwi-final S3-2（A1）：sid → 已連 socketId 集合（登出當前機時精準斷呢個 session 嘅 socket；
  * 其他機嘅 socket 唔受影響）。舊 session 冇 sid → 唔喺呢個 map（只受 staff 層斷線影響）。 */
 const sidSockets = new Map<string, Set<string>>();
@@ -49,31 +98,16 @@ export function initHub(io: SocketIOServer): void {
 
   // ── Auth middleware：驗 session + 核 active 先准 connect ─────────────
   io.use(async (socket: Socket, next) => {
-    try {
-      const session = await getSocketSession(socket.request);
-      if (!session) {
-        return next(new Error("unauthorized"));
-      }
-      // ★ P0-3：停用帳號即時擋（同 web API 同一個 isStaffActive check + 60s cache）
-      if (!(await isStaffActive(session.staffId))) {
-        log.warn({ staffId: session.staffId }, "socket: connect rejected (account disabled)");
-        return next(new Error("account disabled"));
-      }
-      // ★ C-3 尾批：password reset 後嘅舊 session → 拒絕新連（同 web API 401 同水位）
-      if (!(await isStaffSessionCurrent(session))) {
-        log.warn({ staffId: session.staffId }, "socket: connect rejected (session invalidated)");
-        return next(new Error("session invalidated"));
-      }
-      socket.data.session = session;
-      next();
-    } catch (err) {
-      // 驗簽過程任何異常 → reject（fail-closed）
+    const result = await checkSocketAuth(socket.request);
+    if (!result.ok) {
       log.warn(
-        { err: err instanceof Error ? err.message : String(err) },
-        "socket: auth check error, rejecting"
+        { err: result.error, socketId: socket.id.slice(-8) },
+        "socket: connect rejected"
       );
-      next(new Error("unauthorized"));
+      return next(new Error(result.error));
     }
+    socket.data.session = result.session;
+    next();
   });
 
   io.on("connection", (socket) => {
@@ -215,17 +249,8 @@ export function initHub(io: SocketIOServer): void {
           const live = await io.in([...ids]).fetchSockets();
           for (const socket of live) {
             const session = socket.data.session as SessionData | undefined;
-            let ok = true;
-            if (!session) {
-              ok = false; // 冇 session 元數據（唔應該發生）→ fail-closed 斷
-            } else {
-              try {
-                if (!(await isStaffSessionCurrent(session))) ok = false;
-                else if (await isSessionDenied(session.sid)) ok = false;
-              } catch {
-                ok = false; // fail-closed：檢查拋錯 → 斷（重連時 middleware 會重驗）
-              }
-            }
+            // ★ cwi-qa FX-04：fresh + current + denied 一律經 isSocketSessionStillValid
+            const ok = session ? await isSocketSessionStillValid(session) : false;
             if (!ok) {
               log.info({ staffId, socketIdTail: socket.id.slice(-8) }, "socket: revalidate failed → disconnected");
               socket.disconnect(true);
