@@ -9564,6 +9564,15 @@ else
 fi
 mv "/tmp/e2e-fx07-env-backup.$$" .env
 
+# ══ T765（FX-13）：Origin null/garbage → 403（唔係 500）═════════════════════════
+FX13_NULL=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/messages/send" -H "Origin: null" -H "Content-Type: application/json" -d '{}')
+check "T765 Origin: null → 403" "$FX13_NULL" "403"
+FX13_GARB=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/messages/send" -H "Origin: garbage" -H "Content-Type: application/json" -d '{}')
+check "T765 Origin: garbage → 403" "$FX13_GARB" "403"
+# 對照：同站 Origin → 過 origin gate（無 cookie → 401 屬正常；403/500 = 誤殺/回歸）
+FX13_SAME=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/messages/send" -H "Origin: http://127.0.0.1:3100" -H "Content-Type: application/json" -d '{}')
+if [ "$FX13_SAME" != "403" ] && [ "$FX13_SAME" != "500" ]; then pass "T765 same-origin 過 origin gate（→ $FX13_SAME）"; else fail "T765 same-origin 被誤殺（$FX13_SAME）"; fi
+
 # === FX LANE B ===
 # （Lane B 各階段 T 測試入度：階段 2 預約/outbound → 階段 3 附件/API）
 
