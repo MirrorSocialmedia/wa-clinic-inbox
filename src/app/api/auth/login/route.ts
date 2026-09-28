@@ -77,6 +77,57 @@ async function totpLocked(staffId: string): Promise<boolean> {
   }
 }
 
+/**
+ * ★ cwi-qa FX-14（QA-14）：TOTP step 驗證 + 防重放（拆出純函數俾 unit test 直調）。
+ *
+ * 現行（修前）：`GET totp:last` → 比較 → `SET totp:last` 非原子 → 同一 code 兩個並發
+ * 請求都讀到舊 last → 都過（T766：應 1×200 + 1×401）。
+ *
+ * 修後（保留 S3-5 語義 + 原子化）：
+ * 1. `matchedTotpStep`（window ±1）→ null = 錯/過期 → bad
+ * 2. step 唔准倒退：step <= totp:last → replay（舊守衛保留）
+ * 3. ★ 原子 claim：`SET totp:used:<staffId>:<step> 1 EX 120 NX` — 第一個請求攞到該 step；
+ *    返回 null（已被攞，包含同 step 並發）→ replay
+ * 4. 成功後 `SET totp:last:<staffId> <step> EX 120`（倒退檢查基準，best-effort）
+ *
+ * Redis 故障口徑（同 S3-5 現行 fail-open）：used NX 拋錯 → 降級只靠 totp:last
+ *（唔阻登入，log warn）。
+ */
+export async function verifyTotpStep(
+  staffId: string,
+  secretB32: string,
+  code: string
+): Promise<{ ok: true; step: number } | { ok: false; reason: "bad" | "replay" }> {
+  const step = matchedTotpStep(secretB32, code);
+  if (step === null) return { ok: false, reason: "bad" };
+  // ① step 唔准倒退（S3-5 原有守衛 — 保留）
+  let last: string | null = null;
+  try {
+    last = await getRedis().get(`totp:last:${staffId}`);
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "login: totp:last Redis 讀失敗（fail-open）");
+  }
+  if (last !== null && last !== "" && step <= parseInt(last, 10)) {
+    return { ok: false, reason: "replay" };
+  }
+  // ② ★ FX-14 原子 claim — 呢步先係並發安全嘅防重放核心（SET NX 原子）
+  let claimed: string | null;
+  try {
+    claimed = await getRedis().set(`totp:used:${staffId}:${step}`, "1", "EX", 120, "NX");
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "login: totp:used Redis 寫失敗（防重放降級 — 靠 totp:last）");
+    claimed = "OK";
+  }
+  if (claimed === null) return { ok: false, reason: "replay" };
+  // ③ 更新倒退檢查基準（best-effort — 失敗唔阻登入，同 S3-5 口徑）
+  try {
+    await getRedis().set(`totp:last:${staffId}`, String(step), "EX", 120);
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "login: totp:last Redis 寫失敗（防重放降級 — 登入放行）");
+  }
+  return { ok: true, step };
+}
+
 export const POST = handle(async (req: NextRequest) => {
   const ip = clientIpFromHeaders(req.headers);
 
@@ -135,19 +186,8 @@ export const POST = handle(async (req: NextRequest) => {
       log.error({ staffId: user.id, err: err instanceof Error ? err.message : String(err) }, "login: totp secret decrypt failed — TOTP_ENC_KEY 丟/錯？");
       return NextResponse.json({ error: "internal error" }, { status: 500 });
     }
-    const step = matchedTotpStep(secret, parsed.data.totp);
-    // ★ S3-5 防重放：code 實際 step <= 上次已用 step（totp:last EX 120）→ 拒（同 code 唔可以用第二次）
-    let replay = false;
-    let last: string | null = null;
-    if (step !== null) {
-      try {
-        last = await getRedis().get(`totp:last:${user.id}`);
-      } catch (err) {
-        log.warn({ err: err instanceof Error ? err.message : String(err) }, "login: totp:last Redis 讀失敗（fail-open）");
-      }
-      if (last !== null && last !== "" && step <= parseInt(last, 10)) replay = true;
-    }
-    if (step === null || replay) {
+    const v = await verifyTotpStep(user.id, secret, parsed.data.totp);
+    if (!v.ok) {
       // 錯/過期/重放 code → 統一 401（唔洩露細節）+ totpfail 計數（≥5 → 423）
       const n = await totpFail(user.id);
       if (n >= 5) {
@@ -155,11 +195,6 @@ export const POST = handle(async (req: NextRequest) => {
         return NextResponse.json({ error: "totp locked — 15 分鐘後再試" }, { status: 423 });
       }
       return unauthorized();
-    }
-    try {
-      await getRedis().set(`totp:last:${user.id}`, String(step), "EX", 120);
-    } catch (err) {
-      log.warn({ err: err instanceof Error ? err.message : String(err) }, "login: totp:last Redis 寫失敗（防重放降級 — 登入放行）");
     }
     // 成功 = 失敗「連續」斷裂：清 totpfail（防跨 run 累積 flake；EX 900 自然過期係主機制）
     await getRedis().del(`totpfail:${user.id}`).catch(() => undefined);
