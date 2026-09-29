@@ -46,6 +46,11 @@ jobs:
       #   （scripts/seed-knowledge.ts，44 條，冪等；unit 檔頭明載「TKW 需已 seed」）— fresh DB 冇跑
       #   過 → pickKnowledge 5 項全紅。本地 dev DB 係歷史跑過，所以本機綠 / CI 紅。
       - run: pnpm tsx scripts/seed-knowledge.ts
+      # ★ cwi-qa（run #8 實錚 36527615294）：J 段 e2e-s21 斷言 seed 契約 = global E rule
+      #   （FollowupRule trigger=QUOTED_NOT_BOOKED enabled）— seed-followup-p4.ts 專責建立（idempotent upsert）
+      #   但 ci.yml 從來冇跑 → fresh DB 冇 E rule → J 段 FATAL → 下游 pipeline cascade（push/T680/T693 全死）。
+      #   本地 dev DB 係歷史跑過所以本機綠 — 同 FX-01b knowledge seed 同類「舊 DB 假綠」。
+      - run: pnpm tsx scripts/seed-followup-p4.ts
       - run: pnpm typecheck && pnpm lint
       # ★ cwi-qa FX-01（QA-01）：每個 unit 加 timeout 150 — 舊 run unit 卡死會吊住成個 job 6 小時；
       #   150s 夠最快 unit（company-sync ~30s）冷 runner 跑完，卡死個直接 kill → 清晰失敗。
