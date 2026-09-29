@@ -9,7 +9,8 @@ import { resolveClinicIds } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { recordLoginAudit } from "@/lib/auth-audit";
 import { clearLoginFailures } from "@/lib/auth-lockout";
-import { getRedis } from "@/lib/queue";
+// ★ cwi-qa CI-R1：request 路徑用有 commandTimeout 嘅 client（Redis 斷線唔會令請求吊死）
+import { getAppRedis as getRedis } from "@/lib/queue";
 import { matchedTotpStep } from "@/lib/totp";
 import { verifyTotpStep } from "@/lib/totp-verify";
 import { decryptTotpSecret } from "@/lib/totp-enc";

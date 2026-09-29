@@ -1,5 +1,6 @@
 import { matchedTotpStep } from "@/lib/totp";
-import { getRedis } from "@/lib/queue";
+// ★ cwi-qa CI-R1：request 路徑用有 commandTimeout 嘅 client（Redis 斷線唔會令請求吊死）
+import { getAppRedis as getRedis } from "@/lib/queue";
 import log from "@/lib/log";
 
 /**

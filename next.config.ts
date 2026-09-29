@@ -7,6 +7,28 @@ const nextConfig: NextConfig = {
   experimental: {
     authInterrupts: true,
   },
+  // ★ cwi-qa CI-E6（dev-only；`next build`/`start` 完全唔受影響）：`next dev` 每次 rebuild 都重寫
+  //   .next/*manifest.json；同一刻有 request 讀緊 → `⨯ SyntaxError: Unexpected end of JSON input` → HTML 500
+  //  （CI run #17 T672(c)、run #18 H6-MC-UI release /assign 500 + T151/T169；本地 server log 實錚）。
+  //   ① 真觸發源：Tailwind v4（@tailwindcss/postcss 自動 source detection）將成個 project root 註冊做
+  //      webpack context dependency → root 下任何檔變 = client rebuild。mock-e2e / mock client 不停寫
+  //      `.dev/*.json`（workforce-mock-calls.jsonl 每次 mock call 都 append）→ 一個 run 幾百次 rebuild。
+  //      `.dev/` 係 runtime mock 狀態（gitignored），唔係 source → 由 watcher 剔走（Next 預設 regex + `.dev`）。
+  //   ② 唔好 dispose 已編譯 route：預設 maxInactiveAge 60s + pagesBufferLength 5 → 閒 60s 嘅 route 被丟、
+  //      再 hit 再 compile（本地 log 見同一 route compile 兩次）。
+  onDemandEntries: {
+    maxInactiveAge: 24 * 60 * 60 * 1000,
+    pagesBufferLength: 1000,
+  },
+  webpack(config, { dev }) {
+    if (dev) {
+      config.watchOptions = {
+        ...config.watchOptions,
+        ignored: /^((?:[^/]*(?:\/|$))*)(\.(git|next|dev)|node_modules)(\/((?:[^/]*(?:\/|$))*)(?:$|\/))?/,
+      };
+    }
+    return config;
+  },
   // native / 運行時綁 engine 嘅套件唔好畀 webpack bundle（custom server + route handlers）
   serverExternalPackages: [
     "@prisma/client",

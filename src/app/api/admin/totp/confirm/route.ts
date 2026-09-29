@@ -7,7 +7,8 @@ import { getSession } from "@/lib/session";
 import { handle, toResponse } from "@/lib/api-error";
 import { matchedTotpStep } from "@/lib/totp";
 import { decryptTotpSecret } from "@/lib/totp-enc";
-import { getRedis } from "@/lib/queue";
+// ★ cwi-qa CI-R1：request 路徑用有 commandTimeout 嘅 client（Redis 斷線唔會令請求吊死）
+import { getAppRedis as getRedis } from "@/lib/queue";
 
 /**
  * POST /api/admin/totp/confirm — TOTP enroll 第二段（cwi-final S3-5 兩段式）。

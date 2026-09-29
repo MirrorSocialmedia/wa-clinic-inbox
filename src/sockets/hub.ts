@@ -69,6 +69,11 @@ export async function checkSocketAuth(request: { headers: { cookie?: string } })
   if (!(await isStaffSessionCurrent(session))) {
     return { ok: false, error: "session invalidated" };
   }
+  // ★ cwi-qa CI-R2：已登出（sid 已 deny）嘅 cookie 唔准重新連線 — 舊版只喺 60s revalidate 先查，
+  //   client 被踢之後自動重連會再成功（登出後照收實時訊息，每次 ≤60s）。同 web API／SSR 同水位。
+  if (await isSessionDenied(session.sid)) {
+    return { ok: false, error: "session logged out" };
+  }
   return { ok: true, session };
 }
 

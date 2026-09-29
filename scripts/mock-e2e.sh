@@ -176,6 +176,9 @@
 ##
 set -u
 cd "$(dirname "$0")/.."
+# ★ cwi-qa CI-C4：預設香港時區（同生產 ecosystem TZ 一致）— 部分日期用裸 `date -d '+1 day'` 計「聽日」，
+#   app 用 HKT；UTC 機喺 16:00–24:00 跑會對唔上（PC-G1 / T680 等「時段啱啱滿咗」）。外面有設就尊重。
+export TZ="${TZ:-Asia/Hong_Kong}"
 
 # S6-1 CI mode（audit3 P1-22）：--ci = 無本地 .env — 自動生成最小 .env + e2e fixture
 #（DATABASE_URL/REDIS_URL/各 *_MOCK 由 workflow yaml env 提供；secrets 本地隨機生成，零真值入 repo）
@@ -310,8 +313,9 @@ E2E_XFF_SEQ=0
 next_xff() { E2E_XFF_SEQ=$(( (E2E_XFF_SEQ + 1) % 250 + 1 )); echo "10.63.${E2E_XFF_SEQ}.55"; }
 REAL_CURL="$(command -v curl)"
 curl() {
-  local url="" method="" prev="" has_origin=0 has_ct=0 has_xff=0 has_data=0 is_get=0 a
+  local url="" method="" prev="" has_origin=0 has_ct=0 has_xff=0 has_data=0 is_get=0 has_mt=0 a
   for a in "$@"; do
+    case "$a" in -m|--max-time|--max-time=*) has_mt=1 ;; esac
     if [ "$prev" = "-H" ]; then
       case "$a" in
         Origin:*|origin:*) has_origin=1 ;;
@@ -333,6 +337,10 @@ curl() {
   done
   [ -n "$method" ] || { [ "$has_data" = 1 ] && method="POST"; }
   local extra=()
+  # ★ cwi-qa CI-E3：預設 --max-time 120 — 舊版任何一個 curl 吊住都會卡死成個 job（run 36527615294：
+  #   T692 停 Redis 後 T693 一個 curl 等咗 35 分鐘直至 job 被 cancel，後面 0 項跑到）。
+  #   自帶 -m/--max-time 嘅 call 原樣。
+  [ "$has_mt" = 1 ] || extra+=("--max-time" "${E2E_CURL_MAX_TIME:-120}")
   if [[ "$url" == "$BASE"/api/* ]]; then
     [ "$has_origin" = 1 ] || extra+=("-H" "Origin: $BASE")
     if [ "$is_get" != 1 ] && [ -n "$method" ] && [ "$has_ct" = 0 ]; then
@@ -367,7 +375,19 @@ check() { # check <desc> <actual> <expected>
 }
 
 # DB query → JSON
-q() { "$TSX" scripts/e2e-query.ts "$1" 2>/dev/null; }
+# ★ cwi-qa CI-E2：raw SQL 寫 AutomationPolicy（INSERT/UPDATE/DELETE）→ 自動 bust worker/web 嘅
+#   automation level cache（5 分鐘 in-memory TTL）。全檔 ~40 處 raw 寫入，一半冇手動 bust —
+#   全新 DB 下前段 cache 咗 L1，後段插 L3/L4 唔生效（T680 r1–r4 全紅實錚）。本機舊 DB 有殘留行所以綠。
+_Q_POLICY_RE='(INSERT|UPDATE|DELETE)[[:space:]].*"AutomationPolicy"'
+q() {
+  local _out _rc
+  _out=$("$TSX" scripts/e2e-query.ts "$1" 2>/dev/null); _rc=$?
+  if [[ "$1" =~ $_Q_POLICY_RE ]]; then
+    redis-cli -u "${REDIS_URL:-redis://127.0.0.1:6379}" PUBLISH wa-inbox:control '{"cmd":"cache:bust","scope":"automation"}' >/dev/null 2>&1 || true
+  fi
+  [ -n "$_out" ] && printf '%s\n' "$_out"
+  return $_rc
+}
 
 # 由 q 輸出 [{"f":"v"}] 提取字段值
 jf() { grep -oE "\"$1\":\"[^\"]*\"" | head -1 | cut -d'"' -f4; }
@@ -492,6 +512,16 @@ rm -rf .next
 #   全部 "unable to verify the first certificate" → N 段 push 場景（T190–T193）全紅。
 #   CA 由 e2e-push.ts 首跑生成（/tmp/e2e-push-tls/ca.pem）；worker 喺 start 時快照 CA，
 #   所以每個 worker（含段間重啟）都要帶。檔案唔存在就唔 export（Node 會因缺檔拒絕起機）。
+# ★ cwi-qa CI-E1：CA 一定要喺 server/worker 起機**之前**存在 — 舊版靠 e2e-push.ts 喺 N 段首跑先生成，
+#   全新 CI runner 冇 /tmp/e2e-push-tls → 呢度唔 export → worker 唔信 mock endpoint → T190–T193
+#   全部 capture 逾時（run 36527615294）。本機有上次留低嘅 CA 所以一直綠（舊檔假綠）。
+#   同 e2e-push.ts ensureTlsFiles() 同一組檔名／參數；CA 過期（30 日）亦喺起機前重發（之後唔可以再換）。
+_E2E_TLS=/tmp/e2e-push-tls
+if [ ! -f "$_E2E_TLS/ca.pem" ] || [ ! -f "$_E2E_TLS/ca-key.pem" ] || ! openssl x509 -in "$_E2E_TLS/ca.pem" -noout -checkend 86400 >/dev/null 2>&1; then
+  rm -rf "$_E2E_TLS" && mkdir -p "$_E2E_TLS"
+  ( cd "$_E2E_TLS" && openssl req -x509 -newkey rsa:2048 -keyout ca-key.pem -out ca.pem -days 30 -nodes -subj "/CN=e2e-push-test-ca" >/dev/null 2>&1 ) \
+    || { echo "FATAL: 生成 push TLS CA 失敗（openssl？）"; exit 1; }
+fi
 if [ -f /tmp/e2e-push-tls/ca.pem ]; then
   export NODE_EXTRA_CA_CERTS=/tmp/e2e-push-tls/ca.pem
 fi
@@ -8968,7 +8998,16 @@ T692_WLOG_A=/tmp/e2e-worker-t692a.log
 T692_WLOG_B=/tmp/e2e-worker-t692b.log
 T692_WLOG_C=/tmp/e2e-worker-t692c.log
 # worker leaf node pid（kill 必殺 leaf — kill sh/pnpm wrapper = orphan worker，G2 實錘）
-t692_leaf_pid() { ps -eo pid,cmd | grep 'node.*src/workers/index[.]ts' | grep -v grep | tail -1 | awk '{print $1}'; }
+# ★ cwi-qa CI-E5：唔用 `ps -eo pid,cmd`（有 COLUMNS／tty 時會截斷 — worker leaf 嘅 cmdline 有 240+ 字，
+#   截斷後只 match 到 tsx CLI 父 process → kill -9 父 process，真 worker 變孤兒繼續寫 heartbeat →
+#   T692(b)「kill -9 → 150s 內 503」永遠唔成立（run 36527615294：kill 後 160s healthz 一直 200）。
+#   改讀 /proc/<pid>/cmdline（唔會截斷），揀帶 tsx `--import` loader 嗰個 = 真 worker leaf。
+t692_leaf_pid() {
+  local p
+  for p in $(pgrep -f 'src/workers/index[.]ts' 2>/dev/null); do
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '--import' && echo "$p"
+  done | tail -1
+}
 
 # ── T692(a): SIGINT 喺慢 Graph call 中 → in-flight job 完成、Graph 唔重複 ──────────────
 if [ -f /tmp/e2e-push-tls/ca.pem ]; then export NODE_EXTRA_CA_CERTS=/tmp/e2e-push-tls/ca.pem; fi
@@ -9083,7 +9122,22 @@ if [ "$C_UP" = 1 ]; then
   #   CI  = runner 無 systemd，redis 係 service container（job 容器唔可以 restart 佢）→
   #     shutdown 後確認 port 釋放，再 job 內起新 redis-server（同 port 6379、無持久化）模擬重啟；
   #     對 worker 視角等效（connection drop → 同 port 新 process 返回）
-  if [ "$CI_MODE" = "1" ]; then
+  T692_REDIS_CID=""
+  [ "$CI_MODE" = "1" ] && T692_REDIS_CID=$(docker ps -qf ancestor=redis:7 2>/dev/null | head -1)
+  if [ -n "$T692_REDIS_CID" ]; then
+    # ★ cwi-qa CI-E4：CI = docker restart service container（同 T81 同一招 — run 36527615294 T81 實證
+    #   06:03:47 shutdown → 06:03:51 container 自動返嚟）。舊版「shutdown + job 內自起 redis-server」
+    #   唔穩：container 停咗之後 6379 由邊個攞到唔確定，run #17 起唔返 → 之後全部 queue unavailable。
+    #   docker restart = 真 restart（新 process、連線斷、RDB 載返），同生產 `docker restart wa-redis` 一致。
+    docker restart "$T692_REDIS_CID" >/dev/null 2>&1 || true
+    R_UP=0
+    for i in $(seq 1 30); do
+      redis-cli ping 2>/dev/null | grep -q PONG && { R_UP=1; break; }
+      sleep 1
+    done
+    check "T692(c) redis 真重啟（docker restart service container）" "$R_UP" "1"
+    [ "$R_UP" = 1 ] || T692=1
+  elif [ "$CI_MODE" = "1" ]; then
     REDIS_PID_BEFORE=$(pgrep -x redis-server | head -1 || echo "")
     redis-cli shutdown nosave 2>/dev/null || true
     DOWN_OK=0
@@ -9281,7 +9335,7 @@ echo "[S6-9④] T698: outbound media API + worker..."
 T698=0
 T695=0
 COOKIE_T698_SUP=""
-t698_leaf_pid() { ps -eo pid,cmd | grep 'node.*src/workers/index[.]ts' | grep -v grep | tail -1 | awk '{print $1}'; }
+t698_leaf_pid() { t692_leaf_pid; } # ★ cwi-qa CI-E5：同 t692_leaf_pid（/proc cmdline，唔會截斷）
 t698_wait_worker() { # $1 = log（"all workers running — waiting for jobs"）
   local i
   for i in $(seq 1 90); do grep -q "all workers running" "$1" 2>/dev/null && return 0; sleep 1; done

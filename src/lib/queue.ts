@@ -54,11 +54,47 @@ export function getRedis(): IORedis {
   return sharedRedis;
 }
 
+let appRedis: IORedis | null = null;
+
+/** ★ cwi-qa CI-R1：request 路徑單次指令 timeout（ms）— 超時 reject → caller 自己 fail-open／fail-closed。 */
+const APP_REDIS_COMMAND_TIMEOUT_MS = Number(process.env.APP_REDIS_COMMAND_TIMEOUT_MS ?? 1500);
+
+/**
+ * ★ cwi-qa CI-R1：request 路徑專用 Redis（session deny／rate limit／TOTP／nonce）。
+ *
+ * 點解唔用 getRedis()：shared client 係 BullMQ 規定嘅 `maxRetriesPerRequest: null` —
+ * Redis 一斷，指令會喺 offline queue 無限等（唔 reject），caller 嘅 try/catch 永遠唔觸發 →
+ * requireAuth → isSessionDenied 卡死 → 全部已登入 API 冇回應（CI run 36527615294：T692 停 Redis
+ * 後 T693 嘅 curl 吊到 job 被 cancel）。呢個 client 有 commandTimeout + 有限 retry → 斷線時
+ * ≤ 1.5s reject，註釋講嘅 fail-open 先真係生效。
+ */
+export function getAppRedis(): IORedis {
+  if (!appRedis) {
+    appRedis = new IORedis(REDIS_URL, {
+      maxRetriesPerRequest: 1,
+      commandTimeout: APP_REDIS_COMMAND_TIMEOUT_MS,
+      enableReadyCheck: true,
+      connectTimeout: 5000,
+      retryStrategy(times) {
+        return Math.min(times * 500, 10_000);
+      },
+    });
+    appRedis.on("error", (err) => {
+      log.warn({ err: err.message }, "app redis connection error");
+    });
+  }
+  return appRedis;
+}
+
 /** Graceful shutdown 時用。 */
 export async function closeRedis(): Promise<void> {
   if (sharedRedis) {
     await sharedRedis.quit().catch(() => sharedRedis?.disconnect());
     sharedRedis = null;
+  }
+  if (appRedis) {
+    await appRedis.quit().catch(() => appRedis?.disconnect());
+    appRedis = null;
   }
 }
 

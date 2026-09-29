@@ -7,7 +7,8 @@
  * ★ cwi-final S3-6：另加 Redis sliding window（API 限流層 — 見檔案下半）。
  */
 import log from "@/lib/log";
-import { getRedis } from "@/lib/queue";
+// ★ cwi-qa CI-R1：request 路徑用有 commandTimeout 嘅 client（Redis 斷線唔會令請求吊死）
+import { getAppRedis as getRedis } from "@/lib/queue";
 
 interface Bucket {
   tokens: number;
