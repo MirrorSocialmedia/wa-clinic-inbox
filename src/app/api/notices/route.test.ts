@@ -10,7 +10,7 @@
  *   GET 回其他店 URGENT_ESCALATION、PATCH（冇 ids）標晒全店已讀。
  * 修：set !== null && set.length === 0 → GET {notices:[],count:0} / PATCH {updated:0}。
  *
- * 直接調 exported handler 核心（handleNoticesGet/Patch，ctx 注入），
+ * 直接調 exported handler 核心（noticesGet/noticesPatch，ctx 注入），
  * 唔起 server（redline：unit test only）。
  */
 import { test, before, after } from "node:test";
@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
 import type { AuthContext } from "@/lib/rbac";
 import { closeRedis } from "@/lib/queue";
-import { handleNoticesGet, handleNoticesPatch } from "./route";
+import { noticesGet, noticesPatch } from "./handler-core";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -102,7 +102,7 @@ after(async () => {
 
 test("QA-03 重現修復：COMPANY ADMIN（0 店）GET notices = 0（唔洩其他店）", async () => {
   const ctx = makeCtx({ role: "ADMIN", scopeType: "COMPANY", scopedClinicIds: [] }, adminId);
-  const res = await handleNoticesGet(ctx, null);
+  const res = await noticesGet(ctx, null);
   assert.equal(res.status, 200);
   const body = (await res.json()) as { notices: unknown[]; count: number };
   assert.equal(body.count, 0);
@@ -111,7 +111,7 @@ test("QA-03 重現修復：COMPANY ADMIN（0 店）GET notices = 0（唔洩其�
 
 test("QA-03 重現修復：空範圍 PATCH（冇 ids）= 0 且零副作用", async () => {
   const ctx = makeCtx({ role: "ADMIN", scopeType: "COMPANY", scopedClinicIds: [] }, adminId);
-  const res = await handleNoticesPatch(ctx, null);
+  const res = await noticesPatch(ctx, null);
   assert.equal(res.status, 200);
   const body = (await res.json()) as { updated: number; shopCleared: number };
   assert.equal(body.updated, 0);
@@ -127,7 +127,7 @@ test("QA-03 重現修復：空範圍 PATCH（冇 ids）= 0 且零副作用", asy
 
 test("regression：ALL scope（set=null）照樣全店可見", async () => {
   const ctx = makeCtx({ role: "ADMIN", scopeType: "ALL", scopedClinicIds: [] }, adminId);
-  const res = await handleNoticesGet(ctx, null);
+  const res = await noticesGet(ctx, null);
   const body = (await res.json()) as { notices: { id: string }[]; count: number };
   const ids = body.notices.map((n) => n.id);
   assert.ok(body.count >= 1, "ALL scope 應該見到通知");
@@ -136,7 +136,7 @@ test("regression：ALL scope（set=null）照樣全店可見", async () => {
 
 test("regression：CLINICS scope（[TKW]）只見到自己店", async () => {
   const ctx = makeCtx({ role: "ADMIN", scopeType: "CLINICS", scopedClinicIds: [tkwClinicId] }, adminId);
-  const res = await handleNoticesGet(ctx, null);
+  const res = await noticesGet(ctx, null);
   const body = (await res.json()) as { notices: { id: string; clinicId: string }[]; count: number };
   assert.ok(body.notices.some((n) => n.id === NOTICE_TKW), "自己店通知要見到");
   assert.ok(!body.notices.some((n) => n.id === NOTICE_MF), "外店通知唔可以見到");
@@ -144,14 +144,14 @@ test("regression：CLINICS scope（[TKW]）只見到自己店", async () => {
 
 test("PATCH ids 跨店攔截：CLINICS [TKW] 標 MF 通知 → updated 0", async () => {
   const ctx = makeCtx({ role: "ADMIN", scopeType: "CLINICS", scopedClinicIds: [tkwClinicId] }, adminId);
-  const res = await handleNoticesPatch(ctx, { ids: [NOTICE_MF] });
+  const res = await noticesPatch(ctx, { ids: [NOTICE_MF] });
   const body = (await res.json()) as { updated: number };
   assert.equal(body.updated, 0);
 });
 
 test("PATCH ids 在 scope 內 → updated 1 + per-staff 已讀行", async () => {
   const ctx = makeCtx({ role: "ADMIN", scopeType: "CLINICS", scopedClinicIds: [tkwClinicId] }, adminId);
-  const res = await handleNoticesPatch(ctx, { ids: [NOTICE_TKW] });
+  const res = await noticesPatch(ctx, { ids: [NOTICE_TKW] });
   const body = (await res.json()) as { updated: number; shopCleared: number };
   assert.equal(body.updated, 1);
   // ADMIN → 全店欄都會設（shopCleared 1）
@@ -166,7 +166,7 @@ test("PATCH ids 在 scope 內 → updated 1 + per-staff 已讀行", async () => 
 test("GET clinicParam 外範圍 → 403（RbacError）", async () => {
   const ctx = makeCtx({ role: "ADMIN", scopeType: "CLINICS", scopedClinicIds: [mfClinicId] }, adminId);
   await assert.rejects(
-    handleNoticesGet(ctx, tkwClinicId),
+    noticesGet(ctx, tkwClinicId),
     (err: unknown) => (err as { status?: number }).status === 403,
     "外範圍 clinicId 應該 403"
   );
@@ -174,13 +174,13 @@ test("GET clinicParam 外範圍 → 403（RbacError）", async () => {
 
 test("PATCH 空 ids 陣列 → 400 ids required", async () => {
   const ctx = makeCtx({ role: "ADMIN", scopeType: "ALL", scopedClinicIds: [] }, adminId);
-  const res = await handleNoticesPatch(ctx, { ids: [] });
+  const res = await noticesPatch(ctx, { ids: [] });
   assert.equal(res.status, 400);
 });
 
 test("STAFF 空店集合（壞 session 形態）→ GET 零資料唔 throw（fail-closed）", async () => {
   const ctx = makeCtx({ role: "STAFF", scopeType: "CLINICS", scopedClinicIds: [] }, adminId);
-  const res = await handleNoticesGet(ctx, null);
+  const res = await noticesGet(ctx, null);
   const body = (await res.json()) as { count: number };
   assert.equal(body.count, 0);
 });
