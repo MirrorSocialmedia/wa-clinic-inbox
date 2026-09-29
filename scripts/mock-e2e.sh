@@ -9079,11 +9079,14 @@ if [ "$C_UP" = 1 ]; then
     [ "$DOWN_OK" = 1 ] || T692=1
     R_RESTARTED=0
     if [ "$DOWN_OK" = 1 ]; then
-      redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp --save '' \
-        --pidfile /tmp/t692-redis.pid 2>/dev/null || true
+      # ★ cwi-qa CI 修復（2026-09-29 sim 實錚）：container redis shutdown 後 docker-proxy
+      #   可能仍持 6379 1-5s → 單次 bind "Address already in use" 靜默死（`|| true` 吞錯）
+      #   → ping 循環永遠 0。改：start 本身重試（每次 start → 1s → ping），port 一釋放即成。
       for i in $(seq 1 30); do
-        redis-cli ping 2>/dev/null | grep -q PONG && { R_RESTARTED=1; break; }
+        redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp --save '' \
+          --pidfile /tmp/t692-redis.pid 2>/dev/null || true
         sleep 1
+        redis-cli ping 2>/dev/null | grep -q PONG && { R_RESTARTED=1; break; }
       done
     fi
     check "T692(c) redis 真重啟（新 process 返 6379）" "$R_RESTARTED" "1"
