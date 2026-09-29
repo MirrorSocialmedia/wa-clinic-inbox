@@ -4255,9 +4255,9 @@ E_START=$(date -u +%FT%TZ)
 # ── E0. setup：第二 ADMIN + 白名單 env 重啟 server ───────────────────
 # session secret 固定喺 .env — 重啟後 cookie 依然有效（SESSION_SECRET 唔變）
 E2E_ADM2_EMAIL="e2e-adm2-${EPOCH}@e2e.local"
+# ★ FX-02（cwi-qa）行為變更：POST ADMIN 必須帶明確 scopeType（無 → 400）— fixture 補 ALL
 CODE=$(curl -s -o /tmp/e2e-e-adm2.json -w '%{http_code}' -b "$COOKIE_ADMIN" \
   -X POST "$BASE/api/admin/staff" -H 'Content-Type: application/json' \
-  # ★ FX-02（cwi-qa）行為變更：POST ADMIN 必須帶明確 scopeType（無 → 400）— fixture 補 ALL
   -d "{\"email\":\"$E2E_ADM2_EMAIL\",\"name\":\"E2E Admin2\",\"role\":\"ADMIN\",\"scopeType\":\"ALL\",\"clinicId\":null,\"password\":\"e2e-admin2-pass-123\"}")
 check "E0 create 2nd ADMIN → 201" "$CODE" "201"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_EADM2" \
