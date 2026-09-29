@@ -5806,6 +5806,22 @@ MCUI_OUT=$(pnpm -s e2e:multiclinic-ui --scenario send423 --base "$BASE" \
   --staff-tkw-id "$TKW_STAFF_ID" --staff-tkw-name "$TKW_STAFF_NAME" 2>&1)
 echo "$MCUI_OUT" | grep -E "MCUI-(OK|FAIL)" | sed 's/^/  [UI] /'
 echo "$MCUI_OUT" > /tmp/e2e-mcui-423.log
+# ★ cwi-qa FX-17（sim#4 22:29 實錚）：scenario 窗口內中 dev loadManifest race（在冊 flake：
+#   RSC/chunk 500 → dev hard-error 重置 page）→ composer "" 假紅（423 本身係 by-design 決定性）。
+#   500 signature → 重建 423 線（assignVersion 回 0 + 窗口刷新）+ manifest 降溫 → 重跑一次。
+if ! echo "$MCUI_OUT" | grep -q "MCUI-OK send423" && echo "$MCUI_OUT" | grep -q "http 500"; then
+  echo "  [UI] send423 中 500（dev flake signature）→ 重建 423 線 + 重跑一次"
+  MC423_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CV_MC_4'" >/dev/null 2>&1; q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CV_MC_4'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id='$CV_MC_4'" >/dev/null 2>&1
+  q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\", \"lastInboundAt\") VALUES ('$CV_MC_4', '$TKW_CLINIC_ID', '$C_MC_4', 'OPEN', '$MC423_NOW', '$MC423_NOW') ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+  sleep 5 # dev manifest 降溫（openConv 整頁重載重試同款窗口）
+  MCUI_OUT=$(pnpm -s e2e:multiclinic-ui --scenario send423 --base "$BASE" \
+    --cookie "$COOKIE_H6M" --cookie2 "$COOKIE_TKW" --conv-423 "$CV_MC_4" \
+    --staff-tkw-id "$TKW_STAFF_ID" --staff-tkw-name "$TKW_STAFF_NAME" 2>&1)
+  echo "$MCUI_OUT" | grep -E "MCUI-(OK|FAIL)" | sed 's/^/  [UI] /'
+  echo "$MCUI_OUT" > /tmp/e2e-mcui-423.log
+fi
 echo "$MCUI_OUT" | grep -q "MCUI-OK send423" && pass "H6-MC-UI send423：composer 保留 + toast + header 即時更新" || { fail "H6-MC-UI send423（見 /tmp/e2e-mcui-423.log）"; MC=1; }
 
 # UI-4 menu：二級指派選單（其他分店… → WTC → staff）+ 跨店 confirm 文案
