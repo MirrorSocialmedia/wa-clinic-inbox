@@ -23,7 +23,7 @@ import argon2 from "argon2";
 import { closeRedis, getRedis } from "@/lib/queue";
 import { generateTotpSecret, totpCode, matchedTotpStep } from "@/lib/totp";
 import { encryptTotpSecret } from "@/lib/totp-enc";
-import { verifyTotpStep } from "./route";
+import { verifyTotpStep } from "@/lib/totp-verify";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
