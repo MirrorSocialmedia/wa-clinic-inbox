@@ -804,10 +804,14 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
   "GET /api/flows/slots": {
     // clinicCode+from+to（YYYY-MM-DD，from>=今日，span≤7）必填 — 本地日期算（server TZ 同源）
     fixture: () => {
-      const iso = (off: number) => {
-        const x = new Date(Date.now() + off * 86400_000);
-        return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
-      };
+      // ★ cwi-qa CI：日格式必須 HKT（route 用 hkToday() 驗證 from >= today）— 舊實作用
+      //   process-local date（CI runner TZ=UTC）→ UTC 日 = HKT 日 -1（16:00Z-23:59Z 時段）→
+      //   from < hkToday → 400「from must be today or later」必紅（run #7 實錘：02:53 HKT 起）。
+      //   en-CA + Asia/Hong_Kong = 同 hkToday() 口徑（YYYY-MM-DD）。
+      const iso = (off: number) =>
+        new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Hong_Kong", year: "numeric", month: "2-digit", day: "2-digit" }).format(
+          new Date(Date.now() + off * 86400_000),
+        );
       return { url: `/api/flows/slots?clinicCode=TY&from=${iso(0)}&to=${iso(1)}` };
     },
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
