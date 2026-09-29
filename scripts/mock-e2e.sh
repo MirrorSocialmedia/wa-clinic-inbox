@@ -186,6 +186,13 @@ for _a in "$@"; do
   esac
 done
 
+# ★ retention env 標準化（2026-09-29 本地 systemd run 實錘）：retention-purge fail-closed 設計 —
+#   RETENTION_CONV_MONTHS/MEDIA_MONTHS 未明確喺 process env → skip（RETENTION_ENV_MISMATCH）→ T82 全紅。
+#   CI 已明確設 24/12（ci.yml）；本地標準模式以前靠 launch shell 環境繼承（唔穩）→ 未設時預設 24/12（同 CI 值），
+#   worker 係 script 起 → 繼承此 env。${VAR:=} guard 唔會覆蓋 CI/開發者明確值。
+: "${RETENTION_CONV_MONTHS:=24}"; export RETENTION_CONV_MONTHS
+: "${RETENTION_MEDIA_MONTHS:=12}"; export RETENTION_MEDIA_MONTHS
+
 # ★ 平行 e2e 互殺防護：兩個 e2e 同時跑會 pkill 對方 server/worker + 搶同一 port/DB/Redis
 #   → 雙邊失敗（429/500/socket 斷 — 已捉住過一次）。flock 排他：後到者直接退。
 if ! exec 9>/tmp/e2e.lock; then echo "FATAL: 無法開 lock"; exit 1; fi
@@ -4250,7 +4257,8 @@ E_START=$(date -u +%FT%TZ)
 E2E_ADM2_EMAIL="e2e-adm2-${EPOCH}@e2e.local"
 CODE=$(curl -s -o /tmp/e2e-e-adm2.json -w '%{http_code}' -b "$COOKIE_ADMIN" \
   -X POST "$BASE/api/admin/staff" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$E2E_ADM2_EMAIL\",\"name\":\"E2E Admin2\",\"role\":\"ADMIN\",\"clinicId\":null,\"password\":\"e2e-admin2-pass-123\"}")
+  # ★ FX-02（cwi-qa）行為變更：POST ADMIN 必須帶明確 scopeType（無 → 400）— fixture 補 ALL
+  -d "{\"email\":\"$E2E_ADM2_EMAIL\",\"name\":\"E2E Admin2\",\"role\":\"ADMIN\",\"scopeType\":\"ALL\",\"clinicId\":null,\"password\":\"e2e-admin2-pass-123\"}")
 check "E0 create 2nd ADMIN → 201" "$CODE" "201"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_EADM2" \
   -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
