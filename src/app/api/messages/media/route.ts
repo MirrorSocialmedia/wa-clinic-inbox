@@ -18,7 +18,8 @@ import { saveMediaFile } from "@/lib/wa/media";
  * ★ cwi-final S6-9④（audit3 P2-03）：POST /api/messages/media — 員工發附件（圖片/PDF）。
  *
  * 檢查次序同 /api/messages/send 一致（S3-9：replay 喺 Send Lock 之前）：
- *   400 缺欄/壞 clientMessageId → 413 >10MB（硬頂）→ 404 conv → 403 access → 403 SUPERVISOR
+ *   413 content-length >10.5MB（FX-26，parse body 前）→ 400 缺欄/壞 clientMessageId
+ *   → 413 >10MB（硬頂）→ 404 conv → 403 access → 403 SUPERVISOR
  *   → replay（clientMessageId 命中）→ 423 SEND_LOCKED → 422 窗口過 → 415 類型唔支援
  *   → 413 超該類型上限 → 落碟（即加密，FX-16：喺 auto-claim 前）→ auto-claim
  *   → Message(OUT, QUEUED) → AuditLog(SEND_META) → enqueue → 202
@@ -34,10 +35,23 @@ export const runtime = "nodejs";
 
 /** Meta 圖片 5MB / PDF 10MB（自訂）— 入 form 前嘅硬頂（防 client 傳 100MB 先話唔收） */
 const HARD_CAP_BYTES = 10 * 1024 * 1024;
+/** ★ cwi-qa FX-26（QA-26）：content-length 硬頂 — 10MB 硬頂 + multipart 邊界/field 過頭容錯（~512KB）。
+ *  喺 parse body 之前攔：而家 middleware 先截斷 body → formData() 炸 → 錯誤 400（應為 413）。 */
+const CONTENT_LENGTH_HARD_CAP = 10.5 * 1024 * 1024;
 const ENQUEUE_TIMEOUT_MS = 1500;
 
 export const POST = handle(async (req: NextRequest) => {
   const ctx = await requireAuth(req);
+  // ★ cwi-qa FX-26（QA-26）：先睇 content-length — > 10.5MB 直接 413（唔使等 parse body。
+  //  舊路徑：超大 body 被 middleware 截斷 → formData() throw → 400，status 錯 + 白費 CPU）。
+  //  冇 header / 壞值 → 跳過（落返下面 file.size 硬頂兜底）。
+  const contentLength = req.headers.get("content-length");
+  if (contentLength !== null) {
+    const clBytes = Number(contentLength);
+    if (Number.isFinite(clBytes) && clBytes > CONTENT_LENGTH_HARD_CAP) {
+      return NextResponse.json({ error: "FILE_TOO_LARGE", maxBytes: HARD_CAP_BYTES }, { status: 413 });
+    }
+  }
   let form: FormData;
   try {
     form = await req.formData();
