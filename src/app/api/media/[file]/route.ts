@@ -93,12 +93,17 @@ export const GET = handle(
     // ★ cwi-final S6-9④：outbound 附件（mediaName 有值 — 已清洗 cleanDocName）→ 用顯示名做
     //   Content-Disposition 檔名（病人下載見到「陳大文 報告.pdf」而非 out-<uuid>.pdf）。
     //   mediaName 只對 OUT document 寫入（route 層）→ 其他 row 維持用 fileKey。
+    // ★ cwi-qa FX-25（QA-25）：RFC 6266 雙欄 — filename="<ASCII fallback>"（舊 client 兼容）
+    //   + filename*=UTF-8''<pct-encoded>（非 ASCII 檔名正確形式）。
+    //   舊寫法（單一 filename="<encodeURIComponent>"）CJK 檔名喺部分 client 會爛/亂碼。
+    //   ASCII fallback = 顯示名本身係純可印 ASCII 就用佢；否則用 fileKey（結構保證 ASCII）。
     const isInline = mime.startsWith("image/") || mime === "application/pdf";
     const dispName = msg.mediaName ?? file;
+    const asciiFallback = /^[\x21-\x7e]*$/.test(dispName) ? dispName : file;
     const res = new NextResponse(body, {
       headers: {
         "Content-Type": mime,
-        "Content-Disposition": `${isInline ? "inline" : "attachment"}; filename="${encodeURIComponent(dispName)}"`,
+        "Content-Disposition": `${isInline ? "inline" : "attachment"}; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(dispName)}"`,
         // ★ AS-4：nosniff — Content-Type 由我哋決定，唔畀瀏覽器 sniff
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, max-age=3600",
