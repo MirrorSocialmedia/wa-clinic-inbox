@@ -158,7 +158,9 @@ cleanup
 
 if [ "$FAIL" = 0 ]; then
   # ── ★ cwi-final S6-4：drill 記錄（每月 restore drill 留痕入 docs/drills/） ──
-  DRILL_LOG="${DRILL_LOG:-docs/drills/restore-drill-$(date +%Y-%m).md}"
+  # ★ cwi-qa CI：drill 記錄改寫 /tmp（原 docs/drills/ 係 tracked 檔 — mock-e2e 每跑必 append →
+  #   worktree dirty；/tmp 唔入 repo，DRILL_LOG env 覆蓋保留）
+  DRILL_LOG="${DRILL_LOG:-/tmp/restore-drill-$(date +%Y-%m).md}"
   if [ -n "$DRILL_LOG" ]; then
     mkdir -p "$(dirname "$DRILL_LOG")"
     {
