@@ -307,6 +307,12 @@ interface Props {
   notices: StaffNoticeItem[];
   /** ★ AI Workflow T1 (A2)：撳通知 → 標已讀 + 跳對話 */
   onNoticeClick: (n: StaffNoticeItem) => void;
+  /** ★ cwi-ux UX-01：訊息未讀 💬 撳 → 確認「將 N 條對話標為已讀？」→ POST /api/conversations/mark-all-read */
+  onMarkAllRead: () => void;
+  /** ★ cwi-ux UX-01：內部通知面板「全部已讀」（PATCH /api/notices 冇 ids — 後端唔清急症） */
+  onNoticesMarkAllRead: () => void;
+  /** ★ cwi-ux UX-01：急症逐條「已確認」（PATCH /api/notices {ids:[id]} — 唔跳對話） */
+  onNoticeAck: (n: StaffNoticeItem) => void;
   /** ★ Part B（N-7）：客戶未讀總數（badge — 同 OS 通知 permission 無關，一定要有） */
   unreadTotal: number;
   /** ★ Part B（N-8）：通知開關（localStorage per-device） */
@@ -636,11 +642,17 @@ export function ConversationList(p: Props) {
               ))}
             </select>
           )}
-          {/* ★ Part B（N-7）：訊息未讀 badge（state 驅動 — OS 通知 denied/唔支援都一樣見） */}
-          <span
+          {/* ★ Part B（N-7）：訊息未讀 badge（state 驅動 — OS 通知 denied/唔支援都一樣見）
+              ★ cwi-ux UX-01：改 <button> — 撳 → 細確認框「將 N 條對話標為已讀？」→ 批量 API */}
+          <button
+            onClick={() => {
+              const n = p.conversations.filter((c) => c.myUnread > 0).length;
+              if (n > 0 && window.confirm(`將 ${n} 條對話標為已讀？`)) void p.onMarkAllRead();
+            }}
+            disabled={p.unreadTotal === 0}
             aria-label={`訊息未讀（${p.unreadTotal} 則）`}
-            title={p.unreadTotal > 0 ? `${p.unreadTotal} 則未讀訊息` : "訊息未讀"}
-            className={`relative w-7 h-7 rounded-full flex items-center justify-center ${p.unreadTotal > 0 ? "text-t1" : "text-t3"}`}
+            title={p.unreadTotal > 0 ? `${p.unreadTotal} 則未讀訊息 — 撳全部標已讀` : "訊息未讀"}
+            className={`relative w-7 h-7 rounded-full flex items-center justify-center ${p.unreadTotal > 0 ? "text-t1 hover:bg-black/[.04]" : "text-t3 cursor-default"}`}
           >
             <MessageCircle size={15} strokeWidth={2.75} />
             {p.unreadTotal > 0 && (
@@ -648,7 +660,7 @@ export function ConversationList(p: Props) {
                 {p.unreadTotal > 99 ? "99+" : p.unreadTotal}
               </span>
             )}
-          </span>
+          </button>
           {/* ★ H2：mention 鈴鐺 badge（數字 = 未讀 mention 總數；撳 → 跳到最近 mention） */}
           <button
             onClick={p.onBellClick}
@@ -889,23 +901,51 @@ export function ConversationList(p: Props) {
         </>
       )}
 
-      {/* ★ AI Workflow T1 (A2)：內部通知列（未讀；撳 = 標已讀 + 跳對話） */}
+      {/* ★ AI Workflow T1 (A2)：內部通知列（未讀；撳 = 標已讀 + 跳對話）
+          ★ cwi-ux UX-01（選項①）：「全部已讀」唔清急症（後端排除 URGENT_ESCALATION）；急症逐條「已確認」 */}
       {noticeOpen && (
         <div className="border-b border-line px-3 py-2 space-y-1 max-h-56 overflow-y-auto">
-          <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">內部通知</div>
+          <div className="flex items-center justify-between gap-1">
+            <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">內部通知</div>
+            <button
+              onClick={() => void p.onNoticesMarkAllRead()}
+              disabled={!p.notices.some((n) => n.kind !== "URGENT_ESCALATION")}
+              title={
+                p.notices.some((n) => n.kind !== "URGENT_ESCALATION")
+                  ? "標晒非急症通知已讀（急症要逐條確認）"
+                  : "冇非急症通知可清"
+              }
+              className="text-[10px] text-brand-text hover:underline disabled:text-t3 disabled:no-underline disabled:cursor-default"
+            >
+              全部已讀
+            </button>
+          </div>
           {p.notices.length === 0 ? (
             <div className="text-xs text-t3 py-1">冇未讀通知</div>
           ) : (
-            p.notices.map((n) => (
-              <button
-                key={n.id}
-                onClick={() => p.onNoticeClick(n)}
-                className="w-full text-left rounded-full px-2.5 py-1.5 hover:bg-black/[.04]"
-              >
-                <div className="text-xs text-t1 truncate">{n.title}</div>
-                <div className="text-[10px] text-t3">{relTime(n.createdAt)}</div>
-              </button>
-            ))
+            p.notices.map((n) => {
+              const urgent = n.kind === "URGENT_ESCALATION";
+              return (
+                <div key={n.id} className="flex items-center gap-1">
+                  <button
+                    onClick={() => p.onNoticeClick(n)}
+                    className="flex-1 min-w-0 text-left rounded-full px-2.5 py-1.5 hover:bg-black/[.04]"
+                  >
+                    <div className="text-xs text-t1 truncate">{n.title}</div>
+                    <div className="text-[10px] text-t3">{relTime(n.createdAt)}</div>
+                  </button>
+                  {urgent && (
+                    <button
+                      onClick={() => p.onNoticeAck(n)}
+                      title="確認呢條急症（逐條明確確認 — 唔會俾「全部已讀」清走）"
+                      className="shrink-0 text-[10px] rounded-full border border-line px-2 py-1 text-t2 hover:bg-black/[.04] hover:text-t1"
+                    >
+                      已確認
+                    </button>
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
       )}

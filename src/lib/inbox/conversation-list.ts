@@ -125,8 +125,9 @@ export function decodeCursor(raw: string | null): ListCursor | null {
     return null;
   }
 }
-/** 排序 (urgent desc, lastMessageAt desc, id desc) 嘅「喺 cursor 之後」 */
-function afterCursor(c: ListCursor, withUrgent: boolean): Prisma.ConversationWhereInput {
+/** 排序 (urgent desc, lastMessageAt desc, id desc) 嘅「喺 cursor 之後」
+ * ★ cwi-ux UX-01：export 俾 mark-all-read 繼續分頁（>500 時 cursor 跟住撳） */
+export function afterCursor(c: ListCursor, withUrgent: boolean): Prisma.ConversationWhereInput {
   const t = new Date(c.t);
   if (!withUrgent) return { OR: [{ lastMessageAt: { lt: t } }, { lastMessageAt: t, id: { lt: c.id } }] };
   const u = c.u === 1;

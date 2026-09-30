@@ -574,6 +574,16 @@ export interface NotifyTakeoverEvent {
   actorStaffId: string | null;
 }
 
+/** ★ cwi-ux UX-01：一鍵已讀 → 本人其他裝置同步 badge（staff:{staffId} room 定向）。
+ * client 收到 → conversationIds 全部 myUnread=0；unreadClearedIds 再 unreadCount=0（層②命中嘅 row）。 */
+export interface ConversationReadEvent {
+  eventId?: string;
+  /** 已 upsert ConversationRead（個人已讀）嘅對話 id */
+  conversationIds: string[];
+  /** 全店 unreadCount 被清（我負責 / 未指派且 STAFF/ADMIN）嘅對話 id */
+  unreadClearedIds?: string[];
+}
+
 /** ★ H2：INTERNAL note tick 語義（似 WhatsApp）：
  *  灰 ✓ = note 已發出；藍 ✓✓ = 全部被 mention 嘅 staff 已讀（無 mention → 現任 assignee 已讀）。
  *  requiredStaff 為空（unassigned + 無 mention）→ 永遠灰 ✓。 */
