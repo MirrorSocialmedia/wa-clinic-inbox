@@ -39,6 +39,106 @@ export function isPermanentGraphError(e: unknown): boolean {
   return e instanceof GraphError && e.httpStatus >= 400 && e.httpStatus < 500 && e.httpStatus !== 429 && (e.code === null || PERMANENT_CODES.has(e.code));
 }
 
+// ── ★ cwi-qa FX-19（QA-19）：fetch 網絡層錯誤分類（body 已送出後斷線）───────────
+//
+// 背景（S1-15 遗留洞）：outbound worker 只辨 TimeoutError（→ UNKNOWN）；但 fetch 喺
+//   「body 已送出、response 未回」時死（ECONNRESET / UND_ERR_SOCKET / EPIPE）= 結果未知
+//   （Graph 可能已收到訊息）→ 舊路徑當 transient retry → **雙發風險**。
+//   相反 DNS 失敗（ENOTFOUND/EAI_AGAIN）/ ECONNREFUSED = 肯定未送到 → transient（重試安全）。
+//
+// Node/undici 錯誤形狀：`TypeError: fetch failed` + `.cause` = 帶 `.code` 嘅 Error
+//   （ECONNRESET / ECONNREFUSED / ENOTFOUND / UND_ERR_SOCKET…；dual-stack 可能 AggregateError）。
+//   response body 中途死（fetch 已 resolve、json() 時 socket 死）同一個 cause 形狀。
+
+/** 斷線類（body 可能已達 Graph — 結果未知）→ send 路徑轉 UNKNOWN（禁重發，人手核對）。 */
+const OUTCOME_UNKNOWN_NET_CODES = new Set(["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"]);
+/** 肯定未送到（DNS / 拒絕連線）→ transient（重試安全）。 */
+const TRANSIENT_NET_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED"]);
+
+export type FetchNetErrorClass = "outcome-unknown" | "transient" | "other";
+
+/** 行 err/cause 鏈攞第一個 .code（undici 形状：fetch failed → cause.code；AggregateError.errors[0]）。
+ *  pure + 零 IO — unit test 直斷。depth cap 4（防循環 cause）。 */
+export function netErrorCode(err: unknown): string | null {
+  let e: unknown = err;
+  for (let depth = 0; depth < 4 && e; depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code;
+    const ag = (e as { errors?: unknown[] }).errors; // AggregateError（dual-stack）
+    if (Array.isArray(ag) && ag.length > 0) {
+      const first = (ag[0] as { code?: unknown })?.code;
+      if (typeof first === "string" && first.length > 0) return first;
+    }
+    e = (e as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/** 分類 fetch 網絡錯誤（pure — FX-19 unit test 靶）：
+ *  - "outcome-unknown" = 斷線（ECONNRESET/EPIPE/UND_ERR_SOCKET）— send 路徑 → UNKNOWN
+ *  - "transient" = 肯定未送到（DNS/ECONNREFUSED）— 重試安全
+ *  - "other" = 無 code / 其他 — 保持原行為（rethrow，worker 既有 transient 口徑） */
+export function classifyFetchNetError(err: unknown): FetchNetErrorClass {
+  const code = netErrorCode(err);
+  if (code === null) return "other";
+  if (OUTCOME_UNKNOWN_NET_CODES.has(code)) return "outcome-unknown";
+  if (TRANSIENT_NET_CODES.has(code)) return "transient";
+  return "other";
+}
+
+/**
+ * 結果未知（body 可能已達 Graph）— send 路徑專用。caller（outbound.worker S1-15）按
+ * `err.name === "TimeoutError"` 分 UNKNOWN 路徑（UNKNOWN + 禁重發）— ★ 故呢度刻意
+ * `name = "TimeoutError"`：同 timeout 同屬「已送、結果未知」類別，零改 outbound.worker
+ * （lane B 檔案；如老細想要獨立 instanceof 語義，worker 加一行 `instanceof GraphOutcomeUnknownError`
+ * 喺 TimeoutError 檢查之前即可，行為不變）。
+ */
+export class GraphOutcomeUnknownError extends Error {
+  constructor(netCode: string, original: Error) {
+    super(`graph ${netCode} after body send — outcome unknown（request 可能已達 Graph，禁重發）: ${original.message}`);
+    this.name = "TimeoutError"; // 見 class 註釋
+    this.cause = original;
+  }
+}
+
+/** 包 fetch + 網絡錯誤分類。
+ *  - `outcomeUnknown: true`（send 路徑）：斷線 → GraphOutcomeUnknownError（UNKNOWN 路徑）；
+ *  - 其他 / outcomeUnknown: false（upload / GET）：一律 rethrow 原始錯誤（worker 既有 transient 口徑 —
+ *    upload 重試安全（無訊息發出）、GET 無副作用）。 */
+export async function graphFetch(
+  url: string,
+  init: RequestInit,
+  opts: { outcomeUnknown?: boolean } = {}
+): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    const cls = classifyFetchNetError(err);
+    const code = netErrorCode(err);
+    if (opts.outcomeUnknown && cls === "outcome-unknown") {
+      log.warn({ netCode: code ?? "?" }, "graph: socket died after body send — outcome unknown");
+      throw new GraphOutcomeUnknownError(code ?? "UNKNOWN", err instanceof Error ? err : new Error(String(err)));
+    }
+    if (cls !== "other") log.warn({ netCode: code ?? "?", cls }, "graph: fetch network failure — rethrow 原錯誤（此路徑非 send outcome-unknown 口徑 — upload/GET 重試安全）");
+    throw err;
+  }
+}
+
+/** send 路徑用：response body 中途斷線（fetch 已 resolve、讀 body 時 socket 死）同屬「已送、結果未知」。
+ *  JSON 爛（真 parse 失敗）→ 返 null（保持原有 `res.json().catch(() => null)` 口徑）。 */
+async function graphJsonFatalOnSocketDeath(res: Response): Promise<unknown> {
+  try {
+    return await res.json();
+  } catch (err) {
+    if (classifyFetchNetError(err) === "outcome-unknown") {
+      const code = netErrorCode(err);
+      log.warn({ netCode: code ?? "?" }, "graph: socket died mid-response after body send — outcome unknown");
+      throw new GraphOutcomeUnknownError(code ?? "UNKNOWN", err instanceof Error ? err : new Error(String(err)));
+    }
+    return null;
+  }
+}
+
 export interface SendTextResult {
   wamid: string;
   /** mock mode = true */
@@ -77,23 +177,27 @@ export async function sendTextMessage(opts: {
     return { wamid, mocked: true };
   }
 
-  const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken()}`,
-      "Content-Type": "application/json",
+  const res = await graphFetch(
+    `${GRAPH_BASE}/${phoneNumberId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body },
+      }),
+      // ★ cwi-final S1-15：hang 住嘅 Graph call 10s 超时 → TimeoutError → outbound 標 UNKNOWN（結果未知）
+      signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
     },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body },
-    }),
-    // ★ cwi-final S1-15：hang 住嘅 Graph call 10s 超时 → TimeoutError → outbound 標 UNKNOWN（結果未知）
-    signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
-  });
+    { outcomeUnknown: true } // ★ cwi-qa FX-19：斷線（ECONNRESET/UND_ERR_SOCKET）→ 結果未知 → UNKNOWN（禁重發）
+  );
 
-  const data = (await res.json().catch(() => null)) as
+  const data = (await graphJsonFatalOnSocketDeath(res)) as
     | { messages?: { id: string }[]; error?: { message?: string; code?: number } }
     | null;
 
@@ -155,27 +259,31 @@ export async function sendTemplateMessage(opts: {
     return { wamid, mocked: true };
   }
 
-  const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken()}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "template",
-      template: {
-        name: templateName,
-        language: { code: language },
-        components,
+  const res = await graphFetch(
+    `${GRAPH_BASE}/${phoneNumberId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken()}`,
+        "Content-Type": "application/json",
       },
-    }),
-    // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
-    signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
-  });
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "template",
+        template: {
+          name: templateName,
+          language: { code: language },
+          components,
+        },
+      }),
+      // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
+      signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
+    },
+    { outcomeUnknown: true } // ★ cwi-qa FX-19：同 sendTextMessage
+  );
 
-  const data = (await res.json().catch(() => null)) as
+  const data = (await graphJsonFatalOnSocketDeath(res)) as
     | { messages?: { id: string }[]; error?: { message?: string; code?: number } }
     | null;
 
@@ -227,11 +335,12 @@ export async function uploadMedia(opts: {
   form.append("type", opts.mime);
   // ★ TS/Node 22：Buffer 唔係 BlobPart — copy 入新 ArrayBuffer 才過 type check
   form.append("file", new Blob([new Uint8Array(opts.buf)], { type: opts.mime }), opts.filename);
-  const res = await fetch(`${GRAPH_BASE}/${opts.phoneNumberId}/media`, {
+  const res = await graphFetch(`${GRAPH_BASE}/${opts.phoneNumberId}/media`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken()}` },
     body: form,
     signal: AbortSignal.timeout(Number(process.env.GRAPH_UPLOAD_TIMEOUT_MS ?? 30_000)),
+    // ★ cwi-qa FX-19：upload 唔設 outcomeUnknown — 斷線 = 可重試（無訊息發出；mediaId 30 日過期）
   });
   const data = (await res.json().catch(() => null)) as { id?: string; error?: { code?: number; message?: string } } | null;
   if (!res.ok || !data?.id) {
@@ -288,18 +397,22 @@ export async function sendMediaMessage(opts: {
   const media: Record<string, unknown> = { id: mediaId };
   if (opts.caption) media.caption = opts.caption;
   if (kind === "document" && opts.filename) media.filename = opts.filename;
-  const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken()}`,
-      "Content-Type": "application/json",
+  const res = await graphFetch(
+    `${GRAPH_BASE}/${phoneNumberId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ messaging_product: "whatsapp", to, type: kind, [kind]: media }),
+      // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
+      signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
     },
-    body: JSON.stringify({ messaging_product: "whatsapp", to, type: kind, [kind]: media }),
-    // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
-    signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
-  });
+    { outcomeUnknown: true } // ★ cwi-qa FX-19：同 sendTextMessage
+  );
 
-  const data = (await res.json().catch(() => null)) as
+  const data = (await graphJsonFatalOnSocketDeath(res)) as
     | { messages?: { id: string }[]; error?: { message?: string; code?: number } }
     | null;
 
@@ -341,11 +454,11 @@ export async function getMediaInfo(mediaId: string): Promise<MediaInfo> {
       mocked: true,
     };
   }
-  const res = await fetch(`${GRAPH_BASE}/${mediaId}`, {
+  const res = await graphFetch(`${GRAPH_BASE}/${mediaId}`, {
     headers: { Authorization: `Bearer ${accessToken()}` },
     // ★ cwi-final S1-15：同 send 路徑 — 10s 超时 → TimeoutError（caller media.ts catch 後 retry）
     signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
-  });
+  }); // ★ cwi-qa FX-19：GET 無副作用 — 網絡錯誤保持原樣（rethrow → caller retry 安全）
   const data = (await res.json().catch(() => null)) as
     | { id: string; url: string; mime_type: string; file_size?: number; error?: { message?: string; code?: number } }
     | null;
@@ -377,10 +490,10 @@ export async function getPhoneQualityRating(phoneNumberId: string, timeoutMs = 1
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}?fields=quality_rating`, {
+    const res = await graphFetch(`${GRAPH_BASE}/${phoneNumberId}?fields=quality_rating`, {
       headers: { Authorization: `Bearer ${accessToken()}` },
       signal: controller.signal,
-    });
+    }); // ★ cwi-qa FX-19：GET 無副作用 — 網絡錯誤保持原樣
     const data = (await res.json().catch(() => null)) as
       | { quality_rating?: string; error?: { message?: string } }
       | null;
@@ -514,19 +627,23 @@ export async function sendFlowMessage(opts: {
     return { wamid, mocked: true };
   }
 
-  const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken()}`,
-      "Content-Type": "application/json",
+  const res = await graphFetch(
+    `${GRAPH_BASE}/${phoneNumberId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken()}`,
+        "Content-Type": "application/json",
+      },
+      // ★ cwi-final S5-10：新 Meta 格式（interactive.body.text + action.parameters；舊格式真機 139000）
+      body: JSON.stringify(buildFlowPayload(to, flow)),
+      // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
+      signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
     },
-    // ★ cwi-final S5-10：新 Meta 格式（interactive.body.text + action.parameters；舊格式真機 139000）
-    body: JSON.stringify(buildFlowPayload(to, flow)),
-    // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
-    signal: AbortSignal.timeout(Number(process.env.GRAPH_TIMEOUT_MS ?? 10_000)),
-  });
+    { outcomeUnknown: true } // ★ cwi-qa FX-19：同 sendTextMessage
+  );
 
-  const data = (await res.json().catch(() => null)) as
+  const data = (await graphJsonFatalOnSocketDeath(res)) as
     | { messages?: { id: string }[]; error?: { message?: string; code?: number } }
     | null;
   if (!res.ok || !data?.messages?.[0]?.id) {
@@ -569,10 +686,10 @@ const MOCK_TEMPLATES: MessageTemplate[] = [
  */
 export async function listMessageTemplates(wabaId: string): Promise<MessageTemplate[]> {
   if (waMock()) return MOCK_TEMPLATES;
-  const res = await fetch(
+  const res = await graphFetch(
     `${GRAPH_BASE}/${wabaId}/message_templates?fields=name,language,category,status&limit=50`,
     { headers: { authorization: `Bearer ${accessToken()}` }, signal: AbortSignal.timeout(10000) }
-  );
+  ); // ★ cwi-qa FX-19：GET 無副作用 — 網絡錯誤保持原樣
   if (!res.ok) throw new Error(`templates http ${res.status}`);
   return (await res.json()).data as MessageTemplate[];
 }
