@@ -2,6 +2,7 @@ import prisma from "@/lib/prisma";
 import { getServerSession } from "@/lib/session-server";
 import { redirect } from "next/navigation";
 import { AccountCard } from "@/components/inbox/account-card";
+import { LegalLinks } from "@/components/legal-links";
 
 /**
  * /account — 帳戶頁（cwi-notify-v2-20260903 MD §5）。
@@ -33,6 +34,10 @@ export default async function AccountPage() {
       <div className="max-w-md mx-auto px-4 py-6 space-y-4">
         <h1 className="text-lg font-semibold text-t1">帳戶</h1>
         <AccountCard name={session.name} email={session.email} role={session.role} clinics={clinics} />
+        {/* ★ cwi-ux UX-06：法律頁入口（同 login/admin 同一組 link） */}
+        <div className="text-[11px] text-t3 text-center">
+          <LegalLinks />
+        </div>
       </div>
     </div>
   );

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Shield } from "lucide-react";
+import { LegalLinks } from "@/components/legal-links";
 
 /**
  * /login — Organic 登入頁（設計稿 1h）：
@@ -43,10 +44,11 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-canvas p-4">
-      <form
-        onSubmit={submit}
-        className="relative w-full max-w-[460px] min-h-[600px] bg-panel rounded-[32px] shadow-md overflow-hidden flex flex-col justify-center gap-6 px-11 py-10"
-      >
+      <div className="flex flex-col items-center gap-3 w-full max-w-[460px]">
+        <form
+          onSubmit={submit}
+          className="relative w-full min-h-[600px] bg-panel rounded-[32px] shadow-md overflow-hidden flex flex-col justify-center gap-6 px-11 py-10"
+        >
         {/* 裝飾圓（溢出卡外被 overflow-hidden 裁） */}
         <div className="absolute -top-[110px] -right-[120px] w-[300px] h-[300px] rounded-full bg-brand-soft pointer-events-none" />
         <div className="absolute -bottom-[60px] -left-[70px] w-[170px] h-[170px] rounded-full bg-danger-soft pointer-events-none" />
@@ -105,6 +107,11 @@ export default function LoginPage() {
           </div>
         </div>
       </form>
+        {/* ★ cwi-ux UX-06：未登入就見到法律頁入口（Meta 審核要喺 app 搵到私隱政策） */}
+        <div className="text-center text-[11px] text-t3">
+          <LegalLinks />
+        </div>
+      </div>
     </div>
   );
 }
