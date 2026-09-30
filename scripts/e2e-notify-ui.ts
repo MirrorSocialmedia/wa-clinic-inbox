@@ -509,6 +509,17 @@ async function rowUnreadBadge(P: PageLike, name: string): Promise<number> {
 async function unlockAudio(P: PageLike): Promise<Awaited<ReturnType<typeof spy>>> {
   const gear = P.locator('[aria-label="通知設定"]').first();
   await gear.click(); // 開（trusted pointerdown — 音頻解鎖就係呢一下）
+  // ★ cwi-qa CI-T166：等 app 真係解鎖先返 — 舊版固定 sleep 500+800ms。app 喺 0 音量 chime 嘅
+  //   play() promise resolve 先設 audioUnlocked（notify-client.ts unlockAudio）；未解鎖 fireNotify 唔播頁面音。
+  //   CI 冷 dev server 首次攞 /chime.wav 可 >1.3s → 事件早到 → 冇聲但 OS 通知照出 → cond 以 title hit →
+  //   「冇 play notify-urgent.mp3」（run 36664759121 T166；sim2 T168「冇 chime」同源）。
+  //   設定面板嘅「音效：已解鎖 ✅」直接由 audioUnlocked 驅動 — 用佢做 ready 訊號（15s 上限，逾時照行、斷言自己會紅）。
+  const unlocked = await P.getByText(/音效：(已解鎖|App 模式)/)
+    .first()
+    .waitFor({ state: "visible", timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!unlocked) console.log("unlockAudio: 15s 內未見「音效：已解鎖」（audio play() 未 resolve）");
   await new Promise((r) => setTimeout(r, 500));
   await P.locator('div.fixed.inset-0[aria-hidden="true"]')
     .click({ timeout: 5000 })

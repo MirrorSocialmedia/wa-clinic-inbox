@@ -39,6 +39,11 @@ let closing = false;
 async function shutdown(sig: string) {
   if (closing) return;
   closing = true;
+  // ★ cwi-qa CI-T692：shutdown 一開始就停 heartbeat — 舊版 interval 喺 close() 等 in-flight job 期間
+  //   照寫 → 一個卡喺 graceful shutdown 嘅 worker（已停 poll、唔再做嘢）/healthz 永遠 200。
+  //   停咗之後 key 最多 90s 過期 → 503（真實反映「冇 worker 接 job」）；唔 DEL — PM2 reload 時新 worker
+  //   可能已寫咗新 heartbeat。
+  clearInterval(heartbeatTimer);
   log.info({ sig }, "worker shutting down（graceful — 等晒 in-flight job）");
   // BullMQ Worker.close() = 停 poll + wait in-flight job 完成先返
   await Promise.allSettled(workers.map((w) => w.close()));
@@ -51,7 +56,7 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 // heartbeat：EX 90 + /healthz 120s 窗口 — worker 死/掛 → 90s 內 key 過期 → healthz 503
 //   （外部 uptime monitor 每分鐘打 /healthz 接警；.unref() 唔阻 process exit）
-setInterval(() => {
+const heartbeatTimer = setInterval(() => {
   void getRedis().set(WORKER_HEARTBEAT_KEY, String(Date.now()), "EX", 90).catch(() => undefined);
 }, 30_000).unref();
 

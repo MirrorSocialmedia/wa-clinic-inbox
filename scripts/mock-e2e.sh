@@ -2736,7 +2736,11 @@ check "T82 AiDraft 10d DISCARDED 保留（未 90d）" "$(q "SELECT count(*)::tex
 check "T82 StaffNotice 已讀 100d 刪" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE id='$N_OLD'" | jf c)" "0"
 check "T82 StaffNotice 已讀 10d 保留" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE id='$N_RECENT'" | jf c)" "1"
 check "T82 StaffNotice 未讀保留" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE id='$N_UNREAD'" | jf c)" "1"
-T82_OP=$(q "SELECT count(*)::text c FROM \"OpsReport\" WHERE \"clinicId\"='' AND \"periodStart\"::date = CURRENT_DATE" | jf c)
+# ★ cwi-qa CI-C4b：periodStart = 「當日 00:00 本地」（retention-purge.ts setHours(0) — process TZ=HKT）
+#   = UTC 前一日 16:00；舊寫法 `::date = CURRENT_DATE` 用 PG session TZ（CI service container = UTC）→
+#   UTC 00:00–16:00 跑必紅（run 36664759121 03:46Z 實錚；UTC 16:00 後先啱 — 本地 sim3 18:35Z 假綠）。
+#   兩邊都換算 HKT 再比日（同產品「當日」語義一致）。
+T82_OP=$(q "SELECT count(*)::text c FROM \"OpsReport\" WHERE \"clinicId\"='' AND (\"periodStart\" AT TIME ZONE 'Asia/Hong_Kong')::date = (now() AT TIME ZONE 'Asia/Hong_Kong')::date" | jf c)
 [ -n "$T82_OP" ] && [ "$T82_OP" -ge 1 ] && pass "T82 OpsReport 落庫（當日 run 記錄）" || { fail "T82 OpsReport 未落庫（count=$T82_OP）"; T82=1; }
 grep -q "retention-purge: done" /tmp/e2e-worker*.log 2>/dev/null && pass "T82 log metadata only（retention-purge: done + counts）" || { fail "T82 retention-purge log"; T82=1; }
 # hermetic：清 fixture 殘留
@@ -9008,6 +9012,25 @@ t692_leaf_pid() {
     tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '--import' && echo "$p"
   done | tail -1
 }
+# ★ cwi-qa CI-T692b：清晒所有 worker 先再起新嗰個 — 舊寫法 `pkill -f … ; sleep 1` 只發一次 SIGTERM 等 1 秒；
+#   前面段落嘅 worker 如果卡喺 graceful shutdown（close() 等 in-flight job），會一直活住兼寫 heartbeat
+#  （src/workers/index.ts 舊版 shutdown 唔停 interval）→ T692(b) kill 咗新 worker 之後 /healthz 照 200
+#  （run 36664759121：kill 後 150s 都係 200）。SIGTERM → 最多等 20s → 仲喺度就 SIGKILL → 確認清零。
+t692_stop_all_workers() {
+  pkill -f 'src/workers/index[.]ts' 2>/dev/null || true
+  local i
+  for i in $(seq 1 20); do
+    pgrep -f 'src/workers/index[.]ts' >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  echo "    ⚠ T692：worker 20s 內未退出（卡 graceful shutdown）→ SIGKILL：$(pgrep -f 'src/workers/index[.]ts' | tr '\n' ' ')"
+  pkill -9 -f 'src/workers/index[.]ts' 2>/dev/null || true
+  for i in $(seq 1 10); do
+    pgrep -f 'src/workers/index[.]ts' >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  return 1
+}
 
 # ── T692(a): SIGINT 喺慢 Graph call 中 → in-flight job 完成、Graph 唔重複 ──────────────
 if [ -f /tmp/e2e-push-tls/ca.pem ]; then export NODE_EXTRA_CA_CERTS=/tmp/e2e-push-tls/ca.pem; fi
@@ -9051,8 +9074,7 @@ if [ "$A_UP" = 1 ]; then
 fi
 
 # ── T692(b): kill -9 → /healthz 503 喺 2 分鐘內 ──────────────────────────────
-pkill -f "src/workers/index.ts" 2>/dev/null || true
-sleep 1
+t692_stop_all_workers || { fail "T692(b) 前置：舊 worker 殺唔清"; T692=1; }
 nohup pnpm worker >"$T692_WLOG_B" 2>&1 &
 WORKER_PID=$!
 B_UP=0
@@ -9084,6 +9106,13 @@ if [ "$B_UP" = 1 ] && [ -n "${MSG_692:-}" ]; then
   [ -n "$W692B" ] || { fail "T692(b) 搵唔到 worker leaf pid"; T692=1; }
   if [ -n "$W692B" ]; then
     kill -9 "$W692B"
+    # ★ cwi-qa CI-T692b：worker 死 = 成條 process tree 死（tsx CLI 父 process 唔寫 heartbeat，但留住會
+    #   令「幾多個 worker 喺度」唔確定）— 一併 SIGKILL，確保 heartbeat writer = 0
+    pkill -9 -f 'src/workers/index[.]ts' 2>/dev/null || true
+    sleep 1
+    if pgrep -f 'src/workers/index[.]ts' >/dev/null 2>&1; then
+      fail "T692(b) kill -9 後仲有 worker process：$(pgrep -af 'src/workers/index[.]ts' | cut -c1-120 | tr '\n' ';')"; T692=1
+    fi
     B_503=0
     for i in $(seq 1 150); do
       CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$BASE/healthz$HEALTHZ_QS" 2>/dev/null || echo 000)
@@ -9096,6 +9125,7 @@ if [ "$B_UP" = 1 ] && [ -n "${MSG_692:-}" ]; then
 fi
 
 # ── T692(c): redis 重啟 → worker 自己恢復（pid 不變 = dev 等效 PM2 restarts=0）────────────────
+t692_stop_all_workers || { fail "T692(c) 前置：舊 worker 殺唔清"; T692=1; }
 nohup pnpm worker >"$T692_WLOG_C" 2>&1 &
 WORKER_PID=$!
 C_UP=0
