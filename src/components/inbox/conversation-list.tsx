@@ -387,6 +387,22 @@ export function ConversationList(p: Props) {
   const [overflowCollapsed, setOverflowCollapsed] = useState(false);
   const capsuleRowRef = useRef<HTMLDivElement>(null);
   const measureWrapRef = useRef<HTMLDivElement>(null);
+  // ★ cwi-ux UX-04（診斷行）：版面問題第一手數據 — 設定面板底部常駐：
+  //   視窗 / 螢幕高 / safe-bottom（env probe）/ App|瀏覽器。下次有人報版面問題，截圖呢行即知。
+  const [viewportDiag, setViewportDiag] = useState<string | null>(null);
+  useEffect(() => {
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none;padding-bottom:env(safe-area-inset-bottom);";
+    document.body.appendChild(probe);
+    const safeBottom = probe.offsetHeight;
+    probe.remove();
+    const standalone =
+      window.matchMedia("(display-mode: standalone)").matches ||
+      (navigator as unknown as { standalone?: boolean }).standalone === true;
+    setViewportDiag(
+      `視窗 ${window.innerHeight}px · 螢幕 ${screen.height}px · safe-bottom ${safeBottom}px · ${standalone ? "App" : "瀏覽器"}`
+    );
+  }, []);
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 399px)");
     const on = () => setNarrow(mq.matches);
@@ -836,6 +852,8 @@ export function ConversationList(p: Props) {
             <div className="text-[10px] text-t3 pt-1.5 border-t border-line">
               閂咗分頁都收到通知（Web Push）；逐店靜音 / 訊息通知選項已同步 server（push 都生效）
             </div>
+            {/* ★ cwi-ux UX-04：診斷行（版面問題截圖呢行 — viewport / safe-area / 模式） */}
+            {viewportDiag && <div className="text-[9px] text-t3/80 font-mono pt-1">{viewportDiag}</div>}
           </div>
         </>
       )}

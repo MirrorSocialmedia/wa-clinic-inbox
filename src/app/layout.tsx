@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Caprasimo, Figtree, Geist_Mono, Noto_Sans_TC } from "next/font/google";
 import "./globals.css";
 
@@ -31,6 +31,18 @@ const notoTC = Noto_Sans_TC({
 export const metadata: Metadata = {
   title: "WA Clinic Inbox",
   description: "診所 WhatsApp 共用收件箱（internal tool）",
+};
+
+/**
+ * ★ cwi-ux UX-04：viewport-fit=cover — Android edge-to-edge（安裝版）必給：
+ *   冇呢個 env(safe-area-inset-*) 永遠 = 0（app 唔知被系統狀態列／導覽列遮住幾多）。
+ *   themeColor = 鼠尾草綠（同 manifest.theme_color 一致 — 狀態列底色）。
+ */
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#7a8a5e",
 };
 
 /** first paint 前定 theme：固定 light（Organic 今輪無暗色；ThemeToggle 未 render，[data-theme=dark] block 保留但唔觸發）。 */

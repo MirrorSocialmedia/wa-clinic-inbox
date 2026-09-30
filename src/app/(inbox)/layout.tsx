@@ -31,7 +31,11 @@ export default async function InboxLayout({
   });
 
   return (
-    <div className="h-dvh bg-canvas flex overflow-hidden theme-transition">
+    <div className="fixed inset-0 bg-canvas flex overflow-hidden theme-transition pt-[env(safe-area-inset-top)]">
+      {/* ★ cwi-ux UX-04：app-shell 防 body 捲（edge-to-edge 下外框比可視範圍高 → body 可捲 =
+          「向下拉先見到」根因）。只套 (inbox) 群 — /login、(public) 法律頁、/ops、管理頁係長頁要捲。
+          fixed inset-0 外框自身已 overflow-hidden；呢個 style 雙保險禁 html/body 級捲動 + 橡皮筋。 */}
+      <style>{`html,body{height:100%;overflow:hidden;overscroll-behavior:none;}`}</style>
       {/* v2 PWA（cwi-notify-v2）：manifest + SW 註冊（tab 閂咗都收到通知） */}
       <link rel="manifest" href="/manifest.webmanifest" />
       <SwRegistrar />
