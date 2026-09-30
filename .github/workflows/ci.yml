@@ -70,6 +70,9 @@ jobs:
       #   150s 夠最快 unit（company-sync ~30s）冷 runner 跑完，卡死個直接 kill → 清晰失敗。
       - run: for f in scripts/unit-*.ts; do timeout 150 pnpm tsx "$f" || exit 1; done
       - run: pnpm test:ordering
+      # ★ cwi-qa CI-T1：src/**/*.test.ts（15 檔 — FX-02～14、FX-16/24～29/32 嘅 T76x／T77x）以前 CI 一個都冇跑。
+      #   獨立 DB wa_t + Redis db 5（唔污染 mock-e2e）；臨時 .env 跑完即刪。本地模擬 15/15 綠；故意 fail 測試會紅。
+      - run: bash scripts/ci-src-tests.sh
       - run: pnpm tsx scripts/e2e-authz-matrix.ts   # T630
       - run: bash scripts/mock-e2e.sh --ci
       # ★ cwi-qa CI-D1：失敗時上傳 server／worker log — CI 之前只見 mock-e2e stdout，dev server 嘅真錯誤
