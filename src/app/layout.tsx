@@ -31,6 +31,14 @@ const notoTC = Noto_Sans_TC({
 export const metadata: Metadata = {
   title: "WA Clinic Inbox",
   description: "診所 WhatsApp 共用收件箱（internal tool）",
+  // ★ cwi-ux UX-02：manifest / icon 移去 root layout（Next metadata API → 正確寫入 <head>；
+  //   所有頁面包括 /login 都有 manifest — 舊版只喺 (inbox) 登入後頁，/login 加入主畫面攞唔到 manifest）。
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [{ url: "/icon-192.png", sizes: "192x192", type: "image/png" }],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
+  appleWebApp: { capable: true, title: "WA Inbox", statusBarStyle: "default" },
 };
 
 /**

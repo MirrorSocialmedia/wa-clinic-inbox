@@ -36,8 +36,7 @@ export default async function InboxLayout({
           「向下拉先見到」根因）。只套 (inbox) 群 — /login、(public) 法律頁、/ops、管理頁係長頁要捲。
           fixed inset-0 外框自身已 overflow-hidden；呢個 style 雙保險禁 html/body 級捲動 + 橡皮筋。 */}
       <style>{`html,body{height:100%;overflow:hidden;overscroll-behavior:none;}`}</style>
-      {/* v2 PWA（cwi-notify-v2）：manifest + SW 註冊（tab 閂咗都收到通知） */}
-      <link rel="manifest" href="/manifest.webmanifest" />
+      {/* ★ cwi-ux UX-02：manifest link 已移去 root layout（metadata API）— 呢行刪（避免重複） */}
       <SwRegistrar />
       <NavRail name={session.name} email={session.email} role={session.role} />
       <div className="flex-1 min-w-0 min-h-0 flex flex-col">

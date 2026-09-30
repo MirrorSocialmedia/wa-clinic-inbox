@@ -15,7 +15,7 @@
 
 // ★ cwi-realtime-fix §8.3 (T279)：版本標記 — activate 時 console.info（console 可追溯 SW 更新）。
 //   SW 邏輯任何改動都要 bump 呢個值（byte 變 → 瀏覽器自動偵測新 version）。
-const SW_VERSION = "2026-09-18-s02";
+const SW_VERSION = "2026-09-30-ux02"; // ★ cwi-ux UX-02：manifest 加 maskable icon + id/scope → bump（已安裝 App 攞新 manifest）
 
 self.addEventListener("install", (e) => self.skipWaiting());
 self.addEventListener("activate", (e) => {
