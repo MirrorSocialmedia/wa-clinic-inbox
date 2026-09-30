@@ -421,7 +421,7 @@ async function main(): Promise<void> {
     // 註：ortho DISCOVER 有 3 個 slot 問句（appearance/speed/timeline）→ 3 句行問句 + 第 4 句 PRESENT_OPTIONS（實測 2026-09-15；
     //     2/3 句帶 FLOOR 詞「箍牙」= deterministic trigger（唔靠 LLM sessionTrigger））。
     let sandboxId: string | null = null;
-    let stageAt: Record<number, string> = {};
+    const stageAt: Record<number, string> = {}; // ★ cwi-qa FX-01：prefer-const（唔會 reassign）
     let t4: any = null;
     for (let i = 0; i < seq.length; i++) {
       const r = await apiPost("/api/admin/ai-sandbox/run", { clinicId: C1, message: seq[i], sandboxId: sandboxId ?? undefined }, adminCookie);

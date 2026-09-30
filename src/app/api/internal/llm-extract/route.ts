@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import log from "@/lib/log";
-import { getRedis } from "@/lib/queue";
+// ★ cwi-qa CI-R1：request 路徑用有 commandTimeout 嘅 client（Redis 斷線唔會令請求吊死）
+import { getAppRedis as getRedis } from "@/lib/queue";
 import { open, seal, REQ_CONTEXT, respContext, type Envelope } from "@/lib/internal/llm-envelope";
 import { extractQuoteItems, type TermLite } from "@/lib/internal/quote-llm";
 

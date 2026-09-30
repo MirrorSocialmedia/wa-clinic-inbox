@@ -9,8 +9,10 @@ import { resolveClinicIds } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 import { recordLoginAudit } from "@/lib/auth-audit";
 import { clearLoginFailures } from "@/lib/auth-lockout";
-import { getRedis } from "@/lib/queue";
+// ★ cwi-qa CI-R1：request 路徑用有 commandTimeout 嘅 client（Redis 斷線唔會令請求吊死）
+import { getAppRedis as getRedis } from "@/lib/queue";
 import { matchedTotpStep } from "@/lib/totp";
+import { verifyTotpStep } from "@/lib/totp-verify";
 import { decryptTotpSecret } from "@/lib/totp-enc";
 import { clientIpFromHeaders, hit, loginSoftDelayMs } from "@/lib/rate-limit";
 import { waMock } from "@/lib/wa/graph";
@@ -135,19 +137,8 @@ export const POST = handle(async (req: NextRequest) => {
       log.error({ staffId: user.id, err: err instanceof Error ? err.message : String(err) }, "login: totp secret decrypt failed — TOTP_ENC_KEY 丟/錯？");
       return NextResponse.json({ error: "internal error" }, { status: 500 });
     }
-    const step = matchedTotpStep(secret, parsed.data.totp);
-    // ★ S3-5 防重放：code 實際 step <= 上次已用 step（totp:last EX 120）→ 拒（同 code 唔可以用第二次）
-    let replay = false;
-    let last: string | null = null;
-    if (step !== null) {
-      try {
-        last = await getRedis().get(`totp:last:${user.id}`);
-      } catch (err) {
-        log.warn({ err: err instanceof Error ? err.message : String(err) }, "login: totp:last Redis 讀失敗（fail-open）");
-      }
-      if (last !== null && last !== "" && step <= parseInt(last, 10)) replay = true;
-    }
-    if (step === null || replay) {
+    const v = await verifyTotpStep(user.id, secret, parsed.data.totp);
+    if (!v.ok) {
       // 錯/過期/重放 code → 統一 401（唔洩露細節）+ totpfail 計數（≥5 → 423）
       const n = await totpFail(user.id);
       if (n >= 5) {
@@ -155,11 +146,6 @@ export const POST = handle(async (req: NextRequest) => {
         return NextResponse.json({ error: "totp locked — 15 分鐘後再試" }, { status: 423 });
       }
       return unauthorized();
-    }
-    try {
-      await getRedis().set(`totp:last:${user.id}`, String(step), "EX", 120);
-    } catch (err) {
-      log.warn({ err: err instanceof Error ? err.message : String(err) }, "login: totp:last Redis 寫失敗（防重放降級 — 登入放行）");
     }
     // 成功 = 失敗「連續」斷裂：清 totpfail（防跨 run 累積 flake；EX 900 自然過期係主機制）
     await getRedis().del(`totpfail:${user.id}`).catch(() => undefined);

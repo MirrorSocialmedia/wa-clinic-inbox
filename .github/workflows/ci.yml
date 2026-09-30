@@ -3,12 +3,27 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    # ★ cwi-qa FX-01（QA-01）：job 級 timeout — 舊 run 卡 unit 唔退出 6 小時（unit-reminder/session-engine
+    #   冇 process.exit + BullMQ queue 連接 keep event loop 活著）；240 分鐘上限兜底。
+    timeout-minutes: 240
     services:
-      postgres: { image: postgres:16, env: { POSTGRES_PASSWORD: pw, POSTGRES_DB: wa }, ports: ["15432:5432"], options: "--health-cmd pg_isready" }
-      redis: { image: redis:7, ports: ["6379:6379"] }
+      # ★ cwi-qa FX-01（QA-01）：health-cmd 必係單 token（pg_isready）— options 由 GitHub 按空白
+      #   拆 token 傳 docker create（無 shell 層）：多詞命令（例 'pg_isready -U postgres'）會拆出
+      #   unknown flag: -U → Initialize containers 14s 即紅（實測 run 36424082016）。pg_isready
+      #   唔做 auth（收到任何 server response 即 ready）→ 單 token 就夠；main 實測 4 連綠
+      #   （36300671621 / 36315857764 / 36352735331 / 36378302792，35–43s）。
+      # ★ cwi-qa CI-C1：PGUSER=postgres — health-cmd pg_isready 喺 container 內以 root 身份連 → 每 5 秒一行
+      #   `FATAL: role "root" does not exist`（run 36527615294 log 尾 ~1400 行全係呢個，蓋住真錯誤）。
+      postgres: { image: postgres:16, env: { POSTGRES_PASSWORD: pw, POSTGRES_DB: wa, PGUSER: postgres }, ports: ["15432:5432"], options: "--health-cmd pg_isready --health-interval 5s --health-retries 10" }
+      redis: { image: redis:7, ports: ["6379:6379"], options: "--health-cmd redis-cli --health-interval 5s --health-retries 10" }
     env:
       DATABASE_URL: "postgresql://postgres:pw@localhost:15432/wa?connection_limit=15&pool_timeout=10"
       REDIS_URL: redis://localhost:6379
+      # ★ cwi-qa CI-C4：TZ 同生產一致（ecosystem.config.cjs TZ=Asia/Hong_Kong）— runner 預設 UTC。
+      #   mock-e2e 有啲日期用 `date -d '+1 day'`（冇 TZ）計「聽日」，app 用 HKT 計 → UTC 16:00–24:00
+      #   （= HKT 翌日 00:00–08:00）跑 CI 必紅（本地模擬 PC-G1「呢個時段啱啱滿咗」實錚）；作者本機
+      #   TZ=HKT 所以任何時間都綠。
+      TZ: Asia/Hong_Kong
       AI_MOCK: "1"
       WA_MOCK: "1"
       DUTY_MOCK: "1"
@@ -24,10 +39,42 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
+      # ★ cwi-qa FX-01b：確保 redis-cli client 喺 job 容器（runner image 無 redis-tools 就裝）
+      #   mock-e2e --ci [0/9] 用 redis-cli ping 探活；service 已加 health-cmd 保證 ready
+      # ★ cwi-qa CI-C2：只裝 redis-tools（redis-cli）— 唔好裝 redis-server：Ubuntu postinst 會起 systemd
+      #   redis-server.service（Restart=always）去搶 127.0.0.1:6379，同 service container 撞；T81／T692
+      #   停 container redis 嗰刻 6379 可能俾佢搶走（run #16/#17「redis 起唔返」嘅嫌疑源）。
+      #   CI 重啟 redis 一律 docker restart service container（T81／T692 同一招）。
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-tools
       - run: pnpm install --frozen-lockfile
       - run: pnpm migrate:deploy && pnpm db:seed
+      # ★ cwi-qa CI-C3：FX-01 臨時 psql（seed admin 改 ALL）已刪 — FX-02 已上線（seed 帶 scopeType: ALL）。
+      #   保留呢句會遮住 FX-02 迴歸（seed 再壞都唔會喺 CI 見到）。
+      # ★ cwi-qa FX-01b（run 36425409185 step 10 實測）：unit-knowledge 前置 = TKW 知識庫骨架
+      #   （scripts/seed-knowledge.ts，44 條，冪等；unit 檔頭明載「TKW 需已 seed」）— fresh DB 冇跑
+      #   過 → pickKnowledge 5 項全紅。本地 dev DB 係歷史跑過，所以本機綠 / CI 紅。
+      - run: pnpm tsx scripts/seed-knowledge.ts
+      # ★ cwi-qa（run #8 實錚 36527615294）：J 段 e2e-s21 斷言 seed 契約 = global E rule
+      #   （FollowupRule trigger=QUOTED_NOT_BOOKED enabled）— seed-followup-p4.ts 專責建立（idempotent upsert）
+      #   但 ci.yml 從來冇跑 → fresh DB 冇 E rule → J 段 FATAL → 下游 pipeline cascade（push/T680/T693 全死）。
+      #   本地 dev DB 係歷史跑過所以本機綠 — 同 FX-01b knowledge seed 同類「舊 DB 假綠」。
+      - run: pnpm tsx scripts/seed-followup-p4.ts
       - run: pnpm typecheck && pnpm lint
-      - run: for f in scripts/unit-*.ts; do pnpm tsx "$f" || exit 1; done
+      # ★ cwi-qa FX-01（QA-01）：每個 unit 加 timeout 150 — 舊 run unit 卡死會吊住成個 job 6 小時；
+      #   150s 夠最快 unit（company-sync ~30s）冷 runner 跑完，卡死個直接 kill → 清晰失敗。
+      - run: for f in scripts/unit-*.ts; do timeout 150 pnpm tsx "$f" || exit 1; done
       - run: pnpm test:ordering
       - run: pnpm tsx scripts/e2e-authz-matrix.ts   # T630
       - run: bash scripts/mock-e2e.sh --ci
+      # ★ cwi-qa CI-D1：失敗時上傳 server／worker log — CI 之前只見 mock-e2e stdout，dev server 嘅真錯誤
+      #   （例 `⨯ SyntaxError: Unexpected end of JSON input` manifest race、route stack trace）完全睇唔到，
+      #   每次都要估。Actions 頁 → run → Artifacts → e2e-logs 下載。
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: |
+            /tmp/e2e-*.log
+            /tmp/e2e-*.json
+          if-no-files-found: ignore
+          retention-days: 7

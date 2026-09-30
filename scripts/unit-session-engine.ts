@@ -32,6 +32,9 @@ import {
   type StepCtx,
   type StepResult,
 } from "../src/lib/booking/session-engine";
+// ★ cwi-qa FX-01：尾段明確釋放 shared redis + prisma（見檔尾 exit 註釋）
+import { closeRedis } from "../src/lib/queue";
+import prisma from "../src/lib/prisma";
 import { resolveLevel, globalCap, minLevel, asLevel } from "../src/lib/ai/automation";
 import { SESSION_DEFAULTS } from "../src/lib/workflow/definitions";
 import { parseSessionOutput } from "../src/lib/ai";
@@ -442,3 +445,13 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log(`\nUNIT PASS ✅（session-engine unit，${passes} 項）`);
+
+// ★ cwi-qa FX-01（QA-01 ④）：明確釋放 shared 資源 + 強制 exit —
+//   import 鏈（session-engine / ai index → … → lib/queue）module-level 建 8 個 BullMQ queue
+//   （全部共用同一 shared ioredis）→ event loop 永遠唔空 → process 印完 PASS 唔退出 → CI job 卡 6 小時。
+//   closeRedis() 釋放 shared 連接；prisma.$disconnect() 兜底（鏈上 PrismaClient 已構造）。
+void (async () => {
+  await closeRedis();
+  await prisma.$disconnect();
+  process.exit(failures > 0 ? 1 : 0);
+})();

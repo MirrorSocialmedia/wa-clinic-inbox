@@ -66,7 +66,7 @@ interface ItemRow {
   routedGroupId?: string | null;
   followupDueAt?: string | null;
 }
-let FX: Record<string, string> = {}; // C1..C9 → id
+const FX: Record<string, string> = {}; // C1..C9 → id（★ cwi-qa FX-01：prefer-const）
 let X_ID = "";
 let Y_ID = "";
 let G_ID = "";

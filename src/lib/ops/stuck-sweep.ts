@@ -9,6 +9,12 @@
  *     無 payload（DB 唔存 WA mediaId）→ media worker 見唔到 mediaId → SKIPPED（誠實終態）。
  *  2. ai：最近 30 分鐘 `IN + API + text` 且無 AiDraft 且 `aiQueue.getJob("ai-<id>")=null` → 重 enqueue。
  *
+ * ★ cwi-qa FX-12（QA-12）第 3 條：booking `writeState=WRITING AND writeAttemptAt < now-15min`
+ *   且 booking-write queue 冇該 booking 嘅 active job（jobId 前綴 `bw-<id>-`，nonce 唔穩定
+ *   → getJobIds 掃 + 逐個核 state）→ job 丟失 → UNKNOWN + writeError job_lost_sweep
+ *   （唔係 FAILED — 唔知有冇落到；staff 可撳〔重試〕— 同 idempotency key 冪等安全）。
+ *   背景：claim 只接受 null/FAILED/UNKNOWN → 行卡死 WRITING = 卡片永遠「落單處理緊」。
+ *
  * 冪等：兩邊都靠同 jobId + 前置存在性檢查 — 原 job 仲喺 queue → BullMQ 自動忽略；
  * 已處理（READY / 有 draft）→ 唔會再命中 query。零 PII：log 只計數。
  *
@@ -16,17 +22,20 @@
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { aiQueue, mediaQueue } from "@/lib/queue";
+import { aiQueue, mediaQueue, bookingWriteQueue } from "@/lib/queue";
 
 const PER_ROUND_LIMIT = 50;
 const MEDIA_STUCK_MIN = 10; // PENDING 超過 10 分鐘先算 stuck
 const AI_WINDOW_MIN = 30; // 最近 30 分鐘嘅 IN text
+const WRITING_STUCK_MIN = 15; // ★ cwi-qa FX-12：WRITING 超過 15 分鐘 + 無 active job = job 丟失
 
 export interface StuckSweepResult {
   mediaReenqueued: number;
   aiReenqueued: number;
   mediaScanned: number;
   aiScanned: number;
+  bookingSwept: number; // ★ cwi-qa FX-12
+  bookingScanned: number; // ★ cwi-qa FX-12
   capped: boolean;
 }
 
@@ -92,6 +101,74 @@ export async function runStuckSweep(): Promise<StuckSweepResult> {
   }
 
   const capped = total >= PER_ROUND_LIMIT;
-  log.info({ mediaReenqueued, aiReenqueued, mediaScanned, aiScanned, capped }, "stuck-sweep: done");
-  return { mediaReenqueued, aiReenqueued, mediaScanned, aiScanned, capped };
+  // ★ cwi-qa FX-12：booking WRITING 丟失 sweep（獨立函數 — unit test 可單調，唔觸 ai/media queue）
+  const booking = await sweepStuckBookingWrites(now);
+  log.info(
+    {
+      mediaReenqueued,
+      aiReenqueued,
+      mediaScanned,
+      aiScanned,
+      bookingSwept: booking.bookingSwept,
+      bookingScanned: booking.bookingScanned,
+      capped,
+    },
+    "stuck-sweep: done"
+  );
+  return { mediaReenqueued, aiReenqueued, mediaScanned, aiScanned, bookingSwept: booking.bookingSwept, bookingScanned: booking.bookingScanned, capped };
+}
+
+/**
+ * ★ cwi-qa FX-12（QA-12）：booking `writeState=WRITING` 超過 15 分鐘 + queue 冇該 booking
+ * 嘅 active job → job 丟失 → UNKNOWN + writeError job_lost_sweep。
+ *
+ * 背景：confirm-core claim 只接受 null/FAILED/UNKNOWN（WRITING 唔會再 claim）— job 一旦丟失
+ * （Redis 重啟 job 清咗 / 手動誤刪）→ 行永久 WRITING → 卡片永遠「落單處理緊」。
+ * job 丟失 = 未知有冇寫到 Apricot（job 可能已部分執行）→ UNKNOWN（唔係 FAILED — 唔會誤導
+ * 「未落到，可以人手落」）+ staff 可撳〔重試〕（同 idempotencyKey 冪等重放安全）。
+ *
+ * job 偵測：jobId = `bw-<bookingId>-<idemAttempt>-<nonce>`（nonce 每次 claim 變 — 無單一穩定
+ * jobId 可以 getJob）→ getJobs（非終態 states：wait/waiting/active/delayed/prioritized/
+ * waiting-children）+ 前綴匹配。completed/failed = 終態 job，天然唔喺列表入面（唔算保護）。
+ * queue 查詢失敗（Redis blip）→ 呢輪 skip booking 段（保守 — 唔會在睇唔到 queue 時誤標 UNKNOWN）。
+ */
+export async function sweepStuckBookingWrites(nowMs: number = Date.now()): Promise<{ bookingSwept: number; bookingScanned: number }> {
+  const writingCutoff = new Date(nowMs - WRITING_STUCK_MIN * 60_000);
+  const bookingRows = await prisma.bookingRequest.findMany({
+    where: { status: "PENDING", writeState: "WRITING", writeAttemptAt: { lt: writingCutoff } },
+    select: { id: true },
+    take: PER_ROUND_LIMIT,
+  });
+  let bookingScanned = 0;
+  let bookingSwept = 0;
+
+  // queue job 偵測（一次掃 — 只喺有候選 row 先查；v6 getJobs 只攞非終態 = active 語義）
+  let activeJobIds: string[] | null = null;
+  if (bookingRows.length > 0) {
+    try {
+      const jobs = await bookingWriteQueue.getJobs(["wait", "waiting", "active", "delayed", "prioritized", "waiting-children"] as const);
+      activeJobIds = jobs.map((j) => j.id).filter((x): x is string => typeof x === "string");
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : String(err) }, "stuck-sweep: booking-write queue getJobs failed — skip booking sweep this round");
+    }
+  }
+
+  for (const b of bookingRows) {
+    bookingScanned += 1;
+    try {
+      if (activeJobIds === null) continue; // queue 睇唔到 → 保守 skip（下輪再試）
+      // 有 active job（waiting/delayed/active/paused…）→ 唔係丟
+      const hasActive = activeJobIds.some((j) => j.startsWith(`bw-${b.id}-`));
+      if (hasActive) continue;
+      // 丟 → 條件 update（race 保護：仲係 PENDING + WRITING + 仲超過 cutoff）
+      const w = await prisma.bookingRequest.updateMany({
+        where: { id: b.id, status: "PENDING", writeState: "WRITING", writeAttemptAt: { lt: writingCutoff } },
+        data: { writeState: "UNKNOWN", writeError: "job_lost_sweep" },
+      });
+      if (w.count === 1) bookingSwept += 1;
+    } catch (err) {
+      log.warn({ bookingId: b.id, err: err instanceof Error ? err.message : String(err) }, "stuck-sweep: booking WRITING sweep failed");
+    }
+  }
+  return { bookingSwept, bookingScanned };
 }
