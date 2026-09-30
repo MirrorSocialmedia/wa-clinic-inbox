@@ -8,6 +8,7 @@ import { relTime } from "./time";
 import { matchCapsule, type CapsuleKey } from "@/lib/inbox/capsule";
 import { Virtuoso } from "react-virtuoso";
 import type { NotifyPrefs } from "@/lib/notify-client";
+import { isIOSLike, isStandalone, requestInstall } from "@/components/inbox/install-prompt";
 
 // ── ★ cwi-final S6-7：單行對話卡片（React.memo）────────────────────────────────────
 // 由列表 items 循環抽出 — virtualization 後只有 viewport 內行掛 DOM；
@@ -378,6 +379,8 @@ export function ConversationList(p: Props) {
   // ★ F-6（cwi-notify-fix-20260907）：發測試通知（/api/push/test — 同真通知同一條路）
   const [testBusy, setTestBusy] = useState(false);
   const [testResult, setTestResult] = useState<{ kind: "muted" | "other"; text: string; clinicId?: string } | null>(null);
+  // ★ cwi-ux UX-03：「安裝為 App」永久入口（橫條可關，呢度永遠裝得）+ 結果提示
+  const [installHint, setInstallHint] = useState<string | null>(null);
   // ★ cwi-statusrole2-20260910 T1（MD §1.1）：mobile <400px — 兩行 fallback（短字；第二行最多兩粒）
   const [narrow, setNarrow] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -742,6 +745,34 @@ export function ConversationList(p: Props) {
                     · 建議安裝為 App
                   </span>
                 )}
+              </div>
+            )}
+            {/* ★ cwi-ux UX-03：安裝為 App — 永久入口（iOS 冇自動安裝提示，人手教學） */}
+            {isStandalone() ? (
+              <div className="pt-1.5 border-t border-line text-[11px] text-ok-text">已安裝（App 模式運行緊）</div>
+            ) : (
+              <div className="pt-1.5 border-t border-line">
+                <button
+                  onClick={() => {
+                    if (isIOSLike()) {
+                      setInstallHint("iPhone/iPad：Safari 撳底部 分享 ⬆️ 掣 → 「加入主畫面」");
+                      return;
+                    }
+                    void requestInstall().then((r) => {
+                      setInstallHint(
+                        r === "accepted"
+                          ? "已安裝 ✅（重開一次）"
+                          : r === "unavailable"
+                            ? "瀏覽器而家冇提供安裝選項 — 稍後再試（已安裝就不會再出）"
+                            : "已記低：7 日內唔再出安裝提示",
+                      );
+                    });
+                  }}
+                  className="w-full text-left rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-brand-soft text-brand-text border border-line hover:opacity-80"
+                >
+                  安裝為 App
+                </button>
+                {installHint && <div className="text-[10px] text-t3 leading-snug mt-1">{installHint}</div>}
               </div>
             )}
             {/* cwi-realtime-fix §2.3：角色語義 — STAFF 見逐店靜音（黑名單）；ADMIN 只見下方 opt-in（白名單），
