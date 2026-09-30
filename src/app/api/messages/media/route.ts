@@ -20,8 +20,8 @@ import { saveMediaFile } from "@/lib/wa/media";
  * 檢查次序同 /api/messages/send 一致（S3-9：replay 喺 Send Lock 之前）：
  *   400 缺欄/壞 clientMessageId → 413 >10MB（硬頂）→ 404 conv → 403 access → 403 SUPERVISOR
  *   → replay（clientMessageId 命中）→ 423 SEND_LOCKED → 422 窗口過 → 415 類型唔支援
- *   → 413 超該類型上限 → auto-claim → 落碟（即加密）→ Message(OUT, QUEUED)
- *   → AuditLog(SEND_META) → enqueue → 202
+ *   → 413 超該類型上限 → 落碟（即加密，FX-16：喺 auto-claim 前）→ auto-claim
+ *   → Message(OUT, QUEUED) → AuditLog(SEND_META) → enqueue → 202
  *
  * ★ PII：檔名（可能含病人姓名）只入 DB mediaName + UI + Content-Disposition —
  *   唔入 log、唔入 AuditLog（meta 只 kind/size）。
@@ -123,6 +123,12 @@ export const POST = handle(async (req: NextRequest) => {
   // clinicScope belt & braces（同 send route）
   void clinicScope(ctx);
 
+  // ★ cwi-qa FX-16（QA-16/QA-28）：落碟（即加密）放喺 auto-claim **之前** —
+  //   落碟失敗／建 Message 失敗唔好留低「已 claim 冇訊息」（舊位置喺 claim 之後）。
+  //   fileKey 唔含檔名（PII）；顯示名另存 mediaName。
+  const fileKey = `out-${randomUUID()}.${kind.ext}`;
+  const mediaPath = await saveMediaFile(fileKey, buf);
+
   // ★ H1：unassigned 對話首發 → auto-claim（同 send route；窗口已過唔會 claim — 上面已擋）
   if (!conv.assigneeId) {
     await assignConversation({
@@ -133,10 +139,6 @@ export const POST = handle(async (req: NextRequest) => {
     });
     conv.assigneeId = ctx.staff.id;
   }
-
-  // 落碟即加密（media.ts S6-3）— fileKey 唔含檔名（PII）；顯示名另存 mediaName
-  const fileKey = `out-${randomUUID()}.${kind.ext}`;
-  const mediaPath = await saveMediaFile(fileKey, buf);
 
   const now = new Date();
   let msg;

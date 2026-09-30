@@ -247,20 +247,9 @@ export const POST = handle(async (req: NextRequest) => {
   // clinicScope 佢都過一次（belt & braces：route 層嘅 fail-closed 驗證）
   void clinicScope(ctx);
 
-  // ★ H1：unassigned 對話首發 → auto-claim 成為負責人（MD §3.2；AuditLog AUTO_CLAIM）。
-  // 喺窗口檢查之後：窗口已過（422）嘅失敗發送唔會 claim。
-  if (!conv.assigneeId) {
-    await assignConversation({
-      conversationId: conv.id,
-      toStaffId: ctx.staff.id,
-      by: "AUTO_CLAIM",
-      byStaffId: ctx.staff.id,
-    });
-    conv.assigneeId = ctx.staff.id;
-  }
-
   // ★ cwi-final S0-6 + F-1：composer 路徑 claim 前守門。
-  //   位置：Send Lock／窗口檢查之後、replay 之後、建 Message 之前。
+  //   位置：Send Lock／窗口檢查之後、replay 之後、**auto-claim 之前**（cwi-qa FX-16／QA-16+QA-28 —
+  //   precheck 409/400 必須喺 claim 之前回：失敗唔好留低「已 claim 冇訊息」）。
   //   ★ F-1：precheck 依賴 workforce（checkCancellations 會打 appointments feed）—
   //   只有 404/503/網絡錯喺 engine 內部 fail-soft，其餘會 throw。呢度一定要 fail-open：
   //   訊息係員工自己寫嘅，唔可以因為 workforce 500/429 而發唔出（寧願漏咗一次取消檢查）。
@@ -287,6 +276,19 @@ export const POST = handle(async (req: NextRequest) => {
       // opt-out / 已覆 / 已約 / 已過期 → 唔發，叫 UI 刷新建議卡
       return NextResponse.json({ error: "FOLLOWUP_NOT_SENDABLE", reason: why }, { status: 409 });
     }
+  }
+
+  // ★ H1：unassigned 對話首發 → auto-claim 成為負責人（MD §3.2；AuditLog AUTO_CLAIM）。
+  // 喺窗口檢查 + followup precheck 之後（FX-16：precheck 失敗唔會 claim）：
+  // 窗口已過（422）／precheck 唔sendable（409/400）嘅失敗發送都唔會 claim。
+  if (!conv.assigneeId) {
+    await assignConversation({
+      conversationId: conv.id,
+      toStaffId: ctx.staff.id,
+      by: "AUTO_CLAIM",
+      byStaffId: ctx.staff.id,
+    });
+    conv.assigneeId = ctx.staff.id;
   }
 
   const now = new Date();
