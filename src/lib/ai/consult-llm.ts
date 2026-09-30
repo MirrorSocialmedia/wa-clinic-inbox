@@ -240,7 +240,7 @@ export interface ConsultExtractInput {
 /**
  * Call #1 抽槽（MD §6.1）。失敗 throw（timeout 3s / JSON 爛）→ caller 降級。
  */
-export async function consultExtractSlots(input: ConsultExtractInput): Promise<ConsultExtractOutput> {
+export async function consultExtractSlots(input: ConsultExtractInput & { signal?: AbortSignal }): Promise<ConsultExtractOutput> {
   if (isAiMockEnabled()) return mockConsultExtract(input);
   const cfg = getAiConfig();
   // ★ W-S4-7（P2-09）prompt injection：病人訊息改一行一條 JSON.stringify({dir, ts, text})
@@ -262,6 +262,7 @@ export async function consultExtractSlots(input: ConsultExtractInput): Promise<C
     timeoutMs: CONSULT_EXTRACT_TIMEOUT_MS,
     maxTokens: 300,
     guidedJson: EXTRACT_SCHEMA,
+    signal: input.signal,
   });
   return parseConsultExtract(res.content);
 }
@@ -276,7 +277,7 @@ export interface ConsultGenerateResult {
 /**
  * Call #2 生成（MD §6.2）。失敗 throw → caller fail-soft（保留原 draft）。
  */
-export async function consultGenerateDraft(payload: ConsultGeneratePayload): Promise<ConsultGenerateResult> {
+export async function consultGenerateDraft(payload: ConsultGeneratePayload & { signal?: AbortSignal }): Promise<ConsultGenerateResult> {
   if (isAiMockEnabled()) return mockConsultGenerate(payload);
   const cfg = getAiConfig();
   const res = await chatWithFallback(cfg, {
@@ -286,6 +287,7 @@ export async function consultGenerateDraft(payload: ConsultGeneratePayload): Pro
     ],
     temperature: 0.4,
     maxTokens: 600,
+    signal: payload.signal,
   });
   // 輕度 sanitize（模型可能圍 markdown）— 內容守衛由 claim-guard 做
   const text = res.content.replace(/^```(?:\w*)?\s*/i, "").replace(/```\s*$/i, "").trim();

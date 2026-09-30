@@ -120,7 +120,7 @@ export async function classifyAndDraft(
     { role: "system" as const, content: buildSystemPrompt(input.lexiconBlock ?? "") }, // ★ Part E E.8：lexicon 注入
     { role: "user" as const, content: buildUserPrompt(input) },
   ];
-  const r = await chatWithFallback(cfg, { messages, guidedJson: CLASSIFY_DRAFT_JSON_SCHEMA });
+  const r = await chatWithFallback(cfg, { messages, guidedJson: CLASSIFY_DRAFT_JSON_SCHEMA, signal: input.signal });
   const parsed = parseAndValidate(r.content);
   log.debug({ model: r.model, latencyMs: r.latencyMs, tokens: r.tokens }, "ai call ok");
   return { ...parsed, model: r.model, latencyMs: r.latencyMs, tokens: r.tokens };

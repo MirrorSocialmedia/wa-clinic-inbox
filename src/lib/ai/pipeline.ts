@@ -540,25 +540,47 @@ export interface InboundAiInput {
   /** ★ cwi-final S4-2（job early-exit）：true = 跳過 consult LLM turn（§⑪）— 分類/摘要/路由/engine turn 照常。
    * worker：已有較新 IN 訊息 + 店 L2+ 時設 true（慳 GPU；較新 job 行足全流）。 */
   skipHeavy?: boolean;
+  /** ★ cwi-qa FX-08（QA-08）：job deadline 嘅 AbortSignal（由 runInboundAi 外部包層建 — 沙盤/直調可唔提供 = 無 deadline）。
+   * 超時 = abort：在途 LLM call 即刻 cancel；內核每一步 persist 前先查 aborted（唔行 = 零 persist，俾 retry 全新行）。 */
+  deadlineSignal?: AbortSignal;
 }
 
 /**
- * ★ W-S4-7（AI job 總時限）：`runInboundAi` 包 `withDeadline(AI_JOB_DEADLINE_MS ?? 45_000)`。
- * 超時 = throw AiCallError → BullMQ retry → 耗盡行 S1-14 failed notice（ai.worker failed handler 已存在）。
- * 語義：只限單次 job 處理嘅 wall-clock（同 stuck-sweep 唔衝突 — sweep 只補「零動靜」job；
- * 超時 job 會 fail/retry 有動靜）；內部每次 LLM call 嘅自己 timeout 照舊生效。
+ * ★ W-S4-7（AI job 總時限）+ ★ cwi-qa FX-08（QA-08 修復）：`runInboundAi` 包 deadline。
+ *
+ * 舊問題（QA-08）：`Promise.race` 超時後 inner 唔知自己已輸 — 繼續行 persist（分類/路由/engine turn
+ * 都照寫 DB）→ BullMQ retry 同舊 job 並行 → consult `turnCount` +2（A9「首輪唔報價」靠 `turnCount === 0`）、
+ * PatientFact／路由首覆重複寫。
+ *
+ * 修復（施工單 FX-08 點 1+2+4 — AbortController 方案）：
+ * 1. deadline 到 → `AbortController.abort()`：在途 LLM call（chatWithFallback／consult LLM）即刻 cancel（慳 GPU）；
+ * 2. inner 每一步 persist 前先查 `signal.aborted` → throw（零 persist，BullMQ retry 全新行，唔會同舊 job 並行寫）；
+ * 3. 預設 `AI_JOB_DEADLINE_MS=120000`（舊 45s 太短 — 施工單 S6-6：consult job 可達 90s，正常 job 會被誤殺）；
+ *    之後按 S6-4 metrics 嘅 p95 調。
+ * 語義：只限單次 job 處理嘅 wall-clock（同 stuck-sweep 唔衝突 — sweep 只補「零動靜」job；超時 job 會 fail/retry 有動靜）。
  * AI_JOB_DEADLINE_MS 只可 .env.local / process env（零 .env 實值 commit）。
  */
 export async function runInboundAi(input: InboundAiInput): Promise<InboundAiOutcome> {
-  const deadlineMs = Number(process.env.AI_JOB_DEADLINE_MS ?? 45_000);
+  const deadlineMs = Number(process.env.AI_JOB_DEADLINE_MS ?? 120_000);
   if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) return runInboundAiInner(input);
+  const ac = new AbortController();
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new AiCallError(`ai job deadline exceeded (${deadlineMs}ms) — AI_JOB_DEADLINE_MS`)), deadlineMs);
+    timer = setTimeout(() => {
+      // ★ FX-08：先 abort（內核在途 LLM cancel + 後續 persist 全部 gated）→ 先 reject（job fail）。
+      ac.abort();
+      reject(new AiCallError(`ai job deadline exceeded (${deadlineMs}ms) — AI_JOB_DEADLINE_MS`));
+    }, deadlineMs);
     if (typeof timer === "object" && "unref" in timer) (timer as { unref(): void }).unref();
   });
   try {
-    return await Promise.race([runInboundAiInner(input), timeout]);
+    // ★ FX-08：inner 喺 deadline 之後會喺下一個 persist gate throw — 呢個 rejection 要 absorb
+    //   （job 已經 fail 咗；唔吸收 = unhandled rejection 會炸 worker process）。
+    const inner = runInboundAiInner({ ...input, deadlineSignal: ac.signal });
+    inner.catch(() => {
+      /* absorbed — 見上註 */
+    });
+    return await Promise.race([inner, timeout]);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -568,8 +590,19 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
   const { clinic, msg, conv, contact, ctxMessages, persist } = input;
   const { isMedia, consultStore } = input;
 
+  // ── ★ cwi-qa FX-08（QA-08）：deadline abort gate ─────────────────────────────────
+  // 每一步 persist 前（同每個 LLM call 前）查：job 已超時 = 呢度停 — 零後續 persist，
+  // 俾 BullMQ retry 全新行（舊 job 唔會同新 job 並行寫 DB → turnCount/PatientFact/路由唔重複）。
+  const deadlineSignal = input.deadlineSignal;
+  function ensureNotAborted(stage: string): void {
+    if (deadlineSignal?.aborted) {
+      throw new AiCallError(`ai job aborted — deadline passed before ${stage}（AI_JOB_DEADLINE_MS — 零 persist，俾 retry 全新行）`);
+    }
+  }
+
   // ── ① ★ Part F（cwi-raggolden-20260904，F.3）：RAG 兩階段檢索 — 階段一（選 id）喺 classify 前 ──
   //   只對 text 觸發訊息；**fail-soft：任何失敗 → picked=[] 照出草稿**（pickKnowledge 零 throw，catch 兜底）。
+  ensureNotAborted("pickKnowledge"); // ★ cwi-qa FX-08：stage1 係 LLM call（real mode 3s timeout）— 超時唔再開新 call
   const knowledge =
     msg.type === "text" && msg.body
       ? await pickKnowledge({
@@ -597,6 +630,7 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
   const dutyEntries = await fetchDutyRoster(clinic.code, dutyToday).catch(() => null);
   let result: ClassifyAndDraftResult;
   try {
+    ensureNotAborted("classify"); // ★ cwi-qa FX-08：主 LLM call 前查
     result = await classifyAndDraft({
       messages: ctxMessages,
       clinic: {
@@ -606,12 +640,15 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
       dutyRoster: dutyEntries && dutyEntries.length > 0 ? { date: dutyToday, entries: dutyEntries } : null,
       // ★ Part F（F.3）：`<knowledge>` 段（擺事實段之後、對話歷史之前；連 title 方便 trace）
       knowledgeBlock: knowledgePromptBlock(knowledge.picked),
+      signal: deadlineSignal, // ★ cwi-qa FX-08：deadline 到 → 在途 call 即刻 cancel（vllm 橋接）
     });
   } catch (err) {
     const m = err instanceof Error ? err.message : String(err);
-    await persist.onClassifyFailure(err, m);
+    // ★ cwi-qa FX-08：deadline abort 唔入 onClassifyFailure（stats/notice 都係 persist — job 已 fail，retry 自己記）
+    if (!deadlineSignal?.aborted) await persist.onClassifyFailure(err, m);
     throw err;
   }
+  ensureNotAborted("recordAiCall"); // ★ cwi-qa FX-08
   await persist.recordAiCall(true, undefined, result.latencyMs, result.tokens);
 
   // ★ Part E（cwi-paintriage-20260903，E.2）：確定性紅旗 fast path — 訊息本身含 FLOOR ∪ params 紅旗詞
@@ -719,6 +756,7 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
 
   // ── ⑥ COMPLAINT → 內部通知軌（port：worker = StaffNotice + socket；沙盤 = no-op）──────────
   if (result.intent === "COMPLAINT") {
+    ensureNotAborted("notifyComplaint"); // ★ cwi-qa FX-08
     await persist.notifyComplaint({
       clinicId: conv.clinicId,
       conversationId: conv.id,
@@ -743,6 +781,7 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
   const urgent = result.intent === "URGENT_PAIN" || result.urgency === "HIGH";
 
   // ── ⑧ 分類落 Conversation（port：worker = prisma update；沙盤 = in-memory 副本）────────────
+  ensureNotAborted("applyClassification"); // ★ cwi-qa FX-08
   const updatedConv = await persist.applyClassification({
     conv,
     intent: result.intent,
@@ -757,6 +796,7 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
   // ── ⑨ 規則路由（port：worker = 真 applyRouting；沙盤 = display subset）─────────────────
   // ── ★ cwi-routing-20260906（§2）：掛鉤點 = classify 落 DB 之後、任何通知之前。
   //   R-8：URGENT_PAIN/HIGH 嘅全店 urgent:escalation 廣播（caller step 5 路徑）照行。
+  ensureNotAborted("applyRouting"); // ★ cwi-qa FX-08
   const routing = await persist.applyRouting({
     conv: {
       id: conv.id,
@@ -787,6 +827,7 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
       : null;
   let consultOutcome: ConsultTurnOutcome | null = null;
   if (msg.type === "text" && msg.body && consultTrigger !== null) {
+    ensureNotAborted("consultEngineTurn"); // ★ cwi-qa FX-08：engine turn 寫 consult store（turnCount）— 超時唔准再寫
     consultOutcome = await runConsultEngineTurn({
       prisma,
       conv,
@@ -825,6 +866,7 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
     result.intent !== "COMPLAINT" &&
     result.urgency !== "HIGH"
   ) {
+    ensureNotAborted("consultLlmTurn"); // ★ cwi-qa FX-08：第二次 LLM 段（extract/generate）前查
     const llm = await runConsultLlmTurn({
       prisma,
       conv,
@@ -842,6 +884,7 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
       // ★ W-S4-6 (A9)：priceIntent = priceTrace.triggered（patientAskedPrice 用）
       priceIntent: priceTrace.triggered,
       store: consultStore,
+      signal: deadlineSignal, // ★ cwi-qa FX-08：deadline 到 → 在途 extract/generate 即刻 cancel
     });
     consultLlmCalls = llm.calls;
     extractFailed = llm.extractFailed;
@@ -871,6 +914,7 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
         postOpCareWindow,
       });
       if (cg.blocked && cg.code) {
+        ensureNotAborted("auditClaimGuard"); // ★ cwi-qa FX-08
         await persist.auditClaimGuard({
           sessionId: consultOutcome.sessionId,
           code: cg.code,
