@@ -103,10 +103,12 @@ export const GET = handle(
     const res = new NextResponse(body, {
       headers: {
         "Content-Type": mime,
-        "Content-Disposition": `${isInline ? "inline" : "attachment"}; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(dispName)}"`,
+        "Content-Disposition": `${isInline ? "inline" : "attachment"}; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(dispName)}`,
         // ★ AS-4：nosniff — Content-Type 由我哋決定，唔畀瀏覽器 sniff
         "X-Content-Type-Options": "nosniff",
-        "Cache-Control": "private, max-age=3600",
+        // ★ cwi-qa FX-29（QA-29）：no-store — 共用前台電腦登出後唔留病人相/報告喺瀏覽器 cache
+        //   （舊 max-age=3600：同機下一個 staff 登入仲可以 cache 攞到上一個病人嘅媒體）
+        "Cache-Control": "private, no-store",
       },
     });
     // client abort 時收 stream（防 fd 洩漏）
