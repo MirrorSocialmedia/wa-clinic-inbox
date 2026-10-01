@@ -199,7 +199,8 @@ async function createNotice(
     .catch((e) => log.warn({ clinicId, err: e instanceof Error ? e.message : String(e) }, "booking-write: StaffNotice create failed"));
 }
 
-async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<void> {
+// export（unit test 直調 — T-UX07a worker 層斷言：createBooking clinicCode = 預約目標店）
+export async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<void> {
   const { bookingId, actor, visitReasonId, visitReasonCode, triggerMsgId } = job.data;
   const isStaff = actor.type === "STAFF";
   const actorMeta = isStaff ? { staffId: actor.staffId } : { sessionId: actor.sessionId };
