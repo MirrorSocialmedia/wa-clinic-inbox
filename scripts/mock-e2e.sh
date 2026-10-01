@@ -712,6 +712,10 @@ if wait_for "SELECT \"intent\" i, \"urgency\" u, (\"urgent\")::text ug FROM \"Co
 else
   fail "T13 URGENT_PAIN triage"
 fi
+# ★ cwi-qa CI-E8：intent/urgency/urgent 喺 intake 紅旗（sessions/urgent-intake.ts，唔靠 AI）已即刻寫 →
+#   上面 wait_for 一中就過；aiSummary 要等 AI urgent lane 分類完先寫 → 單次 query 會早過佢
+#   （CI run 36898709474 實錚 actual=[false]）。等 aiSummary 落庫（最多 30s）先斷言。
+wait_for "SELECT (\"aiSummary\" IS NOT NULL)::text s FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" '[{"s":"true"}]' 30 || true
 SUM1=$(q "SELECT (\"aiSummary\" IS NOT NULL)::text s FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" | jf s)
 check "T13 aiSummary 已設（側欄顯示用）" "$SUM1" "true"
 DRAFT1=$(q "SELECT count(*)::text c FROM \"AiDraft\" d JOIN \"Conversation\" cv ON cv.id=d.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" | jf c)
