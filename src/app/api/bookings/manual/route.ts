@@ -18,6 +18,14 @@
  * - 時段 = schedule-board 撳落嘅 ONLINE 格；必係未來時段（slot_in_past → 400）
  * - S3-9：providerApricotId 必須經 ProviderClinic 屬該對話嘅店（唔屬 → 400）
  * - 權限：assertConversationAccess（403）+ Send Lock（423）
+ *
+ * ★ cwi-ux UX-07（2026-10-01）：跨分店落單（負責人跟醫生跨店）—
+ * - body `bookingClinicId?`（目標店 = 任何 active 診所；唔限同公司；null/缺 = 對話所屬店，舊行為零改動）
+ * - 跨店權限（spec §7.3，伺服器端判斷）：負責人（已接手；同 Send Lock 一致）先可以；
+ *   非負責人 → 403 `CROSS_CLINIC_NOT_ALLOWED`；唔要求我帳號有目標店範圍（負責緊就得）
+ * - 時段查詢（AvailabilitySlot）、重複防護（existingPending）、slotAvailable 全部用**目標店**
+ *   （dupConfirmed 係病人級（同對話）重複 — 唔變）
+ * - BookingRequest.clinicId 唔變（對話所屬店 — /bookings 隊列 / 通知）；目標店落 bookingClinicId
  */
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -27,6 +35,7 @@ import { requireAuth, assertConversationAccess, assertCanWriteConversation } fro
 import { handle } from "@/lib/api-error";
 import { confirmBookingCore } from "@/lib/booking/confirm-core";
 import { slotAvailable } from "@/lib/availability";
+import { targetClinicSlotWhere } from "@/lib/booking/effective-clinic";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +49,8 @@ const ManualBody = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
   visitReasonId: z.string().min(1).max(64).optional(),
+  // ★ UX-07：預約目標店（Cuid — 任何 active 診所；null/缺 = 對話所屬店）
+  bookingClinicId: z.string().min(1).max(64).optional(),
 });
 
 /** HK 今日（YYYY-MM-DD）+ 而家 HH:mm — 未來時段檢查用（HK 日界） */
@@ -64,19 +75,41 @@ export const POST = handle(async (req: NextRequest) => {
   if (!parsed.success) {
     return NextResponse.json({ error: "invalid body", details: parsed.error.flatten() }, { status: 400 });
   }
-  const { requestId, conversationId, providerApricotId, date, start, visitReasonId } = parsed.data;
+  const { requestId, conversationId, providerApricotId, date, start, visitReasonId, bookingClinicId: bookingClinicParam } = parsed.data;
 
   const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   await assertConversationAccess(ctx, conv); // 別店 / 非授權對話 → 403
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
-  // S3-9：provider 必須經 ProviderClinic 屬該對話嘅店（fail-closed）；名由 DB 讀
+  // ── ★ UX-07：預約目標店（任何 active 診所；唔限同公司；唔要求我帳號有目標店範圍）──
+  const crossClinic = !!bookingClinicParam && bookingClinicParam !== conv.clinicId;
+  const targetClinicId = bookingClinicParam ?? conv.clinicId;
+  if (bookingClinicParam) {
+    const targetClinic = await prisma.clinic.findUnique({ where: { id: bookingClinicParam }, select: { id: true, code: true } });
+    if (!targetClinic) {
+      return NextResponse.json({ error: "unknown_clinic", message: "預約分店唔存在 — 請重揀" }, { status: 400 });
+    }
+    // 跨店權限（spec §7.3）：負責人（已接手；同 Send Lock 一致）先可以；非負責人 → 403
+    //   （先於 Send Lock：跨店嘅 403 語義明確；同店行為零改動）
+    if (crossClinic && conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
+      log.info(
+        { clinicId: conv.clinicId, targetClinic: targetClinic.code, conversationId, staffId: ctx.staff.id, assigneeId: conv.assigneeId },
+        "bookings: manual — 403 CROSS_CLINIC_NOT_ALLOWED（跨店非負責人）"
+      );
+      return NextResponse.json(
+        { error: "CROSS_CLINIC_NOT_ALLOWED", message: "跨分店預約只限呢條對話嘅負責人（先撳〔接手〕先可以跨店約）" },
+        { status: 403 }
+      );
+    }
+  }
+
+  // S3-9：provider 必須經 ProviderClinic 屬預約目標店（fail-closed）；名由 DB 讀
   const provider = await prisma.provider.findFirst({
     where: {
       apricotId: providerApricotId,
       active: true,
-      clinics: { some: { clinicId: conv.clinicId } },
+      clinics: { some: { clinicId: targetClinicId } },
     },
   });
   if (!provider) {
@@ -131,6 +164,13 @@ export const POST = handle(async (req: NextRequest) => {
         { status: 409 }
       );
     }
+    // ★ UX-07：重試同 requestId 但目標店改咗 → 拒（同一張卡唔會兩間店）
+    if ((existing.bookingClinicId ?? existing.clinicId) !== targetClinicId) {
+      return NextResponse.json(
+        { error: "DUPLICATE_BOOKING", message: "呢個請求ID已對應其他分店 — 請重開落單視窗再試" },
+        { status: 409 }
+      );
+    }
     if (existing.status === "CONFIRMED") {
       // 冪等 replay：返原單（零 workforce call / 零重複訊息）
       return NextResponse.json({
@@ -170,6 +210,7 @@ export const POST = handle(async (req: NextRequest) => {
   }
 
   // ── 新卡：建 PENDING（同 Flow 路徑同形）+ 重複防護 ──
+  // ★ UX-07：時段/重複防護用目標店（targetClinicId）；clinicId 欄 = 對話所屬店（唔變）
   const clinicId = conv.clinicId;
   const txOut: {
     err: { status: number; body: Record<string, unknown> } | null;
@@ -203,15 +244,16 @@ export const POST = handle(async (req: NextRequest) => {
         }
         const slotRow = await tx.availabilitySlot.findUnique({
           where: {
-            clinicId_providerApricotId_date_startTime: { clinicId, providerApricotId, date, startTime: start },
+            clinicId_providerApricotId_date_startTime: { clinicId: targetClinicId, providerApricotId, date, startTime: start },
           },
         });
         if (slotRow && !slotAvailable(slotRow)) {
           txOut.err = { status: 409, body: { error: "SLOT_TAKEN", message: "時段啱啱滿咗", retryable: true } };
           return;
         }
+        // ★ UX-07：existingPending 用目標店（同店舊行 clinicId=T 或 跨店行 bookingClinicId=T）
         const existingPending = await tx.bookingRequest.findFirst({
-          where: { clinicId, providerApricotId, requestedDate: date, requestedTime: start, status: "PENDING" },
+          where: { ...targetClinicSlotWhere(targetClinicId), providerApricotId, requestedDate: date, requestedTime: start, status: "PENDING" },
           select: { id: true },
         });
         if (existingPending) {
@@ -222,6 +264,8 @@ export const POST = handle(async (req: NextRequest) => {
           data: {
             conversationId: conv.id,
             clinicId,
+            // ★ UX-07：預約目標店（null = 對話所屬店 — 舊資料零改動）
+            bookingClinicId: crossClinic ? targetClinicId : null,
             flowToken, // ★ S5-8①：manual-${requestId}（冪等）
             providerApricotId,
             providerName: resolvedProviderName,
