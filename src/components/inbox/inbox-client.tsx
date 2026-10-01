@@ -2697,12 +2697,17 @@ export function InboxClient({
     return r;
   }, [assignConversationApi]);
 
-  const sendFlow = useCallback(async () => {
+  const sendFlow = useCallback(async (bookingClinicId?: string) => {
     const convId = selectedIdRef.current;
     if (!convId) return { ok: false, error: "未選擇對話" };
     setFlowBusy(true);
     try {
-      const res = await fetch(`/api/conversations/${convId}/flows`, { method: "POST" });
+      // ★ cwi-ux UX-07：bookingClinicId = 預約分店（跨店；server 驗權限 + token 簽名帶）
+      const res = await fetch(`/api/conversations/${convId}/flows`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bookingClinicId ? { bookingClinicId } : {}),
+      });
       const data = (await res.json().catch(() => null)) as {
         ok?: boolean;
         reused?: boolean;

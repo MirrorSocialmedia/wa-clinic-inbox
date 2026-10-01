@@ -23,7 +23,7 @@ import {
   Users,
   XCircle,
 } from "lucide-react";
-import type { ConversationItem, DraftInfo, DraftTrace, FollowupSuggestion, MessageItem, NoteReceipt, PatientChip, StaffInfo } from "./types";
+import type { ClinicLite, ConversationItem, DraftInfo, DraftTrace, FollowupSuggestion, MessageItem, NoteReceipt, PatientChip, StaffInfo } from "./types";
 import { noteTickState } from "./types";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
@@ -108,8 +108,8 @@ interface Props {
   onDiscard: (draftId: string) => Promise<void>;
   /** 採用/棄 進行中（disable 掣） */
   draftBusy: boolean;
-  /** Phase 3：發 Booking Flow（📅 掣） */
-  onSendFlow: () => Promise<{ ok: boolean; error?: string }>;
+  /** Phase 3：發 Booking Flow（📅 掣）；★ cwi-ux UX-07：bookingClinicId = 預約分店（跨店；同對話店 = 省略） */
+  onSendFlow: (bookingClinicId?: string) => Promise<{ ok: boolean; error?: string }>;
   /** Phase 3：發 Flow 進行中 */
   flowBusy: boolean;
   /** ★ cwi-final S0-12：G2 閘（SSR 注入）— false → 隱藏 📅 掣 */
@@ -680,6 +680,10 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
     setMediaPickError(null);
   }, [p.conversation?.id]);
   const [flowError, setFlowError] = useState<string | null>(null);
+  // ★ cwi-ux UX-07：「預約分店」下拉（Flow bar）— 預設 = 主診醫生最近當值店，冇 = 對話所屬店
+  const [flowClinics, setFlowClinics] = useState<ClinicLite[] | null>(null);
+  const [flowClinicId, setFlowClinicId] = useState<string | null>(null);
+  const [flowPrimaryClinicCode, setFlowPrimaryClinicCode] = useState<string | null>(null);
   // Phase B：過窗 422 後嘅 template 揀選（server 回嘅 APPROVED+UTILITY 名單）
   const [templateOptions, setTemplateOptions] = useState<{ name: string; language: string }[] | null>(null);
   const [templateBusy, setTemplateBusy] = useState(false);
@@ -948,6 +952,55 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.conversation?.id]);
 
+  // ★ cwi-ux UX-07：Flow bar「預約分店」— 數據 = 全部 active 店（/api/clinics?scope=schedule）
+  //   + 該病人主診醫生最近當值店（patient-record?summary=1 → visitStats.primaryDoctor.lastClinicCode）。
+  //   預設：主診醫生最近店 → 冇 = 對話所屬店；只喺 Flow bar 顯示時 fetch（fail-soft：失敗 → 預設對話店）
+  //   （hooks 必須喺 early return 之前 — rules-of-hooks）
+  const cv0 = p.conversation;
+  const cv0Id = cv0?.id ?? null;
+  const cv0ClinicId = cv0?.clinicId ?? null;
+  const flowBarVisible =
+    !!cv0 && !cv0.holdEvent && !cv0.pendingBooking && cv0.intent === "BOOKING_REQUEST" && cv0.window.open && p.slotClaimEnabled !== false;
+  useEffect(() => {
+    if (!flowBarVisible || flowClinics !== null) return;
+    let cancelled = false;
+    fetch("/api/clinics?scope=schedule")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d && d.ok) setFlowClinics(Array.isArray(d.clinics) ? d.clinics : []);
+      })
+      .catch(() => {
+        /* fail-soft：下拉唔顯示 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [flowBarVisible, flowClinics]);
+  useEffect(() => {
+    if (!flowBarVisible || !cv0Id) return;
+    let cancelled = false;
+    setFlowPrimaryClinicCode(null);
+    fetch(`/api/conversations/${cv0Id}/patient-record?summary=1`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setFlowPrimaryClinicCode(d?.visitStats?.primaryDoctor?.lastClinicCode ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setFlowPrimaryClinicCode(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [flowBarVisible, cv0Id]);
+  useEffect(() => {
+    if (!flowBarVisible || !cv0ClinicId) {
+      setFlowClinicId(null);
+      return;
+    }
+    const primary = flowClinics?.find((x) => x.code === flowPrimaryClinicCode) ?? null;
+    setFlowClinicId(primary?.id ?? cv0ClinicId);
+  }, [flowBarVisible, cv0ClinicId, flowClinics, flowPrimaryClinicCode]);
+
   if (!p.conversation) {
     // ★ cwi-final S1-3（N-3）：對話 row 補載中（深連結 / push / bell 指向唔喺列表嘅對話）— skeleton + 返回掣。
     //   只係「正補載」先入呢度（flag 由 caller 控制）：失敗出 notice 後 flag 即清 → 落返下面空狀態，唔會卡死 spinner。
@@ -1050,9 +1103,11 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
     cf.run();
   }
 
-  async function sendFlow() {
+  async function sendFlow(bookingClinicId?: string) {
     if (flowError) setFlowError(null);
-    const r = await p.onSendFlow();
+    const target = bookingClinicId ?? flowClinicId ?? undefined;
+    // 只係同對話店唔同先傳（同店保持傳統空 body → server bookingClinicId null = 對話店）
+    const r = await p.onSendFlow(target && target !== c.clinicId ? target : undefined);
     if (!r.ok) setFlowError(r.error ?? "發送失敗");
   }
 
@@ -1458,16 +1513,37 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
           c.intent === "BOOKING_REQUEST" &&
           c.window.open &&
           p.slotClaimEnabled !== false && (
-            <div className="mb-2 rounded-2xl border border-brand/30 bg-brand-soft p-2 flex items-center gap-2">
+            <div className="mb-2 rounded-2xl border border-brand/30 bg-brand-soft p-2 flex items-center gap-2 flex-wrap">
               <span className="text-xs text-brand-text">
                 病人想預約 — 發預約 Flow 俾病人揀醫生/日期/時間：
               </span>
+              {/* ★ cwi-ux UX-07：預約分店（預設 = 主診醫生最近當值店，冇 = 對話店）— store 數據到手先顯示（fail-soft） */}
+              {flowClinics && flowClinics.length > 0 ? (
+                <select
+                  data-e2e="flow-clinic-select"
+                  value={flowClinicId ?? c.clinicId}
+                  onChange={(e) => setFlowClinicId(e.target.value)}
+                  disabled={p.flowBusy || locked}
+                  title="預約分店（預設 = 主診醫生最近當值店）"
+                  className="shrink-0 text-xs px-2 py-1 rounded-md bg-panel border border-line text-t1"
+                >
+                  {flowClinics.map((cl) => (
+                    <option key={cl.id} value={cl.id}>
+                      {cl.id === c.clinicId ? `${cl.code}（對話店）` : cl.code}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
               <button
                 onClick={() => {
                   const pb = c.pendingBooking;
+                  const crossCode =
+                    flowClinicId && flowClinicId !== c.clinicId
+                      ? flowClinics?.find((x) => x.id === flowClinicId)?.code
+                      : null;
                   requireOutConfirm(
-                    `預約 Flow（WhatsApp 預約卡）${pb ? ` · ${pb.requestedDate} ${pb.requestedTime} ${pb.providerName}` : ""}`,
-                    () => void sendFlow()
+                    `預約 Flow（WhatsApp 預約卡）${pb ? ` · ${pb.requestedDate} ${pb.requestedTime} ${pb.providerName}` : ""}${crossCode ? ` · 預約分店：${crossCode}` : ""}`,
+                    () => void sendFlow(flowClinicId && flowClinicId !== c.clinicId ? flowClinicId : undefined)
                   );
                 }}
                 disabled={p.flowBusy || locked}
