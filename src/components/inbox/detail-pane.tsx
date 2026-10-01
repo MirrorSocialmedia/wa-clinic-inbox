@@ -613,6 +613,10 @@ export function DetailPane({
                           // ★ cwi-final S5-13②：跨公司黃標（C-8 唔阻 match — 只提示）
                           <div className="text-[10px] text-warn-text mt-0.5">⚠ 呢位病人未喺本公司診所睇過</div>
                         )}
+                        {m.sameAccount === false && (
+                          // ★ cwi-apricotty-20261001：另一個 Apricot 帳號（例如青衣）— 睇得，但唔可以用嚟喺本店落單
+                          <div className="text-[10px] text-warn-text mt-0.5">⚠ 另一個 Apricot 帳號嘅病人檔 — 可以睇記錄，唔可以用嚟喺本店代落單</div>
+                        )}
                       </div>
                       <button
                         onClick={() => void pinPatient(m)}

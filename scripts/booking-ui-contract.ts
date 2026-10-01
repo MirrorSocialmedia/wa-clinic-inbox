@@ -115,6 +115,11 @@ async function main(): Promise<void> {
   // cache：再撳一次 → 同一 object（1h memory cache 生效）
   const vr2 = await fetchDictionaries("VISIT_REASON");
   check("dictionaries 1h cache（同 call 回同 object）", vr2 === vr);
+  // ★ cwi-apricotty-20261001：按店 cache（青衣 TY 係另一個 Apricot 帳號）— 唔同店唔共用 cache entry、同店重用
+  const vrTy = await fetchDictionaries("VISIT_REASON", "TY");
+  check("dictionaries 按店分 cache（TY ≠ 預設 entry）", vrTy !== vr);
+  check("dictionaries 按店 cache 重用（同店同 object）", (await fetchDictionaries("VISIT_REASON", "TY")) === vrTy);
+  check("dictionaries 加店後預設 entry 仍然 cache 住", (await fetchDictionaries("VISIT_REASON")) === vr);
   clearDictionariesCache();
 
   // 3b. patient-lookup

@@ -44,7 +44,8 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   let matches: EnrichedMatch[] | null = null;
   let degraded = false;
   try {
-    const lk = await lookupPatient(hash);
+    // ★ cwi-apricotty-20261001：帶店碼 → 每個 match 有 sameAccount（青衣 TY 係另一個 Apricot 帳號）
+    const lk = await lookupPatient(hash, clinic.code);
     matches = lk.matches;
   } catch (e) {
     degraded = true;
