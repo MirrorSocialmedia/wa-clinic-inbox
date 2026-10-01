@@ -138,6 +138,10 @@ export interface BookingInfo {
   writeError?: string | null;
   /** ★ S5-1：本次寫入試次開始（ISO — WRITING 顯示用） */
   writeAttemptAt?: string | null;
+  /** ★ cwi-ux UX-07：跨分店預約 — 目標店 id（null = 同對話店）；膠囊「📍 YL」只在目標店≠對話店時顯示 */
+  bookingClinicId?: string | null;
+  /** ★ cwi-ux UX-07：目標店 code（供膠囊顯示「📍 YL」）；null = 冇目標店或查唔到店名 */
+  bookingClinicCode?: string | null;
 }
 
 /** providerslot-20260830 T3：Flow 硬保留 hold（本地 FlowHoldEvent — 病人資料落 inbox 本地） */

@@ -131,6 +131,8 @@ interface PatientCtxLite {
 export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDone, slotClaimEnabled }: Props) {
   const pinned = !!c.pinnedPatientApricotId;
   const locked = !!c.assigneeId && c.assigneeId !== myStaffId;
+  // ★ cwi-ux UX-07：跨分店預約膠囊「📍 YL」— 只在目標店≠對話店時顯示。
+  const crossClinicCode = b.bookingClinicCode && b.bookingClinicCode !== c.clinicCode ? b.bookingClinicCode : null;
 
   // ── visitReason 下拉（dictionaries + default env）──────────────────
   const [dictItems, setDictItems] = useState<DictItem[] | null>(null);
@@ -384,6 +386,14 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
               )}
               {slotTaken ? "撞單 · 位已滿" : "新預約請求"}
             </span>
+            {crossClinicCode && (
+              <span
+                className="inline-flex items-center gap-0.5 text-[11px] font-semibold px-1.5 py-0.5 rounded-full bg-panel/25 text-panel whitespace-nowrap"
+                title={"預約地點：" + crossClinicCode + "（對話所屬店：" + (c.clinicCode ?? "—") + "）"}
+              >
+                📍 {crossClinicCode}
+              </span>
+            )}
             <a href="/bookings" className="ml-auto text-[11px] opacity-90 hover:opacity-100 whitespace-nowrap">
               去 /bookings 處理 →
             </a>
@@ -589,6 +599,14 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
             <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold tracking-[0.1em] uppercase opacity-90">
               <Check size={12} strokeWidth={3} /> 已確認 · Apricot
             </span>
+            {crossClinicCode && (
+              <span
+                className="inline-flex items-center gap-0.5 text-[11px] font-semibold px-1.5 py-0.5 rounded-full bg-panel/25 text-panel whitespace-nowrap"
+                title={"預約地點：" + crossClinicCode + "（對話所屬店：" + (c.clinicCode ?? "—") + "）"}
+              >
+                📍 {crossClinicCode}
+              </span>
+            )}
             <a href="/bookings" className="ml-auto text-[11px] opacity-90 hover:opacity-100 whitespace-nowrap">
               去 /bookings 處理 →
             </a>
