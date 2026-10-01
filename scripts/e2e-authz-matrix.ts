@@ -788,6 +788,12 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/conversations" }),
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
   },
+  "POST /api/conversations/mark-all-read": {
+    // ★ cwi-ux UX-01：一鍵已讀 — 真寫入（ConversationRead + 層② unreadCount）會污染後面 mock-e2e，
+    //   所以只驗範圍 guard：clinicF 唔喺 TY／YMT 範圍 → assertClinicAccess 403（寫入之前已擋，零副作用）
+    fixture: () => ({ url: "/api/conversations/mark-all-read", method: "POST", body: JSON.stringify({ clinicId: F.clinicF }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403 },
+  },
   "GET /api/dictionaries": {
     fixture: () => ({ url: "/api/dictionaries?kind=VISIT_REASON" }), // ?kind= 必填（VISIT_REASON|BOOKING_TYPE）
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
