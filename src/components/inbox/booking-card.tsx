@@ -58,6 +58,55 @@ export function rollbackButtonVisible(handledAt: string | null | undefined, now:
   return elapsed >= 0 && elapsed <= ROLLBACK_WINDOW_MS;
 }
 
+/**
+ * ★ cwi-qa FX-11（QA-11）pure：writeState/writeError → 寫入狀態 banner 變體（unit test 用）。
+ * MANUAL_RECONCILE（workforce 502 — F 側自己未能確認結果）→ 黃卡，且唔准顯示普通〔重試〕掣
+ * （先入 Apricot 核對有冇呢位病人/單先講得落單/重試）。
+ */
+export type BookingWriteBanner =
+  | { kind: "writing" }
+  | { kind: "unknown" }
+  | { kind: "manual_reconcile" }
+  | { kind: "write_disabled" }
+  | { kind: "failed"; code: string }
+  | { kind: "none" };
+
+export function bookingWriteBanner(writeState: string | null | undefined, writeError: string | null | undefined): BookingWriteBanner {
+  if (writeState === "WRITING") return { kind: "writing" };
+  if (writeState === "UNKNOWN") return { kind: "unknown" };
+  if (writeState === "FAILED" && writeError === "MANUAL_RECONCILE") return { kind: "manual_reconcile" };
+  if (writeState === "FAILED" && writeError === "WRITE_DISABLED") return { kind: "write_disabled" };
+  if (
+    writeState === "FAILED" &&
+    writeError &&
+    writeError !== "SLOT_TAKEN" &&
+    writeError !== "WRITE_DISABLED" &&
+    writeError !== "MANUAL_RECONCILE"
+  )
+    return { kind: "failed", code: writeError };
+  return { kind: "none" };
+}
+
+/**
+ * ★ cwi-qa FX-11（QA-11）pure：主動作掣變體（unit test 用）。
+ * retry = 〔重試（同一單號）〕；create = 〔幫我喺 Apricot 落單〕；
+ * manual_reconcile = 要人手核對（唔顯示任何自動落單/重試掣 — 先入 Apricot 核對）；
+ * unpinned = 未釘住舊客（提示先釘）。
+ */
+export type BookingPrimaryAction = "retry" | "create" | "manual_reconcile" | "unpinned";
+
+export function bookingPrimaryAction(
+  pinned: boolean,
+  writeState: string | null | undefined,
+  writeError: string | null | undefined
+): BookingPrimaryAction {
+  if (!pinned) return "unpinned";
+  if (writeState === "UNKNOWN") return "retry";
+  if (writeState === "FAILED" && writeError && writeError !== "WRITE_DISABLED" && writeError !== "MANUAL_RECONCILE") return "retry";
+  if (writeState === "FAILED" && writeError === "MANUAL_RECONCILE") return "manual_reconcile";
+  return "create";
+}
+
 /** pure："YYYY-MM-DD" → 收據卡頭大字（9月1日）+ 星期（zh-Hant short） */
 export function fmtRequestDay(dateStr: string): { main: string; weekday: string } {
   const d = new Date(`${dateStr}T00:00:00`);
@@ -311,6 +360,9 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
     // ★ cwi-final S5-1（F1）：async 寫入態（卡上顯示）
     const wsTaken = b.writeState === "FAILED" && b.writeError === "SLOT_TAKEN";
     const writing = b.writeState === "WRITING";
+    // ★ cwi-qa FX-11：寫入狀態 banner + 主動作掣決定（pure — 見檔案頭；unit test：booking-card.test.ts）
+    const writeBanner = bookingWriteBanner(b.writeState, b.writeError);
+    const primaryAction = bookingPrimaryAction(pinned, b.writeState, b.writeError);
     const slotTaken = createError?.kind === "slot_taken" || wsTaken;
     const day = fmtRequestDay(b.requestedDate);
     return (
@@ -409,22 +461,29 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
                   落單處理緊…（寫入 Apricot）
                 </div>
               )}
-              {b.writeState === "UNKNOWN" && (
+              {writeBanner.kind === "unknown" && (
                 <div className="rounded-2xl bg-warn-soft border border-warn px-3 py-2.5 text-xs text-warn-text leading-relaxed inline-flex items-start gap-1.5">
                   <AlertTriangle size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
                   未確定 Apricot 有冇落到單 — 唔好人手落單（可能已寫到；撳〔重試（同一單號）〕用同一單號核對）
                 </div>
               )}
-              {b.writeState === "FAILED" && b.writeError === "WRITE_DISABLED" && (
+              {/* ★ cwi-qa FX-11：MANUAL_RECONCILE — workforce 502（F 側未能確認結果）→ 黃卡 + 唔顯示重試掣 */}
+              {writeBanner.kind === "manual_reconcile" && (
+                <div className="rounded-2xl bg-warn-soft border border-warn px-3 py-2.5 text-xs text-warn-text leading-relaxed inline-flex items-start gap-1.5">
+                  <AlertTriangle size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
+                  Apricot 狀態要人手核對 — 先入 Apricot 睇有冇呢位病人
+                </div>
+              )}
+              {writeBanner.kind === "write_disabled" && (
                 <div className="rounded-2xl bg-warn-soft border border-warn px-3 py-2.5 text-xs text-warn-text leading-relaxed inline-flex items-start gap-1.5">
                   <AlertTriangle size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
                   Workforce 寫入暫時停用 — 請人手喺 Apricot 落單，然後撳〔已人手落單〕
                 </div>
               )}
-              {b.writeState === "FAILED" && b.writeError && b.writeError !== "SLOT_TAKEN" && b.writeError !== "WRITE_DISABLED" && (
+              {writeBanner.kind === "failed" && (
                 <div className="rounded-2xl bg-danger-soft border border-warn px-3 py-2.5 text-xs text-danger-text leading-relaxed inline-flex items-start gap-1.5">
                   <AlertTriangle size={13} strokeWidth={2.5} className="mt-0.5 shrink-0" />
-                  落單失敗（{b.writeError}）— 可撳〔重試（同一單號）〕
+                  落單失敗（{writeBanner.code}）— 可撳〔重試（同一單號）〕
                 </div>
               )}
               {/* visitReason 下拉 + 三掣（Organic：全部 rounded-full，主掣 brand-hover） */}
@@ -452,7 +511,7 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
                 )}
               </select>
               {pinned ? (
-                b.writeState === "UNKNOWN" || (b.writeState === "FAILED" && b.writeError && b.writeError !== "WRITE_DISABLED") ? (
+                primaryAction === "retry" ? (
                   <button
                     onClick={() => void doCreate()}
                     disabled={creating || writing}
@@ -460,6 +519,11 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
                   >
                     {creating ? "重試中…" : "重試（同一單號）"}
                   </button>
+                ) : primaryAction === "manual_reconcile" ? (
+                  // ★ cwi-qa FX-11：MANUAL_RECONCILE — 唔顯示任何自動落單/重試掣
+                  <span className="text-[10.5px] text-warn-text inline-flex items-center gap-1">
+                    <AlertTriangle size={11} strokeWidth={2.5} /> 要人手核對 — 先入 Apricot 確認有冇呢位病人先落單/重試
+                  </span>
                 ) : (
                   <button
                     onClick={() => void doCreate()}

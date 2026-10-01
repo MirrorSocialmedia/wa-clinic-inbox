@@ -29,7 +29,16 @@ export function middleware(req: NextRequest) {
   const host = process.env.APP_HOST ?? req.nextUrl.host;
   const origin = req.headers.get("origin");
   const site = req.headers.get("sec-fetch-site");
-  const originOk = origin ? new URL(origin).host === host : site === "same-origin";
+  // ★ cwi-qa FX-13（QA-13，已重現）：`Origin: null`（某些 embed/cross-origin 上下文會發字串 "null"）
+  //   → 舊 `new URL(origin)` throw → 500（全站寫請求炸）。garbage origin 同樣 throw。
+  //   安全語義：origin 存在但 parse 唔到 / 係 "null" → host 對唔上 → 403（fail-closed，唔係 500）。
+  let originHost: string | null = null;
+  try {
+    originHost = origin && origin !== "null" ? new URL(origin).host : null;
+  } catch {
+    originHost = null;
+  }
+  const originOk = origin ? originHost === host : site === "same-origin";
   if (!originOk) return NextResponse.json({ error: "bad origin" }, { status: 403 });
   const ct = req.headers.get("content-type") ?? "";
   // empty-body 判定：content-length=0，或者兩個 body 訊號都冇（content-length / transfer-encoding）

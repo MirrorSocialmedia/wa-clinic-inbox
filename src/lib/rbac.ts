@@ -2,7 +2,8 @@ import { type NextRequest } from "next/server";
 import { getSession, type SessionData, SESSION_TTL_SECONDS } from "@/lib/session";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { getRedis } from "@/lib/queue";
+// ★ cwi-qa CI-R1：request 路徑用有 commandTimeout 嘅 client（Redis 斷線唔會令請求吊死）
+import { getAppRedis as getRedis } from "@/lib/queue";
 import { publishControl } from "@/lib/notify";
 
 /**

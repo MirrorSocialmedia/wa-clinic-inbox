@@ -8,7 +8,12 @@
  *   T4 冪等 — 第二輪 sync 零變動（nameMatched/created/clinicsMapped = 0）
  *   T5 Clinic.companyId — mock 每間店 code 對返 W clinic 嘅 companyId
  *
- * 跑喺 dev DB（15432）+ WORKFORCE_MOCK=1（決定性 mock，sourceId 同 CWM dev seed 一樣）。
+ * 跑喺任何 migrated+seeded DB（本地 dev 15432 / CI fresh postgres）+ WORKFORCE_MOCK=1
+ *（決定性 mock，sourceId 同 CWM dev seed 一樣）。
+ * ★ cwi-qa FX-01b（run 36425409185 step 10 實測）：CI fresh DB 只係 seed 3 間（TKW/MF/WTC）—
+ *   舊斷言「dev DB 7 間 clinic 全部存在」係本地 dev DB 殘留假設（TY/YMT/TW/YL 非 seed 契約）→
+ *   CI 永遠紅。T5 改 hermetic：① seed 3 間必存在 ② 現有 clinic 動態對映射表。
+ *
  * 用法（repo root）：pnpm tsx scripts/unit-company-sync.ts
  * 退出碼：0 = 全過；1 = 有 fail。
  */
@@ -85,17 +90,28 @@ async function main(): Promise<void> {
 
   // ── T5 Clinic.companyId 對應 ──────────────────────────────────────
   // mock 映射：TY→菁薈(A) / YMT,TW,MF→臻善(B) / TKW,YL,WTC→匯樂(C)
+  // ★ cwi-qa FX-01b：fresh DB（CI）只係 seed 3 間 — 舊版死盯「7 間全部存在」CI 必紅
+  //   （TY/YMT/TW/YL 係本地 dev DB 加嘅店，非 prisma/seed.ts 契約）。改：
+  //   ① seed 3 間（TKW/MF/WTC）必存在（companyId 正確由 ② 覆蓋）
+  //   ② 所有現有 clinic 喺映射表內 → companyId 必對上（dev DB 7 間狀態照樣覆蓋）
   const expected: Record<string, string> = { TY: "A", YMT: "B", TW: "B", MF: "B", TKW: "C", YL: "C", WTC: "C" };
   const compByCode: Record<string, string> = {};
   for (const x of [a, b, c]) if (x) compByCode[x.code] = x.id;
+  const allClinics = await prisma.clinic.findMany({ select: { code: true, companyId: true } });
+  const existingCodes = new Set(allClinics.map((x) => x.code));
   let t5ok = true;
   let t5detail = "";
-  for (const [clinicCode, compCode] of Object.entries(expected)) {
-    const cl = await prisma.clinic.findUnique({ where: { code: clinicCode } });
-    if (!cl) { t5ok = false; t5detail = `clinic ${clinicCode} 唔存在`; break; }
-    if (cl.companyId !== compByCode[compCode]) { t5ok = false; t5detail = `clinic ${clinicCode} → ${cl.companyId} 唔係公司 ${compCode} (${compByCode[compCode]})`; break; }
+  for (const code of ["TKW", "MF", "WTC"]) {
+    if (!existingCodes.has(code)) { t5ok = false; t5detail = `seed clinic ${code} 唔存在`; break; }
   }
-  check("T5 7 間 clinic 嘅 companyId 同 workforce 映射一致", t5ok, t5detail);
+  if (t5ok) {
+    for (const cl of allClinics) {
+      const compCode = expected[cl.code];
+      if (!compCode) continue; // 映射表外（唔應該有）— 唔斷言
+      if (cl.companyId !== compByCode[compCode]) { t5ok = false; t5detail = `clinic ${cl.code} → ${cl.companyId} 唔係公司 ${compCode} (${compByCode[compCode]})`; break; }
+    }
+  }
+  check("T5 全部 clinic companyId 同 workforce 映射一致（含 seed 3 間 TKW/MF/WTC）", t5ok, t5detail);
 
   // ── cleanup ───────────────────────────────────────────────────────
   await prisma.company.deleteMany({ where: { id: TEMP_ID } });

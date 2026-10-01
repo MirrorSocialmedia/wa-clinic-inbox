@@ -188,3 +188,63 @@
   - `Contact`: source=11103 scratch=11103
   - `AiDraft`: source=15 scratch=15
   - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T08:10:00Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-160952.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=11190 scratch=11190
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T08:30:34Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-163026.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=11235 scratch=11235
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T09:21:51Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-172143.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=11302 scratch=11302
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T10:13:51Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-181343.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=11369 scratch=11369
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T10:50:04Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-184956.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=11430 scratch=11430
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3
+
+## 2026-09-28T11:57:20Z restore drill — OK
+
+- dump: `.dev/backups/wa-inbox-20260928-195712.dump`
+- 5 表 row count 對數：
+  - `Message`: source=50 scratch=50
+  - `Conversation`: source=15 scratch=15
+  - `Contact`: source=11495 scratch=11495
+  - `AiDraft`: source=15 scratch=15
+  - `BookingRequest`: source=3 scratch=3

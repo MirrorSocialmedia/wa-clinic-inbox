@@ -15,7 +15,8 @@
  * - Redis 故障 → fail-open（登入可用性優先；IP 限流層仍然有效）+ log warn
  * - email 一律 lowercase + trim 做 key（防 case 變體繞過）
  */
-import { getRedis } from "@/lib/queue";
+// ★ cwi-qa CI-R1：request 路徑用有 commandTimeout 嘅 client（Redis 斷線唔會令請求吊死）
+import { getAppRedis as getRedis } from "@/lib/queue";
 import log from "@/lib/log";
 import { waMock } from "@/lib/wa/graph";
 

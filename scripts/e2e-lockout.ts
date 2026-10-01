@@ -23,7 +23,9 @@ try {
 // ★ 顯式非 mock — 本測試要行真 lockout 路徑（.env 可能有 WA_MOCK=1）
 process.env.WA_MOCK = "0";
 
-import { getRedis } from "../src/lib/queue";
+// ★ cwi-qa CI-R1：auth-lockout 已改用 getAppRedis()（request 路徑 client）— 收尾用 closeRedis() 兩個都關，
+//   淨 quit getRedis() 會留住 appRedis 連線 → process 永遠唔退出（sim2 實測吊 20+ 分鐘）。
+import { getAppRedis as getRedis, closeRedis } from "../src/lib/queue";
 import {
   isAccountLocked,
   recordLoginFailure,
@@ -83,7 +85,7 @@ async function main(): Promise<void> {
     check("清後第 5 次先 lock", await recordLoginFailure(email), true);
   } finally {
     await redis.del(`loginfail:${key}`, `lockout:${key}`).catch(() => undefined);
-    await redis.quit().catch(() => redis.disconnect());
+    await closeRedis();
   }
 }
 

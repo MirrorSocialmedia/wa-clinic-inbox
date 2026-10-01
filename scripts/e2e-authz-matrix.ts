@@ -32,7 +32,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
-import { createHmac, randomBytes } from "node:crypto";
+import crypto, { createHmac, randomBytes } from "node:crypto";
 import { execSync, spawn } from "node:child_process";
 import { Prisma, PrismaClient, Role } from "@prisma/client";
 import * as argon2 from "argon2";
@@ -179,6 +179,7 @@ const created: { staff: string[]; clinic: string[]; kdoc: string[]; routing: str
 };
 
 let clinicTyOriginal: { companyId: string | null } = { companyId: null };
+let clinicCompanyOriginals: Record<string, string | null> = {}; // ★ hermetic：TY/YMT/TW/MF 公司歸屬原狀（setup 記、teardown/runMatrix 還原）
 let adminCompBOriginal: { role: Role; scopeType: string; scopeCompanyId: string | null; clinicId: string | null } | null = null;
 let templateOriginal: { key: string; approved: boolean; approvedAt: Date | null; approvedBy: string | null; updatedAt: Date; text: string } | null = null;
 let tyPolicyOriginal: { level: string } | null = null;
@@ -803,10 +804,14 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
   "GET /api/flows/slots": {
     // clinicCode+from+to（YYYY-MM-DD，from>=今日，span≤7）必填 — 本地日期算（server TZ 同源）
     fixture: () => {
-      const iso = (off: number) => {
-        const x = new Date(Date.now() + off * 86400_000);
-        return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
-      };
+      // ★ cwi-qa CI：日格式必須 HKT（route 用 hkToday() 驗證 from >= today）— 舊實作用
+      //   process-local date（CI runner TZ=UTC）→ UTC 日 = HKT 日 -1（16:00Z-23:59Z 時段）→
+      //   from < hkToday → 400「from must be today or later」必紅（run #7 實錘：02:53 HKT 起）。
+      //   en-CA + Asia/Hong_Kong = 同 hkToday() 口徑（YYYY-MM-DD）。
+      const iso = (off: number) =>
+        new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Hong_Kong", year: "numeric", month: "2-digit", day: "2-digit" }).format(
+          new Date(Date.now() + off * 86400_000),
+        );
       return { url: `/api/flows/slots?clinicCode=TY&from=${iso(0)}&to=${iso(1)}` };
     },
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
@@ -980,9 +985,40 @@ async function setup(): Promise<Fixtures> {
   const pw = await argon2.hash(PASS);
   await purgeFixtureRows();
 
+  // ★ cwi-qa FX-01b hermetic（CI fresh DB 自足 — run 36427669280 step 11 實錘紅：seed 只出 TKW/MF/WTC
+  //   + 零公司 + 零 TY/YMT/TW → setup 即 throw）：公司 A/B + 診所 TY/YMT/TW 自 setup（upsert by code 冪等）—
+  //   dev DB 已有 → 只 align companyId（原狀先記落還原）；CI fresh DB → create（fixed id + unique waPhoneNumberId）。
+  //   公司歸屬語義 = dev DB 原樣：TY→A（CB 外店），YMT/TW/MF→B（T631 斷 CB clinics = MF/TW/YMT + fixture）。
+  const companyA = await prisma.company.upsert({
+    where: { code: "A" },
+    update: {},
+    create: { id: "t630coa0000000000000001", code: "A", name: "公司 A（T630 hermetic fixture）" },
+  });
+  const companyB = await prisma.company.upsert({
+    where: { code: "B" },
+    update: {},
+    create: { id: "t630cob0000000000000002", code: "B", name: "公司 B（T630 hermetic fixture）" },
+  });
+  clinicCompanyOriginals = {};
+  const ensureClinic = async (code: string, comp: string, fixedId: string, waPh: string) => {
+    const before = await prisma.clinic.findUnique({ where: { code }, select: { companyId: true } });
+    clinicCompanyOriginals[code] = before?.companyId ?? null;
+    await prisma.clinic.upsert({
+      where: { code },
+      update: { companyId: comp },
+      create: { id: fixedId, code, name: `${code} 診所（T630 hermetic fixture）`, waPhoneNumberId: waPh, waDisplayNumber: "+852 0000 632", companyId: comp },
+    });
+  };
+  await ensureClinic("TY", companyA.id, "t630clinty0000000000000001", "wa_ph_t630_ty");
+  await ensureClinic("YMT", companyB.id, "t630clintymt0000000000000002", "wa_ph_t630_ymt");
+  await ensureClinic("TW", companyB.id, "t630clinttw0000000000000003", "wa_ph_t630_tw");
+  // MF = seed 診所（fresh DB 必存在）— align 入公司 B（T631 CB clinics 斷言包 MF）
+  const mfBefore = await prisma.clinic.findUnique({ where: { code: "MF" }, select: { companyId: true } });
+  if (!mfBefore) throw new Error("MF 診所唔存在（seed 未跑）");
+  clinicCompanyOriginals.MF = mfBefore.companyId;
+  if (mfBefore.companyId !== companyB.id) await prisma.clinic.update({ where: { code: "MF" }, data: { companyId: companyB.id } });
+
   const clinic = await prisma.clinic.findMany({ where: { code: { in: ["TY", "YMT", "TW", "MF"] } }, select: { id: true, code: true, companyId: true } });
-  const companyB = await prisma.company.findFirst({ where: { code: "B" }, select: { id: true } });
-  if (!companyB) throw new Error("company B 唔存在");
   const by = (code: string) => clinic.find((c) => c.code === code)!;
   if (!by("TY") || !by("YMT") || !by("TW") || !by("MF")) throw new Error("TY/YMT/TW/MF 診所唔齊");
   clinicTyOriginal = { companyId: by("TY").companyId };
@@ -1280,7 +1316,10 @@ async function teardown() {
     await prisma.pushSubscription.deleteMany({ where: { staffId: { in: [F.staffTy, F.adminAll] } } });
 
     // 還原 TY automation policy（automation PATCH 格寫咗 L2 — 真店行為要還原）
-    // （TY.companyId 已喺 runMatrix 尾還原）
+    // （TY.companyId 已喺 runMatrix 尾還原 — 呢度兜底：runMatrix 中斷（api() network error throw）尾還原未必行到）
+    for (const [code, orig] of Object.entries(clinicCompanyOriginals)) {
+      await prisma.clinic.updateMany({ where: { code }, data: { companyId: orig } });
+    }
     const tyRow2 = await prisma.clinic.findUnique({ where: { code: "TY" }, select: { id: true } });
     if (tyRow2) {
       const pol = await prisma.automationPolicy.findUnique({ where: { clinicId_category: { clinicId: tyRow2.id, category: "BOOKING_REQUEST" } } });
@@ -1354,7 +1393,8 @@ async function runMatrix(fx: Fixtures) {
     }
   }
 
-  // matrix 後即刻還原 TY（T631 要斷「改唔到 TY 設定」）
+  // matrix 後即刻還原 TY（T631 要斷「改唔到 TY 設定」— matrix 破壞性 200 格寫過 TY.companyId=B）。
+  // YMT/TW/MF 唔喺呢度還原（T631 之後先需要佢哋屬公司 B — 還原喺 teardown）。
   await prisma.clinic.updateMany({ where: { code: "TY" }, data: { companyId: clinicTyOriginal.companyId } });
   await prisma.alert.deleteMany({ where: { clinicId: fx.clinicTY.id, type: "clinic_critical_change" } });
   await prisma.auditLog.deleteMany({ where: { action: "CLINIC_CRITICAL_CHANGE", entity: "Clinic", entityId: fx.clinicTY.id } });
@@ -1838,6 +1878,84 @@ async function waitHealthz(timeoutMs: number): Promise<boolean> {
   return false;
 }
 
+// ★ cwi-qa FX-01b hermetic（CI fresh env 無 dev server — run 36427669280 只有 step 11 裸跑，3100 必然 ECONNREFUSED）：
+//   3100 冇进程 → 自起 pnpm dev（T634 先例同一套 start3100 helper）；有进程（本地 dev / 殘留）→ 只等 ready。
+//   return true = 由本 process 起 → caller 跑完必 kill3100。
+//   ready 判詞 = 200 或 503（worker heartbeat 缺 → 503 degraded，但 server 已 responding — CI 無 worker 是預期態；
+//   t630 相無 healthz 斷言格、無 worker 依賴）— 200-only 會 300s 假死（本地實錘：fresh env 起機後 healthz 永遠 503）。
+async function waitServerResponding(timeoutMs: number): Promise<boolean> {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      const r = await fetch(BASE + "/healthz" + HEALTHZ_QS, { signal: AbortSignal.timeout(3_000) });
+      if (r.status === 200 || r.status === 503) return true;
+    } catch { /* 未起 / 編譯中 */ }
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  return false;
+}
+
+// ★ CI fresh env（無 .env）server 環境配方 — mock-e2e.sh --ci 嘅 .env recipe 逐字轉 process env（零真值入 repo：
+//   全部 fake 定值/生成值，只係格式合法；mock-e2e step 12 會自己重寫 .env/.env.local + 另起 server，互不干涉）。
+function selfStartEnv(): Record<string, string> {
+  const env: Record<string, string> = {
+    ALLOW_SCOPED_ADMIN: "1", // t630 = MATRIX + T631（scoped admin guard 要 ON — staff route 行 62/195）
+    WORKFORCE_WRITE_TIMEOUT_MS: "2000", // 同 mock-e2e.sh 口徑（module-level const — 起機前必帶）
+    WORKFORCE_WRITE_RETRY_DELAY_MS: "200",
+    WA_MEDIA_DIR: "/tmp/wa-media-t630",
+    MEDIA_ENC_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", // 64 hex（同 mock-e2e 固定 fake key — 非 secret）
+    LLM_PROXY_ENABLED: "1", // llm-extract 格：gate 未開 = 503 NOT_ENABLED 截走 401 斷言（fresh + 本地 dev .env.local 都實錘缺）
+    // fake e2e key（非 secret — 格只斷 bad-envelope 401，唔簽真信封；蓋走 .env.local 真值對本 phase 無影響）
+    INTERNAL_LLM_SECRET: "t630matrixfakellmsecret0000000000",
+  };
+  if (fs.existsSync(path.resolve(process.cwd(), ".env"))) {
+    return env; // 本地自起（3100 空）：.env/.env.local 已齊全 — 最小 override
+  }
+  Object.assign(env, {
+    // mock-e2e.sh --ci .env recipe（格式合法 fake 值）
+    FLOW_JWT_SECRET: "t630matrixfakeflowjwtsecret00000000000000000000000000000000a", // 隨便 — JWT secret 無格式 gate
+    SESSION_SECRET: "t630matrixfakesessionscret00000000000000000000000000000000a",
+    PHONE_HASH_KEY: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    TOTP_ENC_KEY: Buffer.from("0123456789abcdef0123456789abcdef").toString("base64"), // 32-byte base64（totp-enc 要求恰 32 bytes）
+    WA_APP_SECRET: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    WA_VERIFY_TOKEN: "t630matrixfakeverifytoken",
+    WORKFORCE_MOCK: "1", // T638 clinical-terms PUT 會打 workforce client — mock 先有 200
+    AI_MOCK: process.env.AI_MOCK ?? "1",
+    WA_MOCK: process.env.WA_MOCK ?? "1",
+    DUTY_MOCK: process.env.DUTY_MOCK ?? "1",
+    PORT: "3100",
+    // mock-e2e .env.local recipe（CI 無 .env.local — 由 process env 承載，loadEnvConfig 唔會覆蓋已設）：
+    APP_HOST: "127.0.0.1:3100", // middleware Origin 同站比較 + socket allowRequest
+    TRUST_PROXY: "1", // login 限流信 XFF — probeCookies 逐身份 10.63.x.7 bucket 先起作用（唔係全部 127.0.0.1 一桶）
+  });
+  // VAPID（/api/push/vapid-key 格 200 要 keypair — 同 mock-e2e 每次生成）
+  try {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+    const pub = publicKey.export({ format: "jwk" });
+    const priv = privateKey.export({ format: "jwk" });
+    if (!pub.x || !pub.y || !priv.d) throw new Error("JWK 缺 x/y/d（P-256 唔會 — 防 TS 型）");
+    const b64u = (b: Buffer) => b.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const point = Buffer.concat([Buffer.from([0x04]), Buffer.from(pub.x, "base64url"), Buffer.from(pub.y, "base64url")]);
+    env.VAPID_PUBLIC_KEY = b64u(point);
+    env.VAPID_PRIVATE_KEY = b64u(Buffer.from(priv.d, "base64url"));
+    env.VAPID_SUBJECT = "mailto:t630-matrix-e2e@wa-clinic.local";
+  } catch { /* VAPID 生成失敗唔阻起機（vapid-key 格可能紅 — 明確報告好過假綠） */ }
+  return env;
+}
+
+async function ensureServer(): Promise<boolean> {
+  if (pidsOn3100().length > 0) {
+    if (await waitServerResponding(300_000)) return false;
+    throw new Error("3100 有进程但 300s 未有 responding（核對 port 3100 係咪乜別嘅嘢）");
+  }
+  console.log("\n═══ 3100 未運行 → hermetic 自起 pnpm dev（CI fresh env）═══");
+  start3100("/tmp/t630-matrix-server.log", selfStartEnv());
+  if (!(await waitServerResponding(300_000))) {
+    throw new Error("hermetic 自起 3100：300s 未 responding（睇 /tmp/t630-matrix-server.log）");
+  }
+  return true;
+}
+
 async function t634() {
   console.log("\n═══ T634 — TOTP 重放/423/強制 enroll（S3-5）═══");
   const pw = await argon2.hash(PASS);
@@ -2110,25 +2228,36 @@ async function main() {
       await prisma.$disconnect();
     }
   } else {
-    let fx: Fixtures;
+    // ★ hermetic：3100 未起就自起（CI fresh env）— 本 process 起嘅 server 跑完必 kill
+    let serverOurs = false;
     try {
-      fx = await setup();
-    } catch (e) {
-      console.error("SETUP FAIL:", e);
-      await teardown();
-      await prisma.$disconnect();
-      process.exit(1);
-    }
-    try {
-      await probeCookies();
-      const ok = await runMatrix(fx);
-      if (ok) {
-        await t631(fx);
-        await t638();
+      serverOurs = await ensureServer();
+      let fx: Fixtures;
+      try {
+        fx = await setup();
+      } catch (e) {
+        console.error("SETUP FAIL:", e);
+        await teardown();
+        await prisma.$disconnect();
+        if (serverOurs) await kill3100(); // process.exit 唔行 finally — 呢度明示 kill 防 orphan
+        process.exit(1);
+      }
+      try {
+        await probeCookies();
+        const ok = await runMatrix(fx);
+        if (ok) {
+          await t631(fx);
+          await t638();
+        }
+      } finally {
+        await teardown();
+        await prisma.$disconnect();
       }
     } finally {
-      await teardown();
-      await prisma.$disconnect();
+      if (serverOurs) {
+        console.log("\n═══ hermetic 清理：kill 本 process 起嘅 3100 ═══");
+        await kill3100();
+      }
     }
   }
 

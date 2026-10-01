@@ -13,6 +13,9 @@
  * 註：import reminder.ts 會構造 PrismaClient（零連接 — 只 pure function 被 call）
  */
 import { hkApptEpochMs, inReminderWindow } from "../src/lib/booking/reminder";
+// ★ cwi-qa FX-01：尾段明確釋放 shared redis + prisma（見檔尾 exit 註釋）
+import { closeRedis } from "../src/lib/queue";
+import prisma from "../src/lib/prisma";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ""): void {
@@ -70,3 +73,14 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log("\nUNIT PASS ✅（reminder unit）");
+
+// ★ cwi-qa FX-01（QA-01 ④）：明確釋放 shared 資源 + 強制 exit —
+//   import 鏈（reminder → … → lib/queue）module-level 建 8 個 BullMQ queue（全部共用同一
+//   shared ioredis）→ event loop 永遠唔空 → process 印完 PASS 唔退出 → CI job 卡 6 小時。
+//   closeRedis() 釋放 shared 連接（queue 全部 connection: getRedis() — 一齊斷）；
+//   prisma.$disconnect() 兜底（import 鏈已構造 PrismaClient，本 unit 零 query）。
+void (async () => {
+  await closeRedis();
+  await prisma.$disconnect();
+  process.exit(failures > 0 ? 1 : 0);
+})();

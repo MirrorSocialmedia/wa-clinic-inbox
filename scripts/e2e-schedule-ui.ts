@@ -255,7 +255,7 @@ async function main(): Promise<void> {
   try {
     await P.goto(`${base}/schedule?clinic=TKW`, { waitUntil: "domcontentloaded", timeout: 60000 });
     await P.waitForTimeout(6000); // SSR + 首次 client refetch 落定
-    let body = (await P.textContent("body")) ?? "";
+    const body = (await P.textContent("body")) ?? ""; // ★ cwi-qa FX-01：prefer-const
     if (!body.includes("mock 陳醫師")) throw new Error("週視圖未載入（mock 陳醫師 冇）");
 
     let n = slotFetches.length;

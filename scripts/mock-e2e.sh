@@ -176,6 +176,9 @@
 ##
 set -u
 cd "$(dirname "$0")/.."
+# ★ cwi-qa CI-C4：預設香港時區（同生產 ecosystem TZ 一致）— 部分日期用裸 `date -d '+1 day'` 計「聽日」，
+#   app 用 HKT；UTC 機喺 16:00–24:00 跑會對唔上（PC-G1 / T680 等「時段啱啱滿咗」）。外面有設就尊重。
+export TZ="${TZ:-Asia/Hong_Kong}"
 
 # S6-1 CI mode（audit3 P1-22）：--ci = 無本地 .env — 自動生成最小 .env + e2e fixture
 #（DATABASE_URL/REDIS_URL/各 *_MOCK 由 workflow yaml env 提供；secrets 本地隨機生成，零真值入 repo）
@@ -185,6 +188,13 @@ for _a in "$@"; do
     --ci) CI_MODE=1 ;;
   esac
 done
+
+# ★ retention env 標準化（2026-09-29 本地 systemd run 實錘）：retention-purge fail-closed 設計 —
+#   RETENTION_CONV_MONTHS/MEDIA_MONTHS 未明確喺 process env → skip（RETENTION_ENV_MISMATCH）→ T82 全紅。
+#   CI 已明確設 24/12（ci.yml）；本地標準模式以前靠 launch shell 環境繼承（唔穩）→ 未設時預設 24/12（同 CI 值），
+#   worker 係 script 起 → 繼承此 env。${VAR:=} guard 唔會覆蓋 CI/開發者明確值。
+: "${RETENTION_CONV_MONTHS:=24}"; export RETENTION_CONV_MONTHS
+: "${RETENTION_MEDIA_MONTHS:=12}"; export RETENTION_MEDIA_MONTHS
 
 # ★ 平行 e2e 互殺防護：兩個 e2e 同時跑會 pkill 對方 server/worker + 搶同一 port/DB/Redis
 #   → 雙邊失敗（429/500/socket 斷 — 已捉住過一次）。flock 排他：後到者直接退。
@@ -196,24 +206,35 @@ fi
 
 # ── env ──────────────────────────────────────────────────────────────────
 set -a
-if [ "$CI_MODE" = "1" ] && [ ! -f .env ]; then
-  echo "  CI mode：生成最小 .env（secrets 本地隨機；零真值入 repo）"
-  _jw=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  _ss=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  _ph=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  _tk=$(head -c 24 /dev/urandom | base64)
-  {
-    echo "DATABASE_URL=${DATABASE_URL:-postgresql://postgres:pw@localhost:15432/wa}"
-    echo "REDIS_URL=${REDIS_URL:-redis://localhost:6379}"
-    echo "FLOW_JWT_SECRET=${_jw}"
-    echo "SESSION_SECRET=${_ss}"
-    echo "PHONE_HASH_KEY=${_ph}"
-    echo "TOTP_ENC_KEY=${_tk}"
-    echo "WORKFORCE_MOCK=1"
-    echo "AI_MOCK=${AI_MOCK:-1}"
-    echo "WA_MOCK=${WA_MOCK:-1}"
-    echo "DUTY_MOCK=${DUTY_MOCK:-1}"
-    echo "PORT=3100"
+if [ "$CI_MODE" = "1" ]; then
+  if [ ! -f .env ]; then
+    echo "  CI mode：生成最小 .env（secrets 本地隨機；零真值入 repo）"
+    _jw=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    _ss=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    _ph=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    # ★ cwi-qa FX-01：TOTP_ENC_KEY = 32 bytes base64（totp-enc.ts 要求恰 32 bytes —
+    #   舊版 24 bytes → TOTP enroll 500，全新 CI DB 必紅）
+    _tk=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+    # ★ cwi-qa FX-01（QA-23）：舊 CI .env 缺 3 key — WA_APP_SECRET（webhook x-hub-signature-256 驗證）/
+    #   WA_VERIFY_TOKEN（webhook GET 驗證）/ MEDIA_ENC_KEY（media.ts 要求恰 64 hex — T43b 碟上密文斷言）
+    _was=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    _wvt=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    _mek=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    {
+      echo "DATABASE_URL=${DATABASE_URL:-postgresql://postgres:pw@localhost:15432/wa}"
+      echo "REDIS_URL=${REDIS_URL:-redis://localhost:6379}"
+      echo "FLOW_JWT_SECRET=${_jw}"
+      echo "SESSION_SECRET=${_ss}"
+      echo "PHONE_HASH_KEY=${_ph}"
+      echo "TOTP_ENC_KEY=${_tk}"
+      echo "WA_APP_SECRET=${_was}"
+      echo "WA_VERIFY_TOKEN=${_wvt}"
+      echo "MEDIA_ENC_KEY=${_mek}"
+      echo "WORKFORCE_MOCK=1"
+      echo "AI_MOCK=${AI_MOCK:-1}"
+      echo "WA_MOCK=${WA_MOCK:-1}"
+      echo "DUTY_MOCK=${DUTY_MOCK:-1}"
+      echo "PORT=3100"
     # VAPID（Web Push e2e T190–193 要有效 keypair；dev-only 本地生成）
     node -e '
       const crypto = require("node:crypto");
@@ -226,14 +247,28 @@ if [ "$CI_MODE" = "1" ] && [ ! -f .env ]; then
       console.log("VAPID_PRIVATE_KEY=" + b64u(Buffer.from(priv.d, "base64url")));
       console.log("VAPID_SUBJECT=mailto:e2e-ci@wa-clinic.local");
     '
-  } > .env
+    } > .env
+  fi
+  # ★ cwi-qa FX-01：fixture 生成唔再綁 .env 存在性（spec：fixture 檔無就生成，唔理 .env 存唔存在）—
+  #   e2e-staff.ts create 同 mock-e2e login 讀同一檔 → 自洽；密碼隨機（零字面值入 repo）
   mkdir -p .dev
   [ -f .dev/e2e-fixtures.txt ] || {
-    # ★ S6-1：密碼隨機生成（零字面值入 repo；e2e-staff.ts create 同 mock-e2e login 讀同一檔 → 自洽）
     H1B_CI_PASS="e2e-ci-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     echo "H1_B_EMAIL=e2e-h1b-ci@wa-clinic.local" > .dev/e2e-fixtures.txt
     echo "H1_B_PASSWORD=$H1B_CI_PASS" >> .dev/e2e-fixtures.txt
   }
+  # ★ cwi-qa FX-01（QA-23）：.env.local — server 靠 next() auto-load（base-server loadEnvConfig，dev mode）：
+  #   APP_HOST = middleware Origin 比較 + socket allowRequest（冇佢 req.nextUrl.host=localhost:3000
+  #     → 全站 POST 403 + 全部 socket 被拒）；
+  #   TRUST_PROXY = login 限流信 XFF bucket（harness 補 10.63.x.55）；
+  #   INTERNAL_LLM_SECRET = S2-9 LLM proxy 信封 key（e2e-s29a 經 process.loadEnvFile 讀 — 同 server 同源；
+  #     36 bytes raw → base64 48 字 ≥ 32 bytes 要求）
+  _llm=$(head -c 36 /dev/urandom | base64 | tr -d '\n')
+  {
+    echo "APP_HOST=127.0.0.1:3100"
+    echo "TRUST_PROXY=1"
+    echo "INTERNAL_LLM_SECRET=${_llm}"
+  } > .env.local
 fi
 # shellcheck disable=SC1091
 . ./.env
@@ -278,8 +313,9 @@ E2E_XFF_SEQ=0
 next_xff() { E2E_XFF_SEQ=$(( (E2E_XFF_SEQ + 1) % 250 + 1 )); echo "10.63.${E2E_XFF_SEQ}.55"; }
 REAL_CURL="$(command -v curl)"
 curl() {
-  local url="" method="" prev="" has_origin=0 has_ct=0 has_xff=0 has_data=0 is_get=0 a
+  local url="" method="" prev="" has_origin=0 has_ct=0 has_xff=0 has_data=0 is_get=0 has_mt=0 a
   for a in "$@"; do
+    case "$a" in -m|--max-time|--max-time=*) has_mt=1 ;; esac
     if [ "$prev" = "-H" ]; then
       case "$a" in
         Origin:*|origin:*) has_origin=1 ;;
@@ -301,6 +337,10 @@ curl() {
   done
   [ -n "$method" ] || { [ "$has_data" = 1 ] && method="POST"; }
   local extra=()
+  # ★ cwi-qa CI-E3：預設 --max-time 120 — 舊版任何一個 curl 吊住都會卡死成個 job（run 36527615294：
+  #   T692 停 Redis 後 T693 一個 curl 等咗 35 分鐘直至 job 被 cancel，後面 0 項跑到）。
+  #   自帶 -m/--max-time 嘅 call 原樣。
+  [ "$has_mt" = 1 ] || extra+=("--max-time" "${E2E_CURL_MAX_TIME:-120}")
   if [[ "$url" == "$BASE"/api/* ]]; then
     [ "$has_origin" = 1 ] || extra+=("-H" "Origin: $BASE")
     if [ "$is_get" != 1 ] && [ -n "$method" ] && [ "$has_ct" = 0 ]; then
@@ -335,7 +375,19 @@ check() { # check <desc> <actual> <expected>
 }
 
 # DB query → JSON
-q() { "$TSX" scripts/e2e-query.ts "$1" 2>/dev/null; }
+# ★ cwi-qa CI-E2：raw SQL 寫 AutomationPolicy（INSERT/UPDATE/DELETE）→ 自動 bust worker/web 嘅
+#   automation level cache（5 分鐘 in-memory TTL）。全檔 ~40 處 raw 寫入，一半冇手動 bust —
+#   全新 DB 下前段 cache 咗 L1，後段插 L3/L4 唔生效（T680 r1–r4 全紅實錚）。本機舊 DB 有殘留行所以綠。
+_Q_POLICY_RE='(INSERT|UPDATE|DELETE)[[:space:]].*"AutomationPolicy"'
+q() {
+  local _out _rc
+  _out=$("$TSX" scripts/e2e-query.ts "$1" 2>/dev/null); _rc=$?
+  if [[ "$1" =~ $_Q_POLICY_RE ]]; then
+    redis-cli -u "${REDIS_URL:-redis://127.0.0.1:6379}" PUBLISH wa-inbox:control '{"cmd":"cache:bust","scope":"automation"}' >/dev/null 2>&1 || true
+  fi
+  [ -n "$_out" ] && printf '%s\n' "$_out"
+  return $_rc
+}
 
 # 由 q 輸出 [{"f":"v"}] 提取字段值
 jf() { grep -oE "\"$1\":\"[^\"]*\"" | head -1 | cut -d'"' -f4; }
@@ -372,7 +424,15 @@ echo "════════════════════════�
 
 # ── 0. infra ────────────────────────────────────────────────────────────
 echo "[0/9] infra..."
-redis-cli ping 2>/dev/null | grep -q PONG || { echo "FATAL: redis not running on 6379"; exit 1; }
+# ★ cwi-qa FX-01b（run 36436372967 實錘）：redis 檢查加 binary 存在性 + 30s retry
+#   舊版一槍 ping：CI service container 剛 bind 到 port 或 runner 無 redis-tools → 假 FATAL
+command -v redis-cli >/dev/null 2>&1 || { echo "FATAL: redis-cli binary 無（runner 無 redis-tools？）"; exit 1; }
+REDIS_UP=0
+for i in $(seq 1 15); do
+  redis-cli ping 2>/dev/null | grep -q PONG && { REDIS_UP=1; break; }
+  sleep 2
+done
+[ "$REDIS_UP" = 1 ] || { echo "FATAL: redis not running on 6379（30s 內無 PONG — 核 redis service/container）"; exit 1; }
 if ! pg_isready -h 127.0.0.1 -p 15432 -q 2>/dev/null; then
   echo "  starting embedded postgres..."
   nohup pnpm dev:db >/tmp/e2e-pg.log 2>&1 &
@@ -452,6 +512,16 @@ rm -rf .next
 #   全部 "unable to verify the first certificate" → N 段 push 場景（T190–T193）全紅。
 #   CA 由 e2e-push.ts 首跑生成（/tmp/e2e-push-tls/ca.pem）；worker 喺 start 時快照 CA，
 #   所以每個 worker（含段間重啟）都要帶。檔案唔存在就唔 export（Node 會因缺檔拒絕起機）。
+# ★ cwi-qa CI-E1：CA 一定要喺 server/worker 起機**之前**存在 — 舊版靠 e2e-push.ts 喺 N 段首跑先生成，
+#   全新 CI runner 冇 /tmp/e2e-push-tls → 呢度唔 export → worker 唔信 mock endpoint → T190–T193
+#   全部 capture 逾時（run 36527615294）。本機有上次留低嘅 CA 所以一直綠（舊檔假綠）。
+#   同 e2e-push.ts ensureTlsFiles() 同一組檔名／參數；CA 過期（30 日）亦喺起機前重發（之後唔可以再換）。
+_E2E_TLS=/tmp/e2e-push-tls
+if [ ! -f "$_E2E_TLS/ca.pem" ] || [ ! -f "$_E2E_TLS/ca-key.pem" ] || ! openssl x509 -in "$_E2E_TLS/ca.pem" -noout -checkend 86400 >/dev/null 2>&1; then
+  rm -rf "$_E2E_TLS" && mkdir -p "$_E2E_TLS"
+  ( cd "$_E2E_TLS" && openssl req -x509 -newkey rsa:2048 -keyout ca-key.pem -out ca.pem -days 30 -nodes -subj "/CN=e2e-push-test-ca" >/dev/null 2>&1 ) \
+    || { echo "FATAL: 生成 push TLS CA 失敗（openssl？）"; exit 1; }
+fi
 if [ -f /tmp/e2e-push-tls/ca.pem ]; then
   export NODE_EXTRA_CA_CERTS=/tmp/e2e-push-tls/ca.pem
 fi
@@ -2666,7 +2736,11 @@ check "T82 AiDraft 10d DISCARDED 保留（未 90d）" "$(q "SELECT count(*)::tex
 check "T82 StaffNotice 已讀 100d 刪" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE id='$N_OLD'" | jf c)" "0"
 check "T82 StaffNotice 已讀 10d 保留" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE id='$N_RECENT'" | jf c)" "1"
 check "T82 StaffNotice 未讀保留" "$(q "SELECT count(*)::text c FROM \"StaffNotice\" WHERE id='$N_UNREAD'" | jf c)" "1"
-T82_OP=$(q "SELECT count(*)::text c FROM \"OpsReport\" WHERE \"clinicId\"='' AND \"periodStart\"::date = CURRENT_DATE" | jf c)
+# ★ cwi-qa CI-C4b：periodStart = 「當日 00:00 本地」（retention-purge.ts setHours(0) — process TZ=HKT）
+#   = UTC 前一日 16:00；舊寫法 `::date = CURRENT_DATE` 用 PG session TZ（CI service container = UTC）→
+#   UTC 00:00–16:00 跑必紅（run 36664759121 03:46Z 實錚；UTC 16:00 後先啱 — 本地 sim3 18:35Z 假綠）。
+#   兩邊都換算 HKT 再比日（同產品「當日」語義一致）。
+T82_OP=$(q "SELECT count(*)::text c FROM \"OpsReport\" WHERE \"clinicId\"='' AND (\"periodStart\" AT TIME ZONE 'Asia/Hong_Kong')::date = (now() AT TIME ZONE 'Asia/Hong_Kong')::date" | jf c)
 [ -n "$T82_OP" ] && [ "$T82_OP" -ge 1 ] && pass "T82 OpsReport 落庫（當日 run 記錄）" || { fail "T82 OpsReport 未落庫（count=$T82_OP）"; T82=1; }
 grep -q "retention-purge: done" /tmp/e2e-worker*.log 2>/dev/null && pass "T82 log metadata only（retention-purge: done + counts）" || { fail "T82 retention-purge log"; T82=1; }
 # hermetic：清 fixture 殘留
@@ -3028,7 +3102,7 @@ T75_WAMID="wamid.E2E_T75_${EPOCH}"
 if ! wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='$T75_WAMID'" '[{"c":"1"}]' 30; then fail "T75 setup 訊息未落庫"; R9=1; fi
 T75_CONV=$(q "SELECT c.id::text id FROM \"Message\" m JOIN \"Conversation\" c ON c.id=m.\"conversationId\" WHERE m.\"waMessageId\"='$T75_WAMID'" | jf id)
 [ -n "$T75_CONV" ] || { fail "T75 對話搵唔到"; R9=1; }
-T75_CID=$(uuidgen)
+T75_CID=$(node -e 'console.log(crypto.randomUUID())')  # ★ cwi-qa FX-01：uuidgen → node（CI 干净 runner 唔依賴 uuid-runtime 套件）
 h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$T75_CONV\",\"body\":\"e2e T75 idempotent 1\",\"clientMessageId\":\"$T75_CID\"}"
 check "T75 首次 POST → 202" "$H1_CODE" "202"
 wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"clientMessageId\"='$T75_CID'" '[{"c":"1"}]' 15 || fail "T75 首次 row 未 commit"
@@ -3249,6 +3323,20 @@ T81_PAT1="8526401${EPOCH}"
 T81_PAT2="8526402${EPOCH}"
 T81_W1="wamid.E2E_T81_A_${EPOCH}"
 T81_W2="wamid.E2E_T81_B_${EPOCH}"
+# ★ cwi-qa FX-01：重啟能力 gate — 本地 = redis-server 手動重啟；CI = docker restart（service container）。
+#   兩者都冇 → 整段 T81 SKIP：SHUTDOWN 後 redis 死住冇辦法恢復 → 後續所有 section
+#   （S4-2 worker job 等）全部連環假紅 — 比跳過呢個 chaos test 嚴重。
+T81_RESTART_OK=0
+if [ "$CI_MODE" = "1" ]; then
+  T81_REDIS_CID=$(docker ps -qf ancestor=redis:7 2>/dev/null | head -1)
+  [ -n "$T81_REDIS_CID" ] && T81_RESTART_OK=1
+else
+  command -v redis-server >/dev/null 2>&1 && T81_RESTART_OK=1
+fi
+if [ "$T81_RESTART_OK" = 0 ]; then
+  echo "    ⚠ T81 SKIP：冇保證嘅 redis 重啟手段（CI docker/service container、本地 redis-server 都冇）— 唔 SHUTDOWN"
+  pass "T81 SKIP（redis 重啟能力唔足 — 唔跑，防 redis 死住連環紅）"
+else
 # 1. redis SHUTDOWN NOSAVE（queue 狀態清空）
 redis-cli SHUTDOWN NOSAVE 2>/dev/null || true
 T81_DOWN=0
@@ -3274,7 +3362,14 @@ case "$T81_O2" in
   *) fail "T81 故障期間 inbound#2 未快回應：${T81_O2:-<timeout 10s>}"; R9=1 ;;
 esac
 # 3. redis 重啟（sandbox 無 supervisor — 手動；模擬 ops 重啟）
-redis-server 127.0.0.1:6379 --daemonize yes >/dev/null 2>&1 || true
+# ★ cwi-qa FX-01：舊 `redis-server 127.0.0.1:6379 --daemonize yes` 將 127.0.0.1:6379 當 config 檔 →
+#   redis 起唔返 → 之後全部 queue unavailable（本地實測 T81 之後 123 項連環紅）。
+#   CI = docker restart service container（gate 已確保 CID 存在）；本地 = 正確參數形式。
+if [ "$CI_MODE" = "1" ]; then
+  docker restart "$T81_REDIS_CID" >/dev/null 2>&1 || true
+else
+  redis-server --port 6379 --bind 127.0.0.1 --daemonize yes >/dev/null 2>&1 || true
+fi
 T81_UP=0
 for i in $(seq 1 30); do
   redis-cli ping 2>/dev/null | grep -q PONG && { T81_UP=1; break; }
@@ -3329,6 +3424,7 @@ if [ "$T81_DB_EXPECT" = 2 ]; then
 else
   pass "T81 delta refetch 跳過（200 數=${T81_DB_EXPECT} — 500 條交還 Meta 重試）"
 fi
+fi  # ← cwi-qa FX-01：T81 重啟能力 gate（T81_RESTART_OK）
 
 # ── R9 summary ─────────────────────────────────────────────────────────
 [ "$R9" = 0 ] && pass "R9 Realtime P0 chaos e2e（T75-T81）" || fail "R9 有項失敗（見上 ❌）"
@@ -4193,9 +4289,10 @@ E_START=$(date -u +%FT%TZ)
 # ── E0. setup：第二 ADMIN + 白名單 env 重啟 server ───────────────────
 # session secret 固定喺 .env — 重啟後 cookie 依然有效（SESSION_SECRET 唔變）
 E2E_ADM2_EMAIL="e2e-adm2-${EPOCH}@e2e.local"
+# ★ FX-02（cwi-qa）行為變更：POST ADMIN 必須帶明確 scopeType（無 → 400）— fixture 補 ALL
 CODE=$(curl -s -o /tmp/e2e-e-adm2.json -w '%{http_code}' -b "$COOKIE_ADMIN" \
   -X POST "$BASE/api/admin/staff" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$E2E_ADM2_EMAIL\",\"name\":\"E2E Admin2\",\"role\":\"ADMIN\",\"clinicId\":null,\"password\":\"e2e-admin2-pass-123\"}")
+  -d "{\"email\":\"$E2E_ADM2_EMAIL\",\"name\":\"E2E Admin2\",\"role\":\"ADMIN\",\"scopeType\":\"ALL\",\"clinicId\":null,\"password\":\"e2e-admin2-pass-123\"}")
 check "E0 create 2nd ADMIN → 201" "$CODE" "201"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_EADM2" \
   -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
@@ -5743,6 +5840,22 @@ MCUI_OUT=$(pnpm -s e2e:multiclinic-ui --scenario send423 --base "$BASE" \
   --staff-tkw-id "$TKW_STAFF_ID" --staff-tkw-name "$TKW_STAFF_NAME" 2>&1)
 echo "$MCUI_OUT" | grep -E "MCUI-(OK|FAIL)" | sed 's/^/  [UI] /'
 echo "$MCUI_OUT" > /tmp/e2e-mcui-423.log
+# ★ cwi-qa FX-17（sim#4 22:29 實錚）：scenario 窗口內中 dev loadManifest race（在冊 flake：
+#   RSC/chunk 500 → dev hard-error 重置 page）→ composer "" 假紅（423 本身係 by-design 決定性）。
+#   500 signature → 重建 423 線（assignVersion 回 0 + 窗口刷新）+ manifest 降溫 → 重跑一次。
+if ! echo "$MCUI_OUT" | grep -q "MCUI-OK send423" && echo "$MCUI_OUT" | grep -q "http 500"; then
+  echo "  [UI] send423 中 500（dev flake signature）→ 重建 423 線 + 重跑一次"
+  MC423_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  q "DELETE FROM \"AiDraft\" WHERE \"conversationId\"='$CV_MC_4'" >/dev/null 2>&1; q "DELETE FROM \"Message\" WHERE \"conversationId\"='$CV_MC_4'" >/dev/null 2>&1
+  q "DELETE FROM \"Conversation\" WHERE id='$CV_MC_4'" >/dev/null 2>&1
+  q "INSERT INTO \"Conversation\" (id, \"clinicId\", \"contactId\", status, \"lastMessageAt\", \"lastInboundAt\") VALUES ('$CV_MC_4', '$TKW_CLINIC_ID', '$C_MC_4', 'OPEN', '$MC423_NOW', '$MC423_NOW') ON CONFLICT (id) DO NOTHING" >/dev/null 2>&1
+  sleep 5 # dev manifest 降溫（openConv 整頁重載重試同款窗口）
+  MCUI_OUT=$(pnpm -s e2e:multiclinic-ui --scenario send423 --base "$BASE" \
+    --cookie "$COOKIE_H6M" --cookie2 "$COOKIE_TKW" --conv-423 "$CV_MC_4" \
+    --staff-tkw-id "$TKW_STAFF_ID" --staff-tkw-name "$TKW_STAFF_NAME" 2>&1)
+  echo "$MCUI_OUT" | grep -E "MCUI-(OK|FAIL)" | sed 's/^/  [UI] /'
+  echo "$MCUI_OUT" > /tmp/e2e-mcui-423.log
+fi
 echo "$MCUI_OUT" | grep -q "MCUI-OK send423" && pass "H6-MC-UI send423：composer 保留 + toast + header 即時更新" || { fail "H6-MC-UI send423（見 /tmp/e2e-mcui-423.log）"; MC=1; }
 
 # UI-4 menu：二級指派選單（其他分店… → WTC → staff）+ 跨店 confirm 文案
@@ -8889,7 +9002,35 @@ T692_WLOG_A=/tmp/e2e-worker-t692a.log
 T692_WLOG_B=/tmp/e2e-worker-t692b.log
 T692_WLOG_C=/tmp/e2e-worker-t692c.log
 # worker leaf node pid（kill 必殺 leaf — kill sh/pnpm wrapper = orphan worker，G2 實錘）
-t692_leaf_pid() { ps -eo pid,cmd | grep 'node.*src/workers/index[.]ts' | grep -v grep | tail -1 | awk '{print $1}'; }
+# ★ cwi-qa CI-E5：唔用 `ps -eo pid,cmd`（有 COLUMNS／tty 時會截斷 — worker leaf 嘅 cmdline 有 240+ 字，
+#   截斷後只 match 到 tsx CLI 父 process → kill -9 父 process，真 worker 變孤兒繼續寫 heartbeat →
+#   T692(b)「kill -9 → 150s 內 503」永遠唔成立（run 36527615294：kill 後 160s healthz 一直 200）。
+#   改讀 /proc/<pid>/cmdline（唔會截斷），揀帶 tsx `--import` loader 嗰個 = 真 worker leaf。
+t692_leaf_pid() {
+  local p
+  for p in $(pgrep -f 'src/workers/index[.]ts' 2>/dev/null); do
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '--import' && echo "$p"
+  done | tail -1
+}
+# ★ cwi-qa CI-T692b：清晒所有 worker 先再起新嗰個 — 舊寫法 `pkill -f … ; sleep 1` 只發一次 SIGTERM 等 1 秒；
+#   前面段落嘅 worker 如果卡喺 graceful shutdown（close() 等 in-flight job），會一直活住兼寫 heartbeat
+#  （src/workers/index.ts 舊版 shutdown 唔停 interval）→ T692(b) kill 咗新 worker 之後 /healthz 照 200
+#  （run 36664759121：kill 後 150s 都係 200）。SIGTERM → 最多等 20s → 仲喺度就 SIGKILL → 確認清零。
+t692_stop_all_workers() {
+  pkill -f 'src/workers/index[.]ts' 2>/dev/null || true
+  local i
+  for i in $(seq 1 20); do
+    pgrep -f 'src/workers/index[.]ts' >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  echo "    ⚠ T692：worker 20s 內未退出（卡 graceful shutdown）→ SIGKILL：$(pgrep -f 'src/workers/index[.]ts' | tr '\n' ' ')"
+  pkill -9 -f 'src/workers/index[.]ts' 2>/dev/null || true
+  for i in $(seq 1 10); do
+    pgrep -f 'src/workers/index[.]ts' >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  return 1
+}
 
 # ── T692(a): SIGINT 喺慢 Graph call 中 → in-flight job 完成、Graph 唔重複 ──────────────
 if [ -f /tmp/e2e-push-tls/ca.pem ]; then export NODE_EXTRA_CA_CERTS=/tmp/e2e-push-tls/ca.pem; fi
@@ -8933,8 +9074,7 @@ if [ "$A_UP" = 1 ]; then
 fi
 
 # ── T692(b): kill -9 → /healthz 503 喺 2 分鐘內 ──────────────────────────────
-pkill -f "src/workers/index.ts" 2>/dev/null || true
-sleep 1
+t692_stop_all_workers || { fail "T692(b) 前置：舊 worker 殺唔清"; T692=1; }
 nohup pnpm worker >"$T692_WLOG_B" 2>&1 &
 WORKER_PID=$!
 B_UP=0
@@ -8966,6 +9106,13 @@ if [ "$B_UP" = 1 ] && [ -n "${MSG_692:-}" ]; then
   [ -n "$W692B" ] || { fail "T692(b) 搵唔到 worker leaf pid"; T692=1; }
   if [ -n "$W692B" ]; then
     kill -9 "$W692B"
+    # ★ cwi-qa CI-T692b：worker 死 = 成條 process tree 死（tsx CLI 父 process 唔寫 heartbeat，但留住會
+    #   令「幾多個 worker 喺度」唔確定）— 一併 SIGKILL，確保 heartbeat writer = 0
+    pkill -9 -f 'src/workers/index[.]ts' 2>/dev/null || true
+    sleep 1
+    if pgrep -f 'src/workers/index[.]ts' >/dev/null 2>&1; then
+      fail "T692(b) kill -9 後仲有 worker process：$(pgrep -af 'src/workers/index[.]ts' | cut -c1-120 | tr '\n' ';')"; T692=1
+    fi
     B_503=0
     for i in $(seq 1 150); do
       CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$BASE/healthz$HEALTHZ_QS" 2>/dev/null || echo 000)
@@ -8978,6 +9125,7 @@ if [ "$B_UP" = 1 ] && [ -n "${MSG_692:-}" ]; then
 fi
 
 # ── T692(c): redis 重啟 → worker 自己恢復（pid 不變 = dev 等效 PM2 restarts=0）────────────────
+t692_stop_all_workers || { fail "T692(c) 前置：舊 worker 殺唔清"; T692=1; }
 nohup pnpm worker >"$T692_WLOG_C" 2>&1 &
 WORKER_PID=$!
 C_UP=0
@@ -8998,26 +9146,72 @@ if [ "$C_UP" = 1 ]; then
   [ "$C_PRE" = 1 ] || T692=1
   W692C=$(t692_leaf_pid)
   C_LOG_LINES_BEFORE=$(wc -l < "$T692_WLOG_C" 2>/dev/null || echo 0)
-  # 停 redis（dev = systemd 管理：redis-server.service Restart=always — shutdown nosave 會喺 ~1-2s 被
-  #   systemd 自動重起 = 真 redis restart（新 process），正正係要測嘅場景；生產軌 = docker restart wa-redis）
-  REDIS_PID_BEFORE=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
-  redis-cli shutdown nosave 2>/dev/null || true
-  R_RESTARTED=0
-  for i in $(seq 1 30); do
-    P=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
-    # P=0 = 一過性 stopped（systemd 重起中）— 繼續等真新 PID
-    if [ "$P" != "0" ] && [ "$P" != "" ] && [ "$P" != "$REDIS_PID_BEFORE" ]; then R_RESTARTED=1; break; fi
-    sleep 1
-  done
-  check "T692(c) redis 真重啟（MainPID ${REDIS_PID_BEFORE:-unknown} → 新 process）" "$R_RESTARTED" "1"
-  [ "$R_RESTARTED" = 1 ] || T692=1
-  R_UP=0
-  for i in $(seq 1 30); do
-    redis-cli ping 2>/dev/null | grep -q PONG && { R_UP=1; break; }
-    sleep 1
-  done
-  check "T692(c) redis 返到 PONG" "$R_UP" "1"
-  [ "$R_UP" = 1 ] || T692=1
+  # 停 redis — 雙軌：
+  #   dev = systemd 管理（redis-server.service Restart=always — shutdown nosave 會喺 ~1-2s 被
+  #     systemd 自動重起 = 真 redis restart（新 process），正正係要測嘅場景；生產軌 = docker restart）
+  #   CI  = runner 無 systemd，redis 係 service container（job 容器唔可以 restart 佢）→
+  #     shutdown 後確認 port 釋放，再 job 內起新 redis-server（同 port 6379、無持久化）模擬重啟；
+  #     對 worker 視角等效（connection drop → 同 port 新 process 返回）
+  T692_REDIS_CID=""
+  [ "$CI_MODE" = "1" ] && T692_REDIS_CID=$(docker ps -qf ancestor=redis:7 2>/dev/null | head -1)
+  if [ -n "$T692_REDIS_CID" ]; then
+    # ★ cwi-qa CI-E4：CI = docker restart service container（同 T81 同一招 — run 36527615294 T81 實證
+    #   06:03:47 shutdown → 06:03:51 container 自動返嚟）。舊版「shutdown + job 內自起 redis-server」
+    #   唔穩：container 停咗之後 6379 由邊個攞到唔確定，run #17 起唔返 → 之後全部 queue unavailable。
+    #   docker restart = 真 restart（新 process、連線斷、RDB 載返），同生產 `docker restart wa-redis` 一致。
+    docker restart "$T692_REDIS_CID" >/dev/null 2>&1 || true
+    R_UP=0
+    for i in $(seq 1 30); do
+      redis-cli ping 2>/dev/null | grep -q PONG && { R_UP=1; break; }
+      sleep 1
+    done
+    check "T692(c) redis 真重啟（docker restart service container）" "$R_UP" "1"
+    [ "$R_UP" = 1 ] || T692=1
+  elif [ "$CI_MODE" = "1" ]; then
+    REDIS_PID_BEFORE=$(pgrep -x redis-server | head -1 || echo "")
+    redis-cli shutdown nosave 2>/dev/null || true
+    DOWN_OK=0
+    for i in $(seq 1 15); do
+      redis-cli ping >/dev/null 2>&1 || { DOWN_OK=1; break; }
+      sleep 1
+    done
+    check "T692(c) redis down（port 釋放）" "$DOWN_OK" "1"
+    [ "$DOWN_OK" = 1 ] || T692=1
+    R_RESTARTED=0
+    if [ "$DOWN_OK" = 1 ]; then
+      # ★ cwi-qa CI 修復（2026-09-29 sim 實錚）：container redis shutdown 後 docker-proxy
+      #   可能仍持 6379 1-5s → 單次 bind "Address already in use" 靜默死（`|| true` 吞錯）
+      #   → ping 循環永遠 0。改：start 本身重試（每次 start → 1s → ping），port 一釋放即成。
+      for i in $(seq 1 30); do
+        redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp --save '' \
+          --pidfile /tmp/t692-redis.pid 2>/dev/null || true
+        sleep 1
+        redis-cli ping 2>/dev/null | grep -q PONG && { R_RESTARTED=1; break; }
+      done
+    fi
+    check "T692(c) redis 真重啟（新 process 返 6379）" "$R_RESTARTED" "1"
+    [ "$R_RESTARTED" = 1 ] || T692=1
+    R_UP=$R_RESTARTED
+  else
+    REDIS_PID_BEFORE=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
+    redis-cli shutdown nosave 2>/dev/null || true
+    R_RESTARTED=0
+    for i in $(seq 1 30); do
+      P=$(systemctl show redis-server -p MainPID --value 2>/dev/null || echo "")
+      # P=0 = 一過性 stopped（systemd 重起中）— 繼續等真新 PID
+      if [ "$P" != "0" ] && [ "$P" != "" ] && [ "$P" != "$REDIS_PID_BEFORE" ]; then R_RESTARTED=1; break; fi
+      sleep 1
+    done
+    check "T692(c) redis 真重啟（MainPID ${REDIS_PID_BEFORE:-unknown} → 新 process）" "$R_RESTARTED" "1"
+    [ "$R_RESTARTED" = 1 ] || T692=1
+    R_UP=0
+    for i in $(seq 1 30); do
+      redis-cli ping 2>/dev/null | grep -q PONG && { R_UP=1; break; }
+      sleep 1
+    done
+    check "T692(c) redis 返到 PONG" "$R_UP" "1"
+    [ "$R_UP" = 1 ] || T692=1
+  fi
   if [ "$R_UP" = 1 ]; then
     # worker 應喺 redis 重啟後 120s 內自己恢復：ioredis 重連（無限重試）+ heartbeat 重寫（≤30s tick）→ healthz 200
     C_REC=0
@@ -9171,7 +9365,7 @@ echo "[S6-9④] T698: outbound media API + worker..."
 T698=0
 T695=0
 COOKIE_T698_SUP=""
-t698_leaf_pid() { ps -eo pid,cmd | grep 'node.*src/workers/index[.]ts' | grep -v grep | tail -1 | awk '{print $1}'; }
+t698_leaf_pid() { t692_leaf_pid; } # ★ cwi-qa CI-E5：同 t692_leaf_pid（/proc cmdline，唔會截斷）
 t698_wait_worker() { # $1 = log（"all workers running — waiting for jobs"）
   local i
   for i in $(seq 1 90); do grep -q "all workers running" "$1" 2>/dev/null && return 0; sleep 1; done
@@ -9442,6 +9636,92 @@ check "T698/T695 收尾：/healthz 200（worker 存活）" "$HZF" "200"
 [ "$HZF" = "200" ] || T698=1
 [ "$T698" = 0 ] && pass "T698 outbound media API+worker（happy/PII/拒絕矩陣/replay/kill-reuse/timeout-UNKNOWN）" || fail "T698 有項失敗（見上 ❌）"
 [ "$T695" = 0 ] && pass "T695 composer media UI（預覽+發送 / 8MB 前端擋 / SUPERVISOR 無 📎）" || fail "T695 有項失敗（見上 ❌）"
+
+# ════════════════════════════════════════════════════════════════════════
+# FX 並行 lane 測試區塊（cwi-qa-fix 20260928 並行計劃 §0 規則 4）— FX-01 建立（空）。
+#   之後各階段需要起 server/browser 嘅 T 測試只准加喺自己 lane 嘅區塊入面，
+#   唔准改區塊以外（避免兩個 lane 同時改 mock-e2e.sh 撞車）。
+# ══════════════════════════════════════════════════════════
+
+# === FX LANE A ===
+# （Lane A 各階段 T 測試入度：階段 2 安全/權限 → 階段 3 AI）
+
+# ── FX LANE A：cwi-qa 階段 1 測試（FX-06 T760 / FX-07 T761 / FX-13 T765）─────────────
+# 注：呢段由 FX-06/FX-07/FX-13 commit 加入（並行計劃 §0 規則 4：lane 測試入自己區塊）。
+
+# ══ T760（FX-06）：statement_timeout 只限 web ══════════════════════════════════
+# role 級 8s 已 RESET（migration 20260928000100）；web 8s 由 ecosystem 生成嘅 URL options 承載。
+FX06_OUT=$(node -e '
+const { readFileSync } = require("node:fs");
+const eco = require("./ecosystem.config.cjs");
+const webUrl = (eco.apps[0].env || {}).DATABASE_URL || "";
+let wv = readFileSync(".env", "utf8").match(/^DATABASE_URL=(.+)$/m)[1].trim();
+if ((wv.startsWith("\"") && wv.endsWith("\"")) || (wv.startsWith("\x27") && wv.endsWith("\x27"))) wv = wv.slice(1, -1);
+(async () => {
+  const { PrismaClient } = require("@prisma/client");
+  const show = async (url) => {
+    const p = new PrismaClient({ datasources: { db: { url } } });
+    const r = await p.$queryRawUnsafe("SHOW statement_timeout");
+    await p.$disconnect();
+    return r[0].statement_timeout;
+  };
+  const out = {
+    webHasOpt: /options=-c%20statement_timeout%3D8000/.test(webUrl),
+    web: webUrl ? await show(webUrl) : null,
+    worker: await show(wv),
+  };
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error("FX06_ERR " + e.message); process.exit(1); });
+' 2>/dev/null | tail -1)
+FX06_WEB_OPT=$(echo "$FX06_OUT" | jq -r '.webHasOpt // empty' 2>/dev/null)
+FX06_WEB_ST=$(echo "$FX06_OUT" | jq -r '.web // empty' 2>/dev/null)
+FX06_WORKER_ST=$(echo "$FX06_OUT" | jq -r '.worker // empty' 2>/dev/null)
+[ "$FX06_WEB_OPT" = "true" ] && pass "T760 web ecosystem URL 帶 statement_timeout=8s option" || fail "T760 web URL 冇 options（raw=${FX06_OUT:0:80}）"
+check "T760 web connection SHOW statement_timeout" "$FX06_WEB_ST" "8s"
+check "T760 worker/migrate URL SHOW statement_timeout" "$FX06_WORKER_ST" "0"
+if pnpm -s migrate:deploy >/dev/null 2>&1; then pass "T760 prisma migrate deploy（worker URL）OK"; else fail "T760 prisma migrate deploy 失敗"; fi
+
+# ══ T761（FX-07）：APP_HOST 必填（production boot fail-fast + predeploy guard）═════
+# (a) production boot：NODE_ENV=production 無 APP_HOST → exit 1 + fatal log（guard 喺 Next app 建立前）
+FX07_BOOT_OUT=$(env -i HOME="$HOME" PATH="$PATH" NODE_ENV=production timeout 30 "$TSX" server.ts 2>&1)
+FX07_BOOT_CODE=$?
+if [ "$FX07_BOOT_CODE" = "1" ] && printf '%s' "$FX07_BOOT_OUT" | grep -q "APP_HOST 未設"; then
+  pass "T761 production boot 無 APP_HOST → exit 1 + fatal log"
+else
+  fail "T761 production boot guard 異常（code=$FX07_BOOT_CODE; out=${FX07_BOOT_OUT:0:120}）"
+fi
+# (b) predeploy：.env 無 APP_HOST → 點名 + exit 1
+cp .env "/tmp/e2e-fx07-env-backup.$$"
+sed -i '/^APP_HOST=/d' .env
+FX07_PRE1_OUT=$(bash scripts/predeploy-check.sh 2>&1)
+FX07_PRE1_CODE=$?
+if [ "$FX07_PRE1_CODE" != "0" ] && printf '%s' "$FX07_PRE1_OUT" | grep -q "APP_HOST 未設"; then
+  pass "T761 predeploy 無 APP_HOST → exit 1 + 點名"
+else
+  fail "T761 predeploy 無 APP_HOST guard 異常（code=$FX07_PRE1_CODE）"
+fi
+# (c) predeploy：APP_HOST=localhost → 點名 + exit 1（production 唔准 loopback）
+printf 'APP_HOST=localhost:3100\n' >> .env
+FX07_PRE2_OUT=$(bash scripts/predeploy-check.sh 2>&1)
+FX07_PRE2_CODE=$?
+if [ "$FX07_PRE2_CODE" != "0" ] && printf '%s' "$FX07_PRE2_OUT" | grep -q "APP_HOST 唔准係"; then
+  pass "T761 predeploy APP_HOST=localhost → exit 1 + 點名"
+else
+  fail "T761 predeploy APP_HOST=localhost guard 異常（code=$FX07_PRE2_CODE）"
+fi
+mv "/tmp/e2e-fx07-env-backup.$$" .env
+
+# ══ T765（FX-13）：Origin null/garbage → 403（唔係 500）═════════════════════════
+FX13_NULL=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/messages/send" -H "Origin: null" -H "Content-Type: application/json" -d '{}')
+check "T765 Origin: null → 403" "$FX13_NULL" "403"
+FX13_GARB=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/messages/send" -H "Origin: garbage" -H "Content-Type: application/json" -d '{}')
+check "T765 Origin: garbage → 403" "$FX13_GARB" "403"
+# 對照：同站 Origin → 過 origin gate（無 cookie → 401 屬正常；403/500 = 誤殺/回歸）
+FX13_SAME=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/messages/send" -H "Origin: http://127.0.0.1:3100" -H "Content-Type: application/json" -d '{}')
+if [ "$FX13_SAME" != "403" ] && [ "$FX13_SAME" != "500" ]; then pass "T765 same-origin 過 origin gate（→ $FX13_SAME）"; else fail "T765 same-origin 被誤殺（$FX13_SAME）"; fi
+
+# === FX LANE B ===
+# （Lane B 各階段 T 測試入度：階段 2 預約/outbound → 階段 3 附件/API）
 
 echo "════════════════════════════════════════════"
 echo " E2E 完成：PASS=$PASS FAIL=$FAIL"

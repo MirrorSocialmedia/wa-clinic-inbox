@@ -2,6 +2,7 @@
   "name": "wa-clinic-inbox",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "prisma generate && next build",
@@ -112,6 +113,7 @@
     "e2e:manual-booking": "tsx scripts/e2e-manual-booking.ts",
     "test:unit-followup": "tsx scripts/unit-followup.ts",
     "test:unit-t724": "tsx scripts/unit-t724-status-rank.ts",
+    "test:unit-workforce-mock-json": "tsx scripts/unit-workforce-mock-json.ts",
     "e2e:s11c-t714": "tsx scripts/e2e-s11c-t714.ts"
   },
   "prisma": {
