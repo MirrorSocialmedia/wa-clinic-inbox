@@ -8,6 +8,7 @@ import {
   CalendarDays,
   Check,
   CheckCheck,
+  ClipboardList,
   Clock,
   ChevronLeft,
   Info,
@@ -657,6 +658,7 @@ export interface ChatPaneHandle {
 export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, ref) {
   const [draft, setDraft] = useState("");
   // ★ cwi-final S6-9（③）：enterSends 有效值 = 偏好 AND 非手機（手機永遠 Enter 換行）
+  // ★ cwi-ux UX-05：同一個 isMobile 亦用嚟縮短手機 placeholder（「輸入訊息…」）— 唔好喺 early return 之後再開 hook。
   const isMobile = useIsMobile();
   const enterSendsActive = (p.enterSends ?? true) && !isMobile;
   // ★ cwi-final S1-13（D-6）：堆疊入目前展示緊嘅卡（parent 已 clamp index）
@@ -1267,27 +1269,41 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
 
   return (
     <section className="flex-1 min-w-0 flex flex-col min-h-0 bg-canvas">
-      {/* header：avatar + contact + 窗口 chip */}
-      <div className="h-[52px] shrink-0 bg-panel border-b border-line flex items-center gap-2 md:gap-2.5 px-2 md:px-4">
+      {/* header：avatar + contact + 窗口 chip
+          ★ cwi-ux UX-05：h-[52px] → min-h-[52px] py-1.5（名字欄 4 行會溢出 52px → 同上下疊埋根因）；
+          手機 <md 名字欄只留 2 行（姓名 + 店碼·負責人），右側掣收細；桌面（≥md）零改變。 */}
+      <div className="min-h-[52px] py-1.5 shrink-0 bg-panel border-b border-line flex items-center gap-2 md:gap-2.5 px-2 md:px-4">
         <button onClick={p.onBack} aria-label="返回列表" className="md:hidden p-1 -ml-1 text-brand-text">
           <ChevronLeft size={20} />
         </button>
         <button
           onClick={p.onOpenDetail}
-          className="flex items-center gap-2.5 min-w-0 text-left lg:pointer-events-none"
+          // ★ cwi-ux UX-05：flex-1 min-w-[80px] — 名字欄保底 80px 唔會被右側掣擠到 0 闊（手機姓名唔見根因）
+          className="flex items-center gap-2.5 flex-1 min-w-[80px] text-left lg:pointer-events-none"
           aria-label="開啟聯絡人詳情"
         >
           <div className="w-[38px] h-[38px] rounded-full bg-brand text-panel flex items-center justify-center text-[15px] font-medium shrink-0">
             {initialOf(c)}
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div className="font-display text-[17px] leading-tight text-t1 truncate">
               {c.contact?.profileName || "未命名聯絡人"}
             </div>
-            {c.contact?.waId && <div className="text-[11px] text-t3">{c.contact.waId}</div>}
+            {/* ★ cwi-ux UX-05：手機第 2 行 — 店碼 + 負責人（細字 truncate）；電話/chip 列/負責人列只 md: 以上 */}
+            <div className="md:hidden text-[10px] text-t3 truncate">
+              {c.clinicCode ? `${c.clinicCode} · ` : ""}
+              {assigneeName ? (
+                <span className={locked ? "text-warn-text" : undefined}>
+                  負責人：{c.assigneeId === p.myStaffId ? "你" : assigneeName}
+                </span>
+              ) : (
+                "未指派"
+              )}
+            </div>
+            {c.contact?.waId && <div className="hidden md:block text-[11px] text-t3">{c.contact.waId}</div>}
             {/* ★ P2（cwi-followup-p2 §3.1）+ v3：病人 chip — patientCode·舊客/新客 + 未結餘額（中性灰，>0 先顯）+ 上次到診 */}
             {patientChip ? (
-              <div className="flex items-center gap-1 flex-wrap" data-e2e="p2-chip-row">
+              <div className="hidden md:flex items-center gap-1 flex-wrap" data-e2e="p2-chip-row">
                 <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-panel-2 text-t2" data-e2e="p2-chip-code">
                   {patientChip.patientCode ?? "—"} · {patientChip.customerType === "returning" ? "舊客" : "新客"}
                 </span>
@@ -1307,20 +1323,24 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
               </div>
             ) : null}
             {assigneeName && (
-              <div className={`text-[10px] inline-flex items-center gap-0.5 ${locked ? "text-warn-text" : "text-t3"}`}>
+              <div className={`hidden md:inline-flex items-center gap-0.5 text-[10px] ${locked ? "text-warn-text" : "text-t3"}`}>
                 <Lock size={9} />
                 負責人：{c.assigneeId === p.myStaffId ? "你" : assigneeName}
               </div>
             )}
           </div>
         </button>
-        {/* ★ P2（cwi-followup-p2 §3.1）：〔病人記錄〕入口 — 手機開半屏抽屜 / 桌面切右側欄分頁 */}
+        {/* ★ P2（cwi-followup-p2 §3.1）：〔病人記錄〕入口 — 手機開半屏抽屜 / 桌面切右側欄分頁
+            ★ cwi-ux UX-05：手機只剩 icon（字版 md: 以上）— 細屏唔好再搶名字欄位 */}
         <button
           data-e2e="p2-open-record"
           onClick={() => p.onOpenPatientRecord?.()}
-          className="px-2.5 py-1 rounded-full text-[11px] border border-line text-brand-text bg-brand-soft hover:opacity-80 whitespace-nowrap"
+          className="shrink-0 p-1.5 md:px-2.5 md:py-1 rounded-full text-brand-text border border-line bg-brand-soft hover:opacity-80"
+          aria-label="病人記錄"
+          title="病人記錄"
         >
-          病人記錄
+          <ClipboardList size={15} strokeWidth={2.75} className="md:hidden" />
+          <span className="hidden md:inline text-[11px]">病人記錄</span>
         </button>
         {/* ★ Phase E：「⋯」menu — 標記投訴 / 標記 AI 錯誤（前線先見到問題） */}
         <div className="relative">
@@ -1339,6 +1359,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
               <div className="fixed inset-0 z-10" onClick={() => setFlagMenuOpen(false)} />
               <div className="absolute right-0 top-9 z-20 w-44 bg-panel border border-line rounded-2xl shadow-lg py-1">
                 {flagMsg ? <p className="px-3 py-1 text-[11px] text-t3">{flagMsg}</p> : null}
+                {releaseError && <p className="px-3 py-1 text-[11px] text-warn-text">{releaseError}</p>}
                 <button
                   disabled={flagBusy}
                   onClick={() => void flag("COMPLAINT")}
@@ -1353,11 +1374,36 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 >
                   標記 AI 錯誤
                 </button>
+                {/* ★ cwi-ux UX-05：〔放手〕收入 ⋯ 選單（手機）— 兩段確認同獨立掣一致（再撳一次放手？） */}
+                {canRelease && (
+                  <button
+                    data-e2e="release-menu-btn"
+                    disabled={p.releaseBusy}
+                    onClick={() => {
+                      setReleaseError(null);
+                      if (!releaseArmed) {
+                        setReleaseArmed(true);
+                        return;
+                      }
+                      setReleaseArmed(false);
+                      void (async () => {
+                        const r = await p.onRelease!();
+                        if (!r.ok) setReleaseError(r.error ?? "放手失敗");
+                      })();
+                    }}
+                    className={`w-full text-left px-3 py-1.5 text-sm hover:bg-panel-2 disabled:opacity-50 ${
+                      releaseArmed ? "text-warn-text font-semibold" : "text-t1"
+                    }`}
+                  >
+                    {p.releaseBusy ? "放手緊…" : releaseArmed ? "再撳一次放手？" : "放手"}
+                  </button>
+                )}
               </div>
             </>
           ) : null}
         </div>
-        {/* cwi-multiclinic-20260903（MD A.6.1）：〔放手〕— 現任負責人 ∨ ADMIN 見；兩段確認防誤觸 */}
+        {/* cwi-multiclinic-20260903（MD A.6.1）：〔放手〕— 現任負責人 ∨ ADMIN 見；兩段確認防誤觸
+            ★ cwi-ux UX-05：手機收入 ⋯ 選單（release-menu-btn），獨立掣只 md: 以上 */}
         {canRelease && (
           <button
             data-e2e="release-btn"
@@ -1374,7 +1420,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
               })();
             }}
             title="放手：取消自己負責人 — 呢條線放返隊列（其他人可以接手）"
-            className={`px-2.5 py-1 rounded-full text-[11px] border ${
+            className={`hidden md:inline-flex shrink-0 items-center px-2.5 py-1 rounded-full text-[11px] border ${
               releaseArmed
                 ? "border-warn-text text-warn-text bg-warn-soft"
                 : "border-line text-t2 hover:text-t1 hover:bg-black/[.04]"
@@ -1384,13 +1430,25 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             {p.releaseBusy ? "放手緊…" : releaseArmed ? "再撳一次放手？" : "放手"}
           </button>
         )}
-        {releaseError && <span className="text-[10px] text-warn-text whitespace-nowrap">{releaseError}</span>}
+        {releaseError && <span className="hidden md:inline text-[10px] text-warn-text whitespace-nowrap">{releaseError}</span>}
         <span
-          className={`ml-auto text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${windowChipCls}`}
+          className={`ml-auto shrink-0 text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${windowChipCls}`}
           title="24 小時客服窗口倒數｜窗口內：用 API（呢度覆）｜過窗三出路：① 開手機 App 免費覆（W-5：只覆主動搵過我哋嘅人、唔好複製同一段派多人、叫停即停）② 發 template（逐條收費）③ 等病人下次搵你"
         >
-          <Clock size={13} strokeWidth={2.75} />
-          {c.window.open ? `窗口 ${windowCountdown(c.window.remainingMs)}` : "已過窗 · 只可發 template"}
+          <Clock size={13} strokeWidth={2.75} className="shrink-0" />
+          {c.window.open ? (
+            <>
+              {/* ★ cwi-ux UX-05：手機只 icon + 小時（23h）— 顏色規則（<6h 黃 / 過窗紅）照舊由 windowChipCls 承載 */}
+              <span className="md:hidden">
+                {Math.floor(c.window.remainingMs / 3_600_000) > 0
+                  ? `${Math.floor(c.window.remainingMs / 3_600_000)}h`
+                  : "<1h"}
+              </span>
+              <span className="hidden md:inline">窗口 {windowCountdown(c.window.remainingMs)}</span>
+            </>
+          ) : (
+            "已過窗 · 只可發 template"
+          )}
         </span>
       </div>
 
@@ -1995,7 +2053,9 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 }}
                 rows={1}
                 placeholder={
-                  enterSendsActive ? "輸入訊息…（Enter 發送，Shift+Enter 換行）" : "輸入訊息…（Enter 換行，Ctrl/⌘+Enter 發送）"
+                  // ★ cwi-ux UX-05：手機只「輸入訊息…」— 長提示（Enter 規則）喺發送掣下方已有 toggle，唔使重複；
+                  //   細框 rounded-full 入面長字會斷行兼被圓角切走下半截
+                  isMobile ? "輸入訊息…" : enterSendsActive ? "輸入訊息…（Enter 發送，Shift+Enter 換行）" : "輸入訊息…（Enter 換行，Ctrl/⌘+Enter 發送）"
                 }
                 data-testid="c5-composer"
                 className="flex-1 resize-none rounded-full bg-panel-2 border border-transparent px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"

@@ -2,6 +2,7 @@ import { redirect, forbidden } from "next/navigation";
 import { getServerSession } from "@/lib/session-server";
 import prisma from "@/lib/prisma";
 import { AdminShell } from "./admin-shell";
+import { BottomTabBar } from "@/components/inbox/bottom-tab-bar";
 
 /**
  * /admin — ADMIN-only 管理區（店/員工/onboarding/templates）。
@@ -30,17 +31,32 @@ export default async function AdminLayout({
     prisma.suggestionCard.count({ where: { status: "PROPOSED" } }),
     prisma.clinic.count(),
   ]);
+  // ★ cwi-ux UX-04：管理頁手機版加返 BottomTabBar（同 (inbox) 四格導航一致 — 唔會「入咗管理頁冇路返」）；
+  //   unread badge 同 (inbox)/layout 同一口徑（未解決 + unreadCount>0）。
+  //   呢度 session.role 已 narrow 到 ADMIN|SUPERVISOR（STAFF 上面 forbidden()）→ 全店口徑。
+  const unreadCount = await prisma.conversation.count({
+    where: {
+      unreadCount: { gt: 0 },
+      status: { not: "RESOLVED" },
+    },
+  });
 
   return (
-    <div className="min-h-screen bg-canvas p-3 md:p-6">
-      <AdminShell
-        userName={session.name}
-        clinicCount={clinicCount}
-        pendingSuggestions={pendingSuggestions}
-        role={session.role}
-      >
-        {children}
-      </AdminShell>
+    <div className="min-h-screen bg-canvas pt-[env(safe-area-inset-top)]">
+      <div className="p-3 md:p-6 pb-[calc(4.5rem+env(safe-area-inset-bottom))] md:pb-6">
+        <AdminShell
+          userName={session.name}
+          clinicCount={clinicCount}
+          pendingSuggestions={pendingSuggestions}
+          role={session.role}
+        >
+          {children}
+        </AdminShell>
+      </div>
+      {/* ★ cwi-ux UX-04：手機固定底部 tab（管理頁長頁自然捲 → fixed；md 以上零影響） */}
+      <div className="md:hidden fixed inset-x-0 bottom-0 z-40">
+        <BottomTabBar role={session.role} unreadCount={unreadCount} />
+      </div>
     </div>
   );
 }

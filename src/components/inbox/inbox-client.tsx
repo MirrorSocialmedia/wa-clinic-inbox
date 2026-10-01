@@ -14,6 +14,7 @@ import type {
   FollowupSuggestion,
   ConvStatus,
   ConvUpdatedEvent,
+  ConversationReadEvent,
   DraftInfo,
   DraftExpiredEvent,
   DraftReadyEvent,
@@ -748,6 +749,22 @@ export function InboxClient({
                 // RESOLVED 自動清急症紅標（同 API PATCH 語義一致）
                 urgent: e.status === "RESOLVED" ? false : c.urgent,
               }
+            : c
+        )
+      );
+    });
+
+    // ── ★ cwi-ux UX-01：一鍵已讀跨裝置同步（staff:{staffId} room 定向；其他裝置 badge 同步變 0）──
+    //   本人發起嗰部裝置已樂觀清過 — 重複收 = 冪等（firstTime eventId 去重 + 同值覆寫）。
+    socket.on("conversation:read", (e: ConversationReadEvent) => {
+      if (!firstTime(e)) return;
+      const ids = new Set(e.conversationIds ?? []);
+      const cleared = new Set(e.unreadClearedIds ?? []);
+      if (ids.size === 0) return;
+      setConversations((prev) =>
+        prev.map((c) =>
+          ids.has(c.id)
+            ? { ...c, myUnread: 0, ...(cleared.has(c.id) ? { unreadCount: 0 } : {}) }
             : c
         )
       );
@@ -1988,6 +2005,81 @@ export function InboxClient({
     })();
   }, []);
 
+  // ── ★ cwi-ux UX-01：一鍵已讀（老細拍板選項① — 急症唔一齊清）─────────────────
+  /** 💬 訊息未讀 → POST /api/conversations/mark-all-read（scope 跟頂部診所下拉）→
+   *  樂觀清本地（層②同服务端同判定）+ refetch 對齊。capped（>500）→ cursor 自動跟住清
+   *  （最多 5 輪 = 2500 條／次 — 超過嘅極端店下次再撳；幂等：已讀唔變未讀）。 */
+  const onMarkAllRead = useCallback(async () => {
+    try {
+      const clinicBody = activeClinicRef.current === "all" ? {} : { clinicId: activeClinicRef.current };
+      let cursor: string | undefined;
+      for (let round = 0; round < 5; round++) {
+        const res = await fetch("/api/conversations/mark-all-read", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(cursor ? { ...clinicBody, cursor } : clinicBody),
+        });
+        if (!res.ok) {
+          const d = (await res.json().catch(() => null)) as { error?: string } | null;
+          setNotice(d?.error ?? `全部標已讀失敗（${res.status}）`);
+          return;
+        }
+        const b = (await res.json()) as { capped: boolean; nextCursor?: string };
+        if (!b.capped || !b.nextCursor) break;
+        cursor = b.nextCursor;
+      }
+      // 樂觀清：我負責 / 未指派且非 SUPERVISOR 嘅 row 先清 unreadCount（同服务端 shouldClearUnread 同判定）
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.myUnread > 0
+            ? {
+                ...c,
+                myUnread: 0,
+                unreadCount:
+                  c.assigneeId === user.staffId || (c.assigneeId === null && user.role !== "SUPERVISOR") ? 0 : c.unreadCount,
+              }
+            : c
+        )
+      );
+      void fetchConversations(activeClinicRef.current);
+    } catch {
+      setNotice("全部標已讀失敗（網絡）");
+    }
+  }, [user.staffId, user.role, fetchConversations]);
+
+  /** 內部通知面板「全部已讀」：PATCH /api/notices（冇 ids）— 後端已排除 URGENT_ESCALATION（選項①）。
+   *  成功 → 前端 state 移除非急症（急症保留，逐條「已確認」）。 */
+  const onNoticesMarkAllRead = useCallback(async () => {
+    try {
+      const res = await fetch("/api/notices", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        setNotice(`通知全部已讀失敗（${res.status}）`);
+        return;
+      }
+      setNotices((prev) => prev.filter((n) => n.kind === "URGENT_ESCALATION"));
+    } catch {
+      setNotice("通知全部已讀失敗（網絡）");
+    }
+  }, []);
+
+  /** 急症逐條「已確認」：PATCH /api/notices {ids:[id]} — 唔跳對話（工單：唔使跳入對話都可以確認）。 */
+  const onNoticeAck = useCallback(async (n: StaffNoticeItem) => {
+    try {
+      await fetch("/api/notices", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [n.id] }),
+      });
+    } catch {
+      /* non-fatal — UI 先 optimistic 清（同 onNoticeClick 口徑） */
+    }
+    setNotices((prev) => prev.filter((x) => x.id !== n.id));
+  }, []);
+
   // ── ★ cwi-final S1-3（N-3）：單條補載 — 深連結 / push / bell / search 指向唔喺列表嘅對話 ────
   //   舊行為：selectedConvId 已設但 row 唔喺 state → selectedConv 永遠 null → 空白畫面（mobile 尤甚）。
   //   而家：?ids= 單條補載（route 已支援 — B6 object API 回 { items }）寫入 state；
@@ -2870,6 +2962,9 @@ export function InboxClient({
         onBellClick={() => void onBellClick()}
         notices={notices}
         onNoticeClick={onNoticeClick}
+        onMarkAllRead={() => void onMarkAllRead()}
+        onNoticesMarkAllRead={() => void onNoticesMarkAllRead()}
+        onNoticeAck={(n) => void onNoticeAck(n)}
         unreadTotal={unreadTotal}
         prefs={prefs}
         onPrefsChange={updatePrefs}
