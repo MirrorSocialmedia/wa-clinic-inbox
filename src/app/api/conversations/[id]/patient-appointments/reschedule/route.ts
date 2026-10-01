@@ -20,6 +20,7 @@ import { getWindowState } from "@/lib/wa/window";
 import { hkDateOffset } from "@/lib/availability";
 import { phoneHash } from "@/lib/phone-hash";
 import { sendBookingFlow, WindowClosedError, FlowsDisabledError } from "@/lib/flows/send";
+import { conversationAllowedBookingClinics } from "@/lib/booking/effective-clinic";
 import { WorkforceApiError, fetchAppointments } from "@/lib/workforce/client";
 
 export const dynamic = "force-dynamic";
@@ -69,6 +70,9 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   // 驗證 appointment 屬於 pinned patient（workforce 回查 — 側欄卡只係 UI，API 唔信）
   const clinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId } });
   if (!clinic) return NextResponse.json({ error: "clinic missing" }, { status: 500 });
+  // ★ UX-07：跨店預約（bookingClinicId）喺目標店 — 允許集合 = 對話所屬店 ∪ 目標店
+  const allowedClinics = await conversationAllowedBookingClinics(conv.id, conv.clinicId);
+  const allowedCodes = new Set(allowedClinics.map((c) => c.code));
   let appt: { apricotApptId: string; clinicCode: string; patientApricotId: string; date: string; start: string; bookingStatus: number };
   try {
     const data = await fetchAppointments(phoneHash(contact.waId), hkDateOffset(-7), hkDateOffset(30));
@@ -82,8 +86,8 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     if (found.patientApricotId !== conv.pinnedPatientApricotId) {
       return NextResponse.json({ error: "patient_mismatch" }, { status: 400 });
     }
-    if (found.clinicCode !== clinic.code) {
-      return NextResponse.json({ error: "wrong_clinic", message: "預約唔係本店 — 唔可以經呢度改期" }, { status: 400 });
+    if (!allowedCodes.has(found.clinicCode)) {
+      return NextResponse.json({ error: "wrong_clinic", message: "預約唔喺本對話可操作嘅診所 — 唔可以經呢度改期" }, { status: 400 });
     }
     if (found.bookingStatus !== 0 && found.bookingStatus !== 102) {
       return NextResponse.json(
@@ -99,11 +103,14 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   }
 
   // 設改期旗標（flow-reply 路由到 reschedule 路徑）+ 發 Flow
+  // ★ UX-07：預約喺目標店（跨店）→ Flow 用同一間目標店（病人新時段落喺同一間店；同店 = 舊行為）
+  const apptClinic = allowedClinics.find((c) => c.code === appt.clinicCode);
+  const flowBookingClinicId = apptClinic && apptClinic.id !== conv.clinicId ? apptClinic.id : null;
   await prisma.conversation.update({ where: { id: conv.id }, data: { reschedulingApptId: apricotApptId } });
   try {
-    const r = await sendBookingFlow({ conversationId: conv.id, staffId: ctx.staff.id });
+    const r = await sendBookingFlow({ conversationId: conv.id, staffId: ctx.staff.id, bookingClinicId: flowBookingClinicId });
     log.info(
-      { conversationId: conv.id, clinicId: conv.clinicId, apricotApptId, apptDate: appt.date, staffId: ctx.staff.id, reused: r.reused },
+      { conversationId: conv.id, clinicId: conv.clinicId, bookingClinicId: flowBookingClinicId, apricotApptId, apptDate: appt.date, staffId: ctx.staff.id, reused: r.reused },
       "patient-appointments: reschedule flow started"
     );
     return NextResponse.json({ ok: true, flowToken: r.flowToken, messageId: r.messageId, reused: r.reused, apricotApptId });

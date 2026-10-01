@@ -18,6 +18,10 @@
  *   jobId = bw-${bookingId}-${idemAttempt}（enqueue 層冪等）。
  * - 重試（queue attempts 3）：DB 短暂故障重投安全 — workforce idempotencyKey 冪等 + 條件 update 防雙確認。
  *
+ * ★ cwi-ux UX-07（2026-10-01）：跨分店預約 — createBooking clinicCode = **預約目標店**
+ *   （effectiveBookingClinicId）；確認訊息店名 + 地址 = 目標店（唔改 = 叫病人去錯店 🔴）；
+ *   afterBookingWrite / aiPatientReply 用目標店；StaffNotice / 對話通知照舊落對話所屬店。
+ *
  * ★ R2 鐵律：publish 永遠喺 commit 之後。
  * ★ PII 鐵律：log 只 metadata（booking/clinic id、workforce code、actor id）— 零訊息原文。
  */
@@ -33,6 +37,7 @@ import { afterBookingWrite } from "@/lib/booking/booking-ops";
 import { buildRemarks, confirmMessageText, clinicAddressFromGreetingConfig } from "@/lib/booking/booking-text";
 import { bookingConfirmClientMessageId } from "@/lib/booking/booking-id";
 import { sendAutoIfStillEligible } from "@/lib/ai/auto-send-gate";
+import { effectiveBookingClinicId } from "@/lib/booking/effective-clinic";
 import { createBooking, WorkforceApiError, WorkforceOutcomeUnknown } from "@/lib/workforce/client";
 import { resolveDurationMin } from "@/lib/booking/durations";
 import { BOOKING_WRITE_CONCURRENCY } from "./concurrency";
@@ -60,6 +65,7 @@ type BookRow = {
   id: string;
   conversationId: string;
   clinicId: string;
+  bookingClinicId: string | null;
   providerApricotId: string;
   providerName: string;
   requestedDate: string;
@@ -215,10 +221,14 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
 
   const conv = await prisma.conversation.findUnique({ where: { id: booking.conversationId } });
   const clinic = await prisma.clinic.findUnique({ where: { id: booking.clinicId } });
-  // ★ S5-14⑦：確認文字加診所名 + 地址（greetingConfig.address — 冇就舊文字）
-  const clinicText = { clinicName: clinic?.name ?? null, clinicAddress: clinicAddressFromGreetingConfig((clinic?.greetingConfig ?? null) as Record<string, unknown> | null) };
-  if (!conv || !clinic || !conv.pinnedPatientApricotId || !booking.requestedTime) {
-    // fail-closed：前置已唔成立（pinned 移除 / conv 刪除 / 時段缺）→ FAILED（唔重試 — 重試都係一樣）
+  // ★ UX-07：預約目標店（時段／Apricot／確認訊息一律用佢）— null = 對話所屬店
+  const bookingClinicId = effectiveBookingClinicId(booking);
+  const bookingClinic =
+    bookingClinicId === clinic?.id ? clinic : await prisma.clinic.findUnique({ where: { id: bookingClinicId } });
+  // ★ S5-14⑦：確認文字加診所名 + 地址（greetingConfig.address — 冇就舊文字）— 目標店
+  const clinicText = { clinicName: bookingClinic?.name ?? null, clinicAddress: clinicAddressFromGreetingConfig((bookingClinic?.greetingConfig ?? null) as Record<string, unknown> | null) };
+  if (!conv || !clinic || !bookingClinic || !conv.pinnedPatientApricotId || !booking.requestedTime) {
+    // fail-closed：前置已唔成立（pinned 移除 / conv 刪除 / 時段缺 / 目標店失踪）→ FAILED（唔重試 — 重試都係一樣）
     await prisma.bookingRequest
       .update({ where: { id: bookingId }, data: { writeState: "FAILED", writeError: "precondition" } })
       .catch(() => undefined);
@@ -239,7 +249,8 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
   try {
     created = await createBooking({
       idempotencyKey,
-      clinicCode: clinic.code,
+      // ★ UX-07：Apricot 落單 = 預約目標店
+      clinicCode: bookingClinic.code,
       providerApricotId: booking.providerApricotId,
       date: booking.requestedDate,
       start: booking.requestedTime,
@@ -263,7 +274,7 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
         { bookingId, ...(!isStaff ? { sessionId: actor.sessionId } : {}) },
       );
       if (!isStaff && triggerMsgId) {
-        await aiPatientReply(conv, clinic.id, triggerMsgId, actor.sessionId, "收到！職員會好快幫你確認 🙂");
+        await aiPatientReply(conv, bookingClinic.id, triggerMsgId, actor.sessionId, "收到！職員會好快幫你確認 🙂");
       }
       await publishUpdated(booking, { status: booking.status, writeState: "UNKNOWN", writeError: "timeout" });
       return;
@@ -283,7 +294,7 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
         { bookingId, sessionId: actor.sessionId },
       );
       if (triggerMsgId) {
-        await aiPatientReply(conv, clinic.id, triggerMsgId, actor.sessionId, "收到！職員會好快幫你確認 🙂");
+        await aiPatientReply(conv, bookingClinic.id, triggerMsgId, actor.sessionId, "收到！職員會好快幫你確認 🙂");
       }
     }
     await publishUpdated(booking, { status: booking.status, writeState: "FAILED", writeError: code.slice(0, 64) });
@@ -322,6 +333,8 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
         meta: {
           conversationId: booking.conversationId,
           clinicId: booking.clinicId,
+          // ★ UX-07：審計帶預約目標店（跨店 row 先有值）
+          bookingClinicId: booking.bookingClinicId,
           apricotApptId: created.apricotApptId,
           visitReasonCode,
           date: booking.requestedDate,
@@ -331,7 +344,8 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
     })
     .catch(() => undefined);
 
-  await afterBookingWrite(booking.clinicId, [booking.requestedDate], booking.conversationId, "CREATED", booking.requestedDate);
+  // ★ UX-07：L2 即時刷新用預約目標店（新位喺邊間店就刷邊間）
+  await afterBookingWrite(bookingClinic.id, [booking.requestedDate], booking.conversationId, "CREATED", booking.requestedDate);
 
   const staffName = isStaff
     ? ((await prisma.staffUser.findUnique({ where: { id: actor.staffId }, select: { name: true } }))?.name ?? null)
@@ -364,7 +378,7 @@ async function processBookingWriteJob(job: Job<BookingWriteJobData>): Promise<vo
     //   already-answered 擋住 = 病人已被覆過（唔雙發確認）；staff 有 BOOKING_AUTO notice。
     const r = await sendAutoIfStillEligible({
       convId: conv.id,
-      clinicId: clinic.id,
+      clinicId: bookingClinic.id,
       triggerMsgId,
       levelCategory: "BOOKING_REQUEST",
       minLevel: "L4",
