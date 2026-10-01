@@ -9225,7 +9225,14 @@ if [ "$C_UP" = 1 ]; then
     check "T692(c) worker leaf pid 唔變（冇 process 重啟 — dev 等效 PM2 restarts=0）" "$W692C2" "$W692C"
     [ "$W692C2" = "$W692C" ] || T692=1
     # 「redis connected」必須喺重啟後嘅新 log 行先算（起機嗰行唔計）
-    if tail -n +$((C_LOG_LINES_BEFORE + 1)) "$T692_WLOG_C" 2>/dev/null | grep -q "redis connected"; then
+    # ★ cwi-qa CI-E5：輪詢最多 60s（唔再單次 grep）— CI docker restart ~0.3s 就返、RDB 載返 heartbeat key
+    #   → 上面 healthz 即刻 200（未必代表已重連），單次 grep 可能早過 ioredis backoff 重連（run 36873354533 實錚）
+    C_RECONN=0
+    for i in $(seq 1 60); do
+      tail -n +$((C_LOG_LINES_BEFORE + 1)) "$T692_WLOG_C" 2>/dev/null | grep -q "redis connected" && { C_RECONN=1; break; }
+      sleep 1
+    done
+    if [ "$C_RECONN" = 1 ]; then
       pass "T692(c) worker log 重啟後見 'redis connected'（自動重連）"
     else
       fail "T692(c) worker log 重啟後無 'redis connected'"; T692=1
