@@ -2478,20 +2478,22 @@ export function InboxClient({
 
   // ── ★ cwi-final S6-9 ①：FAILED 訊息重試（POST /api/messages/[id]/retry）──────────
   // 200 → 本地氣泡轉 QUEUED（server 已條件更新；之後 socket message:status 推 SENT/FAILED）；
-  // 失敗（422 過窗 / 409 非 FAILED / 423 lock）→ 氣泡維持 FAILED + 錯誤文案。
+  // 失敗（409 TOO_OLD 過期 / 422 過窗 / 409 非 FAILED / 423 lock）→ 氣泡維持 FAILED + 錯誤文案。
   const retryMessage = useCallback(async (messageId: string): Promise<{ ok: boolean; error?: string }> => {
     try {
       const res = await fetch(`/api/messages/${messageId}/retry`, { method: "POST" });
       const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
       if (!res.ok) {
         const msg =
-          data?.error === "WINDOW_CLOSED"
-            ? "24 小時窗口已過 — 重發唔出（用過窗三出路）"
-            : data?.error === "NOT_RETRYABLE"
-              ? "訊息狀態已變 — 唔可以重試"
-              : data?.error === "SEND_LOCKED"
-                ? "此對話已有負責人 — 撳〔接手〕先至發得到"
-                : data?.error ?? `重試失敗（${res.status}）`;
+          data?.error === "TOO_OLD" // ★ cwi-qa FX-27（QA-27）：訊息 >24h — 重發不安全，叫員工重新打
+            ? "呢條訊息超過 24 小時 — 請重新輸入發送"
+            : data?.error === "WINDOW_CLOSED"
+              ? "24 小時窗口已過 — 重發唔出（用過窗三出路）"
+              : data?.error === "NOT_RETRYABLE"
+                ? "訊息狀態已變 — 唔可以重試"
+                : data?.error === "SEND_LOCKED"
+                  ? "此對話已有負責人 — 撳〔接手〕先至發得到"
+                  : data?.error ?? `重試失敗（${res.status}）`;
         return { ok: false, error: msg };
       }
       setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, status: "QUEUED" as const, errorCode: null } : m)));

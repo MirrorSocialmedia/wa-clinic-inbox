@@ -4,6 +4,7 @@ import { requireAuth, assertConversationAccess, scopedClinicSet } from "@/lib/rb
 import { handle } from "@/lib/api-error";
 import { DRAFT_STACK_MAX } from "@/lib/ai/draft-stack";
 import { buildFollowupTaskViews } from "@/lib/followup/tasks-view";
+import { toMessageDto } from "../messages/message-dto";
 
 /**
  * GET /api/conversations/[id]/bundle — 開對話一次 round trip（cwi-final S6-7 前端效能）。
@@ -54,7 +55,9 @@ export const GET = handle(async (req: NextRequest, { params }: Ctx) => {
 
   const hasMore = rows.length > 50;
   const page = hasMore ? rows.slice(0, 50) : rows;
-  const messages = [...page].reverse();
+  // ★ cwi-qa FX-24（QA-24）：同 messages route 同一 DTO（../messages/message-dto.ts）—
+  //   剷 waMediaId + mediaPath 絕對路徑 → /api/media/<mediaKey>（防 bundle 漏絕對路徑/waMediaId）。
+  const messages = [...page].reverse().map(toMessageDto);
   const receipts = noteIds.length
     ? (await prisma.noteReadReceipt.findMany({
         where: { messageId: { in: noteIds.map((m) => m.id) } },

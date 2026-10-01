@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
+import { toMessageDto } from "./message-dto";
 
 /**
  * GET /api/conversations/[id]/messages — 對話訊息分頁（MD §6.4）。
@@ -86,14 +87,10 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
-  // ★ cwi-final S6-9④：waMediaId = server-side Graph media id（30 日有效、重試沿用）— 唔回 client。
-  //   mediaName（顯示名）照回（UI 文件連結 + Content-Disposition 用）。
-  //   shallow spread（Date 欄傳引用，同原 row 行為一致）；oldest/newest 用 sanitized 同一組 object。
-  const messages = (after ? page : [...page].reverse()).map((m) => {
-    const r = { ...m } as Record<string, unknown>;
-    delete r.waMediaId;
-    return r;
-  });
+  // ★ cwi-final S6-9④ + cwi-qa FX-24（QA-24）：DTO 單一來源（./message-dto.ts）—
+  //   剷 waMediaId（server-side Graph media id 唔回 client）；
+  //   mediaPath 絕對路徑 → /api/media/<mediaKey>（bundle route 同步用同一函數）。
+  const messages = (after ? page : [...page].reverse()).map(toMessageDto);
 
   return NextResponse.json({
     messages,
