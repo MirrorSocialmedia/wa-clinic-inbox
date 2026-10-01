@@ -11,8 +11,8 @@
  *   PUT  /api/external/v1/bookings/{id}/status?status=102|-7&date=&clinicCode=
  *   PUT  /api/external/v1/bookings/{id}/remove?date=&clinicCode=
  *   POST /api/external/v1/bookings/{id}/reschedule（原子 102+新單）
- *   GET  /api/external/v1/dictionaries?kind=VISIT_REASON|BOOKING_TYPE（1 小時 memory cache）
- *   GET  /api/external/v1/patient-lookup?phoneHash=
+ *   GET  /api/external/v1/dictionaries?kind=VISIT_REASON|BOOKING_TYPE[&clinicCode=]（1 小時 memory cache，按店分）
+ *   GET  /api/external/v1/patient-lookup?phoneHash=[&clinicCode=]
  *   GET  /api/external/v1/appointments?phoneHash=&from=&to=
  *
  * bookable-slots（providerslot-20260830 T1/T3/T4）：
@@ -121,6 +121,8 @@ const DictionaryItemSchema = z.object({ apricotId: z.string(), code: z.string(),
 export const DictionariesResponse = z.object({
   v: z.literal(1),
   kind: z.enum(["VISIT_REASON", "BOOKING_TYPE"]),
+  // ★ cwi-apricotty-20261001：帶 clinicCode 先有 — 該店所屬 Apricot 帳號（MAIN／TY）
+  apricotAccount: z.string().optional(),
   items: z.array(DictionaryItemSchema),
 });
 export type DictionariesResult = z.infer<typeof DictionariesResponse>;
@@ -160,6 +162,10 @@ export const PatientLookupResponse = z.object({
     lastVisit: LastVisitSchema.nullable(),
     visitedClinicIds: z.array(z.string()).optional(),
     gender: z.string().optional(),
+    // ★ cwi-apricotty-20261001：病人檔屬邊個 Apricot 帳號；帶 clinicCode 先有 sameAccount
+    //   （青衣 TY 係另一個帳號 — 同一電話兩邊都可以有檔；落單一定要用同帳號嗰個）
+    apricotAccount: z.string().optional(),
+    sameAccount: z.boolean().optional(),
   })),
 });
 export type PatientLookupResult = z.infer<typeof PatientLookupResponse>;
@@ -883,18 +889,24 @@ export async function rescheduleBooking(
  * cache 跨 request 存活（同 process）；clearDictionariesCache 供測試。
  */
 const DICT_CACHE_MS = 60 * 60 * 1000;
-let dictCache: { at: number; byKind: Partial<Record<"VISIT_REASON" | "BOOKING_TYPE", DictionariesResult>> } | null = null;
+// ★ cwi-apricotty-20261001：cache key = `${clinicCode}|${kind}`（青衣 TY 係另一個 Apricot 帳號，字典 id 唔同）；
+//   clinicCode 空 = workforce 預設帳號（舊口徑）
+let dictCache: { at: number; byKey: Record<string, DictionariesResult> } | null = null;
 
 export function clearDictionariesCache(): void {
   dictCache = null;
 }
 
-export async function fetchDictionaries(kind: "VISIT_REASON" | "BOOKING_TYPE"): Promise<DictionariesResult> {
-  if (dictCache && Date.now() - dictCache.at < DICT_CACHE_MS && dictCache.byKind[kind]) {
-    return dictCache.byKind[kind] as DictionariesResult;
+export async function fetchDictionaries(kind: "VISIT_REASON" | "BOOKING_TYPE", clinicCode?: string | null): Promise<DictionariesResult> {
+  const cacheKey = `${clinicCode ?? ""}|${kind}`;
+  if (dictCache && Date.now() - dictCache.at < DICT_CACHE_MS && dictCache.byKey[cacheKey]) {
+    return dictCache.byKey[cacheKey];
   }
-  const result = DictionariesResponse.parse(await wfGet("/api/external/v1/dictionaries", { kind }));
-  dictCache = { at: Date.now(), byKind: { ...(dictCache?.byKind ?? {}), [kind]: result } };
+  const params: Record<string, string> = { kind };
+  if (clinicCode) params.clinicCode = clinicCode;
+  const result = DictionariesResponse.parse(await wfGet("/api/external/v1/dictionaries", params));
+  const fresh = dictCache && Date.now() - dictCache.at < DICT_CACHE_MS;
+  dictCache = { at: fresh ? dictCache!.at : Date.now(), byKey: { ...(fresh ? dictCache!.byKey : {}), [cacheKey]: result } };
   return result;
 }
 
@@ -907,8 +919,11 @@ export async function fetchCompanies(): Promise<CompaniesResult> {
 }
 
 /** 舊客匹配（phoneHash — 由 wa-inbox 用 PHONE_HASH_KEY 算好先傳；raw phone 永遠唔出 wa-inbox） */
-export async function lookupPatient(phoneHash: string): Promise<PatientLookupResult> {
-  return PatientLookupResponse.parse(await wfGet("/api/external/v1/patient-lookup", { phoneHash }));
+export async function lookupPatient(phoneHash: string, clinicCode?: string | null): Promise<PatientLookupResult> {
+  // ★ cwi-apricotty-20261001：帶 clinicCode → 每個 match 有 sameAccount（同該店係咪同一個 Apricot 帳號）
+  const params: Record<string, string> = { phoneHash };
+  if (clinicCode) params.clinicCode = clinicCode;
+  return PatientLookupResponse.parse(await wfGet("/api/external/v1/patient-lookup", params));
 }
 
 /**

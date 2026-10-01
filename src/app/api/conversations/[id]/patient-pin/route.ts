@@ -52,7 +52,9 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   const hash = phoneHash(contact.waId);
   let matches;
   try {
-    matches = (await lookupPatient(hash)).matches;
+    // ★ cwi-apricotty-20261001：帶店碼（sameAccount）— 跨帳號照准釘（睇記錄 OK），落單先擋（confirm-core）
+    const pinClinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId }, select: { code: true } });
+    matches = (await lookupPatient(hash, pinClinic?.code ?? null)).matches;
   } catch (e) {
     log.warn(
       { conversationId: conv.id, err: e instanceof WorkforceApiError ? `status=${e.status}` : e instanceof Error ? e.name : "unknown" },

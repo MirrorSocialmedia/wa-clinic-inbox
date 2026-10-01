@@ -207,6 +207,9 @@ export interface PatientMatch {
   /** ★ S5-13②：黃標 — visitedClinicIds 全部唔喺當前對話嘅公司（C-8 唔阻跨公司 match，只提示） */
   outsideCompany?: boolean;
   gender?: string;
+  /** ★ cwi-apricotty-20261001：病人檔屬邊個 Apricot 帳號；false = 同本店唔同帳號（睇得，唔可以用嚟落單） */
+  apricotAccount?: string;
+  sameAccount?: boolean;
 }
 
 /** ★ booking-ui（E）：Apricot 預約卡（側欄 upcoming — status 0/102 only） */
