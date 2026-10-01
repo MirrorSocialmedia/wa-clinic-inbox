@@ -64,6 +64,8 @@ export interface ClassifyAndDraftInput {
   lexiconBlock?: string;
   /** ★ Part F（cwi-raggolden-20260904，F.3）：知識庫 `<knowledge>` 段（階段二 — 擺事實段之後、對話歷史之前；缺省/"" = 無） */
   knowledgeBlock?: string;
+  /** ★ cwi-qa FX-08（QA-08）：job deadline signal — 超時 abort 在途 LLM call（vllm chatWithFallback 消費）。 */
+  signal?: AbortSignal;
 }
 
 /**

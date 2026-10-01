@@ -124,7 +124,9 @@ async function urgentEscalationAlreadyEmitted(convId: string, wamid: string | nu
   return dup !== null;
 }
 
-async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>> {
+// ★ cwi-qa FX-08：export 俾 unit test（T771 — deadline 超時 job fail + retry 零重複 persist）直調。
+//   註：import 本檔唔會起 worker（BullMQ Worker 只喺 startAiWorker/startAiUrgentWorker 註冊）。
+export async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, unknown>> {
   const data = job.data;
   // ★ cwi-final S4-4：COMPLAINT lexical 觸發（routing lexicon COMPLAINT 觸發詞）。
   //   現 lexicon 結構 = {term, canonical} 映射，無結構化 COMPLAINT 觸發詞表 → 恒 false（spec：冇就先 urgent only）。

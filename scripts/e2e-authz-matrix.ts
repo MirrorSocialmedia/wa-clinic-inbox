@@ -610,7 +610,7 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
   },
   "POST /api/admin/dead-letters/replay": {
     fixture: () => ({ url: "/api/admin/dead-letters/replay", method: "POST", body: JSON.stringify({}) }),
-    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 200, ADMIN_ALL: 200 }, // 無 id filter 無 scope 分拆（replay 全部 pending — 0 件 = no-op；S3-x 審視項）
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 }, // ★ cwi-qa FX-21：requireGlobalAdmin — replay 唔分 clinic scope（全部店 DLQ）→ 公司級 ADMIN 403；同 /api/admin/metrics 同一口徑
   },
   "POST /api/admin/totp/enroll": {
     fixture: () => ({ url: "/api/admin/totp/enroll", method: "POST", body: JSON.stringify({}) }),

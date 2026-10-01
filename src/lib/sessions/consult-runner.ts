@@ -471,6 +471,8 @@ export interface ConsultLlmTurnInput {
   priceIntent: boolean;
   /** ★ C5（MD §8.1 Tab 2 discovery）：醫生改過嘅發現問題文案（slot → text；缺省 = 出廠表）。 */
   questionOverrides?: Record<string, string> | null;
+  /** ★ cwi-qa FX-08（QA-08）：job deadline signal — 傳落兩次 LLM call（extract/generate）。 */
+  signal?: AbortSignal;
   /** ★ cwi-hubaudit S2（H-2）：持久化分岔點（預設 = prismaConsultStore；沙盤 = redisConsultStore）。 */
   store?: ConsultStore;
 }
@@ -543,6 +545,7 @@ export async function runConsultLlmTurn(input: ConsultLlmTurnInput): Promise<Con
         text: input.msg.body ?? "",
         workflow: input.workflow,
         recent: input.ctxMessages.map((m) => ({ direction: m.direction, body: m.body, ts: m.waTimestamp })),
+        signal: input.signal,
       });
       out.calls += 1;
     } catch (err) {
@@ -604,7 +607,7 @@ export async function runConsultLlmTurn(input: ConsultLlmTurnInput): Promise<Con
           body: m.body as string,
         })),
     };
-    const gen = await consultGenerateDraft(payload);
+    const gen = await consultGenerateDraft({ ...payload, signal: input.signal });
     out.calls += 1;
     out.draft = gen.text;
     out.model = gen.model;

@@ -115,6 +115,12 @@ export interface AiChatOptions {
    * 成個 web process 嘅 shared breaker 連累其他 LLM 功能）。
    */
   skipBreaker?: boolean;
+  /**
+   * ★ cwi-qa FX-08（QA-08）：外部 deadline signal（runInboundAi 嘅 AI_JOB_DEADLINE_MS AbortController）。
+   * abort → 呢個在途 fetch 即刻 cancel（唔使等 per-call timeout）；同 self-timeout 同一 AbortError 路徑
+   * → AiCallError(isTimeout) → 立即失敗（唔 retry 唔 fallback）。
+   */
+  signal?: AbortSignal;
 }
 
 export interface AiChatResult {
@@ -134,6 +140,17 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
   const timeoutMs = opts.timeoutMs ?? cfg.timeoutMs;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // ★ cwi-qa FX-08（QA-08）：外部 deadline signal 橋接 — job 超時先 abort 在途 call（慳 GPU），
+  //   唔係 per-call timeout。兩個來源（timer / 外部 abort）都走同一個 controller → 同一 AbortError 處理。
+  let onExternalAbort: (() => void) | null = null;
+  if (opts.signal) {
+    if (opts.signal.aborted) {
+      controller.abort();
+    } else {
+      onExternalAbort = () => controller.abort();
+      opts.signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+  }
   const t0 = Date.now();
   try {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -189,6 +206,7 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
     throw new AiCallError(`ai network error (model=${model})`);
   } finally {
     clearTimeout(timer);
+    if (onExternalAbort && opts.signal) opts.signal.removeEventListener("abort", onExternalAbort);
   }
 }
 
