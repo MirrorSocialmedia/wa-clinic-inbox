@@ -658,6 +658,7 @@ export interface ChatPaneHandle {
 export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, ref) {
   const [draft, setDraft] = useState("");
   // ★ cwi-final S6-9（③）：enterSends 有效值 = 偏好 AND 非手機（手機永遠 Enter 換行）
+  // ★ cwi-ux UX-05：同一個 isMobile 亦用嚟縮短手機 placeholder（「輸入訊息…」）— 唔好喺 early return 之後再開 hook。
   const isMobile = useIsMobile();
   const enterSendsActive = (p.enterSends ?? true) && !isMobile;
   // ★ cwi-final S1-13（D-6）：堆疊入目前展示緊嘅卡（parent 已 clamp index）
@@ -1032,18 +1033,6 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
     const pos = before.length + name.length + 2;
     requestAnimationFrame(() => el.setSelectionRange(pos, pos));
   }
-
-  // ★ cwi-ux UX-05：輸入框 placeholder 手機縮短（「輸入訊息…」）— 長提示（Enter 規則）只 md 以上顯示。
-  //   md 斷點同 Tailwind 一致（768px）；client 端 matchMedia，hydrate 後才量（初始 false = 用長字，
-  //   手機首次 paint 極短瞬時 — 可接受；唔會 block SSR）。
-  const [isNarrow, setIsNarrow] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 767px)");
-    const on = () => setIsNarrow(mq.matches);
-    on();
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
 
   const windowChipCls =
     c.window.tone === "red"
@@ -1990,7 +1979,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 placeholder={
                   // ★ cwi-ux UX-05：手機只「輸入訊息…」— 長提示（Enter 規則）喺發送掣下方已有 toggle，唔使重複；
                   //   細框 rounded-full 入面長字會斷行兼被圓角切走下半截
-                  isNarrow ? "輸入訊息…" : enterSendsActive ? "輸入訊息…（Enter 發送，Shift+Enter 換行）" : "輸入訊息…（Enter 換行，Ctrl/⌘+Enter 發送）"
+                  isMobile ? "輸入訊息…" : enterSendsActive ? "輸入訊息…（Enter 發送，Shift+Enter 換行）" : "輸入訊息…（Enter 換行，Ctrl/⌘+Enter 發送）"
                 }
                 data-testid="c5-composer"
                 className="flex-1 resize-none rounded-full bg-panel-2 border border-transparent px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
