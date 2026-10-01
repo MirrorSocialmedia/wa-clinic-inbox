@@ -712,6 +712,10 @@ if wait_for "SELECT \"intent\" i, \"urgency\" u, (\"urgent\")::text ug FROM \"Co
 else
   fail "T13 URGENT_PAIN triage"
 fi
+# ★ cwi-qa CI-E8：intent/urgency/urgent 喺 intake 紅旗（sessions/urgent-intake.ts，唔靠 AI）已即刻寫 →
+#   上面 wait_for 一中就過；aiSummary 要等 AI urgent lane 分類完先寫 → 單次 query 會早過佢
+#   （CI run 36898709474 實錚 actual=[false]）。等 aiSummary 落庫（最多 30s）先斷言。
+wait_for "SELECT (\"aiSummary\" IS NOT NULL)::text s FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" '[{"s":"true"}]' 30 || true
 SUM1=$(q "SELECT (\"aiSummary\" IS NOT NULL)::text s FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" | jf s)
 check "T13 aiSummary 已設（側欄顯示用）" "$SUM1" "true"
 DRAFT1=$(q "SELECT count(*)::text c FROM \"AiDraft\" d JOIN \"Conversation\" cv ON cv.id=d.\"conversationId\" JOIN \"Contact\" x ON x.id=cv.\"contactId\" WHERE x.\"waId\"='$PATIENT_AI1'" | jf c)
@@ -6904,6 +6908,9 @@ curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X DELETE "$BASE/api/a
 curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X DELETE "$BASE/api/admin/skill-groups/$E2E_R4_GID" >/dev/null 2>&1
 
 # ── T253. R-9：當值恰一個 → 標人；兩個當值 → 只標組；兩者都全組通知 ─────────────────────
+# ★ cwi-qa CI-E7：mock 當值更 = 00:00–23:59，onDutyMembers 用 [start, end)（end 唔包）→ 香港時間 23:59 嗰一分鐘
+#   冇人當值 → T253a 假紅（2026-10-01 sim 實錚：inbound 15:59:31Z = HKT 23:59）。撞正 23:59 就等過咗先跑。
+for _i in $(seq 1 70); do [ "$(TZ=Asia/Hong_Kong date +%H%M)" = "2359" ] || break; sleep 1; done
 # Case A：恰一個當值成員（TKW 前台 — CONSULT 成員）
 cat > .dev/duty-mock-override.json <<'EOF'
 {"staff":[{"staffName":"TKW 前台","role":"前台","shiftStart":"00:00","shiftEnd":"23:59"}]}
@@ -7535,6 +7542,26 @@ S42_SLOT=$(pc_pick "$TKW_CLINIC_ID" "" 0)
 [ -n "$S42_SLOT" ] || fail "S4-2 setup：TKW 無 15:00 空槽（djb2 grid）"
 S42_P=${S42_SLOT%%|*}; S42_SUR=$(pc_surname "$S42_P")
 
+# ★ cwi-qa CI-E6：S4-2 hold 測試唔再靠固定 sleep — 呢個 worker 啟動時先要清前面 section 留低嘅 AI backlog
+#   （PC1／PC4／E98…，每條 AI_MOCK_DELAY 1.5s）→ job 可能 30s+ 先輪到（2026-10-01 sim 實錚：T651 inbound
+#   16:05:16 → classified 16:05:52，sleep 3+12 之後 check 時草稿未建 → actual=[]）。
+#   s42_wait_held：AiDraft 已建 = job 停喺 hold（hook 喺草稿之後、gate 之前）→ 介入先真係落喺 hold 窗內。
+#   s42_wait_done：worker log 見呢個 wamid 嘅「ai: classified」= gate 已判完，先 check 結果。
+s42_wait_held() { # <IN message id> <max-sec>
+  for _i in $(seq 1 "$2"); do
+    [ "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$1'" | jf c)" != "0" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+s42_wait_done() { # <wamid> <max-sec>
+  for _i in $(seq 1 "$2"); do
+    grep -F "\"wamid\":\"$1\"" /tmp/e2e-worker-s42.log 2>/dev/null | grep -q '"msg":"ai: classified"' && return 0
+    sleep 1
+  done
+  return 1
+}
+
 # ── T650. hold → staff assign → release → 0 自動發 + 草稿留 PROPOSED（D-6）────────────
 # ★ r2 修：PLAIN QUESTION 文字 → AI_DRAFT 路徑（hold hook 覆蓋；booking session 路徑由 PC-G4/T84C/T652 覆蓋）
 S42A_WA="8526130${EPOCH}"; S42A_W1="wamid.E2E_S42A_1_${EPOCH}"
@@ -7542,11 +7569,11 @@ redis-cli SET "ai:hold:$S42A_W1" 1 >/dev/null
 pnpm -s mock-inbound message --clinic TKW --from "$S42A_WA" --text "想問下埋門時間" --wamid "$S42A_W1" --name "E2E S42A" >/dev/null 2>&1
 S42A_CONV=$(pc_conv_of "$S42A_WA" "$TKW_CLINIC_ID")
 S42A_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42A_W1' AND \"direction\"='IN'" | jf id)
-# job 喺 gate 前 hold（AI_MOCK_DELAY 1.5s 確保未過）→ 介入：staff 接手（assign）
-sleep 3
+# job 喺 gate 前 hold（草稿已建 = 停喺 hold）→ 介入：staff 接手（assign）
+s42_wait_held "$S42A_IN" 90 || fail "T650 前置：90s 內 job 未到 hold（AiDraft 未建）"
 q "UPDATE \"Conversation\" SET \"assigneeId\"='$S42_STAFF' WHERE id='$S42A_CONV'" >/dev/null 2>&1
 redis-cli DEL "ai:hold:$S42A_W1" >/dev/null
-sleep 12
+s42_wait_done "$S42A_W1" 60 || fail "T650 前置：放行後 60s 內 job 未完成（無 ai: classified）"
 check "T650 assign 期間 gate 放棄：0 aiAutoSent OUT" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42A_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
 check "T650 草稿留 PROPOSED（D-6：gate 放棄唔改草稿）" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42A_IN'" | jf s)" "PROPOSED"
 check "T650 無 AI_AUTO_SEND audit" "$(q "SELECT count(*)::text c FROM \"AuditLog\" WHERE action='AI_AUTO_SEND' AND \"meta\"->>'conversationId'='$S42A_CONV'" | jf c)" "0"
@@ -7557,11 +7584,11 @@ redis-cli SET "ai:hold:$S42B_W1" 1 >/dev/null
 pnpm -s mock-inbound message --clinic TKW --from "$S42B_WA" --text "想問下埋門時間" --wamid "$S42B_W1" --name "E2E S42B" >/dev/null 2>&1
 S42B_CONV=$(pc_conv_of "$S42B_WA" "$TKW_CLINIC_ID")
 S42B_IN=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='$S42B_W1' AND \"direction\"='IN'" | jf id)
-sleep 3
+s42_wait_held "$S42B_IN" 90 || fail "T651 前置：90s 內 job 未到 hold（AiDraft 未建）"
 # 介入：staff 手動覆咗（raw OUT — SENT + aiAutoSent=false）
 q "INSERT INTO \"Message\" (\"id\",\"conversationId\",\"direction\",\"channel\",\"type\",\"body\",\"status\",\"aiAutoSent\",\"sentByStaffId\",\"waMessageId\",\"billingCategory\",\"createdAt\",\"updatedAt\",\"waTimestamp\") VALUES ('e2e-s42b-staff-out-${EPOCH}','$S42B_CONV','OUT','API','text','staff 手覆：收到','SENT',false,'$S42_STAFF','wamid.S42B_STAFF_${EPOCH}','SERVICE',now(),now(),now())" >/dev/null 2>&1
 redis-cli DEL "ai:hold:$S42B_W1" >/dev/null
-sleep 12
+s42_wait_done "$S42B_W1" 60 || fail "T651 前置：放行後 60s 內 job 未完成（無 ai: classified）"
 check "T651 staff 已覆 → gate 放棄：0 aiAutoSent OUT" "$(q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$S42B_CONV' AND \"direction\"='OUT' AND \"aiAutoSent\"=true" | jf c)" "0"
 check "T651 staff OUT 留喺度（SENT）" "$(q "SELECT \"status\"::text s FROM \"Message\" WHERE \"waMessageId\"='wamid.S42B_STAFF_${EPOCH}'" | jf s)" "SENT"
 check "T651 草稿留 PROPOSED" "$(q "SELECT \"status\"::text s FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$S42B_IN'" | jf s)" "PROPOSED"
@@ -9225,7 +9252,14 @@ if [ "$C_UP" = 1 ]; then
     check "T692(c) worker leaf pid 唔變（冇 process 重啟 — dev 等效 PM2 restarts=0）" "$W692C2" "$W692C"
     [ "$W692C2" = "$W692C" ] || T692=1
     # 「redis connected」必須喺重啟後嘅新 log 行先算（起機嗰行唔計）
-    if tail -n +$((C_LOG_LINES_BEFORE + 1)) "$T692_WLOG_C" 2>/dev/null | grep -q "redis connected"; then
+    # ★ cwi-qa CI-E5：輪詢最多 60s（唔再單次 grep）— CI docker restart ~0.3s 就返、RDB 載返 heartbeat key
+    #   → 上面 healthz 即刻 200（未必代表已重連），單次 grep 可能早過 ioredis backoff 重連（run 36873354533 實錚）
+    C_RECONN=0
+    for i in $(seq 1 60); do
+      tail -n +$((C_LOG_LINES_BEFORE + 1)) "$T692_WLOG_C" 2>/dev/null | grep -q "redis connected" && { C_RECONN=1; break; }
+      sleep 1
+    done
+    if [ "$C_RECONN" = 1 ]; then
       pass "T692(c) worker log 重啟後見 'redis connected'（自動重連）"
     else
       fail "T692(c) worker log 重啟後無 'redis connected'"; T692=1

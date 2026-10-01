@@ -48,10 +48,19 @@ export async function sendBookingFlow(opts: {
    * 唔預先 claim（病人 submit 先 claim — claim@submit_confirm 不變）。
    */
   prefill?: { date: string; providerId: string; start: string };
+  /**
+   * ★ cwi-ux UX-07：預約目標店（Cuid — 任何 active 診所；route 層已驗存在 + 權限）。
+   * 缺/null = 對話所屬店（舊行為零改動）。token 簽名帶 + FlowSession 存 — 病人揀完用同一間店。
+   */
+  bookingClinicId?: string | null;
 }): Promise<SendFlowResult> {
   if (!slotClaimEnabled()) throw new FlowsDisabledError(); // ★ cwi-final S0-12：G2 閘
   const conv = await prisma.conversation.findUnique({ where: { id: opts.conversationId } });
   if (!conv) throw new Error("conversation not found");
+
+  // ★ UX-07：預約目標店（defend — session 冪等重用時可能已經帶咗 target；新發先用 opts）
+  const crossClinic = !!opts.bookingClinicId && opts.bookingClinicId !== conv.clinicId;
+  const bookingClinicId = crossClinic ? (opts.bookingClinicId as string) : null;
 
   const win = getWindowState(conv.lastInboundAt);
   if (!win.open) throw new WindowClosedError();
@@ -72,7 +81,13 @@ export async function sendBookingFlow(opts: {
   }
 
   const token = signFlowToken(
-    { convId: conv.id, clinicId: conv.clinicId, jti: randomBytes(8).toString("hex") },
+    {
+      convId: conv.id,
+      clinicId: conv.clinicId,
+      // ★ UX-07：目標店入簽名（payload 改店 → 驗簽失敗 → 拒）
+      ...(bookingClinicId ? { bookingClinicId } : {}),
+      jti: randomBytes(8).toString("hex"),
+    },
     flowJwtSecret()
   );
   // ★ Canvas 變體選擇（switch MD §3）：NONE（資料源離線 + 無 L2）且純收需求 canvas 已設定
@@ -82,7 +97,8 @@ export async function sendBookingFlow(opts: {
   let canvasVariant = "normal";
   let config: FlowMessageConfig;
   try {
-    const slotRes = await getSlots(conv.clinicId);
+    // ★ UX-07：canvas 空檔狀態用預約目標店（目標店離線先轉純收需求 canvas）
+    const slotRes = await getSlots(bookingClinicId ?? conv.clinicId);
     if (slotRes.degraded === "NONE") {
       const reqCfg = requirementFlowConfig(token);
       if (reqCfg.flow_cdn_url !== defaultFlowConfig(token).flow_cdn_url) canvasVariant = "requirement";
@@ -106,6 +122,8 @@ export async function sendBookingFlow(opts: {
     data: {
       conversationId: conv.id,
       clinicId: conv.clinicId,
+      // ★ UX-07：預約目標店（null = 對話所屬店 — 舊 flow 零改動）
+      bookingClinicId,
       flowToken: token,
       status: "SENT",
       // ★ cwi-final S5-8②（F2）：T4 改期 context — 由 Conversation.reschedulingApptId 複製
@@ -169,7 +187,7 @@ export async function sendBookingFlow(opts: {
   }
 
   log.info(
-    { conversationId: conv.id, clinicId: conv.clinicId, messageId: msg.id, staffId: opts.staffId, canvasVariant },
+    { conversationId: conv.id, clinicId: conv.clinicId, bookingClinicId: bookingClinicId ?? null, messageId: msg.id, staffId: opts.staffId, canvasVariant },
     "flow send: queued interactive flow message"
   );
   return { flowToken: token, flowSessionId: session.id, messageId: msg.id, reused: false };

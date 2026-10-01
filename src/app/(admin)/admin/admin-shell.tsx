@@ -2,6 +2,7 @@
 
 import { usePathname } from "next/navigation";
 import { logoutWithPushCleanup } from "@/lib/notify-client";
+import { LegalLinks } from "@/components/legal-links";
 import {
   ArrowLeft,
   BadgeDollarSign,
@@ -209,6 +210,11 @@ export function AdminShell({
             >
               <LogOut size={15} strokeWidth={2.75} />
             </button>
+          </div>
+
+          {/* ★ cwi-ux UX-06：側欄底部法律頁入口（同 login/account 同一組 link） */}
+          <div className="text-[10.5px] text-t3">
+            <LegalLinks />
           </div>
         </aside>
 

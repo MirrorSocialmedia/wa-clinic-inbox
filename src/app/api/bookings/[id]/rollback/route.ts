@@ -15,6 +15,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { effectiveBookingClinicId } from "@/lib/booking/effective-clinic";
 import { handle } from "@/lib/api-error";
 import { publishConvEvent, convRef } from "@/lib/notify";
 import { afterBookingWrite, rollbackWindowOpen } from "@/lib/booking/booking-ops";
@@ -40,7 +41,9 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   }
 
   const conv = await prisma.conversation.findUnique({ where: { id: booking.conversationId } });
-  const clinic = await prisma.clinic.findUnique({ where: { id: booking.clinicId } });
+  // ★ cwi-ux UX-07：撤銷 = 取消 — Apricot remove 用**預約目標店**（effectiveBookingClinicId —
+  //   跨店單喺目標店落嘅，用對話店 clinicCode 會撤唔到）；scope 檢查仍用 booking.clinicId（對話店）
+  const clinic = await prisma.clinic.findUnique({ where: { id: effectiveBookingClinicId(booking) } });
   if (!conv || !clinic) {
     return NextResponse.json({ error: "conversation missing" }, { status: 500 });
   }

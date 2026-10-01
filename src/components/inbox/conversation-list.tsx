@@ -8,6 +8,7 @@ import { relTime } from "./time";
 import { matchCapsule, type CapsuleKey } from "@/lib/inbox/capsule";
 import { Virtuoso } from "react-virtuoso";
 import type { NotifyPrefs } from "@/lib/notify-client";
+import { isIOSLike, isStandalone, requestInstall } from "@/components/inbox/install-prompt";
 
 // ── ★ cwi-final S6-7：單行對話卡片（React.memo）────────────────────────────────────
 // 由列表 items 循環抽出 — virtualization 後只有 viewport 內行掛 DOM；
@@ -306,6 +307,12 @@ interface Props {
   notices: StaffNoticeItem[];
   /** ★ AI Workflow T1 (A2)：撳通知 → 標已讀 + 跳對話 */
   onNoticeClick: (n: StaffNoticeItem) => void;
+  /** ★ cwi-ux UX-01：訊息未讀 💬 撳 → 確認「將 N 條對話標為已讀？」→ POST /api/conversations/mark-all-read */
+  onMarkAllRead: () => void;
+  /** ★ cwi-ux UX-01：內部通知面板「全部已讀」（PATCH /api/notices 冇 ids — 後端唔清急症） */
+  onNoticesMarkAllRead: () => void;
+  /** ★ cwi-ux UX-01：急症逐條「已確認」（PATCH /api/notices {ids:[id]} — 唔跳對話） */
+  onNoticeAck: (n: StaffNoticeItem) => void;
   /** ★ Part B（N-7）：客戶未讀總數（badge — 同 OS 通知 permission 無關，一定要有） */
   unreadTotal: number;
   /** ★ Part B（N-8）：通知開關（localStorage per-device） */
@@ -378,6 +385,8 @@ export function ConversationList(p: Props) {
   // ★ F-6（cwi-notify-fix-20260907）：發測試通知（/api/push/test — 同真通知同一條路）
   const [testBusy, setTestBusy] = useState(false);
   const [testResult, setTestResult] = useState<{ kind: "muted" | "other"; text: string; clinicId?: string } | null>(null);
+  // ★ cwi-ux UX-03：「安裝為 App」永久入口（橫條可關，呢度永遠裝得）+ 結果提示
+  const [installHint, setInstallHint] = useState<string | null>(null);
   // ★ cwi-statusrole2-20260910 T1（MD §1.1）：mobile <400px — 兩行 fallback（短字；第二行最多兩粒）
   const [narrow, setNarrow] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -387,6 +396,22 @@ export function ConversationList(p: Props) {
   const [overflowCollapsed, setOverflowCollapsed] = useState(false);
   const capsuleRowRef = useRef<HTMLDivElement>(null);
   const measureWrapRef = useRef<HTMLDivElement>(null);
+  // ★ cwi-ux UX-04（診斷行）：版面問題第一手數據 — 設定面板底部常駐：
+  //   視窗 / 螢幕高 / safe-bottom（env probe）/ App|瀏覽器。下次有人報版面問題，截圖呢行即知。
+  const [viewportDiag, setViewportDiag] = useState<string | null>(null);
+  useEffect(() => {
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none;padding-bottom:env(safe-area-inset-bottom);";
+    document.body.appendChild(probe);
+    const safeBottom = probe.offsetHeight;
+    probe.remove();
+    const standalone =
+      window.matchMedia("(display-mode: standalone)").matches ||
+      (navigator as unknown as { standalone?: boolean }).standalone === true;
+    setViewportDiag(
+      `視窗 ${window.innerHeight}px · 螢幕 ${screen.height}px · safe-bottom ${safeBottom}px · ${standalone ? "App" : "瀏覽器"}`
+    );
+  }, []);
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 399px)");
     const on = () => setNarrow(mq.matches);
@@ -617,11 +642,17 @@ export function ConversationList(p: Props) {
               ))}
             </select>
           )}
-          {/* ★ Part B（N-7）：訊息未讀 badge（state 驅動 — OS 通知 denied/唔支援都一樣見） */}
-          <span
+          {/* ★ Part B（N-7）：訊息未讀 badge（state 驅動 — OS 通知 denied/唔支援都一樣見）
+              ★ cwi-ux UX-01：改 <button> — 撳 → 細確認框「將 N 條對話標為已讀？」→ 批量 API */}
+          <button
+            onClick={() => {
+              const n = p.conversations.filter((c) => c.myUnread > 0).length;
+              if (n > 0 && window.confirm(`將 ${n} 條對話標為已讀？`)) void p.onMarkAllRead();
+            }}
+            disabled={p.unreadTotal === 0}
             aria-label={`訊息未讀（${p.unreadTotal} 則）`}
-            title={p.unreadTotal > 0 ? `${p.unreadTotal} 則未讀訊息` : "訊息未讀"}
-            className={`relative w-7 h-7 rounded-full flex items-center justify-center ${p.unreadTotal > 0 ? "text-t1" : "text-t3"}`}
+            title={p.unreadTotal > 0 ? `${p.unreadTotal} 則未讀訊息 — 撳全部標已讀` : "訊息未讀"}
+            className={`relative w-7 h-7 rounded-full flex items-center justify-center ${p.unreadTotal > 0 ? "text-t1 hover:bg-black/[.04]" : "text-t3 cursor-default"}`}
           >
             <MessageCircle size={15} strokeWidth={2.75} />
             {p.unreadTotal > 0 && (
@@ -629,7 +660,7 @@ export function ConversationList(p: Props) {
                 {p.unreadTotal > 99 ? "99+" : p.unreadTotal}
               </span>
             )}
-          </span>
+          </button>
           {/* ★ H2：mention 鈴鐺 badge（數字 = 未讀 mention 總數；撳 → 跳到最近 mention） */}
           <button
             onClick={p.onBellClick}
@@ -726,6 +757,34 @@ export function ConversationList(p: Props) {
                     · 建議安裝為 App
                   </span>
                 )}
+              </div>
+            )}
+            {/* ★ cwi-ux UX-03：安裝為 App — 永久入口（iOS 冇自動安裝提示，人手教學） */}
+            {isStandalone() ? (
+              <div className="pt-1.5 border-t border-line text-[11px] text-ok-text">已安裝（App 模式運行緊）</div>
+            ) : (
+              <div className="pt-1.5 border-t border-line">
+                <button
+                  onClick={() => {
+                    if (isIOSLike()) {
+                      setInstallHint("iPhone/iPad：Safari 撳底部 分享 ⬆️ 掣 → 「加入主畫面」");
+                      return;
+                    }
+                    void requestInstall().then((r) => {
+                      setInstallHint(
+                        r === "accepted"
+                          ? "已安裝 ✅（重開一次）"
+                          : r === "unavailable"
+                            ? "瀏覽器而家冇提供安裝選項 — 稍後再試（已安裝就不會再出）"
+                            : "已記低：7 日內唔再出安裝提示",
+                      );
+                    });
+                  }}
+                  className="w-full text-left rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-brand-soft text-brand-text border border-line hover:opacity-80"
+                >
+                  安裝為 App
+                </button>
+                {installHint && <div className="text-[10px] text-t3 leading-snug mt-1">{installHint}</div>}
               </div>
             )}
             {/* cwi-realtime-fix §2.3：角色語義 — STAFF 見逐店靜音（黑名單）；ADMIN 只見下方 opt-in（白名單），
@@ -836,27 +895,57 @@ export function ConversationList(p: Props) {
             <div className="text-[10px] text-t3 pt-1.5 border-t border-line">
               閂咗分頁都收到通知（Web Push）；逐店靜音 / 訊息通知選項已同步 server（push 都生效）
             </div>
+            {/* ★ cwi-ux UX-04：診斷行（版面問題截圖呢行 — viewport / safe-area / 模式） */}
+            {viewportDiag && <div className="text-[9px] text-t3/80 font-mono pt-1">{viewportDiag}</div>}
           </div>
         </>
       )}
 
-      {/* ★ AI Workflow T1 (A2)：內部通知列（未讀；撳 = 標已讀 + 跳對話） */}
+      {/* ★ AI Workflow T1 (A2)：內部通知列（未讀；撳 = 標已讀 + 跳對話）
+          ★ cwi-ux UX-01（選項①）：「全部已讀」唔清急症（後端排除 URGENT_ESCALATION）；急症逐條「已確認」 */}
       {noticeOpen && (
         <div className="border-b border-line px-3 py-2 space-y-1 max-h-56 overflow-y-auto">
-          <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">內部通知</div>
+          <div className="flex items-center justify-between gap-1">
+            <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">內部通知</div>
+            <button
+              onClick={() => void p.onNoticesMarkAllRead()}
+              disabled={!p.notices.some((n) => n.kind !== "URGENT_ESCALATION")}
+              title={
+                p.notices.some((n) => n.kind !== "URGENT_ESCALATION")
+                  ? "標晒非急症通知已讀（急症要逐條確認）"
+                  : "冇非急症通知可清"
+              }
+              className="text-[10px] text-brand-text hover:underline disabled:text-t3 disabled:no-underline disabled:cursor-default"
+            >
+              全部已讀
+            </button>
+          </div>
           {p.notices.length === 0 ? (
             <div className="text-xs text-t3 py-1">冇未讀通知</div>
           ) : (
-            p.notices.map((n) => (
-              <button
-                key={n.id}
-                onClick={() => p.onNoticeClick(n)}
-                className="w-full text-left rounded-full px-2.5 py-1.5 hover:bg-black/[.04]"
-              >
-                <div className="text-xs text-t1 truncate">{n.title}</div>
-                <div className="text-[10px] text-t3">{relTime(n.createdAt)}</div>
-              </button>
-            ))
+            p.notices.map((n) => {
+              const urgent = n.kind === "URGENT_ESCALATION";
+              return (
+                <div key={n.id} className="flex items-center gap-1">
+                  <button
+                    onClick={() => p.onNoticeClick(n)}
+                    className="flex-1 min-w-0 text-left rounded-full px-2.5 py-1.5 hover:bg-black/[.04]"
+                  >
+                    <div className="text-xs text-t1 truncate">{n.title}</div>
+                    <div className="text-[10px] text-t3">{relTime(n.createdAt)}</div>
+                  </button>
+                  {urgent && (
+                    <button
+                      onClick={() => p.onNoticeAck(n)}
+                      title="確認呢條急症（逐條明確確認 — 唔會俾「全部已讀」清走）"
+                      className="shrink-0 text-[10px] rounded-full border border-line px-2 py-1 text-t2 hover:bg-black/[.04] hover:text-t1"
+                    >
+                      已確認
+                    </button>
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
       )}

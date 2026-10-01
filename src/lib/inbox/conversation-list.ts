@@ -125,8 +125,9 @@ export function decodeCursor(raw: string | null): ListCursor | null {
     return null;
   }
 }
-/** 排序 (urgent desc, lastMessageAt desc, id desc) 嘅「喺 cursor 之後」 */
-function afterCursor(c: ListCursor, withUrgent: boolean): Prisma.ConversationWhereInput {
+/** 排序 (urgent desc, lastMessageAt desc, id desc) 嘅「喺 cursor 之後」
+ * ★ cwi-ux UX-01：export 俾 mark-all-read 繼續分頁（>500 時 cursor 跟住撳） */
+export function afterCursor(c: ListCursor, withUrgent: boolean): Prisma.ConversationWhereInput {
   const t = new Date(c.t);
   if (!withUrgent) return { OR: [{ lastMessageAt: { lt: t } }, { lastMessageAt: t, id: { lt: c.id } }] };
   const u = c.u === 1;
@@ -300,12 +301,11 @@ export async function toConversationDTOs(
   const groupIds = [...new Set(rows.map((r) => r.routedGroupId).filter((x): x is string => !!x))];
   // 裁決 9：bookings 先查（staffIds 要併入 booking.handledByStaffId）
   // ★ cwi-final S1-12：myUnread 一次查全頁（meId 有值先查；SSR/API 都傳）
-  const [contacts, clinics, groups, bookings, myUnreadMap] = await Promise.all([
+  const [contacts, groups, bookings, myUnreadMap] = await Promise.all([
     prisma.contact.findMany({
       where: { id: { in: contactIds } },
       select: { id: true, waId: true, profileName: true, labels: true },
     }),
-    prisma.clinic.findMany({ where: { id: { in: clinicIds } }, select: { id: true, name: true, code: true } }),
     prisma.skillGroup.findMany({ where: { id: { in: groupIds } }, select: { id: true, name: true, code: true } }),
     prisma.bookingRequest.findMany({
       where: { conversationId: { in: rows.map((r) => r.id) }, status: { in: ["PENDING", "CONFIRMED"] } },
@@ -315,6 +315,10 @@ export async function toConversationDTOs(
       ? loadMyUnreadByConv(meId, rows.map((r) => r.id))
       : Promise.resolve(new Map<string, number>()),
   ]);
+  // ★ cwi-ux UX-07：預約目標店（bookingClinicId）可能係外店 — 膠囊要店名 → clinic 查併入佢。
+  const bookingClinicIds = [...new Set(bookings.map((b) => b.bookingClinicId).filter((x): x is string => !!x))];
+  const allClinicIds = [...new Set([...clinicIds, ...bookingClinicIds])];
+  const clinics = await prisma.clinic.findMany({ where: { id: { in: allClinicIds } }, select: { id: true, name: true, code: true } });
   const staffIds = [...new Set([...rowStaffIds, ...bookings.map((b) => b.handledByStaffId).filter((x): x is string => !!x)])];
   const staff = await prisma.staffUser.findMany({ where: { id: { in: staffIds } }, select: { id: true, name: true, active: true } });
 
@@ -414,6 +418,9 @@ export async function toConversationDTOs(
           writeState: b.writeState,
           writeError: b.writeError,
           writeAttemptAt: b.writeAttemptAt ? b.writeAttemptAt.toISOString() : null,
+          // ★ cwi-ux UX-07：跨分店預約 — 目標店（null = 同對話店）；膠囊「📍 YL」只在目標店≠對話店時顯示。
+          bookingClinicId: b.bookingClinicId ?? null,
+          bookingClinicCode: b.bookingClinicId ? (clinicMap.get(b.bookingClinicId)?.code ?? null) : null,
         };
       })() as BookingInfo | null,
       // ★ cwi-final S5-11（F4）：Flow 硬保留 hold 卡（HELD / IN_APRICOT / COMMITTED）— 按對話配對

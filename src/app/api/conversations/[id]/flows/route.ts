@@ -11,6 +11,11 @@
  *
  * Flow 內容（doctor/date/time）唔喺呢度 — 病人行 Flow 時先經
  * /api/flows/endpoint（data_exchange）逐步攞（precheck 原則）。
+ *
+ * ★ cwi-ux UX-07（2026-10-01）：跨分店發 Flow（body `bookingClinicId?`）—
+ * - 目標店 = 任何 active 診所（唔限同公司；唔要求我帳號有目標店範圍）
+ * - 權限：負責人（已接手；同 Send Lock 一致）先可以；非負責人跨店 → 403 `CROSS_CLINIC_NOT_ALLOWED`
+ * - token 簽名帶 bookingClinicId + FlowSession 存 — 病人揀完用同一間店，payload 改店 → 拒
  */
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -38,22 +43,52 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   // D.3：prefill 可選 — 壞 shape → 400（唔影響其他檢查順序；body 唔合法 JSON = 舊 caller 空 body）
   let prefill: { date: string; providerId: string; start: string } | undefined;
+  // ★ UX-07：預約目標店（Cuid；缺/null = 對話所屬店 — 舊 caller 零改動）
+  let bookingClinicParam: string | undefined;
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown> | null;
-  if (body && typeof body === "object" && body.prefill != null) {
-    const parsed = PrefillSchema.safeParse(body.prefill);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { error: "invalid prefill", details: parsed.error.flatten() },
-        { status: 400 }
-      );
+  if (body && typeof body === "object") {
+    if (body.prefill != null) {
+      const parsed = PrefillSchema.safeParse(body.prefill);
+      if (!parsed.success) {
+        return NextResponse.json(
+          { error: "invalid prefill", details: parsed.error.flatten() },
+          { status: 400 }
+        );
+      }
+      prefill = parsed.data;
     }
-    prefill = parsed.data;
+    if (body.bookingClinicId != null) {
+      if (typeof body.bookingClinicId !== "string" || body.bookingClinicId.length < 1 || body.bookingClinicId.length > 64) {
+        return NextResponse.json({ error: "invalid bookingClinicId" }, { status: 400 });
+      }
+      bookingClinicParam = body.bookingClinicId;
+    }
   }
 
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   await assertConversationAccess(ctx, conv); // STAFF 別店 → 403
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
+
+  // ── ★ UX-07：預約目標店（任何 active 診所；唔限同公司）──
+  const crossClinic = !!bookingClinicParam && bookingClinicParam !== conv.clinicId;
+  if (bookingClinicParam) {
+    const targetClinic = await prisma.clinic.findUnique({ where: { id: bookingClinicParam }, select: { id: true, code: true } });
+    if (!targetClinic) {
+      return NextResponse.json({ error: "unknown_clinic", message: "預約分店唔存在 — 請重揀" }, { status: 400 });
+    }
+    // 跨店權限（spec §7.3）：負責人（已接手）先可以；非負責人 → 403（先於 Send Lock）
+    if (crossClinic && conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
+      log.info(
+        { clinicId: conv.clinicId, targetClinic: targetClinic.code, conversationId: conv.id, staffId: ctx.staff.id, assigneeId: conv.assigneeId },
+        "flows: 403 CROSS_CLINIC_NOT_ALLOWED（跨店非負責人）"
+      );
+      return NextResponse.json(
+        { error: "CROSS_CLINIC_NOT_ALLOWED", message: "跨分店預約只限呢條對話嘅負責人（先撳〔接手〕先可以跨店約）" },
+        { status: 403 }
+      );
+    }
+  }
 
   // ★ H1 Send Lock（MD §3.2）：同 free-form 同規則 — 負責人唔係自己 → 423（INTERNAL note route 冇呢個檢查）。
   // ★ cwi-final S3-3（D-11）：ADMIN 豁免刪走 — 統一經 sendLockResponse（ADMIN 都要先撳〔接手〕；T97 口徑）
@@ -88,7 +123,13 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   }
 
   try {
-    const r = await sendBookingFlow({ conversationId: conv.id, staffId: ctx.staff.id, prefill });
+    const r = await sendBookingFlow({
+      conversationId: conv.id,
+      staffId: ctx.staff.id,
+      prefill,
+      // ★ UX-07：預約目標店（null = 對話所屬店）
+      bookingClinicId: crossClinic ? bookingClinicParam : null,
+    });
     // cwi-h6-20260830（h5 §1 寫入點 4）：發 Flow 成功 — 負責人自己 → 觸 assigneeLastActionAt
     if (conv.assigneeId === ctx.staff.id) {
       await prisma.$executeRaw`UPDATE "Conversation" SET "assigneeLastActionAt" = ${new Date()} WHERE "id" = ${conv.id}`;

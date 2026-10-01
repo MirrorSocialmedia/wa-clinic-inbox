@@ -23,6 +23,7 @@ import { phoneHash } from "@/lib/phone-hash";
 import { enqueueOutboundSend } from "@/lib/queue";
 import { afterBookingWrite } from "@/lib/booking/booking-ops";
 import { cancelMessageText } from "@/lib/booking/booking-text";
+import { conversationAllowedBookingClinics } from "@/lib/booking/effective-clinic";
 import { WorkforceApiError, WorkforceOutcomeUnknown, fetchAppointments, updateBookingStatus } from "@/lib/workforce/client";
 
 export const dynamic = "force-dynamic";
@@ -64,8 +65,11 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   const clinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId } });
   if (!clinic) return NextResponse.json({ error: "clinic missing" }, { status: 500 });
+  // ★ UX-07：跨店預約（bookingClinicId）喺目標店 — 允許集合 = 對話所屬店 ∪ 目標店
+  const allowedClinics = await conversationAllowedBookingClinics(conv.id, conv.clinicId);
+  const allowedCodes = new Set(allowedClinics.map((c) => c.code));
 
-  // 驗證 appointment（upcoming 0/102 + pinned patient + 本店）
+  // 驗證 appointment（upcoming 0/102 + pinned patient + 本店或預約目標店）
   let appt: { apricotApptId: string; clinicCode: string; patientApricotId: string; date: string; start: string; bookingStatus: number };
   try {
     const data = await fetchAppointments(phoneHash(contact.waId), hkDateOffset(-7), hkDateOffset(30));
@@ -79,8 +83,8 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     if (found.patientApricotId !== conv.pinnedPatientApricotId) {
       return NextResponse.json({ error: "patient_mismatch" }, { status: 400 });
     }
-    if (found.clinicCode !== clinic.code) {
-      return NextResponse.json({ error: "wrong_clinic", message: "預約唔係本店 — 唔可以經呢度取消" }, { status: 400 });
+    if (!allowedCodes.has(found.clinicCode)) {
+      return NextResponse.json({ error: "wrong_clinic", message: "預約唔喺本對話可操作嘅診所 — 唔可以經呢度取消" }, { status: 400 });
     }
     if (found.bookingStatus !== 0 && found.bookingStatus !== 102) {
       return NextResponse.json(
@@ -95,9 +99,10 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     return NextResponse.json({ error: "workforce_unavailable", message: "查詢 Apricot 失敗 — 請稍後重試" }, { status: status >= 500 ? 502 : status });
   }
 
-  // ★ updateBookingStatus(-7)（已取消）
+  // ★ updateBookingStatus(-7)（已取消）— 用預約自己所在店（cross-clinic = 目標店）
+  const apptClinic = allowedClinics.find((c) => c.code === appt.clinicCode);
   try {
-    await updateBookingStatus(apricotApptId, -7, { clinicCode: clinic.code, date: appt.date });
+    await updateBookingStatus(apricotApptId, -7, { clinicCode: appt.clinicCode, date: appt.date });
   } catch (err) {
     // ★ cwi-final S5-1：outcome unknown（timeout/結果未知）— 唔好盲斷「未取消」（可能已取消）
     if (err instanceof WorkforceOutcomeUnknown) {
@@ -129,7 +134,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
         action: "BOOKING_CANCEL",
         entity: "Conversation",
         entityId: conv.id,
-        meta: { conversationId: conv.id, clinicId: conv.clinicId, apricotApptId, date: appt.date },
+        meta: { conversationId: conv.id, clinicId: conv.clinicId, apptClinicCode: appt.clinicCode, apricotApptId, date: appt.date },
       },
     })
     .catch(() => undefined);
@@ -149,8 +154,8 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     );
   }
 
-  // 即時刷新三步（L2 invalidate + booking:changed CANCELLED）
-  await afterBookingWrite(conv.clinicId, [appt.date], conv.id, "CANCELLED", appt.date);
+  // 即時刷新三步（L2 invalidate + booking:changed CANCELLED）— 預約所在店
+  await afterBookingWrite(apptClinic?.id ?? conv.clinicId, [appt.date], conv.id, "CANCELLED", appt.date);
 
   // 自動取消訊息（窗口內；過窗 = 只改狀態，staff 手覆）
   const win = getWindowState(conv.lastInboundAt);

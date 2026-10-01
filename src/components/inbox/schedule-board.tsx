@@ -603,7 +603,17 @@ function DayGrid({
   const [searchErr, setSearchErr] = useState<string | null>(null);
   const [hits, setHits] = useState<{ id: string; waId: string; profileName: string | null }[] | null>(null);
   const [convs, setConvs] = useState<ConversationItem[] | null>(null);
+  // ★ cwi-ux UX-07：我負責緊嘅對話（其他店/其他公司）— 時間表 popover「我負責緊（其他店）」組。
+  const [crossConvs, setCrossConvs] = useState<ConversationItem[] | null>(null);
   const [selId, setSelId] = useState<string | null>(null);
+  // ★ cwi-ux UX-07：selId 指咗其他店對話（跨店）— 決定 sendFlow/sendManual 帶唔帶 bookingClinicId。
+  const [selCross, setSelCross] = useState(false);
+  // ★ cwi-ux UX-07：跨店確認框 — 揀咗其他店對話但未確認前，唔顯示發 Flow/落單掣。
+  const [crossConfirm, setCrossConfirm] = useState(false);
+  // ★ cwi-ux UX-07：跨店搜尋 hits（我負責緊嘅其他店對話）— 帶 conversationId 俾 UI 直接用。
+  const [crossHits, setCrossHits] = useState<
+    { conversationId: string; clinicId: string; waId: string; profileName: string | null }[] | null
+  >(null);
   const [sending, setSending] = useState(false);
   const [manualBusy, setManualBusy] = useState(false); // G-3 人手落單
   const [manualRequestId, setManualRequestId] = useState<string | null>(null); // ★ S5-8①：視窗級冪等 id（重試 = 同一 requestId）
@@ -616,7 +626,11 @@ function DayGrid({
     setQ("");
     setHits(null);
     setConvs(null);
+    setCrossConvs(null);
+    setCrossHits(null);
     setSelId(null);
+    setSelCross(false);
+    setCrossConfirm(false);
     setPopErr(null);
     setRaceConv(null);
     setManualBusy(false);
@@ -688,6 +702,7 @@ function DayGrid({
     if (!pop || !clinicId) return;
     let alive = true;
     setConvs(null);
+    setCrossConvs(null);
     fetch(`/api/conversations?clinicId=${encodeURIComponent(clinicId)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => {
@@ -696,6 +711,15 @@ function DayGrid({
       })
       .catch(() => {
         if (alive) setConvs([]);
+      });
+    // ★ cwi-ux UX-07：拉「我負責緊嘅對話（其他店）」— 唔按店過濾，excludeClinic = 目前顯示嘅店。
+    fetch(`/api/conversations?mine=1&excludeClinic=${encodeURIComponent(clinicId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (alive) setCrossConvs(Array.isArray(j) ? (j as ConversationItem[]) : (j?.items ?? []));
+      })
+      .catch(() => {
+        if (alive) setCrossConvs([]);
       });
     return () => {
       alive = false;
@@ -708,6 +732,7 @@ function DayGrid({
     const query = q.trim();
     if (!query) {
       setHits(null);
+      setCrossHits(null);
       setSearching(false);
       setSearchErr(null);
       return;
@@ -735,11 +760,29 @@ function DayGrid({
         }
         setSearching(false);
       })();
+      // ★ cwi-ux UX-07：同時搜「我負責緊嘅其他店」對話（mine=1，唔按店過濾）。
+      (async () => {
+        try {
+          const r = await fetch(
+            `/api/search?type=contact&q=${encodeURIComponent(query)}&mine=1&excludeClinic=${encodeURIComponent(clinicId)}`
+          );
+          const j = (await r.json().catch(() => null)) as {
+            results?: { conversationId: string; clinicId: string; waId: string; profileName: string | null }[];
+          } | null;
+          setCrossHits(Array.isArray(j?.results) ? j.results : []);
+        } catch {
+          setCrossHits([]); // 跨店搜尋失敗唔阻本店搜尋
+        }
+      })();
     }, 300);
     return () => clearTimeout(t);
   }, [q, pop, clinicId]);
 
-  const selConv = selId && convs ? convs.find((c) => c.id === selId) ?? null : null;
+  const selConv = selId
+    ? selCross
+      ? crossConvs?.find((c) => c.id === selId) ?? null
+      : convs?.find((c) => c.id === selId) ?? null
+    : null;
 
   // ★ cwi-inboxfix-20260905（MD §4 I-8）：popover 開即見最近 5 條 — 用開 popover 已拉嘅全量 list（同 scope 規則）
   //   按 lastMessageAt desc 排序 slice 5（免額外加 request；效果 = MD 嘅 limit=5&order=lastMessageAt_desc）
@@ -751,7 +794,7 @@ function DayGrid({
           .sort((a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime())
           .slice(0, 5);
 
-  async function sendFlow(conv: ConversationItem) {
+  async function sendFlow(conv: ConversationItem, cross: boolean) {
     if (!pop || !p || sending) return;
     setSending(true);
     setPopErr(null);
@@ -761,6 +804,8 @@ function DayGrid({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prefill: { date, providerId: p.providerId, start: pop.slot.start },
+          // ★ cwi-ux UX-07：跨店 — 預約地點 = 目前顯示嘅店（bookingClinicId）；對話本身唔變。
+          ...(cross ? { bookingClinicId: clinicId } : {}),
         }),
       });
       const j = (await res.json().catch(() => null)) as {
@@ -769,11 +814,14 @@ function DayGrid({
         error?: string;
       } | null;
       if (res.ok) {
-        onToast?.("ok", j?.reused ? "呢格 Flow 已經出過（冪等複用）" : "已發預約連結（Flow · 已鎖定呢格）");
+        onToast?.("ok", j?.reused ? "呢格 Flow 已經出過（冪等複用）" : cross ? `已發預約連結（Flow · 約喺 ${clinic}）` : "已發預約連結（Flow · 已鎖定呢格）");
         setPop(null);
         setQ("");
         setHits(null);
+        setCrossHits(null);
         setSelId(null);
+        setSelCross(false);
+        setCrossConfirm(false);
         setRaceConv(null);
         setPopErr(null);
       } else if (res.status === 422) {
@@ -796,7 +844,7 @@ function DayGrid({
   // ★ cwi-final S5-8①：
   // - requestId 每次打開視窗生成；重試 = 同一 requestId → server 冪等（零雙單）；
   // - 成功語義 = `data.ok === true`（202 WRITING = 受理 / 200 queue_unavailable = 建單但寫入隊列死）— 唔再「res.ok + apricotApptId = 成功」。
-  async function sendManual(conv: ConversationItem) {
+  async function sendManual(conv: ConversationItem, cross: boolean) {
     if (!pop || !p || manualBusy) return;
     if (!conv.pinnedPatientApricotId) return; // UI gate（server 再擋一道 422）
     setManualBusy(true);
@@ -813,6 +861,8 @@ function DayGrid({
           providerName: p.providerName,
           date,
           start: pop.slot.start,
+          // ★ cwi-ux UX-07：跨店 — 預約地點 = 目前顯示嘅店（bookingClinicId）。
+          ...(cross ? { bookingClinicId: clinicId } : {}),
         }),
       });
       const j = (await res.json().catch(() => null)) as {
@@ -840,7 +890,10 @@ function DayGrid({
         setPop(null);
         setQ("");
         setHits(null);
+        setCrossHits(null);
         setSelId(null);
+        setSelCross(false);
+        setCrossConfirm(false);
         setRaceConv(null);
         setPopErr(null);
       } else if (res.status === 409) {
@@ -1022,6 +1075,8 @@ function DayGrid({
                 setPop(null);
                 setRaceConv(null);
                 setPopErr(null);
+                setSelCross(false);
+                setCrossConfirm(false);
               }}
               className="ml-auto text-[10px] text-t3 hover:text-t1 px-1.5 py-0.5 rounded hover:bg-panel-2"
             >
@@ -1045,6 +1100,8 @@ function DayGrid({
                       type="button"
                       onClick={() => {
                         setSelId(c.id);
+                        setSelCross(false);
+                        setCrossConfirm(false);
                         setRaceConv(null);
                         setPopErr(null);
                       }}
@@ -1070,6 +1127,8 @@ function DayGrid({
             onChange={(e) => {
               setQ(e.target.value);
               setSelId(null);
+              setSelCross(false);
+              setCrossConfirm(false);
               setRaceConv(null);
             }}
             placeholder="搵唔到？打姓名／電話搜尋"
@@ -1078,47 +1137,102 @@ function DayGrid({
           />
           {searching && <div className="text-[10.5px] text-t3">搜尋中…</div>}
           {searchErr && <div className="text-xs text-danger-text">{searchErr}</div>}
-          {!searching && hits && hits.length === 0 && (
-            <div className="text-[10.5px] text-t3">搵唔到病人（該店要有既有對話先約得）</div>
+          {!searching && q.trim() && hits && hits.length === 0 && (!crossHits || crossHits.length === 0) && (
+            <div className="text-[10.5px] text-t3">搵唔到病人（本店要有既有對話、或者你負責緊其他店對話先約得）</div>
           )}
+          {/* ★ cwi-ux UX-07：搜尋結果分兩組 —「本店對話」＋「我負責緊（其他店）」 */}
           {hits && hits.length > 0 && (
-            <div className="space-y-1 max-h-48 overflow-y-auto">
-              {hits.map((h) => {
-                const conv = convs?.find((c) => c.contactId === h.id) ?? null;
-                const name = h.profileName || h.waId || "病人";
-                return conv ? (
-                  <button
-                    key={h.id}
-                    type="button"
-                    onClick={() => {
-                      setSelId(conv.id);
-                      setRaceConv(null);
-                      setPopErr(null);
-                    }}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-lg border text-xs flex items-center gap-2 ${
-                      selId === conv.id ? "bg-brand-soft border-brand text-t1" : "bg-panel-2 border-line text-t2 hover:bg-panel-2/70"
-                    }`}
-                  >
-                    <span className="font-medium truncate">{name}</span>
-                    {conv.assigneeName && <span className="text-[10px] text-t3">負責：{conv.assigneeName}</span>}
-                    <span className={`ml-auto text-[10px] ${conv.window.open ? "text-ok-text" : "text-warn-text"}`}>
-                      {conv.window.open ? "窗口開緊" : "窗口已過"}
-                    </span>
-                  </button>
-                ) : (
-                  <div key={h.id} className="px-2.5 py-1.5 rounded-lg bg-panel-2/50 text-xs text-t3 flex items-center gap-2">
-                    <span className="truncate">{name}</span>
-                    <span className="ml-auto text-[10px]">未開始對話</span>
-                  </div>
-                );
-              })}
+            <div className="space-y-1">
+              <div className="text-[10px] font-semibold text-t3">本店對話</div>
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {hits.map((h) => {
+                  const conv = convs?.find((c) => c.contactId === h.id) ?? null;
+                  const name = h.profileName || h.waId || "病人";
+                  return conv ? (
+                    <button
+                      key={h.id}
+                      type="button"
+                      onClick={() => {
+                        setSelId(conv.id);
+                        setSelCross(false);
+                        setCrossConfirm(false);
+                        setRaceConv(null);
+                        setPopErr(null);
+                      }}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-lg border text-xs flex items-center gap-2 ${
+                        selId === conv.id && !selCross ? "bg-brand-soft border-brand text-t1" : "bg-panel-2 border-line text-t2 hover:bg-panel-2/70"
+                      }`}
+                    >
+                      <span className="font-medium truncate">{name}</span>
+                      {conv.assigneeName && <span className="text-[10px] text-t3">負責：{conv.assigneeName}</span>}
+                      <span className={`ml-auto text-[10px] ${conv.window.open ? "text-ok-text" : "text-warn-text"}`}>
+                        {conv.window.open ? "窗口開緊" : "窗口已過"}
+                      </span>
+                    </button>
+                  ) : (
+                    <div key={h.id} className="px-2.5 py-1.5 rounded-lg bg-panel-2/50 text-xs text-t3 flex items-center gap-2">
+                      <span className="truncate">{name}</span>
+                      <span className="ml-auto text-[10px]">未開始對話</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {crossHits && crossHits.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-[10px] font-semibold text-t3">我負責緊（其他店）</div>
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {crossHits.map((h) => {
+                  const conv = crossConvs?.find((c) => c.id === h.conversationId) ?? null;
+                  const name = h.profileName || h.waId || "病人";
+                  return (
+                    <button
+                      key={h.conversationId}
+                      type="button"
+                      disabled={!conv}
+                      onClick={() => {
+                        setSelId(h.conversationId);
+                        setSelCross(true);
+                        setCrossConfirm(false);
+                        setRaceConv(null);
+                        setPopErr(null);
+                      }}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-lg border text-xs flex items-center gap-2 disabled:opacity-40 ${
+                        selId === h.conversationId && selCross ? "bg-brand-soft border-brand text-t1" : "bg-panel-2 border-line text-t2 hover:bg-panel-2/70"
+                      }`}
+                    >
+                      <span className="font-medium truncate">{name}</span>
+                      <span className="text-[10px] text-brand-text shrink-0">📍 {conv?.clinicCode ?? h.clinicId}</span>
+                      {conv && (
+                        <span className={`ml-auto text-[10px] shrink-0 ${conv.window.open ? "text-ok-text" : "text-warn-text"}`}>
+                          {conv.window.open ? "窗口開緊" : "窗口已過"}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
           {convs === null && pop && q.trim() && <div className="text-[10.5px] text-t3">載入既有對話…</div>}
           {popErr && <div className="text-xs text-danger-text">{popErr}</div>}
           {selConv ? (
             <div className="space-y-2">
-              {raceConv || !selConv.window.open ? (
+              {selCross && !crossConfirm ? (
+                <div className="rounded-lg border border-warn-soft bg-warn-soft/30 p-2.5 space-y-1.5">
+                  <div className="text-xs text-t1">
+                    病人喺 <b>{selConv.clinicCode ?? "其他店"}</b> 嘅 WhatsApp 對話，預約地點 <b>{clinic}</b>，確認？
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCrossConfirm(true)}
+                    className="w-full text-xs px-3 py-1.5 rounded-lg bg-brand hover:bg-brand-hover text-panel font-semibold"
+                  >
+                    確認 — 約喺 {clinic}
+                  </button>
+                </div>
+              ) : raceConv || !selConv.window.open ? (
                 <>
                   <div className="text-[10.5px] text-t3">呢位病人 24 小時窗口已過 — Flow 出唔到，改出三出路：</div>
                   <WindowExits conversation={raceConv ?? selConv} myStaffId={myStaffId} />
@@ -1126,7 +1240,7 @@ function DayGrid({
               ) : (
                 <button
                   type="button"
-                  onClick={() => void sendFlow(selConv)}
+                  onClick={() => void sendFlow(selConv, selCross)}
                   disabled={sending}
                   className="w-full text-xs px-3 py-2 rounded-lg bg-brand hover:bg-brand-hover text-panel font-semibold disabled:opacity-40"
                 >
@@ -1138,7 +1252,7 @@ function DayGrid({
                 <div className="space-y-1">
                   <button
                     type="button"
-                    onClick={() => void sendManual(selConv)}
+                    onClick={() => void sendManual(selConv, selCross)}
                     disabled={manualBusy}
                     className="w-full text-xs px-3 py-2 rounded-lg border border-line bg-panel-2 hover:bg-panel text-t1 font-medium disabled:opacity-40"
                     title="直接喺 Apricot 落單（15 分鐘），病人唔使行 Flow；成功後側欄出 CONFIRMED 卡"

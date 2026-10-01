@@ -48,7 +48,8 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
   }
 
   try {
-    const r = await sendBookingFlow({ conversationId: conv.id, staffId: ctx.staff.id });
+    // ★ UX-07：跨店 PENDING 卡重出 Flow → 同一預約目標店（唔會跳返對話所屬店）
+    const r = await sendBookingFlow({ conversationId: conv.id, staffId: ctx.staff.id, bookingClinicId: booking.bookingClinicId ?? null });
     await prisma.auditLog
       .create({
         data: {
@@ -56,11 +57,11 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
           action: "BOOKING_RESEND_FLOW",
           entity: "BookingRequest",
           entityId: booking.id,
-          meta: { conversationId: conv.id, messageId: r.messageId },
+          meta: { conversationId: conv.id, messageId: r.messageId, bookingClinicId: booking.bookingClinicId ?? null },
         },
       })
       .catch(() => undefined);
-    log.info({ bookingId: booking.id, conversationId: conv.id, reused: r.reused }, "bookings: reschedule — flow re-sent");
+    log.info({ bookingId: booking.id, conversationId: conv.id, bookingClinicId: booking.bookingClinicId ?? null, reused: r.reused }, "bookings: reschedule — flow re-sent");
     return NextResponse.json({ ok: true, flowToken: r.flowToken, messageId: r.messageId, reused: r.reused });
   } catch (err) {
     if (err instanceof FlowsDisabledError) {

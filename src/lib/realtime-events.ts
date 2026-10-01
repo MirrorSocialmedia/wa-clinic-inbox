@@ -287,6 +287,14 @@ const holdNew = z.looseObject({
   eventId: id,
 });
 
+/** ★ cwi-ux UX-01：一鍵已讀 — 本人其他裝置同步 badge（`conversation:read`，
+ * publishStaffNotify 定向 `staff:{staffId}` room；client 收到 → myUnread=0 + 層②命中 row unreadCount=0） */
+const conversationRead = z.looseObject({
+  conversationIds: z.array(id),
+  unreadClearedIds: z.array(id).nullish(),
+  eventId: z.string().nullish(),
+});
+
 /** 事件名 → schema 註冊表（publishConvEvent 按 event 名查） */
 export const EVENT_SCHEMAS: Record<string, z.ZodType> = {
   "message:new": messageNew,
@@ -312,4 +320,5 @@ export const EVENT_SCHEMAS: Record<string, z.ZodType> = {
   "notify:takeover": notifyTakeover,
   "followup:changed": followupChanged,
   "hold:new": holdNew,
+  "conversation:read": conversationRead,
 };

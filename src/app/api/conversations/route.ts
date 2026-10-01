@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { requireAuth, assertClinicAccess } from "@/lib/rbac";
+import prisma from "@/lib/prisma";
 import { handle } from "@/lib/api-error";
 import { CAPSULE_KEYS, matchCapsule } from "@/lib/inbox/capsule";
 import {
@@ -43,6 +44,23 @@ export const GET = handle(async (req: NextRequest) => {
   const modeParam = url.searchParams.get("mode");
   if (assignedParam && !CAPSULE_KEYS.includes(assignedParam as (typeof CAPSULE_KEYS)[number])) {
     return NextResponse.json({ error: "invalid assigned (all|unassigned|mine|routed|followup)" }, { status: 400 });
+  }
+
+  // ★ cwi-ux UX-07：mine=1（時間表 popover）— 「我負責緊嘅對話」（任何店/任何公司）。
+  //   只限 assigneeId = 我（單線授權）；excludeClinic = 目前顯示嘅店（UI 分「本店對話」同「其他店」兩組）。
+  //   回傳完整 DTO（window/pinned/clinicName）— 只係我自己負責嘅對話，唔會洩別人線。
+  if (url.searchParams.get("mine") === "1") {
+    const excludeClinic = url.searchParams.get("excludeClinic");
+    const rows = await prisma.conversation.findMany({
+      where: {
+        assigneeId: ctx.staff.id,
+        ...(excludeClinic ? { clinicId: { not: excludeClinic } } : {}),
+      },
+      orderBy: { lastMessageAt: "desc" },
+      take: 50,
+    });
+    const items = await toConversationDTOs(rows, new Map(), undefined, ctx.staff.id);
+    return NextResponse.json({ items, nextCursor: null, scopeClinicIds: null, myGroupIds: [] });
   }
 
   // ★ 範圍 guard（RBAC 鐵律，E2E T350 實測）：STAFF / 受限 ADMIN 砌外範圍 clinicId → 403（所有 branch 適用）

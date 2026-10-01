@@ -1,5 +1,9 @@
 /** Inbox UI 共用型別（同 API 回應 shape 對齊）。 */
 
+// ★ cwi-ux UX-07：visitStats 單一來源 = lib/visit-stats.ts（纯函數 lib — client 可用）
+import type { PatientRecordVisitStats } from "@/lib/visit-stats";
+export type { PatientRecordVisitStats };
+
 export interface ClinicInfo {
   id: string;
   code: string;
@@ -134,6 +138,10 @@ export interface BookingInfo {
   writeError?: string | null;
   /** ★ S5-1：本次寫入試次開始（ISO — WRITING 顯示用） */
   writeAttemptAt?: string | null;
+  /** ★ cwi-ux UX-07：跨分店預約 — 目標店 id（null = 同對話店）；膠囊「📍 YL」只在目標店≠對話店時顯示 */
+  bookingClinicId?: string | null;
+  /** ★ cwi-ux UX-07：目標店 code（供膠囊顯示「📍 YL」）；null = 冇目標店或查唔到店名 */
+  bookingClinicCode?: string | null;
 }
 
 /** providerslot-20260830 T3：Flow 硬保留 hold（本地 FlowHoldEvent — 病人資料落 inbox 本地） */
@@ -577,6 +585,16 @@ export interface NotifyTakeoverEvent {
   actorStaffId: string | null;
 }
 
+/** ★ cwi-ux UX-01：一鍵已讀 → 本人其他裝置同步 badge（staff:{staffId} room 定向）。
+ * client 收到 → conversationIds 全部 myUnread=0；unreadClearedIds 再 unreadCount=0（層②命中嘅 row）。 */
+export interface ConversationReadEvent {
+  eventId?: string;
+  /** 已 upsert ConversationRead（個人已讀）嘅對話 id */
+  conversationIds: string[];
+  /** 全店 unreadCount 被清（我負責 / 未指派且 STAFF/ADMIN）嘅對話 id */
+  unreadClearedIds?: string[];
+}
+
 /** ★ H2：INTERNAL note tick 語義（似 WhatsApp）：
  *  灰 ✓ = note 已發出；藍 ✓✓ = 全部被 mention 嘅 staff 已讀（無 mention → 現任 assignee 已讀）。
  *  requiredStaff 為空（unassigned + 無 mention）→ 永遠灰 ✓。 */
@@ -619,6 +637,8 @@ export interface PatientRecordVisit {
   rxCodes: { code: string; name: string; isAntibiotic: boolean }[];
 }
 
+/** ★ cwi-ux UX-07：近 12 個月到診統計 — 見 lib/visit-stats.ts（top 已 re-export） */
+
 export interface PatientRecordData {
   v: 1;
   /** §4.6 病人卡 opt-out toggle（contact 級 — 配對有冇都顯示）；SUPERVISOR canEdit=false */
@@ -643,6 +663,8 @@ export interface PatientRecordData {
     lastVisitDate: string | null;
   } | null;
   visits: PatientRecordVisit[];
+  /** ★ cwi-ux UX-07：近 12 個月到診統計（主診醫生／最近到診分店）— 無記錄 / 離線 = null（UI 唔顯示） */
+  visitStats: PatientRecordVisitStats | null;
   balance: {
     v: 1;
     patientCode: string;

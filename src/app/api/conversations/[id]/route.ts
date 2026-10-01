@@ -6,6 +6,7 @@ import { requireAuth, assertConversationAccess, assertCanWriteConversation } fro
 import { handle, toResponse } from "@/lib/api-error";
 import { publishConvEvent, convRef } from "@/lib/notify";
 import { assertCanAssign } from "@/lib/assign";
+import { shouldClearUnread } from "@/lib/inbox/mark-read";
 
 /**
  * GET /api/conversations/[id] — 單個對話（+ contact；conversation 含 AI 欄位 intent/urgency/urgent/aiSummary）。別店 → 403。
@@ -78,9 +79,8 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
       update: { lastReadAt: readAt },
     });
   }
-  const clearUnread =
-    markRead === true &&
-    (conv.assigneeId === auth.staff.id || (conv.assigneeId === null && auth.staff.role !== "SUPERVISOR"));
+  // ★ cwi-ux UX-01：兩層規則層②判定改共用 function（mark-read.ts — 同批量 mark-all-read 行同一段 code）
+  const clearUnread = markRead === true && shouldClearUnread(conv, auth.staff);
 
   const updated = await prisma.conversation.update({
     where: { id },

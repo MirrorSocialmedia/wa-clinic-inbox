@@ -737,9 +737,15 @@ model BookingRequest {
   // ★ cwi-final S5-6（F1）：冪等試次 — 同 booking 重試用同一 idemAttempt → 同 idempotency key / 同 clientMessageId（uuidv5）。
   idemAttempt       Int @default(0)
   writeError        String? @db.VarChar(64)
+  // ★ cwi-ux UX-07（2026-10-01）：預約喺邊間店做（目標店）— null = 同 clinicId（舊資料零改動）。
+  //   clinicId 意思唔變 = 對話所屬店（權限範圍 / /bookings 隊列 / 通知）；
+  //   時段／Apricot／確認訊息／改期／取消／提醒 一律用 effectiveBookingClinicId()。
+  bookingClinicId   String? @db.VarChar(36)
   createdAt         DateTime @db.Timestamptz      @default(now())
   // Phase 3：/bookings 隊列查詢（本店 + 狀態 + 時間）
   @@index([clinicId, status, createdAt])
+  // ★ UX-07：目標店時段重複防護（existingPending 按目標店查）
+  @@index([bookingClinicId, status, createdAt])
 }
 
 // Phase 3：醫生名錄（sync 表）— SCREEN_PROVIDER 嘅數據源。
@@ -771,7 +777,10 @@ model FlowSession {
   id               String    @id @default(cuid())
   conversationId   String
   clinicId         String
-  flowToken        String    @unique        // 簽咗 conversationId+clinicId 嘅 JWT
+  flowToken        String    @unique        // 簽咗 conversationId+clinicId 嘅 JWT（UX-07：可加簽 bookingClinicId）
+  // ★ cwi-ux UX-07（2026-10-01）：預約目標店（token 簽名帶 — 病人揀完用同一間店；payload 改店 → 拒）。
+  //   null = 對話所屬店（舊 flow 零改動）。
+  bookingClinicId  String?   @db.VarChar(36)
   flowMessageWamid String?                   // 發出嘅 interactive flow 訊息 wamid（metadata）
   messageId        String?                   // cwi-r1close (D)：對應 interactive Message 內部 id —
                                              // 發送最終 FAILED 時回滾本 session（防 dedup 誤中 → UI 謊報「已發咗」）

@@ -26,6 +26,8 @@ import { getParams } from "@/lib/workflow/store";
 import { fetchAppointments } from "@/lib/workforce/client";
 import { phoneHash } from "@/lib/phone-hash";
 import { hkDateOffset } from "@/lib/availability";
+// ★ cwi-ux UX-07：提醒文字診所名 = 預約目標店（effectiveBookingClinicId）
+import { effectiveBookingClinicId } from "@/lib/booking/effective-clinic";
 
 // ★ 延遲 import：outboundQueue/publishNotify 會拉起 Redis 連接（BullMQ module-level
 // instance）— unit test（零 Redis）import 呢個 module 時唔想連坐。生產路徑行為不變。
@@ -97,7 +99,8 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
     if (!inReminderWindow(t, now.getTime(), minH, maxH)) continue;
 
     const conv = await prisma.conversation.findUnique({ where: { id: b.conversationId } });
-    const clinic = await prisma.clinic.findUnique({ where: { id: b.clinicId } });
+    // ★ UX-07：提醒用預約目標店（null = 對話所屬店 — 舊單零改動）
+    const clinic = await prisma.clinic.findUnique({ where: { id: effectiveBookingClinicId(b) } });
     if (!conv || !clinic) continue;
 
     // ★ cwi-final S5-7（F2）：發前 fetchAppointments 核對 — 預約狀態必須 = 0（booked）。
@@ -187,7 +190,7 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
     }
     sent++;
     log.info(
-      { bookingId: b.id, clinicId: b.clinicId, date: b.requestedDate },
+      { bookingId: b.id, clinicId: b.clinicId, bookingClinicId: b.bookingClinicId ?? null, date: b.requestedDate },
       "reminder: template queued"
     );
   }

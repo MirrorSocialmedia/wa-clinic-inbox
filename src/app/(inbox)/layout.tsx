@@ -4,6 +4,7 @@ import prisma from "@/lib/prisma";
 import { NavRail } from "@/components/inbox/nav-rail";
 import { BottomTabBar } from "@/components/inbox/bottom-tab-bar";
 import { SwRegistrar } from "@/components/inbox/sw-registrar";
+import { InstallPrompt } from "@/components/inbox/install-prompt";
 
 /**
  * (inbox) layout — 所有需要登入嘅頁。
@@ -31,10 +32,15 @@ export default async function InboxLayout({
   });
 
   return (
-    <div className="h-dvh bg-canvas flex overflow-hidden theme-transition">
-      {/* v2 PWA（cwi-notify-v2）：manifest + SW 註冊（tab 閂咗都收到通知） */}
-      <link rel="manifest" href="/manifest.webmanifest" />
+    <div className="fixed inset-0 bg-canvas flex overflow-hidden theme-transition pt-[env(safe-area-inset-top)]">
+      {/* ★ cwi-ux UX-04：app-shell 防 body 捲（edge-to-edge 下外框比可視範圍高 → body 可捲 =
+          「向下拉先見到」根因）。只套 (inbox) 群 — /login、(public) 法律頁、/ops、管理頁係長頁要捲。
+          fixed inset-0 外框自身已 overflow-hidden；呢個 style 雙保險禁 html/body 級捲動 + 橡皮筋。 */}
+      <style>{`html,body{height:100%;overflow:hidden;overscroll-behavior:none;}`}</style>
+      {/* ★ cwi-ux UX-02：manifest link 已移去 root layout（metadata API）— 呢行刪（避免重複） */}
       <SwRegistrar />
+      {/* ★ cwi-ux UX-03：PWA 安裝提示橫條（Android beforeinstallprompt / iOS 加入主畫面教學；已安裝唔顯示） */}
+      <InstallPrompt />
       <NavRail name={session.name} email={session.email} role={session.role} />
       <div className="flex-1 min-w-0 min-h-0 flex flex-col">
         <main className="flex-1 min-w-0 min-h-0">{children}</main>
