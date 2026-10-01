@@ -75,7 +75,7 @@ before(async () => {
 after(async () => {
   if (prisma) {
     for (const fx of convs) await cleanupFx(prisma, fx).catch(() => {});
-    if (ylStaff.id) {
+    if (ylStaff?.id) {
       await prisma.staffClinic.deleteMany({ where: { staffId: ylStaff.id } }).catch(() => {});
       await prisma.staffUser.deleteMany({ where: { id: ylStaff.id } }).catch(() => {});
     }

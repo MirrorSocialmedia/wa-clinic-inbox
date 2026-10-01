@@ -33,9 +33,13 @@ INTERNAL_LLM_SECRET=$(openssl rand -hex 32)
 WA_APP_SECRET=ci-test-app-secret
 WA_VERIFY_TOKEN=ci-test-verify
 APP_HOST=127.0.0.1:3100
+# ★ cwi-ux UX-07：bookings/manual、flows、patient-record 測試走 workforce mock（同 mock-e2e .env 一致；冇設 → new URL(undefined) 500）
+WORKFORCE_MOCK=1
 ENV
 set -a; . ./.env; set +a
 pnpm -s migrate:deploy && pnpm -s db:seed && pnpm -s tsx scripts/seed-knowledge.ts && pnpm -s tsx scripts/seed-followup-p4.ts
+# ★ cwi-ux UX-07：跨分店測試要 YL（同公司）+ TY（跨公司）+ companyId — db:seed 冇（見檔頭）
+pnpm -s tsx scripts/seed-src-test-clinics.ts
 n=0
 while IFS= read -r f; do
   n=$((n+1)); echo "--- $f"

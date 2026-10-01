@@ -125,8 +125,8 @@ after(async () => {
     await prisma.bookingRequest
       .deleteMany({ where: { OR: [{ conversationId: { in: convs.map((c) => c.convId) } }, { flowToken: { startsWith: "manual-" } }] } })
       .catch(() => {});
-    if (pYl.id) await prisma.provider.deleteMany({ where: { id: { in: [pYl.id, pTy.id] } } }).catch(() => {});
-    if (assignee.id) {
+    if (pYl?.id) await prisma.provider.deleteMany({ where: { id: { in: [pYl.id, pTy?.id].filter(Boolean) as string[] } } }).catch(() => {});
+    if (assignee?.id) {
       await prisma.staffClinic.deleteMany({ where: { staffId: assignee.id } }).catch(() => {});
       await prisma.staffUser.deleteMany({ where: { id: assignee.id } }).catch(() => {});
     }

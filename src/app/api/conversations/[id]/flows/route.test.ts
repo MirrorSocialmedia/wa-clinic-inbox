@@ -99,7 +99,7 @@ after(async () => {
     for (const fx of convs) await cleanupFx(prisma, fx).catch(() => {});
     await prisma.flowSession.deleteMany({ where: { conversationId: { in: convs.map((c) => c.convId) } } }).catch(() => {});
     await prisma.bookingRequest.deleteMany({ where: { conversationId: { in: convs.map((c) => c.convId) } } }).catch(() => {});
-    if (assignee.id) {
+    if (assignee?.id) {
       await prisma.staffClinic.deleteMany({ where: { staffId: assignee.id } }).catch(() => {});
       await prisma.staffUser.deleteMany({ where: { id: assignee.id } }).catch(() => {});
     }
