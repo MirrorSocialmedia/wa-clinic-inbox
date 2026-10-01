@@ -47,6 +47,8 @@ interface ContactHit {
   profileName: string | null;
   labels: string[];
   clinicId: string;
+  /** ★ cwi-ux UX-07：mine=1 時 = 我負責緊嘅對話 id（UI 用嚟發 Flow/手落單）；非 mine = null */
+  conversationId: string | null;
 }
 
 interface MessageHit {
@@ -72,6 +74,11 @@ export const GET = handle(async (req: NextRequest) => {
   const type = url.searchParams.get("type") ?? "contact";
   if (q.length < 1) return NextResponse.json({ error: "q required" }, { status: 400 });
   if (q.length > 200) return NextResponse.json({ error: "q too long" }, { status: 400 });
+
+  // ★ cwi-ux UX-07：mine=1（時間表模式）— 唔按店過濾，改為「我負責緊嘅對話」（任何店/任何公司）。
+  //   只限我係 assignee 嘅對話（單線授權）；excludeClinic = 彈出視窗目前顯示嘅店（UI 分「本店對話」同「其他店」兩組用）。
+  const isMine = url.searchParams.get("mine") === "1";
+  const excludeClinic = url.searchParams.get("excludeClinic");
 
   // ★ S6-3：?internal=1 — 搜尋內部備註（channel=INTERNAL）toggle（預設排除）
   const includeInternal = url.searchParams.get("internal") === "1";
@@ -104,6 +111,28 @@ export const GET = handle(async (req: NextRequest) => {
     rows = await prisma.$transaction(
       async (tx): Promise<(ContactHit | MessageHit)[]> => {
         await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '3s'");
+
+        // ★ cwi-ux UX-07：mine=1（時間表模式）— 「我負責緊嘅對話」（任何店/任何公司）。
+        //   只限 assigneeId = 我（單線授權）；excludeClinic = 目前顯示嘅店（UI 分兩組）。
+        //   回傳每個 (contact, conversation) 配對 + conversationId（UI 用嚟發 Flow/手落單）。
+        if (isMine && type === "contact") {
+          return await tx.$queryRaw<ContactHit[]>`
+              SELECT c.id, c."waId", c."profileName", c.labels,
+                     cv."clinicId" AS "clinicId", cv.id AS "conversationId"
+              FROM "Contact" c
+              JOIN "Conversation" cv ON cv."contactId" = c.id
+              WHERE cv."assigneeId" = ${selfId}
+                AND (${excludeClinic ?? null} IS NULL OR cv."clinicId" <> ${excludeClinic ?? null})
+                AND (
+                  c."waId" LIKE '%' || ${qEsc} || '%'
+                  OR (${isPhone} AND c."waId" LIKE '%' || ${digits} || '%')
+                  OR coalesce(c."profileName", '') ILIKE '%' || ${qEsc} || '%'
+                  OR similarity(coalesce(c."profileName", ''), ${q}) > 0.3
+                )
+              ORDER BY similarity(coalesce(c."profileName", ''), ${q}) DESC, c.id DESC
+              LIMIT 20`;
+        }
+
         if (type === "message") {
           return clinicIds
             ? await tx.$queryRaw<MessageHit[]>`
@@ -150,7 +179,7 @@ export const GET = handle(async (req: NextRequest) => {
         }
         return clinicIds
           ? await tx.$queryRaw<ContactHit[]>`
-              SELECT id, "waId", "profileName", labels, "clinicId"
+              SELECT id, "waId", "profileName", labels, "clinicId", NULL::text AS "conversationId"
               FROM "Contact"
               WHERE "clinicId" = ANY(${clinicIds})
                 AND (
@@ -167,7 +196,7 @@ export const GET = handle(async (req: NextRequest) => {
               ORDER BY similarity(coalesce("profileName", ''), ${q}) DESC, id DESC
               LIMIT 20`
           : await tx.$queryRaw<ContactHit[]>`
-              SELECT id, "waId", "profileName", labels, "clinicId"
+              SELECT id, "waId", "profileName", labels, "clinicId", NULL::text AS "conversationId"
               FROM "Contact"
               WHERE (
                 "waId" LIKE '%' || ${qEsc} || '%'
