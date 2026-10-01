@@ -3,6 +3,8 @@
  *
  * 狀態機：只 HELD 可 commit（其餘 → 409）。
  * 1. RBAC：assertClinicAccess（clinicId 缺失 = 只 ADMIN）
+ *    ★ cwi-ux UX-07：跨店 hold（hold.clinicId = 預約目標店 ≠ 對話所屬店）→ 用對話級授權（assertConversationAccess）—
+ *    負責人不要求有目標店範圍（同發 Flow / 手落單一致）
  * 2. ★ cwi-final S5-11（F4）：body.apricotRef 必填 — fetchAppointments 核對單號存在 + 日期/時間一致
  *    （+ 本店 + 有效狀態 0/102）→ 唔一致 → 409 拒絕 + 提示（hold 留 HELD）
  * 3. call workforce commit（MD 3.3：HELD → IN_APRICOT；冪等）
@@ -14,7 +16,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { requireAuth, assertClinicAccess, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { commitHold, WorkforceApiError, WorkforceOutcomeUnknown, fetchAppointments, updateBookingStatus, slotClaimEnabled } from "@/lib/workforce/client";
 import { phoneHash } from "@/lib/phone-hash";
@@ -28,8 +30,21 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   const hold = await prisma.flowHoldEvent.findUnique({ where: { id } });
   if (!hold) return NextResponse.json({ error: "not found" }, { status: 404 });
-  if (hold.clinicId) assertClinicAccess(ctx, hold.clinicId);
-  else if (ctx.staff.role !== "ADMIN") return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
+  if (hold.clinicId) {
+    // ★ UX-07：跨店 hold — hold.clinicId = 預約目標店（可能唔喺我帳號範圍）→
+    //   用對話級授權（負責人/scope/route）判斷；同店 hold 行為零改動
+    const conv = hold.conversationId
+      ? await prisma.conversation.findUnique({
+          where: { id: hold.conversationId },
+          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+        })
+      : null;
+    if (conv && conv.clinicId !== hold.clinicId) {
+      await assertConversationAccess(ctx, conv);
+    } else {
+      assertClinicAccess(ctx, hold.clinicId);
+    }
+  } else if (ctx.staff.role !== "ADMIN") return NextResponse.json({ error: "cross-clinic access denied" }, { status: 403 });
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
   if (!slotClaimEnabled()) return NextResponse.json({ error: "SLOT_CLAIM_DISABLED" }, { status: 403 }); // ★ cwi-final S0-12：G2 閘
 

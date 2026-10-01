@@ -139,6 +139,9 @@ export interface FlowTokenPayload {
   iat?: number;
   /** S3-8：過期時間（epoch sec）= iat + 24h（fail-closed：冇 exp 一律拒） */
   exp?: number;
+  /** ★ cwi-ux UX-07：預約目標店（簽名內 — 病人揀完用同一間店；payload 改店 → 拒）。
+   *  舊 token 冇呢欄（undefined = 對話所屬店）— 舊 flow 零改動。 */
+  bookingClinicId?: string | null;
 }
 
 /** S3-8：Flow token 有效期 = 24h */

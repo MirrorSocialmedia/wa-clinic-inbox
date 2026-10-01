@@ -40,6 +40,7 @@ import { resolveDurationMin } from "@/lib/booking/durations";
 import { phoneHash } from "@/lib/phone-hash";
 import { afterBookingWrite } from "@/lib/booking/booking-ops";
 import { rescheduledReply } from "@/lib/booking/booking-text";
+import { targetClinicSlotWhere } from "@/lib/booking/effective-clinic";
 import { WorkforceApiError, WorkforceOutcomeUnknown, fetchAppointments, rescheduleBooking } from "@/lib/workforce/client";
 
 export interface NfmReplyEnvelope {
@@ -169,6 +170,17 @@ async function handleFlowReplyCore(input: {
   if (!session || session.conversationId !== conversationId || session.clinicId !== clinicId) {
     return { status: "rejected", reason: "unknown_session" };
   }
+  // ★ UX-07：token 簽名帶 bookingClinicId — 必須同 session 對上（payload 改店 → 拒）
+  const bookingClinicId = tokenPayload.bookingClinicId ?? null;
+  if (session.bookingClinicId !== bookingClinicId) {
+    log.warn(
+      { conversationId, tokenTarget: bookingClinicId, sessionTarget: session.bookingClinicId },
+      "flow-reply: flow_token 目標店同 session 唔符 — 拒"
+    );
+    return { status: "rejected", reason: "token_mismatch" };
+  }
+  // 預約目標店（null = 對話所屬店 — 舊 flow 零改動）
+  const targetClinicId = bookingClinicId ?? clinicId;
   if (session.status === "COMPLETED") {
     // ★ 冪等：重複 Complete → 第一次已經建咗卡 — 唔重複
     log.info({ conversationId, flowToken: flow_token.slice(0, 12) }, "flow-reply: duplicate complete (idempotent skip)");
@@ -246,17 +258,18 @@ async function handleFlowReplyCore(input: {
       conv,
       SOURCE_OFFLINE_REPLY,
       { clinic: "?", date, reason: "reschedule_requires_time" },
-      "reschedule_requires_time"
+      "reschedule_requires_time",
+      bookingClinicId
     );
     return { status: "send_failed", reason: "reschedule_requires_time" };
   }
 
-  // 4) 醫生 belonging + 日期/時間格式
+  // 4) 醫生 belonging + 日期/時間格式（★ UX-07：belonging 對預約目標店）
   const provider = await prisma.provider.findFirst({
-    where: { apricotId: String(providerId), active: true, clinics: { some: { clinicId } } },
+    where: { apricotId: String(providerId), active: true, clinics: { some: { clinicId: targetClinicId } } },
   });
   if (!provider) {
-    log.warn({ conversationId, providerId }, "flow-reply: unknown provider for clinic");
+    log.warn({ conversationId, providerId, targetClinicId }, "flow-reply: unknown provider for clinic");
     return { status: "rejected", reason: "unknown_provider" };
   }
   const { start, end } = syncWindow();
@@ -270,13 +283,14 @@ async function handleFlowReplyCore(input: {
   } else if (!/^\d{2}:\d{2}$/.test(time ?? "")) {
     return { status: "rejected", reason: "bad_time_format" };
   }
-  const clinicCode = (await prisma.clinic.findUnique({ where: { id: clinicId } }))?.code ?? "?";
+  const clinicCode = (await prisma.clinic.findUnique({ where: { id: targetClinicId } }))?.code ?? "?";
 
   // 4b) ★ 同一條空檔路徑：getSlots()（四層降級鏈 — 同 flow endpoint / ai.worker 共用，冇第二條路）
   //     正常變體 + NONE（源離線 + 無 L2）→ 冇得 precheck → reject + 重出 Flow（重出時會轉純收需求變體）
+  //     ★ UX-07：空檔源 = 預約目標店
   let slotRes;
   try {
-    slotRes = await getSlots(clinicId);
+    slotRes = await getSlots(targetClinicId);
   } catch (e) {
     log.error(
       { conversationId, err: e instanceof Error ? e.message : String(e) },
@@ -290,7 +304,8 @@ async function handleFlowReplyCore(input: {
       conv,
       SOURCE_OFFLINE_REPLY,
       { clinic: clinicCode, providerApricotId: provider.apricotId, date, reason: "source_offline" },
-      "source_offline"
+      "source_offline",
+      bookingClinicId
     );
     return { status: "send_failed", reason: "source_offline" };
   }
@@ -309,7 +324,7 @@ async function handleFlowReplyCore(input: {
         if (!isRequirementVariant) {
           const lock = await tx.$queryRaw`
             SELECT "id" FROM "AvailabilitySlot"
-            WHERE "clinicId" = ${clinicId}
+            WHERE "clinicId" = ${targetClinicId}
               AND "providerApricotId" = ${provider.apricotId}
               AND "date" = ${date}
               AND "startTime" = ${time}
@@ -320,7 +335,7 @@ async function handleFlowReplyCore(input: {
             return;
           }
           const slotRow = await tx.availabilitySlot.findUnique({
-            where: { clinicId_providerApricotId_date_startTime: { clinicId, providerApricotId: provider.apricotId!, date, startTime: time! } },
+            where: { clinicId_providerApricotId_date_startTime: { clinicId: targetClinicId, providerApricotId: provider.apricotId!, date, startTime: time! } },
           });
           // G-4（B7，F2）：capacity-aware — 共享池 3 人，remainingCapacity 缺欄 fallback 舊語義；
           // checkClash（workforce 寫入時）照舊係最終防線
@@ -337,8 +352,9 @@ async function handleFlowReplyCore(input: {
             });
             return;
           }
+          // ★ UX-07：existingPending 用預約目標店（同店舊行 clinicId=T 或 跨店行 bookingClinicId=T）
           const existingPending = await tx.bookingRequest.findFirst({
-            where: { clinicId, providerApricotId: provider.apricotId!, requestedDate: date, requestedTime: time, status: "PENDING" },
+            where: { ...targetClinicSlotWhere(targetClinicId), providerApricotId: provider.apricotId!, requestedDate: date, requestedTime: time, status: "PENDING" },
           });
           if (existingPending) {
             txResult.reason = "pending_exists";
@@ -346,7 +362,7 @@ async function handleFlowReplyCore(input: {
           }
         } else {
           const existingPending = await tx.bookingRequest.findFirst({
-            where: { clinicId, providerApricotId: provider.apricotId!, requestedDate: date, timeOfDay: String(timeOfDay), status: "PENDING" },
+            where: { ...targetClinicSlotWhere(targetClinicId), providerApricotId: provider.apricotId!, requestedDate: date, timeOfDay: String(timeOfDay), status: "PENDING" },
           });
           if (existingPending) {
             txResult.reason = "pending_exists";
@@ -358,6 +374,8 @@ async function handleFlowReplyCore(input: {
           data: {
             conversationId,
             clinicId,
+            // ★ UX-07：預約目標店（null = 對話所屬店 — 舊資料零改動）
+            bookingClinicId,
             flowToken: flow_token,
             providerApricotId: provider.apricotId!,
             providerName: String(providerName ?? provider.name),
@@ -383,14 +401,15 @@ async function handleFlowReplyCore(input: {
   }
 
   if (txResult.reason) {
-    // 唔過 → session FAILED + 自動覆 + 重出 Flow
+    // 唔過 → session FAILED + 自動覆 + 重出 Flow（★ UX-07：重出 Flow 保持同一預約目標店）
     const failReply = txResult.reason === "pending_exists" && isRequirementVariant ? REQUIREMENT_DUP_REPLY : SLOT_TAKEN_REPLY;
     await failSessionAndResend(
       session.id,
       conv,
       failReply,
       { clinic: clinicCode, providerApricotId: provider.apricotId, date, time: isRequirementVariant ? null : time, timeOfDay: isRequirementVariant ? String(timeOfDay) : null, reason: txResult.reason },
-      txResult.reason
+      txResult.reason,
+      bookingClinicId
     );
     return { status: "send_failed", reason: txResult.reason };
   }
@@ -402,7 +421,7 @@ async function handleFlowReplyCore(input: {
       conv,
       contactWaId: contact.waId,
       oldApptId: reschedulingApptId!,
-      clinicId,
+      clinicId: targetClinicId,
       clinicCode,
       providerApricotId: provider.apricotId!,
       date: date!,
@@ -464,6 +483,8 @@ async function handleReschedule(p: {
   flowToken: string;
 }): Promise<FlowReplyOutcome> {
   const { session, conv, contactWaId, oldApptId, clinicId, clinicCode, providerApricotId, date, time, flowToken } = p;
+  // ★ UX-07：clinicId = 預約目標店（caller 已傳 targetClinicId）— 重出 Flow 保持同一間店
+  const bookingClinicId = clinicId !== conv.clinicId ? clinicId : null;
 
   // 舊單回查（side 攞 oldDate / clinicCode + 原單時長（start/end — S5-14）— reschedule 契約要；contactWaId 已喺 step 3 驗證 = 病人本人）
   let oldAppt: { apricotApptId: string; clinicCode: string; date: string; start: string; end: string };
@@ -484,7 +505,8 @@ async function handleReschedule(p: {
       conv,
       SOURCE_OFFLINE_REPLY,
       { clinic: clinicCode, oldApptId, reason: "reschedule_lookup_failed" },
-      "reschedule_lookup_failed"
+      "reschedule_lookup_failed",
+      bookingClinicId
     );
     return { status: "send_failed", reason: "reschedule_lookup_failed" };
   }
@@ -560,7 +582,8 @@ async function handleReschedule(p: {
           conv,
           reply,
           { clinic: clinicCode, oldApptId, newDate: date, reason: "reschedule_unknown" },
-          "reschedule_unknown"
+          "reschedule_unknown",
+          bookingClinicId
         );
         return { status: "send_failed", reason: "reschedule_unknown" };
       }
@@ -588,7 +611,8 @@ async function handleReschedule(p: {
         conv,
         "對唔住，改期暫時出錯咗，請重新揀時間，我哋會再安排 🙏",
         { clinic: clinicCode, oldApptId, newDate: date, reason: "reschedule_partial" },
-        "reschedule_partial"
+        "reschedule_partial",
+        bookingClinicId
       );
       return { status: "send_failed", reason: "reschedule_partial" };
     }
@@ -606,7 +630,8 @@ async function handleReschedule(p: {
       conv,
       reply,
       { clinic: clinicCode, oldApptId, newDate: date, reason: `reschedule_failed_${status}` },
-      `reschedule_failed_${status}`
+      `reschedule_failed_${status}`,
+      bookingClinicId
     );
     return { status: "send_failed", reason: `reschedule_failed_${status}` };
   }
@@ -706,8 +731,9 @@ async function handleReschedule(p: {
 }
 
 /** precheck 失敗：覆病人「滿咗」+ 重出 Flow（窗口內 — nfm_reply 剛剛 inbound，窗口必開）
- *  順序：先 text（病人睇到解釋）後 Flow 卡片（撳落去重新揀）。 */
-async function autoReplyAndResend(conv: { id: string; clinicId: string }, reason: string, replyText: string = SLOT_TAKEN_REPLY): Promise<void> {
+ *  順序：先 text（病人睇到解釋）後 Flow 卡片（撳落去重新揀）。
+ *  ★ UX-07：bookingClinicId = 原 Flow 嘅預約目標店（重出保持同一間店）。 */
+async function autoReplyAndResend(conv: { id: string; clinicId: string }, reason: string, replyText: string = SLOT_TAKEN_REPLY, bookingClinicId?: string | null): Promise<void> {
   // 1) 自動覆（純 text；系統發出 = sentByStaffId null + aiAutoSent true 慣例）
   try {
     const now = new Date();
@@ -737,7 +763,7 @@ async function autoReplyAndResend(conv: { id: string; clinicId: string }, reason
   // 2) 重出 Flow（新 token / 新 FlowSession — 病人重新揀；staffId=null = 系統；
   //    重出時 flow endpoint 會照時下 degraded 狀態決定再出正常 canvas 定純收需求變體）
   try {
-    await sendBookingFlow({ conversationId: conv.id, staffId: null });
+    await sendBookingFlow({ conversationId: conv.id, staffId: null, bookingClinicId: bookingClinicId ?? null });
   } catch (e) {
     if (e instanceof FlowsDisabledError) {
       // ★ cwi-final S0-12：G2 閘未開 — 預期分支，log.info 原因碼（唔再 log.error）
@@ -758,8 +784,9 @@ async function failSessionAndResend(
   replyText: string,
   meta: Record<string, unknown>,
   reason: string,
+  bookingClinicId?: string | null,
 ): Promise<void> {
   await prisma.flowSession.update({ where: { id: sessionId }, data: { status: "FAILED", completedAt: new Date() } }).catch(() => undefined);
   log.warn({ ...meta }, `flow-reply: ${reason} → 自動覆 + 重出 Flow`);
-  await autoReplyAndResend(conv, reason, replyText);
+  await autoReplyAndResend(conv, reason, replyText, bookingClinicId ?? null);
 }
