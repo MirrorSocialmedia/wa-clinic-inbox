@@ -200,7 +200,8 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
   useEffect(() => {
     if (b.status !== "PENDING" || dictItems !== null) return;
     let cancelled = false;
-    fetch("/api/dictionaries?kind=VISIT_REASON")
+    // ★ cwi-apricotty-20261001：按對話店攞字典（青衣 TY 係另一個 Apricot 帳號，id 唔同）
+    fetch(`/api/dictionaries?kind=VISIT_REASON&clinicId=${encodeURIComponent(c.clinicId)}`)
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return (await res.json()) as { items: DictItem[]; defaultCode: string | null };
@@ -218,7 +219,7 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
     return () => {
       cancelled = true;
     };
-  }, [b.status, b.id, dictItems]);
+  }, [b.status, b.id, dictItems, c.clinicId]);
 
   const slotText = b.requestedTime ?? TOD_LABEL[b.timeOfDay ?? ""] ?? "時段待定";
   const rollbackVisible = b.status === "CONFIRMED" && rollbackButtonVisible(b.handledAt, now);

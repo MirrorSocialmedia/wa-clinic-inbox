@@ -28,7 +28,7 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { enqueueBookingWriteJob, QueueUnavailableError } from "@/lib/queue";
-import { defaultVisitReasonCode, fetchDictionaries } from "@/lib/workforce/client";
+import { defaultVisitReasonCode, fetchDictionaries, lookupPatient } from "@/lib/workforce/client";
 
 export type ConfirmActor = { type: "STAFF"; staffId: string } | { type: "AI"; sessionId: string };
 
@@ -37,11 +37,12 @@ export type ConfirmResult =
   | { ok: false; kind: "QUEUE_UNAVAILABLE"; message: string }
   | { ok: false; kind: "PRECONDITION"; message: string; code: string };
 
-/** env default code（如 0010）→ dictionaries apricotId（createBooking 要 apricotId） */
-async function resolveDefaultVisitReasonId(): Promise<{ apricotId: string; code: string } | null> {
+/** env default code（如 0010）→ dictionaries apricotId（createBooking 要 apricotId）
+ *  ★ cwi-apricotty-20261001：按店攞（青衣 TY 帳號嘅 apricotId 唔同；code 一樣就揀到） */
+async function resolveDefaultVisitReasonId(clinicCode: string): Promise<{ apricotId: string; code: string } | null> {
   const code = defaultVisitReasonCode();
   if (!code) return null;
-  const dict = await fetchDictionaries("VISIT_REASON");
+  const dict = await fetchDictionaries("VISIT_REASON", clinicCode);
   const item = dict.items.find((i) => i.code === code);
   return item ? { apricotId: item.apricotId, code: item.code } : null;
 }
@@ -82,13 +83,13 @@ export async function confirmBookingCore(
   let visitReasonCode: string | null = null;
   if (visitReasonId) {
     // 回查 dictionaries 攞 code（審計 + remarks 用）
-    const dict = await fetchDictionaries("VISIT_REASON");
+    const dict = await fetchDictionaries("VISIT_REASON", clinic.code);
     const item = dict.items.find((i) => i.apricotId === visitReasonId);
     if (!item)
       return { ok: false, kind: "PRECONDITION", message: "visit reason 唔喺 dictionaries 入面", code: "unknown_visit_reason" };
     visitReasonCode = item.code;
   } else {
-    const def = await resolveDefaultVisitReasonId();
+    const def = await resolveDefaultVisitReasonId(clinic.code);
     if (!def)
       return {
         ok: false,
@@ -98,6 +99,24 @@ export async function confirmBookingCore(
       };
     visitReasonId = def.apricotId;
     visitReasonCode = def.code;
+  }
+
+  // ★ cwi-apricotty-20261001：釘住嘅病人檔要同本店同一個 Apricot 帳號（青衣 TY 係另一個帳號；
+  //   主店病人檔唔可以喺青衣落單，反之亦然）。lookup 離線 → 放行（workforce 落單會再擋 409）。
+  if (conv.pinnedPhoneHash) {
+    try {
+      const lk = await lookupPatient(conv.pinnedPhoneHash, clinic.code);
+      const pinnedMatch = lk.matches.find((m) => m.patientApricotId === conv.pinnedPatientApricotId);
+      if (pinnedMatch && pinnedMatch.sameAccount === false)
+        return {
+          ok: false,
+          kind: "PRECONDITION",
+          message: "釘住嘅病人檔屬另一個 Apricot 帳號（另一間公司）— 請喺側欄釘返本店帳號嘅病人檔先落單",
+          code: "patient_other_account",
+        };
+    } catch (e) {
+      log.warn({ bookingId: booking.id, err: e instanceof Error ? e.message : String(e) }, "bookings: pinned account check degraded（放行 — workforce 會再擋）");
+    }
   }
 
   // 純收需求變體（requestedTime = null）：workforce create 需要具體 start
