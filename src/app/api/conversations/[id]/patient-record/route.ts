@@ -12,6 +12,7 @@ import {
   WorkforceApiError,
 } from "@/lib/workforce/client";
 import { resolveConversationPatient } from "@/lib/patient-record";
+import { computeVisitStats } from "@/lib/visit-stats";
 
 /**
  * GET /api/conversations/[id]/patient-record — 病人記錄面板數據（followup-v2 P2）
@@ -87,8 +88,10 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   }
 
   // 3. 三條數據一次過拉（§3.1b：一個 syncedAt 管三個分頁）
+  // ★ cwi-ux UX-07：visits 一律拉 100（CWM 上限）— 12 個月主診醫生統計要夠行；
+  //   summary 回應仍只回前 2 行（customerType 語義不變 + 輕量）。
   const [visitsRes, balanceRes, apptsRes] = await Promise.allSettled([
-    resolved ? fetchPatientVisits(resolved.patientApricotId, summary ? 2 : 50) : Promise.resolve(null),
+    resolved ? fetchPatientVisits(resolved.patientApricotId, 100) : Promise.resolve(null),
     resolved ? fetchPatientBalance(resolved.patientApricotId) : Promise.resolve(null),
     resolved && !summary ? fetchAppointmentsByClinic(clinic.code, hkDateOffset(-30), hkDateOffset(7)) : Promise.resolve(null),
   ]);
@@ -144,7 +147,10 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
           lastVisitDate: visits[0]?.visitDate ?? null,
         }
       : null,
-    visits,
+    visits: summary ? visits.slice(0, 2) : visits,
+    // ★ cwi-ux UX-07：近 12 個月到診統計（主診醫生 + 最近到診分店）— 由 visits 算；
+    //   無記錄 / workforce 離線 = null（UI 唔顯示 — spec：冇記錄唔顯示）
+    visitStats: resolved ? computeVisitStats(visits, hkDateOffset(0)) : null,
     balance,
     appointments,
     // §3.1b 一個 syncedAt：balance（該病人最新索引行）優先；無行 → appointments 頂層

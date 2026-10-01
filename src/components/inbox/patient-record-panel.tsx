@@ -28,6 +28,7 @@ import {
   fmtSyncAt,
   refreshButton,
   syncDisplay,
+  weeksAgoLabel,
   type RefreshPhase,
   type Tone,
 } from "@/lib/patient-record-state";
@@ -353,6 +354,31 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
             <span className="text-t3">·</span>
             <span className="text-t2">{data.patient.source === "pinned" ? "已釘住" : "自動配對"}</span>
           </div>
+          {/* ★ cwi-ux UX-07：最近到診分店 + 主診醫生（近 12 個月）— 冇記錄唔顯示（spec：T-UX07i） */}
+          {data.visitStats ? (
+            <div className="shrink-0 px-3 pb-1 space-y-0.5 text-[11px]">
+              {data.visitStats.latestVisit ? (
+                <div className="text-t2" data-e2e="p2-last-visit-row">
+                  最近到診：{" "}
+                  <span className="font-medium text-t1">{data.visitStats.latestVisit.clinicCode}</span>
+                  {" · "}
+                  <span className="font-medium text-t1">
+                    {data.visitStats.latestVisit.providerName ?? "—"}
+                  </span>
+                  {`（${weeksAgoLabel(data.visitStats.latestVisit.date, now)}）`}
+                </div>
+              ) : null}
+              {data.visitStats.primaryDoctor ? (
+                <div className="text-t2" data-e2e="p2-primary-doctor-row">
+                  主診醫生：{" "}
+                  <span className="font-medium text-t1">
+                    {data.visitStats.primaryDoctor.providerName ?? data.visitStats.primaryDoctor.providerCode}
+                  </span>
+                  {`（近 12 個月 ${data.visitStats.primaryDoctor.count}/${data.visitStats.totalVisits12m} 次）`}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           {/* 四分頁 */}
           <div className="shrink-0 flex gap-1 px-2.5 pb-1.5" data-e2e="p2-tabbar">
             {TABS.map((t) => (

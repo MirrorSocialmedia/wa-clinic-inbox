@@ -133,3 +133,18 @@ export function fmtAmt(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   return `$${Math.round(n).toLocaleString("en-US")}`;
 }
+
+/**
+ * ★ cwi-ux UX-07：「N 星期前」（病人記錄「最近到診：YL · 張醫生（3 星期前）」）。
+ * <1 日 = 「今日」；<7 日 = 「N 日前」；≥7 日 = 星期（四捨五入，最小 1）。
+ * dateStr = YYYY-MM-DD（HK 日界）。
+ */
+export function weeksAgoLabel(dateStr: string | null, now: number = Date.now()): string {
+  if (!dateStr) return "";
+  const t = Date.parse(`${dateStr}T00:00:00+08:00`);
+  if (!Number.isFinite(t)) return "";
+  const days = Math.floor((now - t) / 86_400_000);
+  if (days < 1) return "今日";
+  if (days < 7) return `${days} 日前`;
+  return `${Math.max(1, Math.round(days / 7))} 星期前`;
+}

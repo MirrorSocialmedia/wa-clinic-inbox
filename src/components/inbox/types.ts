@@ -1,5 +1,9 @@
 /** Inbox UI 共用型別（同 API 回應 shape 對齊）。 */
 
+// ★ cwi-ux UX-07：visitStats 單一來源 = lib/visit-stats.ts（纯函數 lib — client 可用）
+import type { PatientRecordVisitStats } from "@/lib/visit-stats";
+export type { PatientRecordVisitStats };
+
 export interface ClinicInfo {
   id: string;
   code: string;
@@ -616,6 +620,8 @@ export interface PatientRecordVisit {
   rxCodes: { code: string; name: string; isAntibiotic: boolean }[];
 }
 
+/** ★ cwi-ux UX-07：近 12 個月到診統計 — 見 lib/visit-stats.ts（top 已 re-export） */
+
 export interface PatientRecordData {
   v: 1;
   /** §4.6 病人卡 opt-out toggle（contact 級 — 配對有冇都顯示）；SUPERVISOR canEdit=false */
@@ -640,6 +646,8 @@ export interface PatientRecordData {
     lastVisitDate: string | null;
   } | null;
   visits: PatientRecordVisit[];
+  /** ★ cwi-ux UX-07：近 12 個月到診統計（主診醫生／最近到診分店）— 無記錄 / 離線 = null（UI 唔顯示） */
+  visitStats: PatientRecordVisitStats | null;
   balance: {
     v: 1;
     patientCode: string;
