@@ -895,6 +895,17 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/notices", method: "PATCH", body: JSON.stringify({ ids: [] }) }),
     expect: { UNAUTH: 401, STAFF_TY: 400, SUPERVISOR: 403 },
   },
+  "POST /api/push/ack": {
+    // ★ cwi-notify-a4：SW 收件回報 — 無 cookie（app 閂咗時 session 可能過期），靠 endpoint 本身；
+    //   body 冇 endpoint → 204 唔做嘢（唔透露訂閱存唔存在）
+    fixture: () => ({ url: "/api/push/ack", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 204, STAFF_TY: 204 },
+  },
+  "GET /api/push/devices": {
+    // ★ cwi-notify-a4：推送診斷 — 只回自己名下訂閱
+    fixture: () => ({ url: "/api/push/devices" }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
+  },
   "GET /api/push/prefs": {
     fixture: () => ({ url: "/api/push/prefs" }),
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },

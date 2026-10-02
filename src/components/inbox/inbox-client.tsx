@@ -454,13 +454,18 @@ export function InboxClient({
       try {
         const res = await fetch("/api/push/prefs", { cache: "no-store" });
         if (!res.ok) return; // 網絡/server 錯 → 用 local cache 兜底（下次 mount 再試）
-        const d = (await res.json()) as { mutedClinics?: string[]; adminMsgClinics?: string[] };
+        const d = (await res.json()) as { mutedClinics?: string[]; adminMsgClinics?: string[]; adminMsgAll?: boolean };
         const strArr = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
         // §2.3 角色語義：每個角色只持有自己嗰個欄（另一欄強制空 — 防跨角色污染）
         const merged =
           user.role === "STAFF"
             ? { ...local, mutedClinics: strArr(d.mutedClinics), adminMsgClinics: [] as string[] }
-            : { ...local, mutedClinics: [] as string[], adminMsgClinics: strArr(d.adminMsgClinics) };
+            : {
+                ...local,
+                mutedClinics: [] as string[],
+                adminMsgClinics: strArr(d.adminMsgClinics),
+                adminMsgAll: d.adminMsgAll !== false, // ★ cwi-notify-a3：server 有效值（ADMIN 未設 = true）
+              };
         setNotifyPrefs(merged); // 覆蓋 localStorage（server 為準）
         setPrefs(merged);
         // eslint-disable-next-line no-console -- §2.4 prefs mount sync 留痕
@@ -479,12 +484,15 @@ export function InboxClient({
       if (typeof Notification !== "undefined" && Notification.permission === "granted") void ensurePushSubscription();
     };
     window.addEventListener("sw:activated", onSwActivated);
-    // §4 Android 音效解鎖：首次 pointerdown → 0 音量 chime（一次性；失敗靜默跳過）
-    // ★ v2 §5：解鎖成功 → 設定面板實時狀態更新
+    // §4 Android 音效解鎖：pointerdown → 真靜音片段解鎖（★ cwi-notify-a1：唔再用 chime — 冇可聞聲）
+    // ★ v2 §5：解鎖成功 → 設定面板實時狀態更新；★ a1：失敗（autoplay 擋）唔再「一次就算」— 下一下撳再試，成功先移除
     const onFirstPointerDown = () => {
-      unlockAudio(() => setAudioOk(true));
+      unlockAudio(() => {
+        setAudioOk(true);
+        window.removeEventListener("pointerdown", onFirstPointerDown, { capture: true });
+      });
     };
-    window.addEventListener("pointerdown", onFirstPointerDown, { once: true, capture: true });
+    window.addEventListener("pointerdown", onFirstPointerDown, { capture: true });
     return () => {
       window.removeEventListener("pointerdown", onFirstPointerDown, { capture: true });
       window.removeEventListener("sw:activated", onSwActivated);
@@ -498,7 +506,9 @@ export function InboxClient({
       // ★ cwi-realtime-fix §2.1 (RT-4)：角色欄（mutedClinics/adminMsgClinics）先 POST（只發自己角色欄 —
       //   F-2），成功之後先寫 localStorage（唔好樂觀寫）；失敗保舊本地值，下次 mount 由 server 覆蓋自愈
       const body =
-        user.role === "ADMIN" ? { adminMsgClinics: next.adminMsgClinics } : { mutedClinics: next.mutedClinics };
+        user.role === "ADMIN"
+          ? { adminMsgClinics: next.adminMsgClinics, adminMsgAll: next.adminMsgAll } // ★ cwi-notify-a3
+          : { mutedClinics: next.mutedClinics };
       try {
         const res = await fetch("/api/push/prefs", {
           method: "POST",
@@ -520,6 +530,28 @@ export function InboxClient({
     },
     [user.role]
   );
+
+  // ★ cwi-notify-a5（2026-10-02）：話 SW 知「呢個頁面而家會自己出提示音」→ SW 收 push 時改 silent，
+  //   避免 app 喺前台時「頁面 chime + 系統通知音」雙聲。ready = 可見 + 音效已解鎖 + 提示音開 + socket 連住
+  //   （任何一項唔成立 → SW 照出系統聲 — 寧可雙聲都唔可以冇聲）。15s 心跳；SW 只信 45s 內嘅狀態。
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    const post = () => {
+      try {
+        const ready = document.visibilityState === "visible" && audioOk && prefs.sound && !connOffline;
+        navigator.serviceWorker.controller?.postMessage({ type: "page-audio", ready });
+      } catch {
+        /* ignore */
+      }
+    };
+    post();
+    const t = window.setInterval(post, 15_000);
+    document.addEventListener("visibilitychange", post);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", post);
+    };
+  }, [audioOk, prefs.sound, connOffline]);
 
   // ★ Part B（N-4）：clinic short name 查表 — STAFF SSR 只帶 primary 店（legacy 單店視角），
   //   多店 staff 收其他店事件時 clinics.find 會 miss → 由 /api/clinics?scope=schedule（零 PII，code/name）補 code 表。
@@ -688,6 +720,7 @@ export function InboxClient({
             activeConversationId: selectedIdRef.current,
             mutedClinics: prefsRef.current.mutedClinics,
             adminMsgClinics: prefsRef.current.adminMsgClinics,
+            adminMsgAll: prefsRef.current.adminMsgAll,
           })
         ) {
           // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
@@ -906,6 +939,7 @@ export function InboxClient({
           activeConversationId: selectedIdRef.current,
           mutedClinics: prefsRef.current.mutedClinics,
           adminMsgClinics: prefsRef.current.adminMsgClinics,
+          adminMsgAll: prefsRef.current.adminMsgAll,
         })
       ) {
         // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
@@ -940,6 +974,7 @@ export function InboxClient({
           activeConversationId: selectedIdRef.current,
           mutedClinics: prefsRef.current.mutedClinics,
           adminMsgClinics: prefsRef.current.adminMsgClinics,
+          adminMsgAll: prefsRef.current.adminMsgAll,
         })
       ) {
         // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
@@ -1128,6 +1163,7 @@ export function InboxClient({
           activeConversationId: selectedIdRef.current,
           mutedClinics: prefsRef.current.mutedClinics,
           adminMsgClinics: prefsRef.current.adminMsgClinics,
+          adminMsgAll: prefsRef.current.adminMsgAll,
         })
       ) {
         // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
@@ -1158,6 +1194,7 @@ export function InboxClient({
           activeConversationId: selectedIdRef.current,
           mutedClinics: prefsRef.current.mutedClinics,
           adminMsgClinics: prefsRef.current.adminMsgClinics,
+          adminMsgAll: prefsRef.current.adminMsgAll,
         })
       ) {
         // eslint-disable-next-line no-console -- F-7 通知來源留痕（MD 要求 console.debug）
@@ -2979,9 +3016,10 @@ export function InboxClient({
         onUnlockAudio={unlockAudioNow}
       />
 
-      {/* ★ Part B：首次登入 banner 一次（localStorage flag；啟 = 請求 permission + 開桌面通知） */}
+      {/* ★ Part B：首次登入 banner 一次（localStorage flag；啟 = 請求 permission + 開桌面通知）
+          ★ cwi-notify-a9：由頂部移去底部 — 舊位置遮住列表 header 嘅「通知設定」鐘（手機未答之前撳唔到） */}
       {notifyBanner && (
-        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 w-[min(94%,540px)] bg-panel border border-line rounded-xl shadow-lg px-4 py-3 flex items-center gap-3">
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 w-[min(94%,540px)] bg-panel border border-line rounded-xl shadow-lg px-4 py-3 flex items-center gap-3">
           <span className="text-sm text-t1 flex-1">開啟通知？客人嚟訊息即刻知</span>
           <button
             onClick={() => {

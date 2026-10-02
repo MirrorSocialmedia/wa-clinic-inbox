@@ -26,7 +26,13 @@ export const POST = handle(async (req: NextRequest) => {
   const { staff, res } = ctx;
   const cookie = res.headers.get("set-cookie") ?? "";
 
-  const body = (await req.json().catch(() => null)) as { clinicId?: unknown } | null;
+  const body = (await req.json().catch(() => null)) as { clinicId?: unknown; delaySec?: unknown } | null;
+  // ★ cwi-notify-a4：延遲測試（1–30 秒）— 撳完即刻閂 app／鎖機，驗證「背景」真係響唔響
+  //   （即時測試時 app 仲喺前台，部分系統前台唔出橫額 → 測唔到真實情況）。
+  const delaySec =
+    typeof body?.delaySec === "number" && Number.isInteger(body.delaySec) && body.delaySec >= 1 && body.delaySec <= 30
+      ? body.delaySec
+      : 0;
   let clinicId: string | null = null;
   if (typeof body?.clinicId === "string" && body.clinicId.length > 0) {
     // ★ cwi-hub-a-20260914（Part A）：scope-aware — 外範圍 clinicId → 403（任何受限角色）
@@ -56,7 +62,18 @@ export const POST = handle(async (req: NextRequest) => {
   }
 
   // 同真通知同一條路（pushToStaff → webpush.sendNotification 逐 subscription）
-  const r = await pushToStaffResult(staff.id, { kind: "notice", clinicShort: clinic.code, conversationId: "" });
+  const testPayload = { kind: "notice" as const, clinicShort: clinic.code, conversationId: "", test: true };
+  if (delaySec > 0) {
+    // fire-and-forget：結果睇「推送診斷」（lastOkAt = 推送服務收貨 / lastReceivedAt = 部機收到）
+    setTimeout(() => {
+      void pushToStaffResult(staff.id, testPayload);
+    }, delaySec * 1000);
+    return Response.json(
+      { ok: true, result: "scheduled", delaySec, clinicId, clinicShort: clinic.code },
+      { status: 200, headers: { "Set-Cookie": cookie } }
+    );
+  }
+  const r = await pushToStaffResult(staff.id, testPayload);
   const base = { ok: true as const, clinicId, clinicShort: clinic.code };
   if (!r.vapidReady) {
     return Response.json({ ...base, result: "vapid-off" }, { status: 200, headers: { "Set-Cookie": cookie } });

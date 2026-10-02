@@ -10,7 +10,7 @@
  *   解密 → 斷言 plaintext。
  *
  * 場景：
- * - t190：真 inbound → push 到；payload **只有** kind/clinicShort/conversationId；零 PII regex
+ * - t190：真 inbound → push 到；payload **只有** kind/clinicShort/conversationId/pushId（隨機 UUID）；零 PII regex
  * - t191：收件人解析 — 未指派 → 全店 STAFF（B+C）；已指派 → 只 B；
  *         ADMIN 跟 DB pushPrefs.adminMsgClinics（唔係 localStorage）
  * - t192：410/404 → subscription row 自動刪；200 → lastOkAt 更新
@@ -109,6 +109,10 @@ interface Capture {
   cryptoKey: string; // "dh=<base64url>"
   encryption: string; // "salt=<base64url>"
   vapidHeader: string;
+  /** ★ cwi-notify-a2：RFC 8030 headers（urgency/TTL/topic） */
+  urgency: string;
+  ttl: string;
+  topic: string;
   t: number;
 }
 const captures: Capture[] = [];
@@ -161,6 +165,9 @@ async function startMockServer(): Promise<void> {
           cryptoKey: String(rq.headers["crypto-key"] ?? ""),
           encryption: String(rq.headers["encryption"] ?? ""),
           vapidHeader: String(rq.headers["authorization"] ?? ""),
+          urgency: String(rq.headers["urgency"] ?? ""),
+          ttl: String(rq.headers["ttl"] ?? ""),
+          topic: String(rq.headers["topic"] ?? ""),
           t: Date.now(),
         });
         rs.writeHead(status, { "content-type": "application/json" });
@@ -391,7 +398,9 @@ async function t190(): Promise<void> {
     return;
   }
   const keys = Object.keys(parsed).sort().join(",");
-  if (keys !== "clinicShort,conversationId,kind") fail(`t190: payload keys 錯（expected=clinicShort,conversationId,kind actual=${keys}）`);
+  // ★ cwi-notify-a4：+ pushId（隨機 UUID — 收件回報用；零 PII，下面 UUID 格式斷言）
+  if (keys !== "clinicShort,conversationId,kind,pushId") fail(`t190: payload keys 錯（expected=clinicShort,conversationId,kind,pushId actual=${keys}）`);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(parsed.pushId))) fail(`t190: pushId 應係 UUID（${parsed.pushId}）`);
   if (parsed.kind !== "message") fail(`t190: kind 錯（${parsed.kind}）`);
   if (parsed.clinicShort !== clinicCode) fail(`t190: clinicShort 錯（${parsed.clinicShort}）`);
   if (parsed.conversationId !== PC_CONV) fail(`t190: conversationId 錯（${parsed.conversationId}）`);
@@ -431,6 +440,15 @@ async function t191(): Promise<void> {
     const pB1 = JSON.parse(decryptCapture(capB1, subB)) as { conversationId?: string };
     const pC1 = JSON.parse(decryptCapture(capC1, subC)) as { conversationId?: string };
     if (pB1.conversationId !== PC_CONV || pC1.conversationId !== PC_CONV) fail(`t191 P1: 未指派應全店收（B=${pB1.conversationId} C=${pC1.conversationId}）`);
+    // ★ cwi-notify-a3（2026-10-02）：ADMIN 預設收全部店 message（pushPrefs 冇 adminMsgAll = true）
+    const capA1 = await waitForCapture(subA.endpoint, t0);
+    const pA1 = JSON.parse(decryptCapture(capA1, subA)) as { kind?: string; pushId?: string };
+    if (pA1.kind !== "message") fail(`t191 P1: ADMIN 預設應收 message（kind=${pA1.kind}）`);
+    if (!pA1.pushId) fail("t191 P1: payload 應帶 pushId（a4 收件回報）");
+    // ★ cwi-notify-a2：高優先級 + 24h TTL + message 有 topic（同對話未派出舊推送被取代）
+    if (capA1.urgency !== "high") fail(`t191 P1: Urgency 應 = high（actual=${capA1.urgency}）`);
+    if (capA1.ttl !== "86400") fail(`t191 P1: TTL 應 = 86400（actual=${capA1.ttl}）`);
+    if (!/^[A-Za-z0-9_-]{22}$/.test(capA1.topic)) fail(`t191 P1: message 應有 22 字 topic（actual=${capA1.topic}）`);
 
     // Phase 2：已指派 → 只 B（C 靜）
     await prisma.conversation.update({ where: { id: PC_CONV }, data: { assigneeId: staffB } });
@@ -448,8 +466,8 @@ async function t191(): Promise<void> {
     const pA3 = JSON.parse(decryptCapture(capA3, subA)) as { kind?: string };
     if (pA3.kind !== "message") fail(`t191 P3: admin opt-in 應收 message（kind=${pA3.kind}）`);
 
-    // Phase 4：ADMIN opt-out（DB 改 []）→ 唔收（localStorage 無效 — DB 為準）
-    r = await api(cookieAdmin, "/api/push/prefs", { mutedClinics: [], adminMsgClinics: [] });
+    // Phase 4：ADMIN 閂「收全部店」+ 白名單 [] → 唔收（localStorage 無效 — DB 為準）
+    r = await api(cookieAdmin, "/api/push/prefs", { mutedClinics: [], adminMsgClinics: [], adminMsgAll: false });
     if (r.status !== 200) fail(`t191 P4: admin prefs 寫失敗（${r.status}）`);
     t0 = Date.now();
     await sendInbound(PII_WAID, PII_NAME, "e2e-push-t191-p4");

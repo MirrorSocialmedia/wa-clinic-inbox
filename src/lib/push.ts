@@ -10,13 +10,15 @@
  *   + ★ L-2 路由目標（routedStaffId + 組員，非 forced — 跟靜音）；已指派 → 只負責人
  * - urgent：同 message（急症安全網）+ in-scope 全 active ADMIN（★ P2-12：urgent 亦受 scope 收窄）
  * - notice（mention/assigned/takeover）：caller 已知 staffId → 直接用 pushToStaff
- * - ADMIN：預設唔收 message（N-2 六店會炸）— 只 pushPrefs.adminMsgClinics 含該店
- *   先收；urgent 預設全收（scope 內）。
+ * - ADMIN：★ cwi-notify-a3（2026-10-02 老細拍板）預設**收範圍內全部店** message（pushPrefs.adminMsgAll
+ *   未設 = true）；adminMsgAll=false → 退返舊白名單（只 adminMsgClinics 含該店先收）。urgent 預設全收（scope 內）。
+ * - SUPERVISOR：維持舊白名單語義（adminMsgClinics opt-in；adminMsgAll 唔適用）。
  * - 全部 filter pushPrefs.mutedClinics 含該店嘅人（逐店靜音 — DB 為準）。
  *
  * Fire-and-forget：任何失敗只 log，絕唔 throw / 絕唔擋主 pipeline。
  * 404/410 → 刪 subscription row（browser 端已作廢）；2xx → lastOkAt（運維驗證）。
  */
+import { createHash, randomUUID } from "node:crypto";
 import webpush from "web-push";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -27,11 +29,22 @@ export interface PushPayload {
   kind: "message" | "notice" | "urgent" | "routing" | "routing-escalation";
   clinicShort: string;
   conversationId: string;
+  /** ★ cwi-notify-a4：推送 id（隨機、零 PII）— SW 收到後連 endpoint 回報 /api/push/ack（診斷「部機有冇收到」） */
+  pushId?: string;
+  /** ★ cwi-notify-a4：設定面板「發測試通知」— SW 標題顯示「測試通知」 */
+  test?: boolean;
 }
 
 interface ParsedPrefs {
   mutedClinics: string[];
   adminMsgClinics: string[];
+  /** ★ cwi-notify-a3：ADMIN「收全部店新訊息」— null = 未設（ADMIN 當 true） */
+  adminMsgAll: boolean | null;
+}
+
+/** ★ cwi-notify-a3：ADMIN 有效「收全部店新訊息」值（未設 = true；只 ADMIN 適用 — SUPERVISOR 永遠 false）。 */
+export function effectiveAdminMsgAll(role: string, prefs: Pick<ParsedPrefs, "adminMsgAll">): boolean {
+  return role === "ADMIN" && prefs.adminMsgAll !== false;
 }
 
 // ── F-3（cwi-notify-fix-20260907）：自我修復 warn 去重（per staff 一次 — 防每個事件重複刷 log） ──
@@ -48,7 +61,8 @@ function noteSelfHeal(staffId: string, count: number): void {
 
 // ★ cwi-realtime-fix §2.1：export 畀 GET /api/push/prefs（DB 單一真相 — 同 client 同一套自我修復邏輯）
 export function parsePushPrefs(p: Prisma.JsonValue | null | undefined, staffId?: string): ParsedPrefs {
-  const d = (p ?? {}) as { mutedClinics?: unknown; adminMsgClinics?: unknown };
+  const d = (p ?? {}) as { mutedClinics?: unknown; adminMsgClinics?: unknown; adminMsgAll?: unknown };
+  const adminMsgAll = typeof d.adminMsgAll === "boolean" ? d.adminMsgAll : null;
   const mutedClinics = Array.isArray(d.mutedClinics) ? d.mutedClinics.filter((x): x is string => typeof x === "string") : [];
   const adminMsgClinics = Array.isArray(d.adminMsgClinics) ? d.adminMsgClinics.filter((x): x is string => typeof x === "string") : [];
   // F-3 自我修復：兩 array 非空且完全相同 = 舊 prefs route 盲寫整包嘅 corruption 特徵
@@ -60,9 +74,9 @@ export function parsePushPrefs(p: Prisma.JsonValue | null | undefined, staffId?:
     mutedClinics.every((c) => adminMsgClinics.includes(c))
   ) {
     noteSelfHeal(staffId, mutedClinics.length);
-    return { mutedClinics: [], adminMsgClinics };
+    return { mutedClinics: [], adminMsgClinics, adminMsgAll };
   }
-  return { mutedClinics, adminMsgClinics };
+  return { mutedClinics, adminMsgClinics, adminMsgAll };
 }
 
 let vapidReady: boolean | null = null; // null = 未試過
@@ -130,7 +144,8 @@ async function pushToStaffCore(staffId: string, payload: PushPayload): Promise<P
   if (!staff || !staff.active) return { vapidReady: true, subscriptions: 0, sent: 0, failures: [] };
   const subs = staff.pushSubscriptions;
   if (subs.length === 0) return { vapidReady: true, subscriptions: 0, sent: 0, failures: [] };
-  const body = JSON.stringify(payload);
+  const body = JSON.stringify({ ...payload, pushId: payload.pushId ?? randomUUID() });
+  const opts = pushSendOptions(payload);
   const failures: string[] = [];
   let sent = 0;
   await Promise.all(
@@ -139,7 +154,7 @@ async function pushToStaffCore(staffId: string, payload: PushPayload): Promise<P
         const res = await webpush.sendNotification(
           { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
           body,
-          { TTL: 60, timeout: 8_000 } // ★ 8s timeout：假 endpoint（斷網 GCM 等）唔好 hang 成個 push 流程
+          opts
         );
         if (res.statusCode === 404 || res.statusCode === 410) {
           // browser 端已取消/過期 — 刪 row
@@ -170,6 +185,27 @@ async function pushToStaffCore(staffId: string, payload: PushPayload): Promise<P
     })
   );
   return { vapidReady: true, subscriptions: subs.length, sent, failures };
+}
+
+/**
+ * ★ cwi-notify-a2（2026-10-02）：Web Push 送出參數 — 對齊 WhatsApp 式「每條必到」。
+ *
+ * - urgency "high"：舊版冇設 = normal → Android Doze／iOS 省電時推送服務會**延遲到下個維護窗口**先派；
+ *   high = 即刻喚醒手機派送（RFC 8030 §5.3；FCM → high priority、APNs → apns-priority 10）。
+ * - TTL 24h：舊版 60 秒 → 延遲派送期間就過期丟棄（「閂咗 app 唔響」根因之一）。24h = 手機斷網／關機返嚟照收
+ *   （同 WhatsApp 24 小時客服窗口一致）。
+ * - topic（只 message 類）：同一對話未派出嘅舊推送被新嗰條取代 — 手機開返機唔會連環響 10 次；
+ *   urgent／notice 唔設 topic（唔可以被普通訊息蓋走）。topic = sha256(conversationId) base64url 前 22 字
+ *   （RFC 8030 §5.4：≤32 個 URL-safe base64 字元；唔洩露 id）。
+ * - timeout 8s：假 endpoint（斷網 GCM 等）唔好 hang 成個 push 流程（原有）。
+ */
+export const PUSH_TTL_SEC = 24 * 60 * 60;
+export function pushSendOptions(payload: Pick<PushPayload, "kind" | "conversationId">): webpush.RequestOptions {
+  const opts: webpush.RequestOptions = { TTL: PUSH_TTL_SEC, urgency: "high", timeout: 8_000 };
+  if (payload.kind === "message" && payload.conversationId) {
+    opts.topic = createHash("sha256").update(payload.conversationId).digest("base64url").slice(0, 22);
+  }
+  return opts;
 }
 
 /**
@@ -252,11 +288,13 @@ export function pushEvent(e: { kind: "message" | "urgent"; clinicId: string; con
             { scopeType: "CLINICS", clinics: { some: { clinicId: e.clinicId } } },
           ],
         },
-        select: { id: true, pushPrefs: true },
+        select: { id: true, role: true, pushPrefs: true },
       });
       for (const a of admins) {
         const prefs = parsePushPrefs(a.pushPrefs, a.id);
-        const eligible = e.kind === "urgent" ? true : prefs.adminMsgClinics.includes(e.clinicId);
+        // ★ cwi-notify-a3：ADMIN 預設收全部（adminMsgAll 未設/true）；false 或 SUPERVISOR → 白名單
+        const eligible =
+          e.kind === "urgent" ? true : effectiveAdminMsgAll(a.role, prefs) || prefs.adminMsgClinics.includes(e.clinicId);
         if (eligible) addTarget(a.id, prefs, false);
       }
 

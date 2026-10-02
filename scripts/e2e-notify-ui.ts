@@ -283,6 +283,7 @@ interface LocatorLike {
   textContent: () => Promise<string | null>;
   getAttribute: (n: string) => Promise<string | null>;
   allTextContents: () => Promise<string[]>;
+  isChecked: () => Promise<boolean>;
 }
 
 let failReason: string | null = null;
@@ -929,26 +930,19 @@ async function main(): Promise<void> {
       if (!bell || !bell.includes("1 未讀")) fail(`t168: mention bell badge 未 +1（aria-label="${bell}"）`);
       console.log("NOTIFY-UI-OK");
     } else if (scenario === "t169") {
-      // ADMIN：預設唔收（六店會炸）+ 設定面板逐店 opt-in + urgent 預設收
+      // ★ cwi-notify-a3（2026-10-02 老細拍板）：ADMIN 預設收全部店 message；閂「收全部店新訊息」→ 逐店白名單；
+      //   urgent 永遠收。（舊版：ADMIN 預設唔收、逐店 opt-in）
       const adm = await openBrowser(exe, cookieCFile, `${base}/inbox`, "granted", "");
       browsers.push(adm.B);
       await waitForListReady(adm.P, PII_NAME);
       await new Promise((r) => setTimeout(r, 3000));
-      // Phase 1：ADMIN 預設唔收 message（交付證明：列表 preview 更新 — 防事件丟失假綠）
-      await publishUntilSeen(adm.P, "t169 P1 交付", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-notify-t169-p1" })), "e2e-notify-t169-p1");
-      {
-        const s = await spy(adm.P);
-        // ★ gen 3 E3（2026-09-25 r3 實測假紅）：unassigned-sla cron（*/5 分）clinic 級 ambient notice（tag=""）
-        //   撞 T169 window → blanket 靜音斷言假紅。同款先例：t162 B9（2026-09-21，只斷本 conv 訊息通知）+
-        //   t188 D2（2026-09-23，「unassigned-sla notice, tag='' 唔算入呢個 case 嘅合約」）— 呢兩處已 filter，
-        //   只有 t169 P1 漏。T169 P1 合約 = 對「message:new」靜 → 只斷 conv-scoped/訊息通知。
-        //   mediaPlays 同理撤（v2 聲同通知綁定 — t162 先例；cron push chime 屬 ambient 噪聲）。
-        const msgNotifs = s.notifications.filter((n) => n.tag === convU || (n.title ?? "").startsWith("新訊息"));
-        if (msgNotifs.length > 0 || s.ctxCreations > 0) fail(`t169 ADMIN 預設應該靜（msgNotifs=${JSON.stringify(msgNotifs)} spy=${JSON.stringify(s)}）`);
-      }
-      // Phase 2：設定面板 ADMIN section 存在
+      // Phase 1：ADMIN 預設收 message（prefs 已 reset = adminMsgAll 未設 → true）
+      await publishAndRing(adm.P, "t169 P1 預設收", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-notify-t169-p1" })), (sp) => titleMatches(sp, `新訊息 · ${CLINIC_SHORT}`));
+      // Phase 2：設定面板 ADMIN section：「收全部店新訊息」預設剔；冇逐店靜音（角色分離）
       await adm.P.locator('[aria-label="通知設定"]').first().click();
-      if ((await adm.P.getByText("接收訊息通知（預設唔收 — 逐店開）").count()) < 1) fail("t169: ADMIN opt-in section 缺");
+      const allBox = adm.P.locator('label:has-text("收全部店新訊息") input[type="checkbox"]');
+      if ((await allBox.count()) < 1) fail("t169: ADMIN「收全部店新訊息」開關缺");
+      if (!(await allBox.first().isChecked())) fail("t169: ADMIN「收全部店新訊息」應該預設剔");
       // cwi-realtime-fix §2.3：角色分離 — ADMIN 只見 opt-in（白名單）；逐店靜音（黑名單）係 STAFF 嘅，唔好同時出
       // ★ exact:true — 面板 help 文字（「…逐店靜音 / 訊息通知選項已同步 server…」）含 substring，
       //   只有 section heading（<div>逐店靜音</div>）先 exact match（實測假紅）
@@ -959,14 +953,20 @@ async function main(): Promise<void> {
         ) as string[];
         fail(`t169: ADMIN 唔應該見逐店靜音 section（角色分離）hits=${JSON.stringify(hits)}`);
       }
-      // Phase 3：opt-in TKW → 收
+      // Phase 3：閂「收全部店」→ 白名單空 → message 靜（用 delta — P1 publishAndRing 可能重發過）
+      await allBox.first().click();
+      await new Promise((r) => setTimeout(r, 3500)); // POST prefs 落定 + v2 全域 3s 音間隔
+      const convUNotifs = async () => (await spy(adm.P)).notifications.filter((n) => n.tag === convU).length;
+      const beforeP3 = await convUNotifs();
+      await publishUntilSeen(adm.P, "t169 P3 白名單空", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-notify-t169-p3" })), "e2e-notify-t169-p3");
+      await new Promise((r) => setTimeout(r, 1500));
+      const deltaP3 = (await convUNotifs()) - beforeP3;
+      if (deltaP3 > 0) fail(`t169 P3：閂「收全部店」+ 白名單空應該靜（convU 通知 Δ=${deltaP3}）`);
+      // Phase 3b：逐店 opt-in TKW → 收
       const tkwChecks = adm.P.locator('label:has-text("TKW") input[type="checkbox"]');
       const nChecks = await tkwChecks.count();
-      if (nChecks < 1) fail("t169: 搵唔到 TKW checkbox");
-      // cwi-realtime-fix §2.3 後：ADMIN 只有一個 TKW checkbox（opt-in）— last() = first()
+      if (nChecks < 1) fail("t169: 閂「收全部店」後搵唔到 TKW checkbox");
       await tkwChecks.last().click();
-      // v2 全域 3s 音間隔：click 會觸發 pointerdown → unlockAudio 播一次 0 音量 chime（計入 lastSoundAt）
-      // → 等 3.5s 先 publish，確保 opt-in 事件嘅 chime 唔會被 unlock 音誤壓（測試語義清晰）
       await new Promise((r) => setTimeout(r, 3500));
       const s = await publishAndRing(adm.P, "t169 opt-in 後", () => publish(clinic, "message:new", messagePayload(convA, clinic, { unread: 1, contact: false, body: "e2e-notify-t169" })), (sp) => titleMatches(sp, `新訊息 · ${CLINIC_SHORT}`));
       if (chimePlays(s) < 1) fail("t169 opt-in: 冇 chime");
@@ -1306,6 +1306,15 @@ async function main(): Promise<void> {
       await waitForListReady(adm.P, listWaitName);
       await new Promise((r) => setTimeout(r, 3000));
       await adm.P.locator('[aria-label="通知設定"]').first().click();
+      // ★ cwi-notify-a3：預設「收全部店」→ 逐店 checkbox 收埋；先閂「收全部店」（POST 要帶 adminMsgAll:false）
+      const postsBeforeAll = (await spyMeta(adm.P)).prefsPosts.length;
+      await adm.P.locator('label:has-text("收全部店新訊息") input[type="checkbox"]').first().click();
+      await new Promise((r) => setTimeout(r, 2500));
+      {
+        const pa = (await spyMeta(adm.P)).prefsPosts.slice(postsBeforeAll);
+        const lastAll = pa.length ? (JSON.parse(pa[pa.length - 1]) as Record<string, unknown>) : null;
+        if (!lastAll || lastAll.adminMsgAll !== false) fail(`t275: 閂「收全部店」POST 應帶 adminMsgAll:false，actual=${JSON.stringify(lastAll)}`);
+      }
       const tkwChecks = adm.P.locator('label:has-text("TKW") input[type="checkbox"]');
       const nChecks = await tkwChecks.count();
       if (nChecks !== 1) fail(`t275: ADMIN 應該只見一個 TKW checkbox（opt-in；無逐店靜音），actual=${nChecks}`);
@@ -1317,7 +1326,7 @@ async function main(): Promise<void> {
       const lastBody = JSON.parse(posts[posts.length - 1]) as Record<string, unknown>;
       if (!("adminMsgClinics" in lastBody)) fail(`t275: POST payload 應有 adminMsgClinics，actual=${JSON.stringify(lastBody)}`);
       if ("mutedClinics" in lastBody) fail(`t275: ADMIN POST 唔准帶 mutedClinics，actual=${JSON.stringify(lastBody)}`);
-      // cleanup：反轉返（預設唔收）
+      // cleanup：反轉返（下個 scenario 開始前 pushPrefs 亦會 reset = NULL）
       await tkwChecks.first().click();
       await new Promise((r) => setTimeout(r, 1500));
       console.log("NOTIFY-UI-OK");
