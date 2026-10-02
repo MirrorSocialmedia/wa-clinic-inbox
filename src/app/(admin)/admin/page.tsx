@@ -8,6 +8,7 @@ import { DeadLetterCard } from "./dead-letter-card";
 import { HeldAlertsPanel } from "./held-alerts-panel";
 import { TotpCard } from "./totp-card";
 import { CompanySyncCard } from "./company-sync-card";
+import { ProviderSyncCard } from "./provider-sync-card";
 
 /**
  * /admin — 總覽 + AI 狀態卡（Phase 2）。
@@ -362,6 +363,9 @@ export default async function AdminOverviewPage() {
 
       {/* ── cwi-followup-p0-20260915（MD §1.1）：公司同步健康列（workforce 主資料快取 + 立即同步） ── */}
       <CompanySyncCard />
+
+      {/* ── cwi-roster-20261001：醫生名錄同步健康列（workforce 名錄 + 立即同步） ── */}
+      <ProviderSyncCard />
 
       {/* ── 安全審計 H-2：TOTP 兩步驟（最小卡片） ── */}
       <TotpCard enabled={totpEnabled} />

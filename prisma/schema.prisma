@@ -196,6 +196,17 @@ model CompanySyncRun {
   @@index([runAt])
 }
 
+// ★ cwi-roster-20261001：醫生名錄同步運行記錄（同 CompanySyncRun 口徑 — cron + 手動共用）
+model ProviderSyncRun {
+  id      String   @id @default(cuid())
+  runAt   DateTime @default(now())
+  status  String   // ok / failed
+  summary String   // JSON：{ clinicsRemote, clinicsMatched, unmatchedClinics, providersUpserted, linksAdded, linksPruned, pruneDeferred, providersDeactivated, staleClinics, source }
+  error   String?
+
+  @@index([runAt])
+}
+
 model Clinic {
   id               String  @id @default(cuid())
   code             String  @unique            // TKW / MF ...（同 clinic-workforce 用同一套 code，方便對照）
@@ -757,8 +768,13 @@ model Provider {
   name      String                    // 醫生名（顯示用）
   apricotId String?  @unique          // Apricot practitioner ext id（mock = mock-pract-<clinic>-<n>）
   active    Boolean  @default(true)
+  // ★ cwi-roster-20261001：workforce Provider.id —— 同一醫生喺唔同 Apricot 帳號會有多行（每帳號一個 apricotId），
+  //   用呢欄認返係同一個人（顯示／報表合併用；null = workforce 未綁或者 seed 行）
+  sourceProviderId String?
   createdAt DateTime @db.Timestamptz @default(now())
   clinics   ProviderClinic[]
+
+  @@index([sourceProviderId])
 }
 
 model ProviderClinic {
