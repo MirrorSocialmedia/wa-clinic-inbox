@@ -15,6 +15,9 @@
  *   GET  /api/external/v1/patient-lookup?phoneHash=[&clinicCode=]
  *   GET  /api/external/v1/appointments?phoneHash=&from=&to=
  *
+ * cwi-roster-20261001（醫生名錄同步 — workforce → wa-inbox Provider/ProviderClinic）：
+ *   GET  /api/external/v1/providers[&clinicCode=]（逐店醫生名錄；零病人資料；scope availability）
+ *
  * bookable-slots（providerslot-20260830 T1/T3/T4）：
  *   GET  /api/external/v1/bookable-slots?clinicCode=&from=&to=（可約時段；slotKey 不透明簽發）
  *   GET  /api/external/v1/bookable-slots/held?clinicCode=（HELD 清單；零病人 PII）
@@ -143,6 +146,27 @@ export const CompaniesResponse = z.object({
   ),
 });
 export type CompaniesResult = z.infer<typeof CompaniesResponse>;
+
+/** ★ cwi-roster-20261001：逐店醫生名錄（workforce GET /providers，scope availability）。
+ *  形狀對齊 workforce contract fixture test/fixtures/external-v1-providers.json（sha256 錨定）。
+ *  非 strict（同其他 response 一致 — 上游加欄唔會炸）。
+ *  🔴 契約鐵律：stale=true 或 providers 空 → consumer 只准「加」唔准「刪」（provider-sync.ts 執行）。
+ *  providerId = workforce Provider.id（null = workforce 未綁）— 同一醫生跨 Apricot 帳號同 id，inbox 用佢認人。 */
+const RemoteProviderSchema = z.object({ apricotId: z.string(), name: z.string(), providerId: z.string().nullable() });
+export const ProvidersResponse = z.object({
+  v: z.literal(1),
+  clinics: z.array(
+    z.object({
+      clinicId: z.string(), // = workforce Clinic.id（cuid）
+      clinicCode: z.string(), // = workforce shortName ?? id —— 同 inbox Clinic.code 對（同 companies 口徑）
+      apricotAccount: z.string(), // MAIN／TY
+      syncedAt: z.string().nullable(), // null = 未 sync 過
+      stale: z.boolean(), // syncedAt > 30 分鐘
+      providers: z.array(RemoteProviderSchema),
+    })
+  ),
+});
+export type ProvidersResult = z.infer<typeof ProvidersResponse>;
 
 /** ★ cwi-final S5-13②：lastVisit 加 clinicId/clinicCode（「最近到診：{店}」）；
  *  match 加 visitedClinicIds（全行 distinct clinicId — 跨公司黃標判斷）；gender「有就回」（B-9，PII 白名單未加欄前永遠無）。 */
@@ -918,6 +942,17 @@ export async function fetchCompanies(): Promise<CompaniesResult> {
   return CompaniesResponse.parse(await wfGet("/api/external/v1/companies", {}));
 }
 
+/**
+ * ★ cwi-roster-20261001：逐店醫生名錄（wa-inbox Provider/ProviderClinic 同步來源）。
+ * 唔設 cache — 同步 job 直接 call（每鐘 :20 cron + 手動「立即同步醫生名錄」）。
+ * clinicCode 選填（唔帶 = 全部已接 Apricot 嘅店）。
+ */
+export async function fetchProviders(clinicCode?: string): Promise<ProvidersResult> {
+  const params: Record<string, string> = {};
+  if (clinicCode) params.clinicCode = clinicCode;
+  return ProvidersResponse.parse(await wfGet("/api/external/v1/providers", params));
+}
+
 /** 舊客匹配（phoneHash — 由 wa-inbox 用 PHONE_HASH_KEY 算好先傳；raw phone 永遠唔出 wa-inbox） */
 export async function lookupPatient(phoneHash: string, clinicCode?: string | null): Promise<PatientLookupResult> {
   // ★ cwi-apricotty-20261001：帶 clinicCode → 每個 match 有 sameAccount（同該店係咪同一個 Apricot 帳號）
@@ -1221,6 +1256,9 @@ const FIXTURE_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-avai
 const FIXTURE_DICTIONARIES_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-dictionaries.json");
 const FIXTURE_PATIENT_LOOKUP_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-patient-lookup.json");
 const FIXTURE_APPOINTMENTS_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-appointments.json");
+// ★ cwi-roster-20261001：providers mock = 決定性 fixture（同 dictionaries 同一做法 readFixtureRecord）。
+// ⚠️ 唔好由 DB ProviderClinic 砌 mock（availability mock 嗰種做法）—— 會變成自己同步自己（循環）。
+const FIXTURE_PROVIDERS_PATH = path.resolve(process.cwd(), "test/fixtures/external-v1-providers.json");
 
 function djb2(s: string): number {
   let h = 5381;
@@ -1379,6 +1417,11 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
 
   if (path === "/api/external/v1/companies") {
     return mockCompanies();
+  }
+
+  // ★ cwi-roster-20261001：providers mock — 決定性 fixture（有 clinicCode 就篩）
+  if (path === "/api/external/v1/providers") {
+    return mockProviders(params);
   }
 
   if (path === "/api/external/v1/patient-lookup") {
@@ -1839,6 +1882,22 @@ function mockCompanies(): unknown {
       { id: "fup0cmpc0000000000000000003", name: "匯樂", clinics: [{ id: "fup0tkwc0000000000000000003", code: "TKW", name: "TKW 診所" }, { id: "fup0ylcl0000000000000000004", code: "YL", name: "YL 診所" }, { id: "fup0wtcl0000000000000000005", code: "WTC", name: "WTC 診所" }] },
     ],
   };
+}
+
+/** ★ cwi-roster-20261001：providers mock — 決定性 fixture（同 dictionaries mock 同一做法 readFixtureRecord）。
+ *  ⚠️ 唔好由 DB ProviderClinic 砌（availability mock 嗰種）—— 會變成自己同步自己（循環）。
+ *  有 clinicCode 就篩（同真端點口徑）。 */
+function mockProviders(params: Record<string, string>): unknown {
+  const path = "/api/external/v1/providers";
+  const data = readFixtureRecord<{ v: number; clinics: ProvidersResult["clinics"] } | null>(FIXTURE_PROVIDERS_PATH);
+  if (!data || !Array.isArray(data.clinics)) {
+    // fixture 缺/壞 → 空 clinics（決定性；同步側「clinics 空 = 乜都唔郁」兜底）
+    log.warn({ path, mock: true, fixture: "missing" }, "workforce MOCK: providers fixture missing → empty");
+    return { v: 1, clinics: [] };
+  }
+  const clinics = params.clinicCode ? data.clinics.filter((c) => c.clinicCode === params.clinicCode) : data.clinics;
+  log.info({ path, mock: true, status: 200, clinics: clinics.length }, "workforce MOCK: providers");
+  return { v: 1, clinics };
 }
 
 type MockPatientData = {

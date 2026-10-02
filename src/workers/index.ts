@@ -159,6 +159,11 @@ async function registerSchedulers() {
     name: "company-sync",
     data: {},
   });
+  // ★ cwi-roster-20261001：醫生名錄同步 — 每個鐘 :20（名錄變動少；新醫生排診後一個鐘內出現；冪等）
+  await cronHeavyQueue.upsertJobScheduler("sched-provider-sync", { pattern: "20 * * * *", tz: "Asia/Hong_Kong" }, {
+    name: "provider-sync",
+    data: {},
+  });
   // ★ cwi-followup-p3-20260916（followup-v2 MD §4.1）：follow-up 排程 — 每 10 分鐘掃 enabled 規則
   //   （A 對話空窗 / B1 預約 / B2 爽約 / C 術後 / D 召回 / E 報價；v3 恒 L1 — 只建 SUGGESTED 建議、cron 零發送；冪等查重重跑安全）
   await cronHeavyQueue.upsertJobScheduler("sched-followup-scan", { pattern: "*/10 * * * *", tz: "Asia/Hong_Kong" }, {
@@ -168,7 +173,7 @@ async function registerSchedulers() {
 
   log.info(
     {},
-    "cron: schedulers registered（light=12/heavy=7，全部 tz=Asia/Hong_Kong）— light: sync-availability 15m, bookings-expire 5m, consult-expire 5m, health-check 5m, hold-sweep 5m, auto-release 5m, routing-escalate 5m, unassigned-sla 5m, stuck-sweep 5m, reminder-scan 15m, pending-status-sweep 2m, outbound-sweep 2m；heavy: auto-resolve daily 03:00, quality-check daily 06:30, weekly-report Mon 07:00, stats-weekly Mon 05:00, retention-purge daily 04:00, company-sync daily 03:00, followup-scan 10m"
+    "cron: schedulers registered（light=12/heavy=8，全部 tz=Asia/Hong_Kong）— light: sync-availability 15m, bookings-expire 5m, consult-expire 5m, health-check 5m, hold-sweep 5m, auto-release 5m, routing-escalate 5m, unassigned-sla 5m, stuck-sweep 5m, reminder-scan 15m, pending-status-sweep 2m, outbound-sweep 2m；heavy: auto-resolve daily 03:00, quality-check daily 06:30, weekly-report Mon 07:00, stats-weekly Mon 05:00, retention-purge daily 04:00, company-sync daily 03:00, provider-sync hourly :20, followup-scan 10m"
   );
 }
 

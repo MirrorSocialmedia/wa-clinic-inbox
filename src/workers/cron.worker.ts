@@ -35,6 +35,10 @@
  * - company-sync       每日 03:00 → cwi-followup-p0-20260915（MD §1.1）：公司主資料同步（workforce →
  *                                       wa-inbox 快取）— name-match 填 sourceId + upsert + Clinic.companyId；
  *                                       結果落 CompanySyncRun（hub 健康列；冪等，重跑安全）
+ * - provider-sync      每鐘 :20 → cwi-roster-20261001：醫生名錄同步（workforce → wa-inbox
+ *                                       Provider/ProviderClinic）— 逐店按 code 對 + upsert by apricotId +
+ *                                       stale/空只加唔刪 + prune 保護（未完結預約 defer）+ 孤立停用；
+ *                                       結果落 ProviderSyncRun（hub 健康列；冪等，重跑安全）
  * - pending-status-sweep 每 2 分鐘 → cwi-final S1-1c（C-1③）：status 早過訊息 parked 行兜底 —
  *                                       drain 配對到 Message 嘅 wamid（LIMIT 500）+ 24h 仍配對唔到 → 丟棄
  *                                       （同 stuck-sweep 同一條 light cron lane）
@@ -50,7 +54,7 @@
  *   hold-sweep / auto-release / routing-escalate / unassigned-sla / stuck-sweep /
  *   pending-status-sweep / outbound-sweep / reminder-scan（⚠️ spec S6-5 列表未列 — 保持現行 light queue，零行為改變；分類待 CEO 拍板）
  * - heavy（concurrency 1）：auto-resolve / quality-check / weekly-report / stats-weekly /
- *   retention-purge / company-sync / followup-scan
+ *   retention-purge / company-sync / provider-sync / followup-scan
  * 兩個 worker 共用 handleCronJob — job name 路由唔依賴隊列（enqueue 錯隊列只會變 concurrency lane，唔會靜默失靈）。
  */
 import { Worker, type Job, type Queue } from "bullmq";
@@ -58,6 +62,7 @@ import { cronQueue, cronHeavyQueue, getRedis, QUEUE_PREFIX } from "@/lib/queue";
 import log from "@/lib/log";
 import prisma from "@/lib/prisma";
 import { syncCompaniesFromWorkforce } from "@/lib/company-sync";
+import { syncProvidersFromWorkforce } from "@/lib/provider-sync";
 import { runFollowupScan } from "@/lib/followup/engine";
 import { refreshAllClinics } from "@/lib/availability";
 import { runExpiry } from "@/lib/booking/expiry";
@@ -221,6 +226,35 @@ async function handleCronJob(job: Job): Promise<unknown> {
               : { status: "failed", summary: JSON.stringify({}), error: r.error },
           });
           log.info({ ok: r.ok }, "cron: company-sync → workforce 同步完成");
+          return r.ok ? { ok: true, ...r.summary } : { ok: false, error: r.error };
+        }
+        case "provider-sync": {
+          // cwi-roster-20261001：醫生名錄同步（冪等）— 每鐘 :20；結果落 ProviderSyncRun（同 company-sync 口徑）。
+          // 零產出分支都要 log（現有慣例 — ok:false 都係有結果，要見到）。
+          const r = await syncProvidersFromWorkforce();
+          await prisma.providerSyncRun.create({
+            data: r.ok
+              ? { status: "ok", summary: JSON.stringify(r.summary) }
+              : { status: "failed", summary: JSON.stringify({}), error: r.error },
+          });
+          if (r.ok) {
+            log.info(
+              {
+                source: r.summary.source,
+                matched: r.summary.clinicsMatched,
+                unmatched: r.summary.unmatchedClinics.length,
+                upserted: r.summary.providersUpserted,
+                linksAdded: r.summary.linksAdded,
+                linksPruned: r.summary.linksPruned,
+                pruneDeferred: r.summary.pruneDeferred,
+                deactivated: r.summary.providersDeactivated,
+                stale: r.summary.staleClinics.length,
+              },
+              "cron: provider-sync → 醫生名錄同步完成"
+            );
+          } else {
+            log.info({ ok: false, error: r.error }, "cron: provider-sync → 醫生名錄同步未完成（零改動）");
+          }
           return r.ok ? { ok: true, ...r.summary } : { ok: false, error: r.error };
         }
         case "followup-scan": {
