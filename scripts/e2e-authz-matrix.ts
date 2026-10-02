@@ -368,6 +368,14 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/admin/company-sync/pair", method: "POST", body: JSON.stringify({ companyId: "nope", sourceId: "nope" }) }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 404 }, // 有效 body + company 唔存在 = 404（400 只係缺欄）
   },
+  "GET /api/admin/provider-sync": {
+    fixture: () => ({ url: "/api/admin/provider-sync" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 403 }, // lastRun（fresh DB = null 都係 200）
+  },
+  "POST /api/admin/provider-sync": {
+    fixture: () => ({ url: "/api/admin/provider-sync", method: "POST" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 }, // mock 同步（fixture MF/TY 冪等）
+  },
   "POST /api/admin/onboarding/exchange": {
     fixture: () => ({ url: "/api/admin/onboarding/exchange", method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 }, // 快照：S3-9（encodeURIComponent）
