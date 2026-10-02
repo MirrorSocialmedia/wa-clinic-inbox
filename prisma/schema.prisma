@@ -289,6 +289,9 @@ model PushSubscription {
   userAgent String?
   createdAt DateTime  @default(now()) @db.Timestamptz
   lastOkAt  DateTime? @db.Timestamptz
+  // ★ cwi-notify-a4（2026-10-02）：手機 SW 真正收到推送嘅時間（sw.js push → POST /api/push/ack）—
+  //   lastOkAt = 推送服務（Google/Apple）收貨；lastReceivedAt = 部機收到。兩者差 = 中間斷咗（診斷用）。
+  lastReceivedAt DateTime? @db.Timestamptz
   staff     StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
   @@index([staffId])
 }

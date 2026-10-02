@@ -144,7 +144,7 @@ run_notify_gate() {
     --staff-a "$N_STAFF_A" --staff-b "$N_STAFF_B"
 
   # T169：ADMIN 預設唔收 + 設定面板逐店 opt-in + urgent 預設收（B.3 驗收附加）
-  nn "T169 ADMIN 預設唔收 + opt-in + urgent 預設收" \
+  nn "T169 ADMIN 預設收全部店（a3）+ 閂全部店→白名單 + urgent 永遠收" \
     --scenario t169 --cookie3 "$COOKIE_ADMIN" \
     --clinic "$TKW_CLINIC_ID" --clinic-m "$MF_CLINIC_ID" --conv-u "$CVU" --conv-a "$CVA" --conv-m "$CVM"
 

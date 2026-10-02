@@ -48,8 +48,10 @@ export interface NotifyPrefs {
   sound: boolean;
   /** 逐店靜音（N-3；multi-clinic 員工先見得到呢組 checkbox）— v2：同步 DB（server push 準） */
   mutedClinics: string[];
-  /** ADMIN 逐店 opt-in 收 message/notice（N-2 — 預設唔收，六店會炸）— v2：同步 DB */
+  /** ADMIN 逐店 opt-in 收 message/notice（adminMsgAll=false 時先生效）— v2：同步 DB */
   adminMsgClinics: string[];
+  /** ★ cwi-notify-a3：ADMIN「收全部店新訊息」（預設 true — 老細拍板 2026-10-02）；false → 只收 adminMsgClinics */
+  adminMsgAll: boolean;
 }
 
 export const DEFAULT_NOTIFY_PREFS: NotifyPrefs = {
@@ -57,13 +59,14 @@ export const DEFAULT_NOTIFY_PREFS: NotifyPrefs = {
   sound: true,
   mutedClinics: [],
   adminMsgClinics: [],
+  adminMsgAll: true,
 };
 
 const PREFS_KEY = "wa_inbox_notify_prefs_v1";
 const BANNER_KEY = "wa_inbox_notify_banner_v1";
 
 function cloneDefaults(): NotifyPrefs {
-  return { ...DEFAULT_NOTIFY_PREFS, mutedClinics: [], adminMsgClinics: [] };
+  return { ...DEFAULT_NOTIFY_PREFS, mutedClinics: [], adminMsgClinics: [], adminMsgAll: true };
 }
 
 /** N-8：讀 localStorage 開關（per-device）。SSR/損壞 → 預設值。
@@ -79,6 +82,7 @@ export function notifyPrefs(): NotifyPrefs {
     const sound = p.sound !== false;
     let mutedClinics = Array.isArray(p.mutedClinics) ? p.mutedClinics.filter((x) => typeof x === "string") : [];
     const adminMsgClinics = Array.isArray(p.adminMsgClinics) ? p.adminMsgClinics.filter((x) => typeof x === "string") : [];
+    const adminMsgAll = p.adminMsgAll !== false;
     const same =
       mutedClinics.length > 0 &&
       mutedClinics.length === adminMsgClinics.length &&
@@ -87,9 +91,9 @@ export function notifyPrefs(): NotifyPrefs {
       // eslint-disable-next-line no-console -- §2.4 自我修復留痕（壞資料 → muted 當空）
       console.warn("[notify] prefs 壞資料（muted === adminMsg）→ mutedClinics 當空");
       mutedClinics = [];
-      setNotifyPrefs({ desktop, sound, mutedClinics, adminMsgClinics }); // 順手寫返正（冪等）
+      setNotifyPrefs({ desktop, sound, mutedClinics, adminMsgClinics, adminMsgAll }); // 順手寫返正（冪等）
     }
-    return { desktop, sound, mutedClinics, adminMsgClinics };
+    return { desktop, sound, mutedClinics, adminMsgClinics, adminMsgAll };
   } catch {
     return cloneDefaults();
   }
@@ -118,7 +122,7 @@ export function setNotifyPrefs(p: NotifyPrefs): void {
 export function syncPushPrefs(p: NotifyPrefs, role: "ADMIN" | "STAFF"): void {
   if (typeof window === "undefined") return;
   const body =
-    role === "ADMIN" ? { adminMsgClinics: p.adminMsgClinics } : { mutedClinics: p.mutedClinics };
+    role === "ADMIN" ? { adminMsgClinics: p.adminMsgClinics, adminMsgAll: p.adminMsgAll } : { mutedClinics: p.mutedClinics };
   void fetch("/api/push/prefs", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -171,6 +175,8 @@ export interface ShouldNotifyArgs {
   activeConversationId: string | null;
   mutedClinics: string[];
   adminMsgClinics: string[];
+  /** ★ cwi-notify-a3：ADMIN「收全部店新訊息」（未傳 = true） */
+  adminMsgAll?: boolean;
 }
 
 /**
@@ -179,8 +185,8 @@ export interface ShouldNotifyArgs {
  * - N-5：正開住嘅對話 → 靜（列表更新照走，純 UI）
  * - N-3：逐店靜音（mutedClinics）→ 靜
  * - mention：server 已定向推送（只 @ 中嗰個人收）→ 唔再走 assignee 邏輯
- * - ADMIN：預設唔收 message/notice（N-2，六店會炸）— urgent 除外（急症安全網）；
- *   opt-in 咗嘅店（adminMsgClinics）先收 message/notice
+ * - ADMIN：★ cwi-notify-a3 預設收全部店 message/notice（adminMsgAll 預設 true）；
+ *   adminMsgAll=false → 只收 opt-in 咗嘅店（adminMsgClinics）；urgent 永遠收（急症安全網）
  * - STAFF：未指派 → 全店響；已指派 → 只負責人響（N-2）
  */
 export function shouldNotify(a: ShouldNotifyArgs): boolean {
@@ -194,7 +200,8 @@ export function shouldNotify(a: ShouldNotifyArgs): boolean {
   if (a.kind === "sla") return true; // cwi-inboxfix-20260905（MD I-5）：公海 SLA 定向推送（server 已 filter 該店 active STAFF）
   if (a.myRole === "ADMIN") {
     if (a.kind === "urgent") return true; // 七閘/URGENT 語義 — 急症預設全收
-    return a.adminMsgClinics.includes(a.clinicId); // N-2 opt-in
+    if (a.adminMsgAll !== false) return true; // ★ cwi-notify-a3：預設收全部店
+    return a.adminMsgClinics.includes(a.clinicId); // adminMsgAll=false → 白名單 opt-in
   }
   if (a.assigneeId == null) return true; // N-2：未指派 → 全店
   return a.assigneeId === a.myStaffId; // N-2：已指派 → 只負責人
@@ -242,13 +249,17 @@ export function playChime(_kind?: NotifyKind): void {
 
 // urgent → public/notify-urgent.mp3（0.7s 三聲；保留 — 同 chime.wav 有明顯分別先分得清緊急）
 let urgentAudio: HTMLAudioElement | null = null;
+function urgentEl(): HTMLAudioElement | null {
+  if (typeof window === "undefined" || typeof Audio === "undefined") return null;
+  if (!urgentAudio) {
+    urgentAudio = new Audio("/notify-urgent.mp3");
+    urgentAudio.preload = "auto";
+  }
+  return urgentAudio;
+}
 export function playUrgentSound(): void {
   try {
-    if (typeof window === "undefined" || typeof Audio === "undefined") return;
-    if (!urgentAudio) {
-      urgentAudio = new Audio("/notify-urgent.mp3");
-      urgentAudio.preload = "auto";
-    }
+    if (!urgentEl() || !urgentAudio) return;
     try {
       urgentAudio.currentTime = 0; // 重播由頭起（metadata 未載會 throw — 兜住）
     } catch {
@@ -282,8 +293,8 @@ function playIfAllowed(kind: NotifyKind, prefs: NotifyPrefs): void {
 }
 
 /**
- * §4 Android 音效解鎖：Android 唔准未經用戶互動播音 — 首次 pointerdown（一次性）
- * 播一次 0 音量 chime 解鎖 audio element（失敗靜默跳過）。
+ * §4 Android 音效解鎖：Android 唔准未經用戶互動播音 — 首次 pointerdown
+ * 播一段真靜音片段解鎖 audio element（失敗靜默跳過，下一下撳再試 — 見下面 cwi-notify-a1）。
  * 震動（vibrate）唔受限制，係手機最可靠嘅提示。
  * ★ cwi-realtime-fix §7.2：play() resolve 先計「解鎖」— 未解鎖前 fireNotify 唔試頁面音
  *   （autoplay 政策必擋），改行 SW 系統通知音。
@@ -302,36 +313,64 @@ export function isAudioUnlocked(): boolean {
   return audioUnlocked;
 }
 
-export function unlockAudio(onUnlocked?: () => void): void {
+/**
+ * ★ cwi-notify-a1（2026-10-02）：真靜音解鎖 — 舊版用 chime.wav 設 volume=0 播、300ms 後還原音量，
+ *   但 chime 長 1.96s → 剩低 ~1.7s 照響（實測：冇新訊息，開 app 後第一下撳就響）；
+ *   iOS `volume` 係唯讀（永遠 1）→ 成段響。改：喺**同一個** audio element 播一段真靜音 wav
+ *   （public/unlock-silence.wav，0.1s 全零）→ element 被用戶手勢啟動（iOS 逐 element 計）→
+ *   換返原本 src。全程冇可聞聲；已解鎖就唔再做（舊版每次 mount 都重做）。
+ *   chime 同 urgent 兩個 element 都要解（iOS 逐 element）。
+ */
+const UNLOCK_SILENCE_SRC = "/unlock-silence.wav";
+function unlockEl(el: HTMLAudioElement, realSrc: string): Promise<void> {
   try {
-    const el = chimeEl();
-    if (!el) return;
-    const prev = el.volume;
-    el.volume = 0;
+    el.src = UNLOCK_SILENCE_SRC;
+  } catch {
+    /* ignore */
+  }
+  const restore = () => {
     try {
-      el.currentTime = 0;
+      el.pause();
+      el.src = realSrc;
+      el.load();
     } catch {
       /* ignore */
     }
-    void el.play()
+  };
+  return el.play().then(
+    () => restore(),
+    (err: unknown) => {
+      restore();
+      throw err;
+    }
+  );
+}
+
+export function unlockAudio(onUnlocked?: () => void): void {
+  const done = () => {
+    try {
+      onUnlocked?.(); // v2 §5：settings 面板實時狀態（「音效：已解鎖 ✅」）
+    } catch {
+      /* ignore */
+    }
+  };
+  if (audioUnlocked) {
+    done();
+    return;
+  }
+  try {
+    const c = chimeEl();
+    if (!c) return;
+    const u = urgentEl();
+    void unlockEl(c, "/chime.wav")
       .then(() => {
         audioUnlocked = true; // 解鎖成功 → 之後頁面 chime 可信
-        try {
-          onUnlocked?.(); // v2 §5：settings 面板實時狀態（「音效：已解鎖 ✅」）
-        } catch {
-          /* ignore */
-        }
+        done();
       })
       .catch(() => {
-        /* autoplay policy — 靜默 skip */
+        /* autoplay policy — 靜默 skip（下一下撳再試） */
       });
-    window.setTimeout(() => {
-      try {
-        el.volume = prev;
-      } catch {
-        /* ignore */
-      }
-    }, 300);
+    if (u) void unlockEl(u, "/notify-urgent.mp3").catch(() => undefined);
   } catch {
     /* ignore */
   }

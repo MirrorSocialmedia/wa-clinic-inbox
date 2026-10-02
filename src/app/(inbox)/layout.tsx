@@ -39,10 +39,11 @@ export default async function InboxLayout({
       <style>{`html,body{height:100%;overflow:hidden;overscroll-behavior:none;}`}</style>
       {/* ★ cwi-ux UX-02：manifest link 已移去 root layout（metadata API）— 呢行刪（避免重複） */}
       <SwRegistrar />
-      {/* ★ cwi-ux UX-03：PWA 安裝提示橫條（Android beforeinstallprompt / iOS 加入主畫面教學；已安裝唔顯示） */}
-      <InstallPrompt />
       <NavRail name={session.name} email={session.email} role={session.role} />
       <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+        {/* ★ cwi-ux UX-03：PWA 安裝提示橫條（Android beforeinstallprompt / iOS 加入主畫面教學；已安裝唔顯示）
+            ★ cwi-notify-a9：喺主欄 flow 入面（推低內容）— 唔再疊喺 header 上面遮住掣 */}
+        <InstallPrompt />
         <main className="flex-1 min-w-0 min-h-0">{children}</main>
         <BottomTabBar role={session.role} unreadCount={unreadCount} />
       </div>

@@ -8,6 +8,7 @@ import { relTime } from "./time";
 import { matchCapsule, type CapsuleKey } from "@/lib/inbox/capsule";
 import { Virtuoso } from "react-virtuoso";
 import type { NotifyPrefs } from "@/lib/notify-client";
+import { PushDiagnostics } from "./push-diagnostics";
 import { isIOSLike, isStandalone, requestInstall } from "@/components/inbox/install-prompt";
 
 // ── ★ cwi-final S6-7：單行對話卡片（React.memo）────────────────────────────────────
@@ -816,29 +817,42 @@ export function ConversationList(p: Props) {
             )}
             {p.userRole === "ADMIN" && (
               <div className="space-y-1 pt-1.5 border-t border-line">
-                <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">
-                  接收訊息通知（預設唔收 — 逐店開）
-                </div>
-                {p.clinics.map((c) => {
-                  const on = p.prefs.adminMsgClinics.includes(c.id);
-                  return (
-                    <label key={c.id} className="flex items-center gap-2 text-xs text-t1 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={on}
-                        onChange={() =>
-                          p.onPrefsChange({
-                            ...p.prefs,
-                            adminMsgClinics: on
-                              ? p.prefs.adminMsgClinics.filter((x) => x !== c.id)
-                              : [...p.prefs.adminMsgClinics, c.id],
-                          })
-                        }
-                      />
-                      {c.code}
-                    </label>
-                  );
-                })}
+                <div className="text-[10px] font-semibold text-t3 uppercase tracking-wide">接收訊息通知</div>
+                {/* ★ cwi-notify-a3（2026-10-02）：ADMIN 預設收全部店（舊版預設唔收要逐店開）；
+                    閂咗「全部店」先出逐店白名單 */}
+                <label className="flex items-center gap-2 text-xs text-t1 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={p.prefs.adminMsgAll}
+                    onChange={() => p.onPrefsChange({ ...p.prefs, adminMsgAll: !p.prefs.adminMsgAll })}
+                  />
+                  收全部店新訊息
+                </label>
+                {!p.prefs.adminMsgAll && (
+                  <>
+                    <div className="text-[10px] text-t3">只收以下店（急症永遠收）：</div>
+                    {p.clinics.map((c) => {
+                      const on = p.prefs.adminMsgClinics.includes(c.id);
+                      return (
+                        <label key={c.id} className="flex items-center gap-2 text-xs text-t1 cursor-pointer pl-3">
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() =>
+                              p.onPrefsChange({
+                                ...p.prefs,
+                                adminMsgClinics: on
+                                  ? p.prefs.adminMsgClinics.filter((x) => x !== c.id)
+                                  : [...p.prefs.adminMsgClinics, c.id],
+                              })
+                            }
+                          />
+                          {c.code}
+                        </label>
+                      );
+                    })}
+                  </>
+                )}
               </div>
             )}
             <div className="pt-1.5 border-t border-line space-y-1.5">
@@ -867,6 +881,10 @@ export function ConversationList(p: Props) {
                 </div>
               )}
             </div>
+            {/* ★ cwi-notify-a4/a7：推送診斷（每部機收唔收到）+ 延遲測試 + 手機設定教學 + 版本 */}
+            <PushDiagnostics
+              testClinicId={p.activeClinicId !== "all" ? p.activeClinicId : (p.clinics[0]?.id ?? null)}
+            />
             {/* cwi-realtime-fix §3 (RT-6)：連線狀態 debug 區（唯讀 — 事件計數/游標/最後補漏） */}
             {p.rtDebug && (
               <div className="pt-1.5 border-t border-line space-y-0.5">

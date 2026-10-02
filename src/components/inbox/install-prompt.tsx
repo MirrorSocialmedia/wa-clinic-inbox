@@ -149,10 +149,14 @@ export function InstallPrompt() {
   };
 
   const androidReady = hasPrompt && !ios;
+  // ★ cwi-notify-a9：而家喺 layout flow 入面 — 冇嘢顯示（桌面／未有 beforeinstallprompt）就完全唔 render，唔留空白
+  if (!androidReady && !ios) return null;
 
   return (
-    <div className="absolute top-0 inset-x-0 z-40 px-3 pt-[calc(env(safe-area-inset-top)+10px)] pointer-events-none">
-      <div className="pointer-events-auto mx-auto max-w-2xl flex items-center gap-2.5 rounded-xl border border-line bg-panel shadow-lg px-3 py-2">
+    // ★ cwi-notify-a9（2026-10-02）：改返入 layout flow（舊版 absolute 疊喺收件箱頂 → 遮住「通知設定」鐘／搜尋，
+    //   iPhone Safari 未撳「稍後」之前撳唔到 header 掣 — 真機截圖重現）。放喺 (inbox) layout 主欄最頂。
+    <div className="shrink-0 px-3 pt-2 pb-1" data-testid="install-prompt">
+      <div className="mx-auto max-w-2xl flex items-center gap-2.5 rounded-xl border border-line bg-panel shadow-lg px-3 py-2">
         {androidReady ? (
           <>
             <Download size={16} strokeWidth={2.75} className="text-brand shrink-0" />

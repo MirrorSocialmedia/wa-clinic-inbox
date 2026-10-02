@@ -1,7 +1,7 @@
 import { type NextRequest } from "next/server";
 import { handle } from "@/lib/api-error";
 import { requireAuth, scopedClinicSet } from "@/lib/rbac";
-import { parsePushPrefs } from "@/lib/push";
+import { parsePushPrefs, effectiveAdminMsgAll } from "@/lib/push";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 
@@ -35,7 +35,12 @@ export const GET = handle(async (req: NextRequest) => {
     select: { pushPrefs: true },
   });
   const parsed = parsePushPrefs(row?.pushPrefs, staff.id);
-  return Response.json({ mutedClinics: parsed.mutedClinics, adminMsgClinics: parsed.adminMsgClinics });
+  // ★ cwi-notify-a3：adminMsgAll = ADMIN 有效值（未設 = true）；其他角色永遠 false
+  return Response.json({
+    mutedClinics: parsed.mutedClinics,
+    adminMsgClinics: parsed.adminMsgClinics,
+    adminMsgAll: effectiveAdminMsgAll(staff.role, parsed),
+  });
 });
 
 function cleanClinicIds(v: unknown): string[] | null {
@@ -49,7 +54,11 @@ export const POST = handle(async (req: NextRequest) => {
   const { staff, res } = ctx;
   const cookie = res.headers.get("set-cookie") ?? "";
 
-  const body = (await req.json().catch(() => null)) as { mutedClinics?: unknown; adminMsgClinics?: unknown } | null;
+  const body = (await req.json().catch(() => null)) as {
+    mutedClinics?: unknown;
+    adminMsgClinics?: unknown;
+    adminMsgAll?: unknown;
+  } | null;
 
   // F-2 角色分離：呢個角色擁有邊個欄
   const isStaff = staff.role === "STAFF";
@@ -87,7 +96,20 @@ export const POST = handle(async (req: NextRequest) => {
 
   // F-2：只寫自己角色嘅欄（另一欄唔入 JSON — 舊污染值順帶清走）
   const finalIds = scopeSet === null ? ids : ids.filter((x) => scopeSet.includes(x));
-  const prefs: object = isStaff ? { mutedClinics: finalIds } : { adminMsgClinics: finalIds };
+  // ★ cwi-notify-a3：ADMIN「收全部店新訊息」— body 有 boolean 就寫；冇帶 → 保留 DB 現值（整包覆寫唔可以洗走佢）
+  let adminMsgAll: boolean | null = null;
+  if (staff.role === "ADMIN") {
+    if (typeof body?.adminMsgAll === "boolean") adminMsgAll = body.adminMsgAll;
+    else {
+      const cur = await prisma.staffUser.findUnique({ where: { id: staff.id }, select: { pushPrefs: true } });
+      adminMsgAll = parsePushPrefs(cur?.pushPrefs, staff.id).adminMsgAll;
+    }
+  }
+  const prefs: object = isStaff
+    ? { mutedClinics: finalIds }
+    : adminMsgAll === null
+      ? { adminMsgClinics: finalIds }
+      : { adminMsgClinics: finalIds, adminMsgAll };
   if (finalIds.length !== ids.length) {
     log.warn(
       { staffId: staff.id, role: staff.role, requested: ids.length, kept: finalIds.length },

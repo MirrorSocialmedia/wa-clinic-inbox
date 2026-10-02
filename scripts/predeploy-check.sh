@@ -27,6 +27,20 @@ esac
 for k in MEDIA_ENC_KEY PHONE_HASH_KEY SESSION_SECRET; do
   v="$(envv $k)"; [ "${#v}" -ge 32 ] || bad "$k 長度 < 32"
 done
+# ★ cwi-notify-a6（2026-10-02）：Web Push（VAPID）— 冇設 = server 靜靜停用推送（app 閂咗／鎖屏完全冇通知），
+#   手機亦訂閱唔到（/api/push/vapid-key 503）。以前呢度唔檢查 → predeploy 全綠都可能冇推送。
+for k in VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY VAPID_SUBJECT; do
+  v="$(envv $k)"; [ -n "$v" ] && ok "$k 有值" || bad "$k 未設（Web Push 會停用 — 生成：pnpm exec web-push generate-vapid-keys）"
+done
+vs="$(envv VAPID_SUBJECT)"
+case "$vs" in
+  mailto:*@example.com|*example.com*) wrn "VAPID_SUBJECT 仲係範例值（$vs）— 改做你真實電郵 mailto:you@your-domain" ;;
+  mailto:*|https://*) : ;;
+  "") : ;;
+  *) bad "VAPID_SUBJECT 要係 mailto:… 或 https://…（而家：$vs）" ;;
+esac
+# ★ cwi-notify-a6：HEALTHZ_TOKEN — 未設 = /healthz 詳細狀態（db/redis/worker/security）對外公開
+[ -n "$(envv HEALTHZ_TOKEN)" ] && ok "HEALTHZ_TOKEN 有值" || bad "HEALTHZ_TOKEN 未設（/healthz 詳細狀態會公開 — 生成：openssl rand -hex 32）"
 if [ "$(envv ALLOW_MOCK_IN_PROD)" != "1" ]; then
   for k in AI_MOCK WA_MOCK DUTY_MOCK WORKFORCE_MOCK AI_MOCK_FAIL WA_GRAPH_MOCK_FAIL; do
     [ "$(envv $k)" = "1" ] && bad "$k=1（production 唔准開 mock）"
