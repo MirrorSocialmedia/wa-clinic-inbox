@@ -1,6 +1,22 @@
 import type { NextConfig } from "next";
+import { execSync } from "node:child_process";
+
+// ★ cwi-notify-a8（2026-10-02）：build 版本（git commit 短碼 + build 日期）— 通知設定面板底部顯示，
+//   用嚟一眼確認部機行緊邊個版本（「手機撳唔到管理」等問題先排除未部署）。攞唔到 git → "unknown"。
+function buildVersion(): string {
+  let commit = "unknown";
+  try {
+    commit = execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim() || "unknown";
+  } catch {
+    /* 冇 git（例如 tarball 部署）→ unknown */
+  }
+  return `${commit} · ${new Date().toISOString().slice(0, 10)}`;
+}
 
 const nextConfig: NextConfig = {
+  env: {
+    NEXT_PUBLIC_APP_VERSION: buildVersion(),
+  },
   // App Review 三件套（2026-08-20）：Next 15.5 起 unauthorized()/forbidden() 要呢個 flag。
   // 只被 (admin)/admin/layout.tsx + onboarding/templates 頁用（非 ADMIN → 403 / unauth → 401 防線二）；
   // repo 其他任何地方未用過 — 爆炸範圍受控。

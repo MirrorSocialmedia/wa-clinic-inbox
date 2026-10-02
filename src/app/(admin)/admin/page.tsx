@@ -8,6 +8,7 @@ import { DeadLetterCard } from "./dead-letter-card";
 import { HeldAlertsPanel } from "./held-alerts-panel";
 import { TotpCard } from "./totp-card";
 import { CompanySyncCard } from "./company-sync-card";
+import { vapidPublicKey } from "@/lib/push";
 
 /**
  * /admin — 總覽 + AI 狀態卡（Phase 2）。
@@ -96,6 +97,14 @@ export default async function AdminOverviewPage() {
     prisma.opsReport.findFirst({ where: { clinicId: "" }, orderBy: { periodEnd: "desc" } }),
     // ★ cwi-final S1-1a：DLQ 未重放計數（健康卡）
     prisma.deadLetter.count({ where: { replayedAt: null } }),
+  ]);
+  // ★ cwi-notify-a6（2026-10-02）：Web Push 健康 — VAPID 有冇配置 + 訂閱裝置 + 近 7 日真係送到手機嘅數量
+  const pushWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const pushReady = vapidPublicKey() !== null;
+  const [pushSubs, pushOk7d, pushRecv7d] = await Promise.all([
+    prisma.pushSubscription.count(),
+    prisma.pushSubscription.count({ where: { lastOkAt: { gte: pushWeekAgo } } }),
+    prisma.pushSubscription.count({ where: { lastReceivedAt: { gte: pushWeekAgo } } }),
   ]);
   const reportMetrics = latestReport?.metrics as
     | { frt?: { medianSec?: number }; draftAdoption?: { rate?: number } }
@@ -230,6 +239,27 @@ export default async function AdminOverviewPage() {
             ⚠ AI_MOCK_FAIL=1 生效中 — mock 模擬 AI 斷線（E2E T16 用；上線前必須移除）。
           </p>
         )}
+      </section>
+
+      {/* ── ★ cwi-notify-a6：通知推送（Web Push）健康 ── */}
+      <section className="bg-panel rounded-[26px] border border-line p-5" data-testid="push-health">
+        <h2 className="text-[18px] font-normal text-t1 mb-2">通知推送（app 閂咗／鎖屏）</h2>
+        <div className="text-[13px] text-t2 space-y-1">
+          <div>
+            伺服器配置：
+            {pushReady ? (
+              <span className="text-ok-text font-semibold">已配置 ✅</span>
+            ) : (
+              <span className="text-danger-text font-semibold">未配置 ❌ — .env 要設 VAPID_PUBLIC_KEY／VAPID_PRIVATE_KEY／VAPID_SUBJECT</span>
+            )}
+          </div>
+          <div>
+            已訂閱裝置 {pushSubs} 部 · 近 7 日推送服務收貨 {pushOk7d} 部 · 近 7 日手機確認收到 {pushRecv7d} 部
+          </div>
+          <div className="text-[11px] text-t3">
+            「收貨」多過「收到」= 有手機收唔到（省電／通知設定）— 叫同事喺收件箱鐘（通知設定）→ 推送診斷 撳「10 秒後發測試」。
+          </div>
+        </div>
       </section>
 
       {/* ── 各舖 AI 模式（Phase 2b：DRAFT/AUTO + 近 24h 自動發統計） ── */}
