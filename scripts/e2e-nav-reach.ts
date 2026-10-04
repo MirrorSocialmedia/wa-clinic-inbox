@@ -93,7 +93,7 @@ async function ensureServer(): Promise<boolean> {
     cwd: ROOT,
     env: {
       ...process.env,
-      NODE_OPTIONS: "--max-old-space-size=8192",
+      NODE_OPTIONS: "--max-old-space-size=4096",
       WORKFORCE_MOCK: process.env.WORKFORCE_MOCK ?? "1",
       AI_MOCK: process.env.AI_MOCK ?? "1",
       WA_MOCK: process.env.WA_MOCK ?? "1",
@@ -242,6 +242,7 @@ async function main(): Promise<void> {
   //   先 pre-compile 兩條最重 shared 路徑（warm 機 = 秒過 no-op；冷機吸收編譯成本）。
   for (const u of ["/login", "/inbox"]) {
     await fetch(`${BASE}${u}`, { signal: AbortSignal.timeout(300_000) }).catch(() => {});
+    await sleep(5_000); // ★ CI OOM 平尖峰：逐條 warm + settle（唔好兩條重頁同時編譯）
   }
   const exe = chromiumPath();
   let B: Browser;

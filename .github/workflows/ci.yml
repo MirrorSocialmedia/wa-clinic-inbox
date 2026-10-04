@@ -75,6 +75,15 @@ jobs:
       - run: bash scripts/ci-src-tests.sh
       - run: pnpm tsx scripts/e2e-authz-matrix.ts   # T630
       # ★ cwi-setnav SET-09：入口回歸爬蟲（角色 × 桌面/手機 BFS — 新頁冇入口 = 紅；server 冇就自起，跑完還原）
+      # ★ cwi-setnav CI fix（runs 37182915690/4048889/4878514/5801784/6973631 五連紅實錚）：
+      #   nav-reach 前掃走所有殘留 node server — orphan（前 step teardown 漏殺）+ 新 server 雙份 RAM
+      #   → 7GB runner cgroup OOM → step process 被 SIGKILL（25-30s 即死、無 JS catch、diag 無 fire）。
+      - run: |
+          pkill -f " server.ts" 2>/dev/null || true
+          pkill -f "next dev" 2>/dev/null || true
+          sleep 3
+          lsof -ti:3100 -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+          sleep 1
       - run: pnpm tsx scripts/e2e-nav-reach.ts
       - run: bash scripts/mock-e2e.sh --ci
       # ★ cwi-qa CI-D1：失敗時上傳 server／worker log — CI 之前只見 mock-e2e stdout，dev server 嘅真錯誤
