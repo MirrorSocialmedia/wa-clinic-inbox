@@ -190,7 +190,7 @@ async function bfs(
       if (visited.has(u)) continue;
       iters++;
       try {
-        await P.goto(`${BASE}${u}`, { waitUntil: "domcontentloaded", timeout: 90_000 });
+        await P.goto(`${BASE}${u}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
       } catch {
         continue; // 單頁慢/失敗唔阻 BFS
       }
@@ -227,6 +227,12 @@ async function main(): Promise<void> {
   console.log(`routes：static ${staticRoutes.length}（斷言 ${assertable.length}）；dynamic（唔入斷言）：${dynamicRoutes.join(", ") || "無"}`);
 
   const serverOurs = await ensureServer();
+  // ★ cwi-setnav CI fix（run 37182915690 實錚）：CI runner 無 .next → 冷啟動 on-demand compile，
+  //   BFS 首 hit goto（90s）喺 /inbox 級重頁編譯超過 timeout → 誤判「冇入口」紅。
+  //   先 pre-compile 兩條最重 shared 路徑（warm 機 = 秒過 no-op；冷機吸收編譯成本）。
+  for (const u of ["/login", "/inbox"]) {
+    await fetch(`${BASE}${u}`, { signal: AbortSignal.timeout(300_000) }).catch(() => {});
+  }
   const exe = chromiumPath();
   const B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<Browser> }).launch({
     headless: true,
