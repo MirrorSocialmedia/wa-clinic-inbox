@@ -101,8 +101,16 @@ export function __resetBreakerForTest(): void {
 
 // ── chat.completions ────────────────────────────────────────────────────
 
+/**
+ * ★ cwi-labdoc-extract：multimodal content part（OpenAI-compatible；sglang/vLLM 都支援 image_url data URL）。
+ *   只喺 VISION 模式用（labdoc-extract）；其餘 caller 照舊用 string content。
+ */
+export type AiContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export interface AiChatOptions {
-  messages: { role: "system" | "user"; content: string }[];
+  messages: { role: "system" | "user"; content: string | AiContentPart[] }[];
   /** vLLM guided_json schema（強制結構化輸出） */
   guidedJson?: unknown;
   /** ★ consult v2.1 C4：per-call 參數覆寫（唔提供 = 原口徑 temperature 0 / AI_TIMEOUT_MS / 600 tokens） */
