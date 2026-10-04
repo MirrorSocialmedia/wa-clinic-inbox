@@ -80,9 +80,17 @@ async function serverResponding(timeoutMs: number): Promise<boolean> {
 async function ensureServer(): Promise<boolean> {
   if (pidsOn3100().length > 0) {
     if (await serverResponding(120_000)) return false;
-    throw new Error("3100 有进程但 120s 未 responding");
+    // ★ CI fix（run 37184048889 猜因）：zombie 端口（前一個 hermetic step teardown 殺咗 pnpm 但 next 殘留/半死）
+    //   → 唔好直接 throw：kill 晒重來自起（同 e2e-authz-matrix kill3100 同招）。
+    console.log("  [nav-reach] 3100 有 zombie 进程（120s 未 responding）→ kill 後自起");
+    for (const p of pidsOn3100()) { try { process.kill(p, "SIGTERM"); } catch { /* */ } }
+    try { execSync('pkill -f " server.ts" || true', { stdio: "ignore" }); } catch { /* */ }
+    await sleep(3_000);
+    for (const p of pidsOn3100()) { try { process.kill(p, "SIGKILL"); } catch { /* */ } }
+    await sleep(1_000);
+  } else {
+    console.log("  [nav-reach] 3100 未運行 → 自起 pnpm dev（hermetic）...");
   }
-  console.log("  [nav-reach] 3100 未運行 → 自起 pnpm dev（hermetic）...");
   const child = spawn("pnpm", ["dev"], {
     cwd: ROOT,
     env: {
@@ -99,7 +107,11 @@ async function ensureServer(): Promise<boolean> {
     detached: true,
   });
   child.unref();
-  if (!(await serverResponding(300_000))) throw new Error("hermetic 自起 3100：300s 未 responding（睇 /tmp/nav-reach-server.log）");
+  if (!(await serverResponding(300_000))) {
+    let tail = "";
+    try { tail = execSync("tail -15 /tmp/nav-reach-server.log 2>/dev/null", { encoding: "utf8" }); } catch { /* */ }
+    throw new Error(`hermetic 自起 3100：300s 未 responding。/tmp/nav-reach-server.log tail:\n${tail}`);
+  }
   return true;
 }
 
@@ -234,10 +246,16 @@ async function main(): Promise<void> {
     await fetch(`${BASE}${u}`, { signal: AbortSignal.timeout(300_000) }).catch(() => {});
   }
   const exe = chromiumPath();
-  const B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<Browser> }).launch({
-    headless: true,
-    executablePath: exe,
-  })) as unknown as Browser;
+  let B: Browser;
+  try {
+    B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<Browser> }).launch({
+      headless: true,
+      executablePath: exe,
+    })) as unknown as Browser;
+  } catch (e) {
+    // ★ CI 診斷：browser launch 失敗時直接報 executable + 原錯（runner chrome 版本 / CDP 不兼容睇得出）
+    throw new Error(`chromium launch 失敗（executable=${exe}）: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   const U_STAFF = "e2enavstf000000000000001";
   const U_SUP = "e2enavsup000000000000001";
