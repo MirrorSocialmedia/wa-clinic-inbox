@@ -250,7 +250,7 @@ async function main(): Promise<void> {
     B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<Browser> }).launch({
       headless: true,
       executablePath: exe,
-      args: ["--disable-dev-shm-usage"], // ★ CI 容器 /dev/shm 64MB 經典坑 — 防 chrome renderer 死
+      args: ["--disable-dev-shm-usage", "--no-sandbox"], // ★ CI：容器/shm 64MB 坑 + ubuntu24 userns 限制防 chrome sandbox 死
     })) as unknown as Browser;
   } catch (e) {
     // ★ CI 診斷：browser launch 失敗時直接報 executable + 原錯（runner chrome 版本 / CDP 不兼容睇得出）
