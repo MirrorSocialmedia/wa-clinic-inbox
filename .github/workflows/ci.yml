@@ -79,9 +79,10 @@ jobs:
       - run: bash scripts/ci-src-tests.sh
       - run: pnpm tsx scripts/e2e-authz-matrix.ts   # T630
       # ★ cwi-setnav SET-09：入口回歸爬蟲（角色 × 桌面/手機 BFS — 新頁冇入口 = 紅；server 冇就自起，跑完還原）
-      # ★ cwi-setnav CI fix（runs 37182915690/4048889/4878514/5801784/6973631 五連紅實錚）：
-      #   nav-reach 前掃走所有殘留 node server — orphan（前 step teardown 漏殺）+ 新 server 雙份 RAM
-      #   → 7GB runner cgroup OOM → step process 被 SIGKILL（25-30s 即死、無 JS catch、diag 無 fire）。
+      # ★ cwi-setnav：nav-reach 前掃走殘留 node server（確定性單 server — 防前 step teardown 漏殺）。
+      #   ⚠ 更正（2026-10-04，run 37197787333 server log 實錚）：之前幾次 25-30s 即死嘅真根因唔係 OOM，
+      #   係呢步 CI 冇 .env → 自起 server 冇 SESSION_SECRET → login 500 → fatal；已喺 e2e-nav-reach.ts
+      #   freshEnvRecipe() 修（同 e2e-authz-matrix selfStartEnv 同一份 fake 配方）。
       - run: |
           pkill -f " server.ts" 2>/dev/null || true
           pkill -f "next dev" 2>/dev/null || true

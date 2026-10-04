@@ -93,6 +93,7 @@ async function ensureServer(): Promise<boolean> {
     cwd: ROOT,
     env: {
       ...process.env,
+      ...freshEnvRecipe(),
       NODE_OPTIONS: "--max-old-space-size=4096",
       WORKFORCE_MOCK: process.env.WORKFORCE_MOCK ?? "1",
       AI_MOCK: process.env.AI_MOCK ?? "1",
@@ -111,6 +112,25 @@ async function ensureServer(): Promise<boolean> {
     throw new Error(`hermetic 自起 3100：300s 未 responding。/tmp/nav-reach-server.log tail:\n${tail}`);
   }
   return true;
+}
+
+// ★ cwi-setnav CI fix（2026-10-04，run 37197787333 實錚）：CI 跑到呢步時**冇 .env**（ci-src-tests.sh 用完臨時
+//   .env 即刪；mock-e2e.sh 要下一步先寫）→ 自起嘅 server 冇 SESSION_SECRET → POST /api/auth/login 500
+//   「SESSION_SECRET missing or < 32 chars」→ login throw → fatal（之前 4 連紅 25-30s 即死 = 呢個，唔係 OOM）。
+//   本地有 .env 所以一直綠（假綠）。同 e2e-authz-matrix selfStartEnv() 同一份 fake 配方（格式合法、非真值）；
+//   有 .env → 唔覆蓋（本地照用自己 .env）。
+function freshEnvRecipe(): Record<string, string> {
+  if (fs.existsSync(path.join(ROOT, ".env"))) return {};
+  return {
+    SESSION_SECRET: "navreachfakesessionsecret000000000000000000000000000000000a",
+    FLOW_JWT_SECRET: "navreachfakeflowjwtsecret0000000000000000000000000000000000a",
+    PHONE_HASH_KEY: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    TOTP_ENC_KEY: Buffer.from("0123456789abcdef0123456789abcdef").toString("base64"), // 恰 32 bytes
+    MEDIA_ENC_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", // 64 hex
+    WA_APP_SECRET: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    WA_VERIFY_TOKEN: "navreachfakeverifytoken",
+    WA_MEDIA_DIR: "/tmp/wa-media-nav-reach",
+  };
 }
 
 // ── route 掃描（src/app/**/page.tsx）────────────────────────────────────────
@@ -373,8 +393,9 @@ async function main(): Promise<void> {
   process.exit(1);
 }
 
-// ★ CI 診斷自報（冇 PAT 可讀）：fail/fatal 時全環境診斷寫檔 + force push 去 ci-diag-setnav branch
-//   （只喺 cwi-settings-backnav 分支跑時 push — 避 diag branch trigger 循環）
+// ★ CI 診斷：fail/fatal 時全環境診斷印入 job log（ci.yml step wrapper 再補 server log tail）。
+//   ★ cwi-setnav CI fix：已移除「force push 診斷去 ci-diag-setnav branch」— CI token 冇 write（403），
+//   而且由 CI 強推另一條 branch 唔安全；log 本身已自包含。
 function emitDiag(tag: string, e?: unknown): void {
   const safe = (cmd: string): string => {
     try { return execSync(cmd, { encoding: "utf8", timeout: 10_000 }).trim().slice(0, 2000); }
@@ -396,22 +417,6 @@ function emitDiag(tag: string, e?: unknown): void {
     safe("node -e \"console.log(require('playwright-core/package.json').version)\" 2>&1"),
   ].join("\n");
   console.error(`════ NAV-REACH DIAGNOSTIC [${tag}] ════\n${diag}\n════`);
-  if (process.env.GITHUB_REF_NAME === "cwi-settings-backnav") {
-    try {
-      const f = `.ci-diag/nav-reach-${tag}-${runId}.txt`;
-      fs.mkdirSync(".ci-diag", { recursive: true });
-      fs.writeFileSync(f, diag + "\n");
-      execSync(
-        `git config user.email ci-diag@openclaw.local && git config user.name ci-diag && ` +
-        `git add ${f} && git commit -q -m "ci-diag: nav-reach ${tag} diagnostics (run ${runId})" && ` +
-        `git push -q -f origin HEAD:refs/heads/ci-diag-setnav`,
-        { stdio: "pipe", timeout: 60_000 },
-      );
-      console.error(`[nav-reach] diag pushed → origin/ci-diag-setnav:${f}`);
-    } catch (pe) {
-      console.error("[nav-reach] diag self-push failed:", pe instanceof Error ? pe.message : String(pe));
-    }
-  }
 }
 
 main().catch((e) => {
