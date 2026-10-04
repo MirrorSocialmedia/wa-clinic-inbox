@@ -1,7 +1,7 @@
 /**
  * unit-labdoc-extract — cwi-labdoc-extract（cwm-labdoc §5.2）wa-inbox 讀單 proxy 單元測試
  *
- * 範圍（零 DB；redis 只用於 replay 路徑 — CI service 一定有）：
+ * 範圍（零 DB；redis 只用於 replay + 429 契約路徑 — CI service 一定有）：
  *   1. 信封 round-trip：seal/open @ context "labdoc-extract.v1" + respContext(nonce)；
  *      錯 context / 錯 key → throw（防兩 repo 實作漂移）
  *   2. 契約 fixture lock：prompt.v1.txt === prompt.ts 文字（byte-identical）；
@@ -176,6 +176,7 @@ async function main(): Promise<void> {
   const { LABDOC_EXTRACT_PROMPT, buildLabDocPrompt, LABDOC_MAX_HINT_CHARS } = await import("../src/lib/labdoc/prompt");
   const { POST } = await import("../src/app/api/internal/labdoc-extract/route");
   const { NextRequest } = await import("next/server");
+  const { getAppRedis } = await import("../src/lib/queue");
 
   // ══════════ 1. 信封 round-trip ══════════
   console.log("[1] 信封 round-trip（context = labdoc-extract.v1）");
@@ -384,6 +385,19 @@ async function main(): Promise<void> {
     const r = await hit(raw);
     check("12MB+1KB → 413 TOO_LARGE", r.status === 413 && r.body?.error === "TOO_LARGE");
   }
+  // 413 TOO_LARGE（m-1：嚴-byte 語義 — astral 字元 = 2 UTF-16 code units / 4 UTF-8 bytes，
+  //   舊 raw.length 檢查對呢類 body 會放過 ~2× 上限）
+  {
+    const big = "🚀".repeat(4_000_000); // code units = 8MB，bytes = 16MB
+    check(
+      "前提：code units <12MB 但 bytes >12MB（舊 raw.length 會放過）",
+      big.length <= 12 * 1024 * 1024 && Buffer.byteLength(big) > 12 * 1024 * 1024,
+      `len=${big.length} bytes=${Buffer.byteLength(big)}`
+    );
+    const raw = `{"v":1,"kid":"k1","ts":${Date.now()},"nonce":"n413b","iv":"x","ct":"${big}","tag":"x"}`;
+    const r = await hit(raw);
+    check("astral 密集 body（bytes >12MB、code units <12MB）→ 413 TOO_LARGE", r.status === 413 && r.body?.error === "TOO_LARGE", `got ${r.status}`);
+  }
   // 400 BAD_JSON
   {
     const r = await hit("this is not json");
@@ -483,15 +497,29 @@ async function main(): Promise<void> {
     check("上游 JSON 缺必填 → result=null + reason=bad_response", r.status === 200 && dec?.result === null && dec?.reason === "bad_response");
   }
   // 7f. 429 BUSY（CONCURRENCY=1 + 上游 sleep 占位）
+  // ★ M-1（2026-10-04 reviewer 修復）：429 唔消耗 nonce — CWM 重試同一信封
+  //   必須 429→(恢復後) 200，而唔係永久 409 REPLAY（舊行為：BUSY 時 nonce 已入 Redis）。
   {
     upstreamMode = { kind: "sleep", ms: 1200, content: JSON.stringify(invoiceSample()) };
     const envA = sealReq({ mode: "TEXT", kindHint: "INVOICE", labHint: null, text: "busy A", images: null });
     const envB = sealReq({ mode: "TEXT", kindHint: "INVOICE", labHint: null, text: "busy B", images: null });
     const [ra, rb] = await Promise.all([hit(JSON.stringify(envA)), hit(JSON.stringify(envB))]);
-    const busy = [ra, rb].find((x) => x.status === 429);
-    const okR = [ra, rb].find((x) => x.status === 200);
-    check("同時兩請求（CONCURRENCY=1）→ 一個 429 BUSY", busy !== undefined && busy.body?.error === "BUSY" && busy.body?.retryAfterSec === 5, `statuses=${[ra.status, rb.status]}`);
-    check("另一個照 200", okR !== undefined);
+    const pairs = [{ env: envA, r: ra }, { env: envB, r: rb }];
+    const busyP = pairs.find((p) => p.r.status === 429);
+    const okP = pairs.find((p) => p.r.status === 200);
+    check("同時兩請求（CONCURRENCY=1）→ 一個 429 BUSY", busyP !== undefined && busyP.r.body?.error === "BUSY" && busyP.r.body?.retryAfterSec === 5, `statuses=${[ra.status, rb.status]}`);
+    check("另一個照 200", okP !== undefined);
+    if (busyP && okP) {
+      const redis = getAppRedis();
+      check("429 BUSY 嘅 nonce 未消耗（Redis key 唔存在）", (await redis.exists(`labdocx:nonce:${busyP.env.nonce}`)) === 0);
+      check("200 嘅 nonce 已消耗（Redis key 存在）", (await redis.exists(`labdocx:nonce:${okP.env.nonce}`)) === 1);
+      // CWM 重試契約：429 後原信封重發 → 200（唔係 409 REPLAY）
+      const retry = await hit(JSON.stringify(busyP.env));
+      check("429 後原信封重發 → 200（重試契約）", retry.status === 200, `got ${retry.status} ${JSON.stringify(retry.body)}`);
+      check("重試成功後 nonce 已消耗 → 再重發 409 REPLAY", (await hit(JSON.stringify(busyP.env))).status === 409);
+    } else {
+      check("429/200 pair 異常 — M-1 契約斷言 skip", false, `statuses=${[ra.status, rb.status]}`);
+    }
   }
   // 7g. llm_error ×3 → breaker_open（獨立 breaker）
   {

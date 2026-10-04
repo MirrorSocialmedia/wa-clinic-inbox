@@ -15,7 +15,7 @@
  *   L-4  400 BAD_PAYLOAD（固定原因碼；marker 唔入回應）
  *   L-5  409 REPLAY（同一信封兩次）
  *   L-6  401 BAD_TAG / STALE / BAD_ENVELOPE
- *   L-7  reason 路徑（parse_error / bad_response）
+ *   L-7  reason 路徑（parse_error / bad_response / llm_error）
  *   L-8  零 DB 寫入：全部 user table count 前後一致
  *   L-9  唔 log 原文：server log 檔 marker 0 hit + 有 metadata 行
  *
@@ -495,7 +495,7 @@ async function main(): Promise<void> {
     }
 
     // ══ L-7 reason 路徑 ══
-    console.log("[L-7] reason 路徑（parse_error / bad_response）");
+    console.log("[L-7] reason 路徑（parse_error / bad_response / llm_error）");
     {
       upstreamMode = { kind: "content", content: "我睇到總數 3200 蚊，但呢個唔係 JSON" };
       let env = sealReq({ mode: "TEXT", kindHint: "INVOICE", labHint: null, text: "page", images: null });
@@ -510,6 +510,15 @@ async function main(): Promise<void> {
       r = await hit(JSON.stringify(env));
       dec = openResp(r, env.nonce);
       check("上游缺必填 → result=null + bad_response", r.status === 200 && dec?.result === null && dec?.reason === "bad_response", `dec=${JSON.stringify(dec)}`);
+
+      // m-3（2026-10-04 reviewer 修復）：啟用 upstreamMode 500 — llm_error 真網絡 case。
+      //   單次 500 = 1 strike（breaker 閾值 3 連敗）→  breaker 保持關閉，唔使 reset；
+      //   呢 case 係 L 段最後一個 route 請求，殘留 strike 隨 server 停機消失。
+      upstreamMode = { kind: "500" };
+      env = sealReq({ mode: "TEXT", kindHint: "INVOICE", labHint: null, text: "page", images: null });
+      r = await hit(JSON.stringify(env));
+      dec = openResp(r, env.nonce);
+      check("上游 500 → result=null + llm_error", r.status === 200 && dec?.result === null && dec?.reason === "llm_error", `dec=${JSON.stringify(dec)}`);
     }
 
     // ══ L-8 零 DB 寫入 ══
