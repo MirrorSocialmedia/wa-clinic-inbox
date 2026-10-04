@@ -433,6 +433,26 @@ async function publishAndRing(P: PageLike, what: string, pub: () => Promise<void
   return fail(`${what}: 3 次 publish 都無反應`);
 }
 
+/**
+ * ★ cwi-setnav CI fix（2026-10-04，T169 P3 假紅實錚：prefsPosts=[] — click 冇 toggle）：
+ * 撳齒輪開設定面板 = trusted pointerdown → unlockAudio（async）→ 解鎖後音效狀態行由
+ * 「音效：需互動一次 ⚠️（撳呢度解鎖）· 建議安裝為 App」（兩行）變「音效：已解鎖 ✅」（一行）→
+ * 下面成段內容向上移；Playwright 計好座標之後先 shift → click 落咗隔籬元素。
+ * 所以：開面板後等音效狀態落定先撳；撳完核對 checkbox 真係轉咗（最多 3 次）。
+ */
+async function waitPanelSettled(P: PageLike): Promise<void> {
+  await P.getByText(/音效：(已解鎖|App 模式)/).first().waitFor({ timeout: 15_000 }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 400));
+}
+async function toggleCheckbox(box: LocatorLike, want: boolean, what: string): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    if ((await box.isChecked()) === want) return;
+    await box.click();
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  if ((await box.isChecked()) !== want) fail(`${what}：checkbox 撳 3 次都轉唔到 ${want ? "剔" : "唔剔"}`);
+}
+
 function titleMatches(s: Awaited<ReturnType<typeof spy>>, exactTitle: string): boolean {
   return s.notifications.some((n) => n.title === exactTitle);
 }
@@ -940,6 +960,7 @@ async function main(): Promise<void> {
       await publishAndRing(adm.P, "t169 P1 預設收", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-notify-t169-p1" })), (sp) => titleMatches(sp, `新訊息 · ${CLINIC_SHORT}`));
       // Phase 2：設定面板 ADMIN section：「收全部店新訊息」預設剔；冇逐店靜音（角色分離）
       await adm.P.locator('[aria-label="通知設定"]').first().click();
+      await waitPanelSettled(adm.P);
       const allBox = adm.P.locator('label:has-text("收全部店新訊息") input[type="checkbox"]');
       if ((await allBox.count()) < 1) fail("t169: ADMIN「收全部店新訊息」開關缺");
       if (!(await allBox.first().isChecked())) fail("t169: ADMIN「收全部店新訊息」應該預設剔");
@@ -954,19 +975,24 @@ async function main(): Promise<void> {
         fail(`t169: ADMIN 唔應該見逐店靜音 section（角色分離）hits=${JSON.stringify(hits)}`);
       }
       // Phase 3：閂「收全部店」→ 白名單空 → message 靜（用 delta — P1 publishAndRing 可能重發過）
-      await allBox.first().click();
+      const tClick = Date.now();
+      await toggleCheckbox(allBox.first(), false, "t169 P3 閂「收全部店」");
       await new Promise((r) => setTimeout(r, 3500)); // POST prefs 落定 + v2 全域 3s 音間隔
       const convUNotifs = async () => (await spy(adm.P)).notifications.filter((n) => n.tag === convU).length;
       const beforeP3 = await convUNotifs();
       await publishUntilSeen(adm.P, "t169 P3 白名單空", () => publish(clinic, "message:new", messagePayload(convU, clinic, { unread: 1, contact: false, body: "e2e-notify-t169-p3" })), "e2e-notify-t169-p3");
       await new Promise((r) => setTimeout(r, 1500));
       const deltaP3 = (await convUNotifs()) - beforeP3;
-      if (deltaP3 > 0) fail(`t169 P3：閂「收全部店」+ 白名單空應該靜（convU 通知 Δ=${deltaP3}）`);
+      if (deltaP3 > 0) {
+        const all = (await spy(adm.P)).notifications as { title: string; tag?: string; t?: number }[];
+        const meta = await spyMeta(adm.P);
+        fail(`t169 P3：閂「收全部店」+ 白名單空應該靜（convU 通知 Δ=${deltaP3}）DIAG tClick=${tClick} notifs=${JSON.stringify(all.map((n) => ({ ti: n.title, tag: n.tag, t: n.t })))} prefsPosts=${JSON.stringify(meta.prefsPosts)} debug=${JSON.stringify(meta.debugLogs.slice(-12))}`);
+      }
       // Phase 3b：逐店 opt-in TKW → 收
       const tkwChecks = adm.P.locator('label:has-text("TKW") input[type="checkbox"]');
       const nChecks = await tkwChecks.count();
       if (nChecks < 1) fail("t169: 閂「收全部店」後搵唔到 TKW checkbox");
-      await tkwChecks.last().click();
+      await toggleCheckbox(tkwChecks.last(), true, "t169 P3b 剔 TKW");
       await new Promise((r) => setTimeout(r, 3500));
       const s = await publishAndRing(adm.P, "t169 opt-in 後", () => publish(clinic, "message:new", messagePayload(convA, clinic, { unread: 1, contact: false, body: "e2e-notify-t169" })), (sp) => titleMatches(sp, `新訊息 · ${CLINIC_SHORT}`));
       if (chimePlays(s) < 1) fail("t169 opt-in: 冇 chime");
@@ -1306,9 +1332,10 @@ async function main(): Promise<void> {
       await waitForListReady(adm.P, listWaitName);
       await new Promise((r) => setTimeout(r, 3000));
       await adm.P.locator('[aria-label="通知設定"]').first().click();
+      await waitPanelSettled(adm.P);
       // ★ cwi-notify-a3：預設「收全部店」→ 逐店 checkbox 收埋；先閂「收全部店」（POST 要帶 adminMsgAll:false）
       const postsBeforeAll = (await spyMeta(adm.P)).prefsPosts.length;
-      await adm.P.locator('label:has-text("收全部店新訊息") input[type="checkbox"]').first().click();
+      await toggleCheckbox(adm.P.locator('label:has-text("收全部店新訊息") input[type="checkbox"]').first(), false, "t275 閂「收全部店」");
       await new Promise((r) => setTimeout(r, 2500));
       {
         const pa = (await spyMeta(adm.P)).prefsPosts.slice(postsBeforeAll);
