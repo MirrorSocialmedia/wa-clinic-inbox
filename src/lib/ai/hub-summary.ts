@@ -22,6 +22,9 @@ import { floorTermSet } from "@/lib/sessions/red-flags";
 import { LEXICON_DEFAULTS, LexiconParams } from "@/lib/workflow/definitions";
 import { fetchDutyRoster as wfDutyRoster, WorkforceApiError } from "@/lib/workforce/client";
 import { hkToday } from "@/lib/duty/client";
+// cwi-setnav SET-05/07：七步契約（純常量 — client/server 共用）
+import { STEP_ANCHORS, STEP_EXTRA_LINKS, STEP_NAMES } from "./hub-step-contract";
+export { HUB_STEP_CONTRACT } from "./hub-step-contract"; // unit-hub-b / e2e-hub-b 斷言口徑保持
 
 // ── 型別 ──────────────────────────────────────────────────────────────
 
@@ -34,6 +37,8 @@ export interface HubStep {
   warnings: string[];
   /** [調較] / 撳行跳轉 anchor（B.1 對應現有頁） */
   anchor: string;
+  /** cwi-setnav SET-05：額外加鏈（例：第⑤步「技能組」— STEP_EXTRA_LINKS 單一來源） */
+  extraLinks?: { label: string; href: string }[];
   /** 機器讀（e2e T360 對 DB 斷言口徑） */
   detail: Record<string, unknown>;
 }
@@ -69,28 +74,6 @@ export const SANDBOX_DEMO_QUESTIONS: string[] = [
   "我智慧齒经常發炎，想拔掉，幾錢？", // 智慧齒
   "想約個洗牙，几時有空位？", // 洗牙
   "牙有个洞，补牙大概几钱？", // 補牙
-];
-
-const STEP_NAMES = ["安全閘", "理解", "對話模式", "搵資料", "派俾邊個", "出文", "發唔發"] as const;
-const STEP_ANCHORS = [
-  "/admin/workflows#wf-pain-triage", // ① 紅旗區（pain-triage 卡）
-  "/admin/ai/keywords", // ② 關鍵詞中心（新）
-  "/admin/consult", // ③ AI 傾偈設定
-  "/admin/knowledge", // ④ 知識庫
-  "/admin/routing-rules", // ⑤ 路由規則（技能組併入此步 — B.5）
-  "/admin/workflows#wf-tone", // ⑥ tone 新區（唯讀 guard 清單）
-  "/admin/automation", // ⑦ AI 自動化
-] as const;
-
-/** 七步契約（name + anchor）— unit/e2e 斷言用單一來源（T360/T368）。 */
-export const HUB_STEP_CONTRACT: ReadonlyArray<readonly [string, string]> = [
-  [STEP_NAMES[0], STEP_ANCHORS[0]],
-  [STEP_NAMES[1], STEP_ANCHORS[1]],
-  [STEP_NAMES[2], STEP_ANCHORS[2]],
-  [STEP_NAMES[3], STEP_ANCHORS[3]],
-  [STEP_NAMES[4], STEP_ANCHORS[4]],
-  [STEP_NAMES[5], STEP_ANCHORS[5]],
-  [STEP_NAMES[6], STEP_ANCHORS[6]],
 ];
 
 /** 高價值 PRICE doc 判定（schema 註解口徑）：priceMax/priceMin > 1.5 或 priceMax >= 5000。 */
@@ -304,6 +287,8 @@ export async function buildHubSummary(ctx: AuthContext): Promise<HubSummary> {
     summary: `技能組 ${groups.length} · 路由規則 ${rules.length}`,
     warnings: orphanRules > 0 ? [`${orphanRules} 條規則指向零成員／零服務店嘅組（${orphanNames.slice(0, 3).join("、")}${orphanNames.length > 3 ? "…" : ""}）`] : [],
     anchor: STEP_ANCHORS[4],
+    // cwi-setnav SET-05：技能組入口（同路由規則並列）
+    extraLinks: STEP_EXTRA_LINKS[4].map(([label, href]) => ({ label, href })),
     detail: { skillGroups: groups.length, routingRules: rules.length, orphanRules },
   };
 
