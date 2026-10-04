@@ -78,24 +78,22 @@ async function serverResponding(timeoutMs: number): Promise<boolean> {
   return false;
 }
 async function ensureServer(): Promise<boolean> {
+  // ★ 確定性：3100 有任何进程（responding 定 zombie）都 kill 晒 → 自起（避免 orphan 雙份 RAM
+  //   + 錯代碼 reuse — 本地 dev unit 錯殺風險低：unit Restart=always 自復原）
   if (pidsOn3100().length > 0) {
-    if (await serverResponding(120_000)) return false;
-    // ★ CI fix（run 37184048889 猜因）：zombie 端口（前一個 hermetic step teardown 殺咗 pnpm 但 next 殘留/半死）
-    //   → 唔好直接 throw：kill 晒重來自起（同 e2e-authz-matrix kill3100 同招）。
-    console.log("  [nav-reach] 3100 有 zombie 进程（120s 未 responding）→ kill 後自起");
+    console.log("  [nav-reach] 3100 有既有进程 → kill 後自起（確定性單 server）");
     for (const p of pidsOn3100()) { try { process.kill(p, "SIGTERM"); } catch { /* */ } }
     try { execSync('pkill -f " server.ts" || true', { stdio: "ignore" }); } catch { /* */ }
     await sleep(3_000);
     for (const p of pidsOn3100()) { try { process.kill(p, "SIGKILL"); } catch { /* */ } }
     await sleep(1_000);
-  } else {
-    console.log("  [nav-reach] 3100 未運行 → 自起 pnpm dev（hermetic）...");
   }
+  console.log("  [nav-reach] 自起 pnpm dev（hermetic）...");
   const child = spawn("pnpm", ["dev"], {
     cwd: ROOT,
     env: {
       ...process.env,
-      NODE_OPTIONS: "--max-old-space-size=16384",
+      NODE_OPTIONS: "--max-old-space-size=8192",
       WORKFORCE_MOCK: process.env.WORKFORCE_MOCK ?? "1",
       AI_MOCK: process.env.AI_MOCK ?? "1",
       WA_MOCK: process.env.WA_MOCK ?? "1",
@@ -251,6 +249,7 @@ async function main(): Promise<void> {
     B = (await (chromium as { launch: (o: Record<string, unknown>) => Promise<Browser> }).launch({
       headless: true,
       executablePath: exe,
+      args: ["--disable-dev-shm-usage"], // ★ CI 容器 /dev/shm 64MB 經典坑 — 防 chrome renderer 死
     })) as unknown as Browser;
   } catch (e) {
     // ★ CI 診斷：browser launch 失敗時直接報 executable + 原錯（runner chrome 版本 / CDP 不兼容睇得出）
@@ -369,24 +368,25 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   console.log(`NAV-REACH-FAIL: ${FAILS}`);
+  emitDiag("fail");
   process.exit(1);
 }
 
-main().catch((e) => {
-  // ★ CI 診斷自報（冇 PAT -readable）：fatal 時全環境診斷寫檔 + push 去 ci-diag-setnav branch
-  //   （只喺 cwi-settings-backnav 分支跑時 push — 避 diag branch trigger 循環；force push — diag branch 一次性）
+// ★ CI 診斷自報（冇 PAT 可讀）：fail/fatal 時全環境診斷寫檔 + force push 去 ci-diag-setnav branch
+//   （只喺 cwi-settings-backnav 分支跑時 push — 避 diag branch trigger 循環）
+function emitDiag(tag: string, e?: unknown): void {
   const safe = (cmd: string): string => {
     try { return execSync(cmd, { encoding: "utf8", timeout: 10_000 }).trim().slice(0, 2000); }
     catch (ce) { return `ERR: ${ce instanceof Error ? ce.message.slice(0, 200) : String(ce).slice(0, 200)}`; }
   };
   const runId = process.env.GITHUB_RUN_ID ?? "local";
   const diag = [
-    `nav-reach FATAL @ ${new Date().toISOString()} (GITHUB_RUN_ID=${runId} ref=${process.env.GITHUB_REF_NAME ?? "n/a"})`,
+    `nav-reach ${tag} @ ${new Date().toISOString()} (GITHUB_RUN_ID=${runId} ref=${process.env.GITHUB_REF_NAME ?? "n/a"})`,
     `node=${process.version} ${process.platform}/${process.arch}`,
     `PW_CHROMIUM=${process.env.PW_CHROMIUM ?? "(unset)"}  chrome: ${safe("google-chrome --version 2>&1")}`,
     `BASE=${BASE}  DATABASE_URL=${(process.env.DATABASE_URL ?? "").replace(/:.*@/, ":***@")}`,
     `lsof -i:3100 (LISTEN): ${safe("lsof -ti:3100 -sTCP:LISTEN 2>&1") || "(none)"}`,
-    `error: ${e instanceof Error ? e.message : String(e)}`,
+    `error: ${e instanceof Error ? e.message : (e !== undefined ? String(e) : "(none — FAIL count path)")}`,
     `stack:`,
     e instanceof Error ? (e.stack ?? "") : "",
     `-- /tmp/nav-reach-server.log tail --`,
@@ -394,15 +394,15 @@ main().catch((e) => {
     `-- playwright-core version --`,
     safe("node -e \"console.log(require('playwright-core/package.json').version)\" 2>&1"),
   ].join("\n");
-  console.error("════ NAV-REACH DIAGNOSTIC ════\n" + diag + "\n════");
+  console.error(`════ NAV-REACH DIAGNOSTIC [${tag}] ════\n${diag}\n════`);
   if (process.env.GITHUB_REF_NAME === "cwi-settings-backnav") {
     try {
-      const f = `.ci-diag/nav-reach-${runId}.txt`;
+      const f = `.ci-diag/nav-reach-${tag}-${runId}.txt`;
       fs.mkdirSync(".ci-diag", { recursive: true });
       fs.writeFileSync(f, diag + "\n");
       execSync(
         `git config user.email ci-diag@openclaw.local && git config user.name ci-diag && ` +
-        `git add ${f} && git commit -q -m "ci-diag: nav-reach fatal diagnostics (run ${runId})" && ` +
+        `git add ${f} && git commit -q -m "ci-diag: nav-reach ${tag} diagnostics (run ${runId})" && ` +
         `git push -q -f origin HEAD:refs/heads/ci-diag-setnav`,
         { stdio: "pipe", timeout: 60_000 },
       );
@@ -411,5 +411,9 @@ main().catch((e) => {
       console.error("[nav-reach] diag self-push failed:", pe instanceof Error ? pe.message : String(pe));
     }
   }
+}
+
+main().catch((e) => {
+  emitDiag("fatal", e);
   process.exit(2);
 });
