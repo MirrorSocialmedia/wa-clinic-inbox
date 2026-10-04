@@ -994,8 +994,13 @@ async function main(): Promise<void> {
       if (nChecks < 1) fail("t169: 閂「收全部店」後搵唔到 TKW checkbox");
       await toggleCheckbox(tkwChecks.last(), true, "t169 P3b 剔 TKW");
       await new Promise((r) => setTimeout(r, 3500));
-      const s = await publishAndRing(adm.P, "t169 opt-in 後", () => publish(clinic, "message:new", messagePayload(convA, clinic, { unread: 1, contact: false, body: "e2e-notify-t169" })), (sp) => titleMatches(sp, `新訊息 · ${CLINIC_SHORT}`));
-      if (chimePlays(s) < 1) fail("t169 opt-in: 冇 chime");
+      // ★ cwi-setnav CI fix（run 37206780198「opt-in: 冇 chime」）：P1 已經有一條「新訊息 · TKW」→ 舊 cond
+      //   （任何同標題通知）一開始就成立 → 未等新訊息到就斷 chime（P1 喺解鎖前 = 0 chime）→ CI 慢就紅。
+      //   改：cond 綁本 conv（convA）+ chime 用 publish 前 baseline 嘅 delta（最多等 3s）。
+      const chimeBase = chimePlays(await spy(adm.P));
+      await publishAndRing(adm.P, "t169 opt-in 後", () => publish(clinic, "message:new", messagePayload(convA, clinic, { unread: 1, contact: false, body: "e2e-notify-t169" })), (sp) => sp.notifications.some((n) => n.tag === convA && n.title === `新訊息 · ${CLINIC_SHORT}`));
+      const s = await waitForSpy(adm.P, (sp) => chimePlays(sp) - chimeBase >= 1, "t169 opt-in chime", 3000).catch(() => null);
+      if (!s) fail(`t169 opt-in: 冇 chime（Δ=0；base=${chimeBase}）`);
       // Phase 4：urgent 預設收（MF 未 opt-in 都收 — 急症安全網）
       if (!clinicM) throw new Error("t169 要 --clinic-m");
       const s4 = await publishAndRing(adm.P, "t169 urgent 預設", () => publish(clinicM, "urgent:escalation", urgentPayload(convM, { contactName: PII_NAME })), (sp) => titleMatches(sp, `⚠ 緊急 · ${MF_SHORT}`));
