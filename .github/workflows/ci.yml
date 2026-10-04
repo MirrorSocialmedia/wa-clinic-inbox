@@ -74,6 +74,8 @@ jobs:
       #   獨立 DB wa_t + Redis db 5（唔污染 mock-e2e）；臨時 .env 跑完即刪。本地模擬 15/15 綠；故意 fail 測試會紅。
       - run: bash scripts/ci-src-tests.sh
       - run: pnpm tsx scripts/e2e-authz-matrix.ts   # T630
+      # ★ cwi-setnav SET-09：入口回歸爬蟲（角色 × 桌面/手機 BFS — 新頁冇入口 = 紅；server 冇就自起，跑完還原）
+      - run: pnpm tsx scripts/e2e-nav-reach.ts
       - run: bash scripts/mock-e2e.sh --ci
       # ★ cwi-qa CI-D1：失敗時上傳 server／worker log — CI 之前只見 mock-e2e stdout，dev server 嘅真錯誤
       #   （例 `⨯ SyntaxError: Unexpected end of JSON input` manifest race、route stack trace）完全睇唔到，
