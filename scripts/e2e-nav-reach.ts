@@ -373,6 +373,43 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  console.error("NAV-REACH-ERROR:", e);
+  // ★ CI 診斷自報（冇 PAT -readable）：fatal 時全環境診斷寫檔 + push 去 ci-diag-setnav branch
+  //   （只喺 cwi-settings-backnav 分支跑時 push — 避 diag branch trigger 循環；force push — diag branch 一次性）
+  const safe = (cmd: string): string => {
+    try { return execSync(cmd, { encoding: "utf8", timeout: 10_000 }).trim().slice(0, 2000); }
+    catch (ce) { return `ERR: ${ce instanceof Error ? ce.message.slice(0, 200) : String(ce).slice(0, 200)}`; }
+  };
+  const runId = process.env.GITHUB_RUN_ID ?? "local";
+  const diag = [
+    `nav-reach FATAL @ ${new Date().toISOString()} (GITHUB_RUN_ID=${runId} ref=${process.env.GITHUB_REF_NAME ?? "n/a"})`,
+    `node=${process.version} ${process.platform}/${process.arch}`,
+    `PW_CHROMIUM=${process.env.PW_CHROMIUM ?? "(unset)"}  chrome: ${safe("google-chrome --version 2>&1")}`,
+    `BASE=${BASE}  DATABASE_URL=${(process.env.DATABASE_URL ?? "").replace(/:.*@/, ":***@")}`,
+    `lsof -i:3100 (LISTEN): ${safe("lsof -ti:3100 -sTCP:LISTEN 2>&1") || "(none)"}`,
+    `error: ${e instanceof Error ? e.message : String(e)}`,
+    `stack:`,
+    e instanceof Error ? (e.stack ?? "") : "",
+    `-- /tmp/nav-reach-server.log tail --`,
+    safe("tail -30 /tmp/nav-reach-server.log 2>&1"),
+    `-- playwright-core version --`,
+    safe("node -e \"console.log(require('playwright-core/package.json').version)\" 2>&1"),
+  ].join("\n");
+  console.error("════ NAV-REACH DIAGNOSTIC ════\n" + diag + "\n════");
+  if (process.env.GITHUB_REF_NAME === "cwi-settings-backnav") {
+    try {
+      const f = `.ci-diag/nav-reach-${runId}.txt`;
+      fs.mkdirSync(".ci-diag", { recursive: true });
+      fs.writeFileSync(f, diag + "\n");
+      execSync(
+        `git config user.email ci-diag@openclaw.local && git config user.name ci-diag && ` +
+        `git add ${f} && git commit -q -m "ci-diag: nav-reach fatal diagnostics (run ${runId})" && ` +
+        `git push -q -f origin HEAD:refs/heads/ci-diag-setnav`,
+        { stdio: "pipe", timeout: 60_000 },
+      );
+      console.error(`[nav-reach] diag pushed → origin/ci-diag-setnav:${f}`);
+    } catch (pe) {
+      console.error("[nav-reach] diag self-push failed:", pe instanceof Error ? pe.message : String(pe));
+    }
+  }
   process.exit(2);
 });
