@@ -21,6 +21,8 @@ interface HubStep {
   summary: string;
   warnings: string[];
   anchor: string;
+  /** cwi-setnav SET-05：額外加鏈（例：第⑤步「技能組」） */
+  extraLinks?: { label: string; href: string }[];
   detail: Record<string, unknown>;
 }
 interface HealthItem {
@@ -554,27 +556,39 @@ export default function AiHub({ role }: { role: string }) {
         )}
         <div className="flex flex-col divide-y divide-line">
           {(summary?.steps ?? []).map((s) => (
-            <a
-              key={s.n}
-              href={s.anchor}
-              className="flex items-center gap-3 px-5 py-3 hover:bg-panel-2/60 transition-colors"
-              title={s.anchor}
-            >
-              <span className="flex-none w-[26px] h-[26px] rounded-full bg-brand-soft text-brand-text grid place-items-center text-[12px] font-bold">
-                {s.n}
-              </span>
-              <span className="flex-none w-[76px] text-[13px] font-semibold text-t1">{s.name}</span>
-              <span className="text-[12.5px] text-t2 min-w-0 truncate">{s.summary}</span>
-              {s.warnings.length > 0 && (
-                <span
-                  className="flex-none max-w-[320px] truncate px-2.5 py-1 rounded-full bg-warn-soft text-warn-text text-[11px] font-semibold border border-warn/20"
-                  title={s.warnings.join("；")}
-                >
-                  ⚠ {s.warnings.join("；")}
+            <div key={s.n} className="flex items-stretch">
+              <a
+                href={s.anchor}
+                className="flex-1 min-w-0 flex items-center gap-3 px-5 py-3 hover:bg-panel-2/60 transition-colors"
+                title={s.anchor}
+              >
+                <span className="flex-none w-[26px] h-[26px] rounded-full bg-brand-soft text-brand-text grid place-items-center text-[12px] font-bold">
+                  {s.n}
                 </span>
-              )}
-              <span className="ml-auto flex-none text-[11px] font-semibold text-brand-text">調較 →</span>
-            </a>
+                <span className="flex-none w-[76px] text-[13px] font-semibold text-t1">{s.name}</span>
+                <span className="text-[12.5px] text-t2 min-w-0 truncate">{s.summary}</span>
+                {s.warnings.length > 0 && (
+                  <span
+                    className="flex-none max-w-[320px] truncate px-2.5 py-1 rounded-full bg-warn-soft text-warn-text text-[11px] font-semibold border border-warn/20"
+                    title={s.warnings.join("；")}
+                  >
+                    ⚠ {s.warnings.join("；")}
+                  </span>
+                )}
+                <span className="ml-auto flex-none text-[11px] font-semibold text-brand-text">調較 →</span>
+              </a>
+              {/* cwi-setnav SET-05：第⑤步額外加鏈（技能組 — 同路由規則並列入口） */}
+              {s.extraLinks?.map((l) => (
+                <a
+                  key={l.href}
+                  href={l.href}
+                  className="flex-none self-center flex items-center gap-1 pr-4 pl-1 text-[11px] font-semibold text-brand-text hover:bg-brand-soft/50 rounded-full border-l border-line px-2.5"
+                  title={l.href}
+                >
+                  {l.label} →
+                </a>
+              ))}
+            </div>
           ))}
           {!summary && !loadErr && <div className="px-5 py-6 text-[12.5px] text-t3">載入中…</div>}
         </div>

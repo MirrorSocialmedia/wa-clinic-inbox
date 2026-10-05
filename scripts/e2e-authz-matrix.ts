@@ -1890,7 +1890,7 @@ function start3100(logFile: string, extraEnv: Record<string, string>): void {
   // （pnpm .bin/tsx 係 shell shim — realpath 唔到 dist；直接 pnpm dev 最穩）
   const child = spawn("pnpm", ["dev"], {
     cwd: process.cwd(),
-    env: { ...process.env, NODE_OPTIONS: "--max-old-space-size=16384", ...extraEnv },
+    env: { ...process.env, NODE_OPTIONS: "--max-old-space-size=16384", APP_HOST: new URL(BASE).host, ...extraEnv },
     stdio: ["ignore", fs.openSync(logFile, "a"), fs.openSync(logFile, "a")],
     detached: true,
   });

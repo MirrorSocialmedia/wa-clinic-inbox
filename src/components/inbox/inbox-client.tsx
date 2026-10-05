@@ -60,6 +60,8 @@ import { ConversationList } from "./conversation-list";
 import { ChatPane, type ChatPaneHandle } from "./chat-pane";
 import { DetailPane } from "./detail-pane";
 import { PatientDrawer } from "./patient-drawer";
+// cwi-setnav NAV-01/02：手機系統返回鍵圖層堆疊（conv / detail / patient）
+import { backLayerReplaceUrl, isMobileViewport, pushBackLayer, useBackLayer } from "@/lib/back-stack";
 
 const PAGE_SIZE = 50;
 const WINDOW_MS = 24 * 3600 * 1000;
@@ -295,6 +297,25 @@ export function InboxClient({
 
   const socketRef = useRef<Socket | null>(null);
   const selectedIdRef = useRef<string | null>(null);
+
+  // ── cwi-setnav NAV-02：系統返回鍵圖層堆疊（WhatsApp 式 — 工單 §2.2/§2.3）─────────────
+  // 對話層 close = 舊 onBack 同一套語義（ref 同步 + 收 patient 抽屜 + 清 gap/建議卡）。
+  // detail sheet 換對話自動收（上面 selectedConvId effect）；patient 抽屜由 closeConv 連帶收。
+  const closeConv = useCallback(() => {
+    selectedIdRef.current = null;
+    setSelectedConvId(null);
+    setPatientDrawerOpen(false); // P2：取消選中 → 收埋病人記錄抽屜
+    setGapDividerAfterMs(null); // T2：取消選中清中間斷層分隔線
+    setSuggestion(null); // ★ cwi-followup-v3：取消選中清建議卡
+  }, []);
+  useBackLayer(
+    selectedConvId !== null,
+    closeConv,
+    "conv",
+    selectedConvId ? `/inbox?conv=${encodeURIComponent(selectedConvId)}` : null
+  );
+  useBackLayer(detailOpen, () => setDetailOpen(false), "detail");
+  useBackLayer(patientDrawerOpen, () => setPatientDrawerOpen(false), "patient");
   // ★ Realtime P0 (R5)：assign/接手要讀最新 assignVersion — ref 避免 callback stale closure
   const conversationsRef = useRef<ConversationItem[]>(conversations);
   conversationsRef.current = conversations;
@@ -1297,6 +1318,51 @@ export function InboxClient({
   //   而家 render sync 已移除，呢度必經 selectConversation 先至 socket 新訊息會 append）。
   //   selectConversation 聲明喺呢度之後，但 effect 只在 mount 後先執行 → 運行時安全（冇 TDZ）。
   //   冪等：fetchMessagesLatest merge-by-id / markRead 冪等 — 即使雙調用都冇重複載入副作用。
+  // ── cwi-setnav NAV-03：深連結起手（/inbox?conv=X 冷啟動 — 推送通知／預約卡）──────────
+  //   history = [列表, 對話]：先將冷啟動 entry reset 做「列表」，再 push 對話圖層 →
+  //   系統返回返對話列表（唔會退出 app）。只限 mobile（桌面零 pushState）+ URL 仲指向
+  //   深連結對話先做（防 stale ?conv= 残留時多 push 一層）。
+  const nav03BootedRef = useRef(false);
+  useEffect(() => {
+    if (nav03BootedRef.current) return;
+    if (!initialSelectedConvId || !isMobileViewport()) return;
+    const q = new URLSearchParams(window.location.search);
+    if (q.get("conv") !== initialSelectedConvId) return;
+    const doBoot = () => {
+      if (nav03BootedRef.current) return;
+      nav03BootedRef.current = true;
+      // reset 做「列表」entry — 清走 reload 殘留嘅 stale waLayer/n（防之後 push 複製埋舊 state）
+      const cleanState = { ...(window.history.state ?? {}) };
+      delete cleanState.waLayer;
+      delete cleanState.n;
+      window.history.replaceState(cleanState, "", "/inbox");
+      pushBackLayer("conv", closeConv, `/inbox?conv=${encodeURIComponent(initialSelectedConvId)}`);
+    };
+    // ★ 必須等 Next.js 先將 entry state 蓋印（__NA + tree）先做 boot —
+    //   我哋 push 出嚟嘅 entry 要帶埋 __NA（stateFor spread prev state）；若 Next 未蓋印就 push，
+    //   entry 無 __NA → 系統返回時 Next onPopState 視佢為 pages-router entry → location.reload()
+    //   → session history 收埋（len 3→2）+ 跳出 app（2026-10-03 BN-04 實錚）。
+    // ★ 2026-10-04 gen2 註：曾試「蓋印 + state 800ms 穩定」延後 boot — 實錚反而拉長
+    //   「boot 前系統返回 = 落 about:blank」嘅真實用戶窗口（冷深連結 + 頭 1 秒撳返回）→ 已撤回。
+    //   蓋印後即刻 boot（~15ms）係最快安全時機。BN-04 e2e 早期失敗真根因 = Playwright-core
+    //   waitForFunction 喺初始 navigation 期間 phantom-pass（detached 初始 context 嘅 history
+    //   alias 讀到假 len/state）→ test 側改用手動 main-context 輪詢（見 e2e-backnav.ts BN-04）。
+    const stamped = () => Boolean((window.history.state as { __NA?: boolean } | null)?.__NA);
+    if (stamped()) {
+      doBoot();
+      return;
+    }
+    let tries = 0;
+    const t = setInterval(() => {
+      tries += 1;
+      if (stamped() || tries > 200) {
+        clearInterval(t);
+        doBoot(); // 20s 未蓋印（唔應該發生）→ 照 boot（已知降級：該 entry 無 __NA）
+      }
+    }, 100);
+    return () => clearInterval(t);
+  }, [initialSelectedConvId, closeConv]);
+
   useEffect(() => {
     if (initialSelectedConvId) {
       void selectConversation(initialSelectedConvId);
@@ -2184,6 +2250,8 @@ export function InboxClient({
       }
       setSelectedConvId(convId);
       selectedIdRef.current = convId; // F-8：ref 同步（fetch guard 要即時准）
+      // cwi-setnav NAV-02：換對話 → replaceState（唔疊多層 — 返回一下就返列表；桌面同步 ?conv= URL）
+      backLayerReplaceUrl("conv", `/inbox?conv=${encodeURIComponent(convId)}`);
       setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge — 唔清會混兩對話）
       setHasMore(false); // ★ cwi-final S6-7：hasMore 單調口徑下換對話必須重置（否則上一對話嘅 true 漏入新對話）
       setGapDividerAfterMs(null); // T2：換對話清中間斷層分隔線
@@ -3051,15 +3119,7 @@ export function InboxClient({
       <ChatPane
         key={`chat-${selectedConv?.id ?? "none"}`} // ★ cwi-final S1-1e（=S1-6）：換對話 remount — 舊對話殘留 messages 唔會漏入新 pane
         ref={chatPaneApiRef} // ★ cwi-final S6-7：virtualized thread 跳行 API（mention bell / 通知卡）
-        onBack={() => {
-          // ★ cwi-audit2-20260908 T1：取消選中都要同步 ref（render-body sync 已移除）
-          //   — 否則舊對話嘅 socket 訊息會 append 入「未選中」狀態
-          selectedIdRef.current = null;
-          setSelectedConvId(null);
-          setPatientDrawerOpen(false); // P2：取消選中 → 收埋病人記錄抽屜
-          setGapDividerAfterMs(null); // T2：取消選中清中間斷層分隔線
-          setSuggestion(null); // ★ cwi-followup-v3：取消選中清建議卡
-        }}
+        onBack={closeConv} // ★ cwi-audit2-20260908 T1：取消選中同步 ref — cwi-setnav NAV-02 改行 closeConv（+ history 同步）
         onOpenDetail={() => setDetailOpen(true)}
         conversation={selectedConv}
         conversationLoading={selectedConvId !== null && selectedConv === null && selConvLoading} // ★ cwi-final S1-3（N-3）

@@ -1,15 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { CalendarDays, LogOut, MessageCircle, Settings, Stethoscope } from "lucide-react";
+import { BadgeDollarSign, CalendarDays, LogOut, MessageCircle, Settings, Stethoscope } from "lucide-react";
 import { logoutWithPushCleanup } from "@/lib/notify-client";
 
 /**
  * 左邊 icon rail（SleekFlow 式），取代舊 TopBar。
  * - 導航：收件箱 / 預約 /（ADMIN）管理
  * - 底部：用戶 initials → avatar menu（姓名/email/角色 + 明確「登出」項 — cwi-notify-v2 MD §5）
+ * - cwi-setnav SET-04：「報價」icon + 紅點數字（/api/admin/quotes?status=pending&countOnly=1；
+ *   30s 輪詢 — realtime 可選項未做；fail-soft = 0/隱藏）
  */
 export function NavRail({
   name,
@@ -24,16 +26,40 @@ export function NavRail({
   const [menuOpen, setMenuOpen] = useState(false);
   const pathname = usePathname();
 
+  // cwi-setnav SET-04：待確認報價計數（mount + 30s 輪詢；失敗 fail-soft 保舊值）
+  const [quoteCount, setQuoteCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetch("/api/admin/quotes?status=pending&countOnly=1", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: unknown) => {
+          if (cancelled) return;
+          const c = (d as { count?: number } | null)?.count;
+          if (typeof c === "number") setQuoteCount(c);
+        })
+        .catch(() => {});
+    };
+    load();
+    const t = window.setInterval(load, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, []);
+
   async function logout() {
     setBusy(true);
     // MD §3.6：先清 push subscription（client）→ server 兜底 → 清 session → /login
     await logoutWithPushCleanup();
   }
 
-  const items: { href: string; label: string; icon: React.ReactNode; adminOnly?: boolean }[] = [
+  const items: { href: string; label: string; icon: React.ReactNode; adminOnly?: boolean; badge?: number }[] = [
     { href: "/inbox", label: "收件箱", icon: <MessageCircle size={18} strokeWidth={2.75} /> },
     { href: "/bookings", label: "預約", icon: <CalendarDays size={18} strokeWidth={2.75} /> },
     { href: "/schedule", label: "醫生時間表", icon: <Stethoscope size={18} strokeWidth={2.75} /> },
+    // cwi-setnav SET-04：報價入口（前線日常用 — 紅點 = 待確認數）
+    { href: "/quotes", label: "報價", icon: <BadgeDollarSign size={18} strokeWidth={2.75} />, badge: quoteCount },
     { href: "/admin", label: "管理", icon: <Settings size={18} strokeWidth={2.75} />, adminOnly: true },
   ];
 
@@ -59,13 +85,18 @@ export function NavRail({
               title={it.label}
               aria-label={it.label}
               aria-current={active ? "page" : undefined}
-              className={`w-[38px] h-[38px] rounded-full flex items-center justify-center ${
+              className={`relative w-[38px] h-[38px] rounded-full flex items-center justify-center ${
                 active
                   ? "bg-brand-soft text-brand-text"
                   : "text-t2 hover:bg-black/[.04] hover:text-t1"
               }`}
             >
               {it.icon}
+              {typeof it.badge === "number" && it.badge > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 min-w-[17px] h-[17px] px-1 rounded-full bg-danger text-panel text-[10px] font-bold flex items-center justify-center">
+                  {it.badge > 99 ? "99+" : it.badge}
+                </span>
+              )}
             </Link>
           );
         })}

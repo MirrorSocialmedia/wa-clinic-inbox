@@ -9759,6 +9759,16 @@ check "T765 Origin: garbage → 403" "$FX13_GARB" "403"
 FX13_SAME=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/messages/send" -H "Origin: http://127.0.0.1:3100" -H "Content-Type: application/json" -d '{}')
 if [ "$FX13_SAME" != "403" ] && [ "$FX13_SAME" != "500" ]; then pass "T765 same-origin 過 origin gate（→ $FX13_SAME）"; else fail "T765 same-origin 被誤殺（$FX13_SAME）"; fi
 
+# ══ cwi-setnav NAV-06：手機返回鍵 e2e（scripts/e2e-backnav.ts — 7 項）═════════════
+BN_OUT=$(pnpm -s tsx scripts/e2e-backnav.ts 2>&1)
+BN_CODE=$?
+if [ "$BN_CODE" = "0" ]; then
+  pass "cwi-setnav NAV-06 backnav e2e 7/7（圖層堆疊 / 深連結 / tab 協作 / 桌面零 push）"
+else
+  echo "$BN_OUT" | sed 's/^/    /'
+  fail "cwi-setnav NAV-06 backnav e2e 失敗（exit=$BN_CODE — 見上 BN 行）"
+fi
+
 # === FX LANE B ===
 # （Lane B 各階段 T 測試入度：階段 2 預約/outbound → 階段 3 附件/API）
 
