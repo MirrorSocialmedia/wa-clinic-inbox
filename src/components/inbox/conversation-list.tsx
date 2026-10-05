@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Bell, BellRing, CalendarDays, MessageCircle, Search, Settings, X } from "lucide-react";
+import { Bell, BellRing, CalendarDays, MessageCircle, Search, Settings, X, BadgeDollarSign } from "lucide-react";
 import type { ClinicInfo, ConversationItem, ConvStatus, StaffNoticeItem } from "./types";
 import { relTime } from "./time";
 // ★ cwi-final S1-2（L-3）：膠囊 predicate — client 同 server 共用單一來源（計數不變式）
@@ -10,6 +10,8 @@ import { Virtuoso } from "react-virtuoso";
 import type { NotifyPrefs } from "@/lib/notify-client";
 import { PushDiagnostics } from "./push-diagnostics";
 import { isIOSLike, isStandalone, requestInstall } from "@/components/inbox/install-prompt";
+// cwi-setnav NAV-02：系統返回鍵圖層堆疊
+import { useBackLayer } from "@/lib/back-stack";
 
 // ── ★ cwi-final S6-7：單行對話卡片（React.memo）────────────────────────────────────
 // 由列表 items 循環抽出 — virtualization 後只有 viewport 內行掛 DOM；
@@ -391,6 +393,32 @@ export function ConversationList(p: Props) {
   // ★ cwi-statusrole2-20260910 T1（MD §1.1）：mobile <400px — 兩行 fallback（短字；第二行最多兩粒）
   const [narrow, setNarrow] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  // cwi-setnav NAV-02：列表 popover — 系統返回先閂 popover（WhatsApp 式）
+  useBackLayer(settingsOpen, () => setSettingsOpen(false), "pop:settings");
+  useBackLayer(noticeOpen, () => setNoticeOpen(false), "pop:notices");
+  useBackLayer(moreOpen, () => setMoreOpen(false), "pop:more");
+
+  // cwi-setnav SET-04：手機版報價膠囊（NavRail 係桌面 only — 手機靠呢個入口）；N=0 隱藏；30s 輪詢 fail-soft
+  const [quoteCount, setQuoteCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetch("/api/admin/quotes?status=pending&countOnly=1", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: unknown) => {
+          if (cancelled) return;
+          const c = (d as { count?: number } | null)?.count;
+          if (typeof c === "number") setQuoteCount(c);
+        })
+        .catch(() => {});
+    };
+    load();
+    const t = window.setInterval(load, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, []);
   // ★ cwi-final S1-8（L-5 修正版 / R-14）：overflow 偵測 — reset 版（el.scrollWidth > el.clientWidth + 1，
   //   放低返會回 false）。量測經隱藏 sizer（永遠佈局全量項 — 對 collapsed 狀態不變式）→ 冇 osc；
   //   爆咗先收**數字 0** 嘅膠囊入 ⋯（待跟進永遠可見，唔入 ⋯）；⋯ 隱藏膠囊數字 > 0 顯示紅點。
@@ -629,6 +657,18 @@ export function ConversationList(p: Props) {
       <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-2">
         <span className="font-display text-[19px] text-t1">收件箱</span>
         <div className="flex items-center gap-1.5">
+          {/* cwi-setnav SET-04：報價膠囊（手機 only；N=0 隱藏） */}
+          {quoteCount > 0 && (
+            <a
+              href="/quotes"
+              className="md:hidden flex items-center gap-1 h-7 px-2.5 rounded-full bg-brand-soft text-brand-text text-[11px] font-semibold"
+              aria-label={`報價確認（${quoteCount} 條待處理）`}
+              title={`${quoteCount} 條報價待確認`}
+            >
+              <BadgeDollarSign size={13} strokeWidth={2.75} />
+              報價 {quoteCount > 99 ? "99+" : quoteCount}
+            </a>
+          )}
           {p.userRole === "ADMIN" && (
             <select
               value={p.activeClinicId}

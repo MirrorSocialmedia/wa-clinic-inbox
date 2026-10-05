@@ -1,7 +1,9 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { logoutWithPushCleanup } from "@/lib/notify-client";
+import { AI_NAV_SUBITEMS } from "@/lib/ai/hub-step-contract";
 import { LegalLinks } from "@/components/legal-links";
 import {
   ArrowLeft,
@@ -11,6 +13,7 @@ import {
   BookOpenText,
   Building2,
   CalendarDays,
+  ChevronDown,
   ClipboardCheck,
   FileText,
   LayoutDashboard,
@@ -58,6 +61,10 @@ const SECTION_NAMES: Record<string, string> = {
   "/admin/consult": "AI 傾偈設定",
   "/admin/knowledge": "知識庫",
   "/admin/golden": "GoldenCase 評測",
+  // cwi-setnav SET-08：麵包屑補名（缺嘅全部補 — 唔好再顯示「設定」）
+  "/admin/usage": "用量統計",
+  "/admin/clinical-terms": "術語對照表",
+  "/admin/quotes": "報價確認",
 };
 
 export function AdminShell({
@@ -75,7 +82,21 @@ export function AdminShell({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const section = SECTION_NAMES[pathname] ?? "設定";
+  // cwi-setnav SET-07：ADMIN 側欄 AI 組可摺疊子項（同一份契約清單 — 同 AI 流程七步共用）
+  const [aiSubOpen, setAiSubOpen] = useState(false);
+
+  // cwi-setnav NAV-05：管理頁手機版「< 返回」— 子頁返總覽；總覽返收件箱（上一層係收件箱先 back）
+  function onMobileBack() {
+    if (pathname !== "/admin") {
+      router.replace("/admin");
+      return;
+    }
+    const st = window.history.state as { waFrom?: string } | null;
+    if (st?.waFrom === "/inbox") window.history.back();
+    else router.replace("/inbox");
+  }
 
   const allGroups: { title: string; items: NavItem[] }[] = [
     {
@@ -92,7 +113,8 @@ export function AdminShell({
         { href: "/schedule", label: "醫生時間表", icon: CalendarDays },
         { href: "/admin/followups", label: "跟進規則", icon: BellRing },
         { href: "/admin/clinical-terms", label: "術語對照表", icon: BookOpenText },
-        { href: "/admin/quotes", label: "報價確認", icon: BadgeDollarSign },
+        // cwi-setnav SET-04：報價確認搬入收件箱殼（/admin/quotes 已 redirect /quotes）
+        { href: "/quotes", label: "報價確認", icon: BadgeDollarSign },
       ],
     },
     {
@@ -125,7 +147,8 @@ export function AdminShell({
 
   // ★ cwi-statusrole2-20260910（MD §5.2）：SUPERVISOR 側欄只留「總覽 / 醫生時間表 / AI 自動化 / AI 建議」—
   //   其餘設定類隱藏（route 層 RBAC 403 係背墊；UI 先做第一層唔好見到 dead link）
-  const SUPERVISOR_NAV = new Set(["/admin", "/schedule", "/admin/ai", "/admin/automation", "/admin/suggestions"]);
+  // ★ cwi-setnav SET-06（老細 2026-10-03 20:18 HKT 拍板）：+報價確認（/quotes 唯讀）+術語對照表 — 淨加 nav 入口，API 寫權限唔改（SUPERVISOR 寫 /quotes 仍 403）
+  const SUPERVISOR_NAV = new Set(["/admin", "/schedule", "/admin/ai", "/admin/automation", "/admin/suggestions", "/quotes", "/admin/clinical-terms"]);
   // ★ cwi-statusrole2-20260910（MD §5.2）取代 cwi-routing-20260906 §8 舊 filter（只露 AI 兩頁）：
   //   SUPERVISOR = 全店唯讀 + AI 級別讀寫 → 側欄 = 總覽 / 醫生時間表 / AI 自動化 / AI 建議
   const visibleGroups =
@@ -166,26 +189,60 @@ export function AdminShell({
                 {g.items.map((it) => {
                   const active = pathname === it.href;
                   const Icon = it.icon;
+                  // cwi-setnav SET-07：AI 流程項下掛可摺疊子項（ADMIN only）
+                  const isAiHub = it.href === "/admin/ai" && role === "ADMIN";
                   return (
-                    <a
-                      key={it.href}
-                      href={it.href}
-                      aria-current={active ? "page" : undefined}
-                      className={`flex items-center gap-2.5 px-3 py-2 rounded-full text-[13px] font-semibold transition-colors ${
-                        active ? "bg-brand-soft text-brand-text" : "text-t2 hover:bg-black/[.04]"
-                      }`}
-                    >
-                      <Icon size={15} strokeWidth={2.75} className="flex-none" />
-                      <span className="truncate">{it.label}</span>
-                      {typeof it.badge === "number" && it.badge > 0 && (
-                        <span
-                          className="ml-auto min-w-[19px] h-[19px] px-1.5 rounded-full bg-brand-soft border border-line-strong grid place-items-center text-[10.5px] font-semibold text-brand-text flex-none"
-                          title={`待審 ${it.badge} 條`}
+                    <div key={it.href} className="flex flex-col">
+                      <div className="flex items-center">
+                        <a
+                          href={it.href}
+                          aria-current={active ? "page" : undefined}
+                          className={`flex-1 flex items-center gap-2.5 px-3 py-2 rounded-full text-[13px] font-semibold transition-colors ${
+                            active ? "bg-brand-soft text-brand-text" : "text-t2 hover:bg-black/[.04]"
+                          }`}
                         >
-                          {it.badge}
-                        </span>
+                          <Icon size={15} strokeWidth={2.75} className="flex-none" />
+                          <span className="truncate">{it.label}</span>
+                          {typeof it.badge === "number" && it.badge > 0 && (
+                            <span
+                              className="ml-auto min-w-[19px] h-[19px] px-1.5 rounded-full bg-brand-soft border border-line-strong grid place-items-center text-[10.5px] font-semibold text-brand-text flex-none"
+                              title={`待審 ${it.badge} 條`}
+                            >
+                              {it.badge}
+                            </span>
+                          )}
+                        </a>
+                        {isAiHub && (
+                          <button
+                            onClick={() => setAiSubOpen((v) => !v)}
+                            aria-expanded={aiSubOpen}
+                            title={aiSubOpen ? "摺起 AI 子項" : "展開 AI 子項"}
+                            className="ml-1 p-1.5 rounded-full text-t3 hover:bg-black/[.04] hover:text-t1 flex-none"
+                          >
+                            <ChevronDown size={13} strokeWidth={2.75} className={`transition-transform ${aiSubOpen ? "rotate-180" : ""}`} />
+                          </button>
+                        )}
+                      </div>
+                      {isAiHub && aiSubOpen && (
+                        <div className="flex flex-col pl-7 pr-2 pb-1 gap-0.5">
+                          {AI_NAV_SUBITEMS.map((sub) => {
+                            const subActive = pathname === sub.href.split("#")[0];
+                            return (
+                              <a
+                                key={sub.href}
+                                href={sub.href}
+                                aria-current={subActive ? "page" : undefined}
+                                className={`px-3 py-1.5 rounded-full text-[12px] transition-colors ${
+                                  subActive ? "bg-brand-soft text-brand-text font-semibold" : "text-t3 hover:text-t1 hover:bg-black/[.04]"
+                                }`}
+                              >
+                                {sub.label}
+                              </a>
+                            );
+                          })}
+                        </div>
                       )}
-                    </a>
+                    </div>
                   );
                 })}
               </div>
@@ -221,10 +278,20 @@ export function AdminShell({
         {/* ── 右側內容區（麵包屑 + 頁面內容） ── */}
         <main className="flex-1 min-w-0 p-5 md:p-7">
           <div className="flex items-center justify-between gap-3 mb-5">
-            <nav className="text-[11px] text-t2" aria-label="麵包屑">
-              設定 <span className="mx-1 text-t3">/</span>{" "}
-              <span className="font-semibold text-t1">{section}</span>
-            </nav>
+            <div className="flex items-center gap-2 min-w-0">
+              {/* cwi-setnav NAV-05：手機版頂部「< 返回」（而家只得「回到 Inbox」） */}
+              <button
+                onClick={onMobileBack}
+                aria-label="返回"
+                className="md:hidden -ml-1 p-1.5 rounded-full text-t2 hover:bg-black/[.04] flex-none"
+              >
+                <ArrowLeft size={15} strokeWidth={2.75} />
+              </button>
+              <nav className="text-[11px] text-t2 truncate" aria-label="麵包屑">
+                設定 <span className="mx-1 text-t3">/</span>{" "}
+                <span className="font-semibold text-t1">{section}</span>
+              </nav>
+            </div>
             <a
               href="/inbox"
               className="flex items-center gap-1.5 text-[11px] font-semibold text-t2 hover:text-brand-text flex-none"

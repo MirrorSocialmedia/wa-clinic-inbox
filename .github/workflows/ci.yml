@@ -30,6 +30,10 @@ jobs:
       ALLOW_MOCK_IN_PROD: "1"
       RETENTION_CONV_MONTHS: "24"
       RETENTION_MEDIA_MONTHS: "12"
+      # ★ cwi-setnav（2026-10-04）：middleware S3-6 origin 守門 — next({dev}) custom server 嘅
+      #   req.nextUrl.host 係 Next 內部 default（localhost:3000，跟實際 bind 無關）；固定 APP_HOST
+      #   先同 e2e harness 嘅 origin（BASE host）確定性匹配（本地 .env.local 同招；CI 無 .env.local）。
+      APP_HOST: "127.0.0.1:3100"
       # S6-1 deviation（記錄在案）：runner 無 ms-playwright registry → 指 system chrome
       #（spec S6-1「executablePath 讀 env PW_CHROMIUM（冇就用 playwright 預設）」機制；
       #   mock-e2e.sh --ci 內嘅 browser e2e 經 scripts/_pw.ts chromiumPath() 消費呢個 env）
@@ -74,6 +78,31 @@ jobs:
       #   獨立 DB wa_t + Redis db 5（唔污染 mock-e2e）；臨時 .env 跑完即刪。本地模擬 15/15 綠；故意 fail 測試會紅。
       - run: bash scripts/ci-src-tests.sh
       - run: pnpm tsx scripts/e2e-authz-matrix.ts   # T630
+      # ★ cwi-setnav SET-09：入口回歸爬蟲（角色 × 桌面/手機 BFS — 新頁冇入口 = 紅；server 冇就自起，跑完還原）
+      # ★ cwi-setnav：nav-reach 前掃走殘留 node server（確定性單 server — 防前 step teardown 漏殺）。
+      #   ⚠ 更正（2026-10-04，run 37197787333 server log 實錚）：之前幾次 25-30s 即死嘅真根因唔係 OOM，
+      #   係呢步 CI 冇 .env → 自起 server 冇 SESSION_SECRET → login 500 → fatal；已喺 e2e-nav-reach.ts
+      #   freshEnvRecipe() 修（同 e2e-authz-matrix selfStartEnv 同一份 fake 配方）。
+      - run: |
+          pkill -f " server.ts" 2>/dev/null || true
+          pkill -f "next dev" 2>/dev/null || true
+          sleep 3
+          lsof -ti:3100 -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+          sleep 1
+      # ★ cwi-setnav：shell wrapper — 若 script 被 SIGKILL/OOM（exit 137）或 native crash，JS catch 唔會行；
+      #   wrapper 喺 step 層捕 exit code + server log tail + dmesg/journal OOM 訊息 → log 自包含（唔使 PAT 都斷因）。
+      - run: |
+          set +e
+          pnpm tsx scripts/e2e-nav-reach.ts
+          rc=$?
+          echo "NAV-REACH EXIT CODE: $rc"
+          if [ $rc -ne 0 ]; then
+            echo "=== /tmp/nav-reach-server.log (tail 40) ==="
+            tail -40 /tmp/nav-reach-server.log 2>/dev/null || echo "(no server log)"
+            echo "=== dmesg OOM 訊號（最後 20 行） ==="
+            dmesg 2>/dev/null | tail -20 || journalctl -k --since "-10 min" 2>/dev/null | tail -20 || echo "(no kernel log access)"
+          fi
+          exit $rc
       - run: bash scripts/mock-e2e.sh --ci
       # ★ cwi-qa CI-D1：失敗時上傳 server／worker log — CI 之前只見 mock-e2e stdout，dev server 嘅真錯誤
       #   （例 `⨯ SyntaxError: Unexpected end of JSON input` manifest race、route stack trace）完全睇唔到，

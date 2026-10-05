@@ -5,6 +5,7 @@
  * 入隊列等醫生／護士 ✓ 收貨 / ✎ 改 / ✗ 丟；收貨可「順手教字典」（teachTerm → CWM ClinicalTermMap）。
  *
  * GET  ?status=pending,confirmed,corrected&limit=200 → { v:1, quotes:[...] }（零原始電話）
+ *       ?status=pending&countOnly=1 → { v:1, count }（cwi-setnav SET-04：NavRail 紅點／膠囊計數；上限 500 — API 最大頁）
  * POST { id, action: confirm|correct|discard, fields?, teachTerm?, correctionNote? }
  *   → { v:1, id, status, termMapUpserted }
  *
@@ -38,26 +39,30 @@ export const GET = handle(async (req: NextRequest) => {
   const sp = new URL(req.url).searchParams;
   const status = sp.get("status") ?? undefined;
   const limit = sp.get("limit") ? Math.min(Number(sp.get("limit")) || 200, 500) : 200;
+  // cwi-setnav SET-04：待確認計數（NavRail 紅點／手機膠囊）— 同一 scope 口徑，只回數字
+  const countOnly = sp.get("countOnly") === "1";
   const codes = await scopedCodes(ctx);
   // ★ cwi-final S5-13①：workforce 已支援 clinic filter — 受限用戶先試 server-side（clinicCodes = shortName 兼容）；
   //   400 CLINIC_CODE_NOT_FOUND（W 碼對唔到 CWM shortName — 數據未對齊）→ fallback 舊「攞 500 條再 filter」（S0-7 保證）。
   if (!codes) {
-    const data = await fetchQuotes({ status, limit });
+    const data = await fetchQuotes({ status, limit: countOnly ? 500 : limit });
+    if (countOnly) return NextResponse.json({ v: 1, count: data.quotes.length });
     return NextResponse.json(data);
   }
   let quotes: WorkforceQuote[];
   try {
     const data = await fetchQuotes({ status, limit: 500, clinicCodes: [...codes] });
-    quotes = data.quotes.slice(0, limit);
+    quotes = data.quotes;
   } catch (e) {
     if (e instanceof WorkforceApiError && e.status === 400 && e.code === "CLINIC_CODE_NOT_FOUND") {
       const data = await fetchQuotes({ status, limit: 500 });
-      quotes = data.quotes.filter((q) => codes.has(q.clinicCode)).slice(0, limit);
+      quotes = data.quotes.filter((q) => codes.has(q.clinicCode));
     } else {
       throw e;
     }
   }
-  return NextResponse.json({ v: 1, quotes });
+  if (countOnly) return NextResponse.json({ v: 1, count: quotes.length });
+  return NextResponse.json({ v: 1, quotes: quotes.slice(0, limit) });
 });
 
 export const POST = handle(async (req: NextRequest) => {

@@ -77,6 +77,8 @@ import { fmtAmt, fmtDateShort } from "@/lib/patient-record-state";
 import { BookingCard } from "./booking-card";
 import { HoldCard } from "./hold-card";
 import { WindowExits } from "./window-exits";
+// cwi-setnav NAV-02：對話內彈窗／popover — 系統返回先閂彈窗（WhatsApp 式）
+import { useBackLayer } from "@/lib/back-stack";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -782,6 +784,9 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   const [flagMenuOpen, setFlagMenuOpen] = useState(false);
   const [flagBusy, setFlagBusy] = useState(false);
   const [flagMsg, setFlagMsg] = useState<string | null>(null);
+  // cwi-setnav NAV-02：確認彈窗 + 旗標選單入返回堆疊
+  useBackLayer(outConfirm !== null, () => setOutConfirm(null), "modal:confirm");
+  useBackLayer(flagMenuOpen, () => setFlagMenuOpen(false), "pop:flag");
   // ★ cwi-final S6-7：thread virtualization（react-virtuoso normal mode — startReached 載舊 / followOutput 貼最新）
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const scrollerElRef = useRef<HTMLDivElement | null>(null);

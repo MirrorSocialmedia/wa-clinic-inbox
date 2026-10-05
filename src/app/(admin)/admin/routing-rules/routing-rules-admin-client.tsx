@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { applyLexicon } from "@/lib/sessions/lexicon-core"; // pure — client-safe（★ cwi-auditfix-20260908 H-1）
+// cwi-setnav SET-05：技能組入口連結（同一份契約清單 — 同 AI 流程第⑤步共用）
+import { STEP_EXTRA_LINKS } from "@/lib/ai/hub-step-contract";
+const SKILL_GROUP_LINK = STEP_EXTRA_LINKS[4][0]; // ["技能組", "/admin/skill-groups"]
 
 /**
  * 路由規則管理 client — ★ cwi-routing-20260906（MD §4.2）。
@@ -212,6 +215,13 @@ export default function RoutingRulesAdmin() {
           <p className="text-xs text-t3 mt-0.5">
             ⚠️ <b>首個命中即停</b> — 順序好重要，可以拖拉改次序（改完即時生效）。店規則同全局規則同名／同優先級時，店規則覆蓋全局。
           </p>
+          {/* cwi-setnav SET-05：技能組入口（同一份契約清單 — 同 AI 流程第⑤步共用） */}
+          <a
+            href={SKILL_GROUP_LINK[1]}
+            className="inline-flex items-center gap-1 mt-1.5 text-xs font-semibold text-brand-text hover:underline"
+          >
+            {SKILL_GROUP_LINK[0]} →
+          </a>
         </div>
         <button
           onClick={() => setEditing("new")}

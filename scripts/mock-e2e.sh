@@ -3641,15 +3641,20 @@ PC_FAIL=0
 
 # ── PC setup：helpers + 重起 worker（乾浄 env + 預設 visit reason）+ 槽位選擇 ──
 # 相對日期窗口（mock AI 只識聽日/後日/大後日 → +1/+2/+3）
-PC_D1=$(date -d '+1 day' +%F); PC_D2=$(date -d '+2 day' +%F); PC_D3=$(date -d '+3 day' +%F)
+# ★ cwi-setnav CI fix（run 37211675525）：PC_D1..3 以前喺 PC setup 計一次 — mock-e2e 全程 ~75 分鐘，
+#   CI 喺 15:00–16:00 UTC 開跑就會喺中途跨 HKT 午夜：T680（~00:06 HKT）揀咗舊「聽日」（10/5），
+#   但 app 而家當「聽日」= 10/6 → 「該日冇開診」→ T680 七紅。改為每次 pick／換算都即時重計。
+pc_refresh_days() { PC_D1=$(date -d '+1 day' +%F); PC_D2=$(date -d '+2 day' +%F); PC_D3=$(date -d '+3 day' +%F); }
+pc_refresh_days
 # pc_pick <clinicId> <providerApricotId|''> <offset> → "providerApricotId|date"（15:00 open 槽）
 pc_pick() {
   local prov="${2:-}"
+  pc_refresh_days
   q "SELECT (\"providerApricotId\"||'|'||\"date\") v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$1' AND \"startTime\"='15:00' AND \"isOpen\"=true AND \"bookedCount\"=0 AND \"date\" IN ('$PC_D1','$PC_D2','$PC_D3')${prov:+ AND \"providerApricotId\"='$prov'} ORDER BY \"date\",\"providerApricotId\" LIMIT 1 OFFSET ${3:-0}" | jf v
 }
 pc_prov_name() { q "SELECT name FROM \"Provider\" WHERE \"apricotId\"='$1'" | jf name; }
 pc_surname() { local n; n=$(pc_prov_name "$1"); echo "${n%% *}"; }
-pc_date_kw() { case "$1" in "$PC_D1") echo "聽日";; "$PC_D2") echo "後日";; "$PC_D3") echo "大後日";; *) echo "";; esac; }
+pc_date_kw() { pc_refresh_days; case "$1" in "$PC_D1") echo "聽日";; "$PC_D2") echo "後日";; "$PC_D3") echo "大後日";; *) echo "";; esac; }
 pc_conv_of() { q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$1' AND c.\"clinicId\"='$2' ORDER BY c.\"lastMessageAt\" DESC LIMIT 1" | jf id; }
 pc_contact_of() { q "SELECT id FROM \"Contact\" WHERE \"waId\"='$1' AND \"clinicId\"='$2'" | jf id; }
 pc_sess_replies() { q "SELECT count(*)::text c FROM \"Message\" WHERE \"conversationId\"='$1' AND \"direction\"='OUT' AND type='text' AND status='SENT' AND \"bookingSessionId\" IS NOT NULL" | jf c; }
@@ -9753,6 +9758,16 @@ check "T765 Origin: garbage → 403" "$FX13_GARB" "403"
 # 對照：同站 Origin → 過 origin gate（無 cookie → 401 屬正常；403/500 = 誤殺/回歸）
 FX13_SAME=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/messages/send" -H "Origin: http://127.0.0.1:3100" -H "Content-Type: application/json" -d '{}')
 if [ "$FX13_SAME" != "403" ] && [ "$FX13_SAME" != "500" ]; then pass "T765 same-origin 過 origin gate（→ $FX13_SAME）"; else fail "T765 same-origin 被誤殺（$FX13_SAME）"; fi
+
+# ══ cwi-setnav NAV-06：手機返回鍵 e2e（scripts/e2e-backnav.ts — 7 項）═════════════
+BN_OUT=$(pnpm -s tsx scripts/e2e-backnav.ts 2>&1)
+BN_CODE=$?
+if [ "$BN_CODE" = "0" ]; then
+  pass "cwi-setnav NAV-06 backnav e2e 7/7（圖層堆疊 / 深連結 / tab 協作 / 桌面零 push）"
+else
+  echo "$BN_OUT" | sed 's/^/    /'
+  fail "cwi-setnav NAV-06 backnav e2e 失敗（exit=$BN_CODE — 見上 BN 行）"
+fi
 
 # === FX LANE B ===
 # （Lane B 各階段 T 測試入度：階段 2 預約/outbound → 階段 3 附件/API）
