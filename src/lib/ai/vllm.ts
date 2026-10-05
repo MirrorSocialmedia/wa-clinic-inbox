@@ -101,8 +101,16 @@ export function __resetBreakerForTest(): void {
 
 // ── chat.completions ────────────────────────────────────────────────────
 
+/**
+ * ★ cwi-labdoc-extract：multimodal content part（OpenAI-compatible；sglang/vLLM 都支援 image_url data URL）。
+ *   只喺 VISION 模式用（labdoc-extract）；其餘 caller 照舊用 string content。
+ */
+export type AiContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export interface AiChatOptions {
-  messages: { role: "system" | "user"; content: string }[];
+  messages: { role: "system" | "user"; content: string | AiContentPart[] }[];
   /** vLLM guided_json schema（強制結構化輸出） */
   guidedJson?: unknown;
   /** ★ consult v2.1 C4：per-call 參數覆寫（唔提供 = 原口徑 temperature 0 / AI_TIMEOUT_MS / 600 tokens） */
@@ -128,10 +136,16 @@ export interface AiChatResult {
   model: string;
   tokens: number;
   latencyMs: number;
+  /**
+   * ★ cwi-labdoc-extract：上游 choices[0].finish_reason（"stop" | "length" | …；冇就 null）。
+   *   "length" = 輸出撞 max_tokens 被截斷 — labdoc 用嚟報 reason "truncated"（唔再含糊報 parse_error）。
+   *   其他 caller 唔使理（新增欄位，舊口徑不變）。
+   */
+  finishReason: string | null;
 }
 
 interface ChatCompletionResponse {
-  choices?: { message?: { content?: string | null; reasoning_content?: string | null } }[];
+  choices?: { message?: { content?: string | null; reasoning_content?: string | null }; finish_reason?: string | null }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   error?: { message?: string };
 }
@@ -195,6 +209,7 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
       model,
       tokens: json?.usage?.total_tokens ?? 0,
       latencyMs,
+      finishReason: typeof choice?.finish_reason === "string" ? choice.finish_reason : null,
     };
   } catch (err) {
     if (err instanceof AiCallError) throw err;

@@ -81,6 +81,7 @@
     "test:unit-reopen-reply": "tsx scripts/unit-reopen-reply.ts",
     "test:unit-knowledge": "tsx scripts/unit-knowledge.ts",
     "test:unit-impressions-f": "tsx scripts/unit-impressions-f.ts",
+    "test:unit-labdoc-extract": "tsx scripts/unit-labdoc-extract.ts",
     "seed:knowledge": "tsx scripts/seed-knowledge.ts",
     "golden:export": "tsx scripts/golden-export.ts",
     "eval:golden": "tsx scripts/eval-golden.ts",
@@ -114,7 +115,8 @@
     "test:unit-followup": "tsx scripts/unit-followup.ts",
     "test:unit-t724": "tsx scripts/unit-t724-status-rank.ts",
     "test:unit-workforce-mock-json": "tsx scripts/unit-workforce-mock-json.ts",
-    "e2e:s11c-t714": "tsx scripts/e2e-s11c-t714.ts"
+    "e2e:s11c-t714": "tsx scripts/e2e-s11c-t714.ts",
+    "e2e:labdoc-extract": "tsx scripts/e2e-labdoc-extract.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

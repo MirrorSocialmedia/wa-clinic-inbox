@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "labdoc-extract-result.v1",
+  "description": "cwm-labdoc §5.4 輸出 JSON — wa-inbox ⇄ CWM 共用契約（兩 repo 同一份文字；byte-compare 防漂移）。語義：INVOICE 嘅 sections=[]；STATEMENT 嘅 groups=[]；多餘欄位丟棄（parse 端非 strict）；必填欄缺 → bad_response（重試計一次）；日期一律 YYYY-MM-DD、statementMonth YYYY-MM、原文放 *Raw 欄；金額純數字（貸項/CREDIT 負數）；讀單後系統檢查（§5.5）同敏感數字過濾（§5.6）屬 CWM 側，唔係呢份契約。",
+  "type": "object",
+  "required": [
+    "kind",
+    "lab",
+    "billTo",
+    "docNoRaw",
+    "docNoLabel",
+    "dateRaw",
+    "date",
+    "deliveryDate",
+    "orderReceivedDate",
+    "statementMonth",
+    "groups",
+    "sections",
+    "subtotal",
+    "total",
+    "readIssues"
+  ],
+  "properties": {
+    "kind": { "enum": ["INVOICE", "STATEMENT"] },
+    "lab": {
+      "type": "object",
+      "required": ["nameRaw", "nameCnRaw", "payeeRaw"],
+      "properties": {
+        "nameRaw": { "type": ["string", "null"] },
+        "nameCnRaw": { "type": ["string", "null"] },
+        "payeeRaw": { "type": ["string", "null"] }
+      }
+    },
+    "billTo": {
+      "type": "object",
+      "required": ["nameRaw", "addressRaw", "customerNoRaw", "shortCodeRaw", "doctorRaw"],
+      "properties": {
+        "nameRaw": { "type": ["string", "null"] },
+        "addressRaw": { "type": ["string", "null"] },
+        "customerNoRaw": { "type": ["string", "null"] },
+        "shortCodeRaw": { "type": ["string", "null"] },
+        "doctorRaw": { "type": ["string", "null"] }
+      }
+    },
+    "docNoRaw": { "type": ["string", "null"] },
+    "docNoLabel": { "type": ["string", "null"] },
+    "dateRaw": { "type": ["string", "null"] },
+    "date": { "type": ["string", "null"] },
+    "deliveryDate": { "type": ["string", "null"] },
+    "orderReceivedDate": { "type": ["string", "null"] },
+    "statementMonth": { "type": ["string", "null"] },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["patientNameRaw", "patientCodeRaw", "labCaseRef", "lines"],
+        "properties": {
+          "patientNameRaw": { "type": ["string", "null"] },
+          "patientCodeRaw": { "type": ["string", "null"] },
+          "labCaseRef": { "type": ["string", "null"] },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["description", "toothRaw", "qty", "unitPrice", "listPrice", "discountRaw", "amount"],
+              "properties": {
+                "description": { "type": "string" },
+                "toothRaw": { "type": ["string", "null"] },
+                "qty": { "type": ["number", "null"] },
+                "unitPrice": { "type": ["number", "null"] },
+                "listPrice": { "type": ["number", "null"] },
+                "discountRaw": { "type": ["string", "null"] },
+                "amount": { "type": "number" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["clinicRaw", "doctorRaw", "customerNoRaw", "addressRaw", "pageFrom", "pageTo", "total", "currentTotal", "lines"],
+        "properties": {
+          "clinicRaw": { "type": ["string", "null"] },
+          "doctorRaw": { "type": ["string", "null"] },
+          "customerNoRaw": { "type": ["string", "null"] },
+          "addressRaw": { "type": ["string", "null"] },
+          "pageFrom": { "type": ["number", "null"] },
+          "pageTo": { "type": ["number", "null"] },
+          "total": { "type": ["number", "null"] },
+          "currentTotal": { "type": ["number", "null"] },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["lineType", "docNoRaw", "date", "patientRaw", "patientCodeRaw", "labCaseRef", "description", "toothRaw", "qty", "unitPrice", "amount", "agingBucket"],
+              "properties": {
+                "lineType": { "enum": ["INVOICE", "CREDIT", "PAYMENT", "CHARGE", "BF"] },
+                "docNoRaw": { "type": ["string", "null"] },
+                "date": { "type": ["string", "null"] },
+                "patientRaw": { "type": ["string", "null"] },
+                "patientCodeRaw": { "type": ["string", "null"] },
+                "labCaseRef": { "type": ["string", "null"] },
+                "description": { "type": ["string", "null"] },
+                "toothRaw": { "type": ["string", "null"] },
+                "qty": { "type": ["number", "null"] },
+                "unitPrice": { "type": ["number", "null"] },
+                "amount": { "type": "number" },
+                "agingBucket": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "subtotal": { "type": ["number", "null"] },
+    "total": { "type": ["number", "null"] },
+    "readIssues": { "type": "array", "items": { "type": "string" } }
+  }
+}

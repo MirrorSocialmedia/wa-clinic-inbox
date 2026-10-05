@@ -78,6 +78,13 @@ jobs:
       #   獨立 DB wa_t + Redis db 5（唔污染 mock-e2e）；臨時 .env 跑完即刪。本地模擬 15/15 綠；故意 fail 測試會紅。
       - run: bash scripts/ci-src-tests.sh
       - run: pnpm tsx scripts/e2e-authz-matrix.ts   # T630
+      # ★ cwi-labdoc-extract：讀單 proxy 真 server e2e（L-1…L-9：真網絡信封、413、REPLAY、BAD_TAG／STALE、
+      #   parse_error／bad_response／truncated／llm_error、零 DB 寫入、唔 log 原文）。以前只喺本機跑，CI 從來冇跑過。
+      #   自管資源：DB wa_labdoc（drop → create → drop；owner = URL user）、Redis db 6（FLUSHDB）、
+      #   server :3105、mock 上游 :39099 — 唔撞 mock-e2e（3100／wa／db 0）。放喺 mock-e2e 之前：佢自己清晒先交棒。
+      - run: timeout 900 pnpm e2e:labdoc-extract
+        env:
+          LABDOC_E2E_BASE_DB_URL: "postgresql://postgres:pw@localhost:15432/wa"
       # ★ cwi-setnav SET-09：入口回歸爬蟲（角色 × 桌面/手機 BFS — 新頁冇入口 = 紅；server 冇就自起，跑完還原）
       # ★ cwi-setnav：nav-reach 前掃走殘留 node server（確定性單 server — 防前 step teardown 漏殺）。
       #   ⚠ 更正（2026-10-04，run 37197787333 server log 實錚）：之前幾次 25-30s 即死嘅真根因唔係 OOM，

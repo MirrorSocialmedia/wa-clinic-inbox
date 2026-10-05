@@ -295,6 +295,12 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/internal/llm-extract", method: "POST", body: JSON.stringify({ v: 1 }) }),
     expect: { UNAUTH: 401 }, // bad envelope（信封驗 — 唔係 RBAC cookie）
   },
+  "POST /api/internal/labdoc-extract": {
+    // cwi-labdoc-extract（cwm-labdoc §5.2）：同 llm-extract 同構（AES-GCM 信封守門先於 RBAC）；
+    // gate 已開（selfStartEnv LLM_PROXY_ENABLED=1 + fake secret）→ { v: 1 } 缺 kid/nonce → 401 BAD_ENVELOPE
+    fixture: () => ({ url: "/api/internal/labdoc-extract", method: "POST", body: JSON.stringify({ v: 1 }) }),
+    expect: { UNAUTH: 401 }, // bad envelope（信封驗 — 唔係 RBAC cookie）
+  },
 
   // ═══ admin — S3-1 target ═══
   "GET /api/admin/staff": {
