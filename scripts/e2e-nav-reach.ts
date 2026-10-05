@@ -29,6 +29,7 @@ import { execSync, spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { PrismaClient } from "@prisma/client";
 import { chromium, chromiumPath } from "./_pw";
+import { parseListenPids } from "./_listen-pids";
 
 const require = createRequire(path.join(process.cwd(), "package.json"));
 const argon2 = require("argon2");
@@ -57,9 +58,10 @@ const prisma = new PrismaClient();
 
 // ── server 探活 / hermetic 自起（同 e2e-authz-matrix 同招）────────────────────
 function pidsOn3100(): number[] {
+  // ★ 只列 LISTEN state（防 established connection 誤列 — 2026-09-24 T634 自殺實錚）；parse 用共享純函數。
   try {
-    const out = execSync("lsof -ti:3100 -sTCP:LISTEN", { encoding: "utf8" }).trim();
-    return out ? out.split("\n").filter(Boolean).map(Number) : [];
+    const out = execSync("lsof -ti:3100 -sTCP:LISTEN", { encoding: "utf8" });
+    return parseListenPids(out);
   } catch {
     return [];
   }
@@ -82,8 +84,9 @@ async function ensureServer(): Promise<boolean> {
   //   + 錯代碼 reuse — 本地 dev unit 錯殺風險低：unit Restart=always 自復原）
   if (pidsOn3100().length > 0) {
     console.log("  [nav-reach] 3100 有既有进程 → kill 後自起（確定性單 server）");
+    // ★ cwi-labdoc-followup m-7：port-scoped kill-by-PID only — 舊 `pkill -f " server.ts"` 已移除
+    //   （pattern kill 會誤殺本地 dev 3100 — 鐵律：禁 pattern kill）；冇 listener = no-op。
     for (const p of pidsOn3100()) { try { process.kill(p, "SIGTERM"); } catch { /* */ } }
-    try { execSync('pkill -f " server.ts" || true', { stdio: "ignore" }); } catch { /* */ }
     await sleep(3_000);
     for (const p of pidsOn3100()) { try { process.kill(p, "SIGKILL"); } catch { /* */ } }
     await sleep(1_000);
