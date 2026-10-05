@@ -12,6 +12,8 @@
  *   6. route in-process（env hermetic pin + 本 process mock OpenAI 上游，ephemeral port）：
  *      200 happy（TEXT/VISION + prompt/image 上游斷言）、413、400/401/409、
  *      reason 路徑（parse_error / bad_response / llm_error / breaker_open）、429 BUSY、503 NOT_ENABLED
+ *   8. 時限同重試（施工單 v1.1 §5.2）：總 deadline 包埋重試／fallback、VISION 唔用 fallback model、
+ *      finish_reason=length → truncated、AI_MOCK 月結單數字自洽（Σ 行 = section total）
  *
  * 跑法（repo root）：pnpm tsx scripts/unit-labdoc-extract.ts
  * 退出碼：0 = 全過；1 = 有 fail
@@ -44,7 +46,11 @@ function check(name: string, cond: boolean, detail = ""): void {
 }
 
 // ── mock OpenAI-compatible 上游（本 process，ephemeral port；零真 GPU）─────────────────
-type UpstreamMode = { kind: "content"; content: string } | { kind: "sleep"; ms: number; content: string } | { kind: "500" };
+type UpstreamMode =
+  | { kind: "content"; content: string; finishReason?: string }
+  | { kind: "sleep"; ms: number; content: string }
+  | { kind: "500" }
+  | { kind: "slow500"; ms: number };
 let upstreamMode: UpstreamMode = { kind: "content", content: "" };
 const upstreamBodies: unknown[] = [];
 const upstream = http.createServer((req, res) => {
@@ -65,7 +71,15 @@ const upstream = http.createServer((req, res) => {
       finish(JSON.stringify({ error: { message: "mock upstream boom" } }), 500);
       return;
     }
-    const content = JSON.stringify({ choices: [{ message: { content: upstreamMode.content } }], usage: { total_tokens: 10 } });
+    if (upstreamMode.kind === "slow500") {
+      setTimeout(() => finish(JSON.stringify({ error: { message: "mock upstream slow boom" } }), 500), upstreamMode.ms);
+      return;
+    }
+    const finishReason = upstreamMode.kind === "content" ? upstreamMode.finishReason ?? "stop" : "stop";
+    const content = JSON.stringify({
+      choices: [{ message: { content: upstreamMode.content }, finish_reason: finishReason }],
+      usage: { total_tokens: 10 },
+    });
     if (upstreamMode.kind === "sleep") {
       setTimeout(() => finish(content), upstreamMode.ms);
     } else {
@@ -172,6 +186,8 @@ async function main(): Promise<void> {
     LABDOC_MAX_TEXT_CHARS,
     LabDocValidationError,
     __resetLabDocBreakerForTest,
+    __setLabDocTimeoutForTest,
+    LABDOC_LLM_TIMEOUT_MS,
   } = await import("../src/lib/internal/labdoc-llm");
   const { LABDOC_EXTRACT_PROMPT, buildLabDocPrompt, LABDOC_MAX_HINT_CHARS } = await import("../src/lib/labdoc/prompt");
   const { POST } = await import("../src/app/api/internal/labdoc-extract/route");
@@ -541,6 +557,88 @@ async function main(): Promise<void> {
     const r = await hit(JSON.stringify(env));
     const dec = openResp(r, env.nonce);
     check("breaker reset 後 → 200 + result", r.status === 200 && dec?.result?.kind === "INVOICE");
+  }
+
+  // ══════════ 8. 時限同重試（施工單 v1.1 §5.2）══════════
+  console.log("[8] 時限（Cloudflare 100s）+ 重試上限 + truncated + mock 自洽");
+  {
+    check("LABDOC_LLM_TIMEOUT_MS = 85s（< CWM 95s < Cloudflare 100s）", LABDOC_LLM_TIMEOUT_MS === 85_000);
+    const PRIMARY = "unit-primary-model";
+    const FALLBACK = "unit-fallback-model";
+    process.env.VLLM_MODEL = PRIMARY;
+    process.env.VLLM_FALLBACK_MODEL = FALLBACK;
+    const textReq = { mode: "TEXT" as const, kindHint: "INVOICE" as const, labHint: null, text: "deadline", images: null };
+    const visionReq = { mode: "VISION" as const, kindHint: "INVOICE" as const, labHint: null, text: null, images: [TINY_JPEG_B64] };
+
+    // 8a. 慢上游：總 deadline 到就停，唔會 primary 重試 + fallback 疊加
+    __resetLabDocBreakerForTest();
+    __setLabDocTimeoutForTest(300);
+    upstreamBodies.length = 0;
+    upstreamMode = { kind: "sleep", ms: 1500, content: JSON.stringify(invoiceSample()) };
+    let t0 = Date.now();
+    let o = await extractLabDoc(textReq);
+    let ms = Date.now() - t0;
+    check("慢上游 → deadline 到即 llm_error", o.result === null && o.reason === "llm_error", JSON.stringify(o));
+    check("慢上游 → 用時 ≈ deadline（< 1000ms，唔等上游 1500ms）", ms < 1000, `ms=${ms}`);
+    check("慢上游 → 只打咗 1 次（timeout 唔重試、唔轉 fallback）", upstreamBodies.length === 1, `n=${upstreamBodies.length}`);
+
+    // 8b. 非 timeout 錯誤（每次 250ms 後 500）：無 deadline = primary×2 + fallback×2 = 4 次 ≈ 1000ms；
+    //     有 deadline 600ms → 最多 3 次、總用時 < 900ms
+    __resetLabDocBreakerForTest();
+    __setLabDocTimeoutForTest(600);
+    upstreamBodies.length = 0;
+    upstreamMode = { kind: "slow500", ms: 250 };
+    t0 = Date.now();
+    o = await extractLabDoc(textReq);
+    ms = Date.now() - t0;
+    check("連續 500 → llm_error", o.result === null && o.reason === "llm_error", JSON.stringify(o));
+    check("連續 500 → 總用時受 deadline 限（< 900ms）", ms < 900, `ms=${ms}`);
+    check("連續 500 → 上游次數 ≤ 3（第 4 次已過 deadline）", upstreamBodies.length <= 3, `n=${upstreamBodies.length}`);
+
+    // 8c. TEXT 仍會用 fallback；VISION 唔用 fallback（fallback 未必識睇圖）
+    __resetLabDocBreakerForTest();
+    __setLabDocTimeoutForTest(null);
+    upstreamBodies.length = 0;
+    upstreamMode = { kind: "500" };
+    o = await extractLabDoc(textReq);
+    const textModels = upstreamBodies.map((b: any) => b.model);
+    check("TEXT 失敗 → primary ×2 + fallback ×2", JSON.stringify(textModels) === JSON.stringify([PRIMARY, PRIMARY, FALLBACK, FALLBACK]), JSON.stringify(textModels));
+    __resetLabDocBreakerForTest();
+    upstreamBodies.length = 0;
+    o = await extractLabDoc(visionReq);
+    const visionModels = upstreamBodies.map((b: any) => b.model);
+    check("VISION 失敗 → 只用 primary ×2（冇 fallback）", JSON.stringify(visionModels) === JSON.stringify([PRIMARY, PRIMARY]), JSON.stringify(visionModels));
+    check("VISION 失敗 → llm_error", o.result === null && o.reason === "llm_error");
+
+    // 8d. finish_reason=length → truncated（唔係 parse_error）；唔計 breaker strike
+    __resetLabDocBreakerForTest();
+    upstreamBodies.length = 0;
+    upstreamMode = { kind: "content", content: JSON.stringify(invoiceSample()).slice(0, 80), finishReason: "length" };
+    o = await extractLabDoc(textReq);
+    check("finish_reason=length → reason=truncated", o.result === null && o.reason === "truncated", JSON.stringify(o));
+    upstreamMode = { kind: "content", content: JSON.stringify(invoiceSample()), finishReason: "length" };
+    o = await extractLabDoc(textReq);
+    check("finish_reason=length 但 JSON 完整 → 仍報 truncated（可能漏行）", o.result === null && o.reason === "truncated");
+    upstreamMode = { kind: "content", content: JSON.stringify(invoiceSample()), finishReason: "stop" };
+    o = await extractLabDoc(textReq);
+    check("finish_reason=stop → 正常 result", o.reason === null && o.result?.kind === "INVOICE");
+
+    // 8e. AI_MOCK 月結單：Σ(INVOICE+CREDIT+CHARGE) = section total；Σ CURRENT = currentTotal（CWM §5.5 會驗）
+    process.env.AI_MOCK = "1";
+    const m = await extractLabDoc({ mode: "TEXT", kindHint: "STATEMENT", labHint: null, text: "x", images: null });
+    process.env.AI_MOCK = "0";
+    const sec = m.result?.sections?.[0];
+    const counted = (sec?.lines ?? []).filter((l: any) => ["INVOICE", "CREDIT", "CHARGE"].includes(l.lineType));
+    const sum = counted.reduce((a: number, l: any) => a + l.amount, 0);
+    const sumCurrent = counted.filter((l: any) => l.agingBucket === "CURRENT").reduce((a: number, l: any) => a + l.amount, 0);
+    check("mock 月結單 Σ 行 = section total", sec !== undefined && sum === sec.total, `sum=${sum} total=${sec?.total}`);
+    check("mock 月結單 Σ CURRENT = currentTotal", sec !== undefined && sumCurrent === sec.currentTotal, `sum=${sumCurrent} current=${sec?.currentTotal}`);
+    check("mock 月結單 doc total = section total", m.result?.total === sec?.total);
+
+    process.env.VLLM_FALLBACK_MODEL = "";
+    delete process.env.VLLM_MODEL;
+    __setLabDocTimeoutForTest(null);
+    __resetLabDocBreakerForTest();
   }
 
   upstream.close();

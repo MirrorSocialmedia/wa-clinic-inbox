@@ -16,7 +16,11 @@
  *     失敗 → result:null + reason（parse_error = JSON 都解唔到；bad_response = 解到但唔符合契約）
  *
  * 上游：本地 model（chatWithFallback，OpenAI-compatible；VLLM_BASE_URL）。
- *   - timeout 110s < CWM client 120s（vision 慢）— proxy 自己先報 reason，CWM 唔使等自己個 deadline。
+ *   - 總時限 85s（AbortSignal — 包埋 chatWithFallback 內部重試同 fallback；施工單 v1.1 §5.2）：
+ *     CWM → wa-inbox 經 Cloudflare，origin 100s 未回應 Cloudflare 就回 524（唔係密文）；
+ *     85s < CWM client 95s < Cloudflare 100s — proxy 一定喺 Cloudflare 斷線前回 sealed reason。
+ *   - VISION 唔用 fallback model（fallback 未必識睇圖，只會白試兩次）。
+ *   - 輸出撞 max_tokens（finish_reason=length）→ reason "truncated"（CWM 可以改為分頁／分段再叫）。
  *   - 獨立 breaker（R-29 模式，同 quote-llm）：proxy 連續失敗只開呢度自己個 breaker。
  */
 import { chatWithFallback, getAiConfig, type AiContentPart } from "@/lib/ai/vllm";
@@ -38,7 +42,7 @@ export interface LabDocRequest {
   images: string[] | null;
 }
 
-export type LabDocReason = null | "breaker_open" | "llm_error" | "parse_error" | "bad_response" | "mock";
+export type LabDocReason = null | "breaker_open" | "llm_error" | "parse_error" | "bad_response" | "truncated" | "mock";
 export type LabDocOutcome = { result: LabDocResult | null; reason: LabDocReason };
 
 // ── 入參上限（§5.2）────────────────────────────────────────────────────────
@@ -47,8 +51,16 @@ export const LABDOC_MAX_IMAGES = 8;
 export const LABDOC_MAX_HINT_CHARS = 500;
 /** 單張圖 decode 後上限（長邊 1600 嘅 jpeg 通常 1–2MB；5MB 兜底防 pathological base64）。 */
 export const LABDOC_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-/** 本層 LLM call 超時 — 必 < CWM client 120s，令 proxy 先回 sealed reason。 */
-export const LABDOC_LLM_TIMEOUT_MS = 110_000;
+/**
+ * 本層 LLM 總時限（包埋重試同 fallback）。必須 < CWM client 95s < Cloudflare origin timeout 100s，
+ * 令 proxy 喺 Cloudflare 斷線（524，非密文）之前回 sealed reason。施工單 v1.1 §5.2。
+ */
+export const LABDOC_LLM_TIMEOUT_MS = 85_000;
+let timeoutOverrideMs: number | null = null;
+/** Test hook：縮短總時限（單測用；null = 還原 LABDOC_LLM_TIMEOUT_MS）。 */
+export function __setLabDocTimeoutForTest(ms: number | null): void {
+  timeoutOverrideMs = ms;
+}
 const LABDOC_MAX_TOKENS = 8192;
 /** VISION 模式 user message 嘅引導行（固定文字；prompt 主體喺 system）。 */
 const VISION_USER_LEAD = "以下是單據圖片。請按規則輸出 JSON。";
@@ -185,18 +197,27 @@ function mockResult(req: LabDocRequest): LabDocResult {
 export async function extractLabDoc(req: LabDocRequest): Promise<LabDocOutcome> {
   if (process.env.AI_MOCK === "1") return { result: mockResult(req), reason: "mock" };
   if (Date.now() < openUntil) return { result: null, reason: "breaker_open" };
+  const totalMs = timeoutOverrideMs ?? LABDOC_LLM_TIMEOUT_MS;
+  const baseCfg = getAiConfig();
+  // VISION：fallback model 未必係 vision model → 只用 primary（primary 仍有 1 次重試）
+  const cfg = req.mode === "VISION" ? { ...baseCfg, fallbackModel: "" } : baseCfg;
   let content: string;
+  let finishReason: string | null;
   try {
-    const r = await chatWithFallback(getAiConfig(), {
+    const r = await chatWithFallback(cfg, {
       messages: buildMessages(req),
       guidedJson: labDocJsonSchema,
       temperature: 0,
       maxTokens: LABDOC_MAX_TOKENS,
-      timeoutMs: LABDOC_LLM_TIMEOUT_MS,
+      timeoutMs: totalMs,
+      // ★ 總 deadline：chatWithFallback 內部 primary 重試 + fallback 全部共用呢個 signal —
+      //   到時即 abort 在途 call（AbortError → isTimeout → 唔再 retry／fallback）
+      signal: AbortSignal.timeout(totalMs),
       skipBreaker: true, // 獨立 breaker（R-29）
     });
     fails = 0;
     content = r.content;
+    finishReason = r.finishReason;
   } catch {
     // 唔 log error message（上遊錯誤描述理論上唔含 prompt，但唔冒險 — 同 llm-extract 鐵律）
     if (++fails >= 3) {
@@ -205,6 +226,8 @@ export async function extractLabDoc(req: LabDocRequest): Promise<LabDocOutcome> 
     }
     return { result: null, reason: "llm_error" };
   }
+  // 輸出撞 max_tokens → 唔好當 parse_error（JSON 半截）；明確話 CWM 知係截斷
+  if (finishReason === "length") return { result: null, reason: "truncated" };
   return parseLabDocResponse(content);
 }
 
@@ -264,8 +287,9 @@ const MOCK_STATEMENT: LabDocResult = {
       addressRaw: null,
       pageFrom: 1,
       pageTo: 1,
-      total: 4500,
-      currentTotal: 5000,
+      // Σ INVOICE + CREDIT = 3200 − 500 = 2700（PAYMENT 唔計）— 同 CWM §5.5 分段讀數檢查一致
+      total: 2700,
+      currentTotal: 2700,
       lines: [
         {
           lineType: "INVOICE",
@@ -313,6 +337,6 @@ const MOCK_STATEMENT: LabDocResult = {
     },
   ],
   subtotal: null,
-  total: 4500,
+  total: 2700,
   readIssues: [],
 };

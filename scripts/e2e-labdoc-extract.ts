@@ -15,7 +15,7 @@
  *   L-4  400 BAD_PAYLOAD（固定原因碼；marker 唔入回應）
  *   L-5  409 REPLAY（同一信封兩次）
  *   L-6  401 BAD_TAG / STALE / BAD_ENVELOPE
- *   L-7  reason 路徑（parse_error / bad_response / llm_error）
+ *   L-7  reason 路徑（parse_error / bad_response / truncated / llm_error）
  *   L-8  零 DB 寫入：全部 user table count 前後一致
  *   L-9  唔 log 原文：server log 檔 marker 0 hit + 有 metadata 行
  *
@@ -82,7 +82,7 @@ function dbUrlFor(db: string, base: string): string {
 }
 
 // ── mock OpenAI-compatible 上游 ────────────────────────────────────────────
-type UpstreamMode = { kind: "content"; content: string } | { kind: "500" };
+type UpstreamMode = { kind: "content"; content: string; finishReason?: string } | { kind: "500" };
 let upstreamMode: UpstreamMode = { kind: "content", content: "" };
 const upstreamBodies: any[] = [];
 const upstream = http.createServer((req, res) => {
@@ -101,7 +101,12 @@ const upstream = http.createServer((req, res) => {
       return;
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ choices: [{ message: { content: upstreamMode.content } }], usage: { total_tokens: 10 } }));
+    res.end(
+      JSON.stringify({
+        choices: [{ message: { content: upstreamMode.content }, finish_reason: upstreamMode.finishReason ?? "stop" }],
+        usage: { total_tokens: 10 },
+      })
+    );
   });
 });
 
@@ -246,7 +251,10 @@ async function main(): Promise<void> {
   const admin = new pg.Client(adminUrl);
   await admin.connect();
   await admin.query(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`);
-  await admin.query(`CREATE DATABASE ${DB_NAME} OWNER wa_inbox`);
+  // ★ owner = base URL 嘅 user（本地 dev = wa_inbox；CI service = postgres）— 唔 hardcode
+  const owner = decodeURIComponent(new URL(base).username) || "postgres";
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(owner)) throw new Error("e2e: base DB user 唔係合法 identifier");
+  await admin.query(`CREATE DATABASE ${DB_NAME} OWNER "${owner}"`);
   await admin.end();
   console.log("[setup] database ready");
 
@@ -495,7 +503,7 @@ async function main(): Promise<void> {
     }
 
     // ══ L-7 reason 路徑 ══
-    console.log("[L-7] reason 路徑（parse_error / bad_response / llm_error）");
+    console.log("[L-7] reason 路徑（parse_error / bad_response / truncated / llm_error）");
     {
       upstreamMode = { kind: "content", content: "我睇到總數 3200 蚊，但呢個唔係 JSON" };
       let env = sealReq({ mode: "TEXT", kindHint: "INVOICE", labHint: null, text: "page", images: null });
@@ -510,6 +518,13 @@ async function main(): Promise<void> {
       r = await hit(JSON.stringify(env));
       dec = openResp(r, env.nonce);
       check("上游缺必填 → result=null + bad_response", r.status === 200 && dec?.result === null && dec?.reason === "bad_response", `dec=${JSON.stringify(dec)}`);
+
+      // 輸出撞 max_tokens（finish_reason=length）→ truncated（唔係含糊嘅 parse_error）
+      upstreamMode = { kind: "content", content: JSON.stringify(invoiceSample()).slice(0, 120), finishReason: "length" };
+      env = sealReq({ mode: "TEXT", kindHint: "STATEMENT", labHint: null, text: "page", images: null });
+      r = await hit(JSON.stringify(env));
+      dec = openResp(r, env.nonce);
+      check("上游 finish_reason=length → result=null + truncated", r.status === 200 && dec?.result === null && dec?.reason === "truncated", `dec=${JSON.stringify(dec)}`);
 
       // m-3（2026-10-04 reviewer 修復）：啟用 upstreamMode 500 — llm_error 真網絡 case。
       //   單次 500 = 1 strike（breaker 閾值 3 連敗）→  breaker 保持關閉，唔使 reset；

@@ -24,7 +24,10 @@ import {
  * nonce 消耗口徑（M-1，2026-10-04 reviewer 修復）：只有已認證（tag 合法）+ 合法 payload
  * 先消耗 nonce — 429 BUSY 發生時 nonce 未 SET，CWM 重試同一信封會得 429（可重試）而唔係 409 REPLAY。
  *
- * 回應（密文內）：{ result: §5.4 JSON | null, reason: "breaker_open"|"llm_error"|"parse_error"|"bad_response"|"mock"|null }
+ * 回應（密文內）：{ result: §5.4 JSON | null, reason: "breaker_open"|"llm_error"|"parse_error"|"bad_response"|"truncated"|"mock"|null }
+ *   - truncated = 輸出撞 max_tokens（finish_reason=length）— CWM 應分頁／分段再叫，唔好原樣重試
+ *   - mock = AI_MOCK=1（result 非 null）— CWM 以 result != null 判斷成功
+ * 時限：LLM 總時限 85s（labdoc-llm.ts）< CWM client 95s < Cloudflare origin 100s（施工單 v1.1 §5.2）。
  */
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";

@@ -136,10 +136,16 @@ export interface AiChatResult {
   model: string;
   tokens: number;
   latencyMs: number;
+  /**
+   * ★ cwi-labdoc-extract：上游 choices[0].finish_reason（"stop" | "length" | …；冇就 null）。
+   *   "length" = 輸出撞 max_tokens 被截斷 — labdoc 用嚟報 reason "truncated"（唔再含糊報 parse_error）。
+   *   其他 caller 唔使理（新增欄位，舊口徑不變）。
+   */
+  finishReason: string | null;
 }
 
 interface ChatCompletionResponse {
-  choices?: { message?: { content?: string | null; reasoning_content?: string | null } }[];
+  choices?: { message?: { content?: string | null; reasoning_content?: string | null }; finish_reason?: string | null }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   error?: { message?: string };
 }
@@ -203,6 +209,7 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
       model,
       tokens: json?.usage?.total_tokens ?? 0,
       latencyMs,
+      finishReason: typeof choice?.finish_reason === "string" ? choice.finish_reason : null,
     };
   } catch (err) {
     if (err instanceof AiCallError) throw err;
