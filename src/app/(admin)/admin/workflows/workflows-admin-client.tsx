@@ -787,12 +787,35 @@ export default function WorkflowsAdmin() {
   }, [load]);
 
   // ★ cwi-hub-b-20260914（B.1）：hub 七步跳轉 anchor（例：/admin/workflows#wf-pain-triage）— load 完後 scroll 到目標卡
+  // ★ cwi-setfix H-3：卡片 load 完後仲會展開（版本列／流程圖）→ 一次 scroll 會停喺上面張卡（⑥ 出文跳咗去痛症問診卡）。
+  //   改為 1.5 秒內重 scroll 幾次直至位置穩定；用戶自己郁（wheel/touch/key）即停。
   useEffect(() => {
     if (loading) return;
     const h = window.location.hash;
     if (!h) return;
-    const el = document.getElementById(h.slice(1));
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    let stopped = false;
+    const stop = () => {
+      stopped = true;
+    };
+    const go = (behavior: ScrollBehavior) => {
+      if (stopped) return;
+      document.getElementById(h.slice(1))?.scrollIntoView({ behavior, block: "start" });
+    };
+    go("smooth");
+    const timers = [400, 900, 1500].map((ms) => window.setTimeout(() => go("auto"), ms));
+    // 落點卡閃一閃（⑥ 出文係最後一張卡 — 捲唔到去頂，冇提示會以為跳錯位）
+    const target = document.getElementById(h.slice(1));
+    target?.classList.add("ring-2", "ring-brand");
+    timers.push(window.setTimeout(() => target?.classList.remove("ring-2", "ring-brand"), 2500));
+    window.addEventListener("wheel", stop, { passive: true });
+    window.addEventListener("touchstart", stop, { passive: true });
+    window.addEventListener("keydown", stop);
+    return () => {
+      timers.forEach((t) => window.clearTimeout(t));
+      window.removeEventListener("wheel", stop);
+      window.removeEventListener("touchstart", stop);
+      window.removeEventListener("keydown", stop);
+    };
   }, [loading]);
 
   useEffect(() => {
@@ -827,27 +850,28 @@ export default function WorkflowsAdmin() {
           {workflows.map((wf) => (
             <KeyCard key={wf.key} wf={wf} clinicId={clinicId} versions={versions[wf.key] ?? []} onChanged={load} />
           ))}
-          {/* ★ cwi-hub-b-20260914（B.1）：⑥ 出文 anchor 卡（wf-tone）— 只讀摘要：tone 設ting（greetingConfig）+ guard（code 常數）；
-              實際編輯行 /admin/clinics 嘅 greetingConfig 欄（舊頁內容唔改，呢度只係 hub 跳轉落點） */}
+          {/* ★ cwi-hub-b-20260914（B.1）：⑥ 出文 anchor 卡（wf-tone）— 只讀摘要。
+              ★ cwi-setfix H-2：舊文案「tone 喺診所設定 greetingConfig 改」唔啱（greetingConfig 只係地址／營業時間／FAQ，
+              冇語氣欄）→ 如實寫：語氣 = 系統預設；可以改嘅只有知識庫短免責聲明。 */}
           <div id="wf-tone" className="bg-panel rounded-[22px] border border-line p-4 scroll-mt-20">
             <div className="flex items-center gap-2 mb-2">
-              <span className="font-semibold text-t1">出文（tone + guard）— 只讀</span>
-              <span className="text-xs text-t3">tone 喺「診所設定」greetingConfig 改；guard 係 code 常數（唔可關）</span>
+              <span className="font-semibold text-t1">⑥ 出文（語氣 + 把關）— 只讀</span>
             </div>
             <div className="text-sm text-t2 space-y-1">
               <div>
-                tone 設定（greetingConfig）：
-                {clinics.filter((c) => (c as { greetingConfig?: unknown }).greetingConfig).length > 0
-                  ? `${clinics.filter((c) => (c as { greetingConfig?: unknown }).greetingConfig).length}/${clinics.length} 間設咗`
-                  : clinics.length > 0
-                    ? `未設定（${clinics.length} 間全用 default 語氣）`
-                    : "—"}
+                語氣：系統預設（禮貌廣東話、前台口吻、2–4 句）— 暫時未開放自訂。
               </div>
               <div>
-                價格 guard（price-guard）：引用價必須有 doc 依據，無依據 → 棄草稿轉人手 <span className="text-t3">（3 類規則：無 doc / 價外區 / 短 disclaimer 缺）</span>
+                價格把關（price-guard）：引用價錢必須喺知識庫有依據，冇依據 → 棄草稿轉人手 <span className="text-t3">（3 類規則：無 doc / 價外區 / 短免責聲明缺）</span>
               </div>
               <div>
-                聲稱 guard（claim-guard）：醫療聲稱違規 → 棄草稿出人手提示 <span className="text-t3">（9 類違規詞庫）</span>
+                醫療聲稱把關（claim-guard）：違規字眼 → 棄草稿出人手提示 <span className="text-t3">（9 類違規詞庫，唔可以關）</span>
+              </div>
+              <div>
+                可以改嘅：高價值收費嘅「短免責聲明」—{" "}
+                <a href="/admin/knowledge" className="text-brand-text font-semibold hover:underline">
+                  去知識庫 →
+                </a>
               </div>
             </div>
           </div>

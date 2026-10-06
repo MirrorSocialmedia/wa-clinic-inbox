@@ -535,6 +535,22 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: `/api/admin/followups/rules/${F.followupRule}`, method: "PATCH", body: JSON.stringify({ enabled: true }) }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 200, ADMIN_ALL: 200 },
   },
+  // ★ cwi-setfix F-1：新增／刪除／出廠規則
+  "POST /api/admin/followups/rules": {
+    // clinicId = TY（CB 外店）：CB 403（scope 先）；ALL 400（template 唔存在 — 零狀態改動）
+    fixture: (f) => ({ url: "/api/admin/followups/rules", method: "POST", body: JSON.stringify({ clinicId: f.clinicTY.id, name: "T630 new rule", trigger: "CONVERSATION_IDLE", delayValue: 7, delayUnit: "DAY", templateName: "t630-no-such-template" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
+  },
+  "DELETE /api/admin/followups/rules/[id]": {
+    // 唔存在 id → 404（scope 檢查喺 find 之後）— 零狀態改動
+    fixture: () => ({ url: "/api/admin/followups/rules/t630nope0000000000000001", method: "DELETE" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 404, ADMIN_ALL: 404 },
+  },
+  "POST /api/admin/followups/rules/factory": {
+    // 全局 → global only；冪等（CI DB 已 seed 齊 → 零新增；缺嘅會補成停用規則）
+    fixture: () => ({ url: "/api/admin/followups/rules/factory", method: "POST" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
   "GET /api/admin/followups/templates": {
     fixture: () => ({ url: "/api/admin/followups/templates" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 }, // gen2 口徑：UI 需要（偏離清單）

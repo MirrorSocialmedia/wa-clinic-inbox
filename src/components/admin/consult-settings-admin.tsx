@@ -341,6 +341,26 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
     }
   }, [selected, approveName, showToast, loadProducts, runPreview]);
 
+  // ★ cwi-setfix C-1：停用／重新啟用方案（PATCH API 早已有，UI 以前冇掣 — 誤開嘅空白方案清唔走，「未確認」警示永遠喺度）
+  const doToggleEnabled = useCallback(async () => {
+    if (!selected) return;
+    const next = !selected.enabled;
+    if (!next && !confirm(`停用「${selected.displayName}」？\n停用後 AI 唔會再提呢個方案（可以隨時重新啟用）。`)) return;
+    const res = await fetch(`/api/admin/consult-products/${selected.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: next }),
+    });
+    if (res.ok) {
+      showToast(next ? "已重新啟用" : "已停用 · AI 唔會再提呢個方案");
+      void loadProducts();
+      void runPreview();
+    } else {
+      const j = (await res.json().catch(() => null)) as { message?: string; error?: string } | null;
+      showToast(`操作失敗：${j?.message ?? j?.error ?? res.status}`);
+    }
+  }, [selected, showToast, loadProducts, runPreview]);
+
   const doCreateProduct = useCallback(async () => {
     const code = `CUSTOM-${Date.now().toString(36).toUpperCase().slice(-6)}`;
     const res = await fetch("/api/admin/consult-products", {
@@ -413,7 +433,8 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
     void saveSetting("advanced", { ...s.advanced, ...patch });
   };
 
-  const unapprovedCount = products.filter((p) => p.approvedAt === null).length;
+  // ★ cwi-setfix C-1：停用嘅方案唔計「未確認」
+  const unapprovedCount = products.filter((p) => p.enabled && p.approvedAt === null).length;
   const isImplant = workflow === "IMPLANT_CONSULT";
 
   // ── render ──────────────────────────────────────────────────────────
@@ -509,13 +530,15 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
                 key={p.id}
                 onClick={() => setSelectedId(p.id)}
                 className={`inline-flex items-center gap-1.5 text-xs rounded-full px-3 py-1.5 border transition-colors ${
-                  p.approvedAt
-                    ? "border-brand bg-brand-soft text-brand-text font-medium"
-                    : "border-warn text-warn-text bg-panel"
+                  !p.enabled
+                    ? "border-line text-t3 bg-panel line-through"
+                    : p.approvedAt
+                      ? "border-brand bg-brand-soft text-brand-text font-medium"
+                      : "border-warn text-warn-text bg-panel"
                 } ${selectedId === p.id ? "ring-2 ring-brand/40" : ""}`}
-                title={p.approvedAt ? "已確認 — AI 可以用" : "未確認 — AI 唔會同病人提起"}
+                title={!p.enabled ? "已停用 — AI 唔會用" : p.approvedAt ? "已確認 — AI 可以用" : "未確認 — AI 唔會同病人提起"}
               >
-                <span>{p.approvedAt ? "✓" : "⚠"}</span>
+                <span>{!p.enabled ? "⏸" : p.approvedAt ? "✓" : "⚠"}</span>
                 {p.displayName}
               </button>
             ))}
@@ -596,7 +619,7 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
                     />
                   )}
                 </Field>
-                <Field label="收費" hint="💡 由價目表自動拎，改價請去價目表">
+                <Field label="收費" hint="💡 由知識庫「收費範圍」自動拎 — 改價或者新增收費去知識庫" hintHref="/admin/knowledge">
                   <select
                     value={form.priceDocTitle}
                     onChange={(e) => updateForm({ priceDocTitle: e.target.value })}
@@ -657,9 +680,23 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
                       </button>
                     </div>
                   )}
-                  {!selected.approvedAt && (
+                  {!selected.approvedAt && selected.enabled && (
                     <div className="text-[11px] text-warn-text">⚠ 未確認嘅方案，AI 唔會同病人提起</div>
                   )}
+                  {/* ★ cwi-setfix C-1：停用／重新啟用（例：誤撳「新增方案」開咗嘅空白方案） */}
+                  <div className="flex items-center gap-2 pt-1">
+                    {!selected.enabled && <span className="text-[11px] text-t3">⏸ 已停用 — AI 唔會用呢個方案</span>}
+                    <button
+                      onClick={() => void doToggleEnabled()}
+                      disabled={!canWrite}
+                      data-testid="c5-toggle-enabled"
+                      className={`ml-auto text-[11px] px-3 py-1 rounded-full border disabled:opacity-50 ${
+                        selected.enabled ? "border-danger/40 text-danger-text hover:bg-danger-soft" : "border-brand text-brand-text hover:bg-brand-soft"
+                      }`}
+                    >
+                      {selected.enabled ? "停用呢個方案" : "重新啟用"}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -726,6 +763,15 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
       {/* ══ Tab 2：AI 會點傾 ══ */}
       {tab === "rules" && (
         <div className="space-y-3" data-testid="c5-tab2">
+          {/* ★ cwi-setfix C-3：Tab 2 規則／問題全部係箍牙（ORTHO-*）— 植牙用固定規則，揀植牙都顯示同一套會誤導 */}
+          {isImplant && (
+            <div className="rounded-[12px] border border-warn/30 bg-warn-soft px-3 py-2 text-[12px] text-warn-text">
+              下面嘅開關同問題只用於「箍牙」傾偈。植牙傾偈用固定安全規則（唔推介邊款、交醫生評估），暫時冇開關可以調。
+            </div>
+          )}
+          <div className="text-[11.5px] text-t3 px-1">
+            呢度係 AI 喺箍牙／植牙諮詢入面嘅行為。每條規則都係系統內建（唔可以新增）；有開關嘅可以開／關，🔒 嘅為咗病人安全唔可以關。
+          </div>
           <div className="bg-panel-2 rounded-[16px] p-4">
             <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2">AI 會點反應</div>
             <div className="mt-2.5 divide-y divide-line">
@@ -785,13 +831,7 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
                   <span className="mt-2 text-t3 cursor-grab" title="拖住改順序">
                     <GripVertical size={13} strokeWidth={2} />
                   </span>
-                  <textarea
-                    value={q.text}
-                    rows={2}
-                    disabled={!canWrite}
-                    onChange={(e) => setQuestion(idx, { text: e.target.value })}
-                    className="flex-1 bg-transparent text-[13px] text-t1 focus:outline-none resize-none"
-                  />
+                  <QuestionText value={q.text} disabled={!canWrite} onCommit={(text) => setQuestion(idx, { text })} />
                   <button
                     onClick={() => setQuestion(idx, { enabled: !q.enabled })}
                     disabled={!canWrite}
@@ -820,7 +860,7 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
                 <span className="text-[11px] text-t3">關閉</span>
               </div>
             </div>
-            <div className="mt-2.5 text-[11px] text-t3">問完就會介紹方案，唔會連珠炮發問🫶🏻</div>
+            <div className="mt-2.5 text-[11px] text-t3">問完就會介紹方案，唔會連珠炮發問🫶🏻 · 撳問題文字就可以改，改完撳出面自動儲存；拖左邊 ⠿ 改次序。</div>
           </div>
         </div>
       )}
@@ -943,12 +983,48 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
 }
 
 /** 問句式欄位包裹（label + 💡 hint + 內容）。 */
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Field({ label, hint, hintHref, children }: { label: string; hint?: string; hintHref?: string; children: React.ReactNode }) {
   return (
     <div>
       <div className="text-[12px] font-medium text-t2 mb-1">{label}</div>
       {children}
-      {hint && <div className="mt-1 text-[11px] text-t3">{hint}</div>}
+      {hint && (
+        <div className="mt-1 text-[11px] text-t3">
+          {hint}
+          {/* cwi-setfix C-4：提示叫人「去價目表」但冇連結 */}
+          {hintHref && (
+            <a href={hintHref} className="ml-1.5 font-semibold text-brand-text hover:underline">
+              去知識庫 →
+            </a>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+/**
+ * ★ cwi-setfix C-2：發現問題文字框 — 本地草稿，離開（blur）先儲存。
+ * 舊版 onChange 直接 PUT：每打一個字就存一次 + toast，value 又跟 server 回應 → 打字會亂跳／食字。
+ */
+function QuestionText({ value, disabled, onCommit }: { value: string; disabled: boolean; onCommit: (text: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+  return (
+    <textarea
+      value={draft}
+      rows={2}
+      disabled={disabled}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        const t = draft.trim();
+        if (!t) setDraft(value); // 唔准清空（server 要 ≥1 字）
+        else if (t !== value) onCommit(t);
+      }}
+      title="撳入去改字，改完撳出面就會儲存"
+      className="flex-1 bg-transparent text-[13px] text-t1 focus:outline-none resize-none rounded-[6px] hover:bg-panel-2/60 focus:bg-panel-2/60 px-1 -mx-1"
+    />
   );
 }

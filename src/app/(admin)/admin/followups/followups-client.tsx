@@ -10,6 +10,7 @@
  * 全繁體 UI；零臨床全文顯示（contextJson 只係顯示用結構化數據）。
  */
 import { useCallback, useEffect, useState } from "react";
+import { FOLLOWUP_TRIGGER_LABELS } from "@/lib/followup/factory-defaults";
 
 type Tab = "rules" | "templates";
 
@@ -50,6 +51,15 @@ interface RuleDraft {
   cancelOnArrival: boolean;
   cancelOnResolved: boolean;
 }
+/** cwi-setfix F-1：新增規則表單 */
+interface NewRuleDraft {
+  name: string;
+  trigger: keyof typeof FOLLOWUP_TRIGGER_LABELS;
+  delayValue: number;
+  delayUnit: "HOUR" | "DAY" | "WEEK" | "MONTH";
+  templateName: string;
+  reasonCodes: string;
+}
 interface TemplateRow {
   key: string;
   name: string;
@@ -84,6 +94,9 @@ export default function FollowupsClient() {
   const [editing, setEditing] = useState<RuleRow | null>(null);
   const [draft, setDraft] = useState<RuleDraft | null>(null);
   const [drawer409, setDrawer409] = useState(false); // BEFORE_APPOINTMENT 首啟用 → 弹 B1 確認後 retry
+  // cwi-setfix F-1：新增規則表單（以前冇新增入口 — 生產 DB 唔行 seed → 規則表空）
+  const [creating, setCreating] = useState<NewRuleDraft | null>(null);
+  const [createErr, setCreateErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -199,6 +212,78 @@ export default function FollowupsClient() {
     }
   };
 
+  // ── cwi-setfix F-1：建立出廠規則／新增／刪除 ──
+  const installFactory = () => {
+    if (!confirm("建立出廠規則？\n會補返缺少嘅 6 條常用規則同訊息 template（全部預設停用 — 檢查完先逐條開）。已有嘅唔會改。")) return;
+    void act("factory", async () => {
+      const res = await fetch("/api/admin/followups/rules/factory", { method: "POST" });
+      if (!res.ok) throw new Error(`factory ${res.status}`);
+    }, "出廠規則已建立（全部停用 — 檢查好再喺「啟用」欄開）");
+  };
+
+  const openCreate = () => {
+    setCreateErr(null);
+    setCreating({ name: "", trigger: "CONVERSATION_IDLE", delayValue: 7, delayUnit: "DAY", templateName: templates[0]?.key ?? "", reasonCodes: "" });
+  };
+
+  const submitCreate = async () => {
+    if (!creating) return;
+    setCreateErr(null);
+    if (!creating.name.trim()) return setCreateErr("規則名必填");
+    if (!creating.templateName) return setCreateErr("揀一個訊息 template（冇 template 先撳「建立出廠規則」）");
+    setBusy("create");
+    try {
+      const res = await fetch("/api/admin/followups/rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: creating.name.trim(),
+          trigger: creating.trigger,
+          delayValue: creating.delayValue,
+          delayUnit: creating.delayUnit,
+          templateName: creating.templateName,
+          reasonCodes: creating.reasonCodes.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean),
+        }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        setCreateErr(`新增失敗：${j?.error ?? res.status}`);
+        return;
+      }
+      setCreating(null);
+      setMsg("已新增規則（預設停用 — 喺「啟用」欄開）");
+      await load();
+    } catch {
+      setCreateErr("新增失敗（網絡）");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeRule = (r: RuleRow) => {
+    if (!confirm(`刪除規則「${r.name}」？`)) return;
+    setBusy(r.id);
+    setMsg(null);
+    void (async () => {
+      try {
+        const res = await fetch(`/api/admin/followups/rules/${r.id}`, { method: "DELETE" });
+        if (res.status === 409) {
+          const j = (await res.json().catch(() => null)) as { message?: string } | null;
+          setMsg(j?.message ?? "仲有未處理建議 — 請先停用");
+        } else if (!res.ok) {
+          setMsg(`刪除失敗（${res.status}）`);
+        } else {
+          setMsg("規則已刪除");
+          await load();
+        }
+      } catch {
+        setMsg("刪除失敗（網絡）");
+      } finally {
+        setBusy(null);
+      }
+    })();
+  };
+
   const confirmDrawer409 = () => {
     setDrawer409(false);
     void saveDrawer(true);
@@ -234,6 +319,26 @@ export default function FollowupsClient() {
       {msg && <div className="rounded border border-line bg-panel-2 px-3 py-2 text-sm">{msg}</div>}
 
       {tab === "rules" && (
+        <div className="flex flex-wrap items-center gap-2">
+          {/* cwi-setfix F-1：新增／建立出廠規則 */}
+          <button
+            onClick={openCreate}
+            className="rounded-full bg-brand px-3 py-1.5 text-sm font-medium text-panel hover:opacity-90"
+          >
+            ＋ 新增規則
+          </button>
+          <button
+            onClick={installFactory}
+            disabled={busy === "factory"}
+            className="rounded-full border border-line px-3 py-1.5 text-sm text-t1 hover:bg-panel-2 disabled:opacity-40"
+          >
+            建立出廠規則
+          </button>
+          <span className="text-xs text-t3">新規則一律預設停用 — 檢查好延遲同 template 再開</span>
+        </div>
+      )}
+
+      {tab === "rules" && (
         <div className="overflow-x-auto rounded-lg border border-line">
           <table className="w-full text-sm">
             <thead className="bg-panel-2 text-left text-xs text-t2">
@@ -259,6 +364,14 @@ export default function FollowupsClient() {
                         className="text-xs px-2 py-0.5 rounded-full border border-line text-t2 hover:text-t1 hover:bg-panel-2"
                       >
                         編輯
+                      </button>
+                      {/* cwi-setfix F-1：刪除（有未處理建議 → server 409，叫先停用） */}
+                      <button
+                        onClick={() => removeRule(r)}
+                        disabled={busy === r.id}
+                        className="text-xs px-2 py-0.5 rounded-full border border-danger/40 text-danger-text hover:bg-danger-soft disabled:opacity-40"
+                      >
+                        刪除
                       </button>
                     </div>
                   </td>
@@ -301,6 +414,13 @@ export default function FollowupsClient() {
                   </td>
                 </tr>
               ))}
+              {rules.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-3 py-6 text-center text-sm text-t2">
+                    未有規則 — 撳上面「建立出廠規則」一鍵建立 6 條常用規則（對話空窗／預約提醒／爽約／術後關懷／洗牙召回／報價未成交），或者「＋ 新增規則」自己建。
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
           <p className="border-t border-line bg-panel-2 px-3 py-2 text-xs text-t2">
@@ -312,6 +432,11 @@ export default function FollowupsClient() {
 
       {tab === "templates" && (
         <div className="space-y-3">
+          {templates.length === 0 && (
+            <div className="rounded-lg border border-dashed border-line p-4 text-sm text-t2">
+              未有 template — 去「規則」tab 撳「建立出廠規則」，會一併建立出廠訊息 template（全部未審批，審批後先會發）。
+            </div>
+          )}
           {templates.map((t) => (
             <div key={t.key} className="rounded-lg border border-line p-3">
               <div className="flex items-center justify-between">
@@ -355,6 +480,104 @@ export default function FollowupsClient() {
             變數佔位：{"{{salutation}}"} 稱呼 / {"{{clinicName}}"} 診所名 / {"{{apptDate}}"}・{"{{apptTime}}"} 預約 / {"{{providerName}}"} 醫生。
             出廠 5 條 draft 全部未審批（老細審批中）— 審批前過窗建議會顯示「等 template 審批」唔會真發（窗口內 free-form 不受影響）。
           </p>
+        </div>
+      )}
+
+      {/* cwi-setfix F-1：新增規則彈窗 */}
+      {creating && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={() => setCreating(null)}>
+          <div className="w-full max-w-md rounded-2xl border border-line bg-panel p-5 shadow-xl space-y-3" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-bold">新增跟進規則</h2>
+            <label className="block text-xs text-t2">
+              規則名
+              <input
+                value={creating.name}
+                maxLength={60}
+                onChange={(e) => setCreating({ ...creating, name: e.target.value })}
+                className="mt-1 w-full rounded border border-line bg-panel px-2 py-1.5 text-sm text-t1"
+                placeholder="例：植牙術後關懷（3 日）"
+              />
+            </label>
+            <label className="block text-xs text-t2">
+              幾時出建議
+              <select
+                value={creating.trigger}
+                onChange={(e) => setCreating({ ...creating, trigger: e.target.value as NewRuleDraft["trigger"] })}
+                className="mt-1 w-full rounded border border-line bg-panel px-2 py-1.5 text-sm text-t1"
+              >
+                {(Object.keys(FOLLOWUP_TRIGGER_LABELS) as NewRuleDraft["trigger"][]).map((k) => (
+                  <option key={k} value={k}>
+                    {FOLLOWUP_TRIGGER_LABELS[k]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block text-xs text-t2">
+                延遲
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={creating.delayValue}
+                  onChange={(e) => setCreating({ ...creating, delayValue: Number(e.target.value) })}
+                  className="mt-1 w-full rounded border border-line bg-panel px-2 py-1.5 text-sm text-t1"
+                />
+              </label>
+              <label className="block text-xs text-t2">
+                單位
+                <select
+                  value={creating.delayUnit}
+                  onChange={(e) => setCreating({ ...creating, delayUnit: e.target.value as NewRuleDraft["delayUnit"] })}
+                  className="mt-1 w-full rounded border border-line bg-panel px-2 py-1.5 text-sm text-t1"
+                >
+                  <option value="HOUR">小時</option>
+                  <option value="DAY">日</option>
+                  <option value="WEEK">週</option>
+                  <option value="MONTH">月</option>
+                </select>
+              </label>
+            </div>
+            {(creating.trigger === "AFTER_TREATMENT" || creating.trigger === "RECALL_NO_REPEAT") && (
+              <label className="block text-xs text-t2">
+                治療代碼（求診原因 code，逗號分隔 — 例：0017, 0013）
+                <input
+                  value={creating.reasonCodes}
+                  onChange={(e) => setCreating({ ...creating, reasonCodes: e.target.value })}
+                  className="mt-1 w-full rounded border border-line bg-panel px-2 py-1.5 text-sm text-t1"
+                />
+              </label>
+            )}
+            <label className="block text-xs text-t2">
+              訊息 template
+              <select
+                value={creating.templateName}
+                onChange={(e) => setCreating({ ...creating, templateName: e.target.value })}
+                className="mt-1 w-full rounded border border-line bg-panel px-2 py-1.5 text-sm text-t1"
+              >
+                {templates.length === 0 && <option value="">（未有 template — 先撳「建立出廠規則」）</option>}
+                {templates.map((t) => (
+                  <option key={t.key} value={t.key}>
+                    {t.name}
+                    {t.approved ? "" : "（未審批）"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {createErr && <div className="text-xs text-danger-text">{createErr}</div>}
+            <div className="flex justify-end gap-2 pt-1">
+              <button onClick={() => setCreating(null)} className="rounded-full border border-line px-3 py-1.5 text-sm text-t2 hover:bg-panel-2">
+                取消
+              </button>
+              <button
+                onClick={() => void submitCreate()}
+                disabled={busy === "create"}
+                className="rounded-full bg-brand px-3 py-1.5 text-sm font-medium text-panel hover:opacity-90 disabled:opacity-40"
+              >
+                新增（預設停用）
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

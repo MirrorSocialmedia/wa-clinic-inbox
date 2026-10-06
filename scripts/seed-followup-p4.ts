@@ -12,43 +12,15 @@
  * 全部 L1（老細拍板「每日上限唔設，靠 L1」— 入待跟進隊列等人撳）。
  */
 import prisma from "../src/lib/prisma";
+import { QUOTE_FOLLOWUP_TEXT, FOLLOWUP_P4_RULES, FOLLOWUP_P4_DRAFT_TEMPLATES } from "../src/lib/followup/factory-defaults";
 
+// ★ cwi-setfix F-1：template／規則清單搬咗去 src/lib/followup/factory-defaults.ts（UI「建立出廠規則」共用）
 // ★ cwi-followup-v3 紅線：E 類訊息**唔准重複報價金額** → 舊文本嘅 {{amount}} 已移除（只留項目名）
-const TEMPLATE_TEXT =
-  "{{salutation}}你好，呢度係{{clinicName}}。關於 {{quoteDate}} 同你討論嘅治療方案（{{item}}），想再跟你一下——如對價錢、療程或者分期有任何疑問，或者直接想預約覆診，隨時回覆呢條訊息，我哋會即刻為你安排。期待為你服務！";
-
-const RULES: {
-  trigger: string;
-  name: string;
-  delayValue: number;
-  delayUnit: string;
-  reasonCodes: string[];
-  templateName: string;
-}[] = [
-  { trigger: "AFTER_TREATMENT", name: "術後關懷（C · P4）", delayValue: 1, delayUnit: "DAY", reasonCodes: ["0017", "0013"], templateName: "post_op_check" },
-  { trigger: "RECALL_NO_REPEAT", name: "洗牙召回（D · P4）", delayValue: 6, delayUnit: "MONTH", reasonCodes: ["0008"], templateName: "recall_cleaning" },
-  { trigger: "QUOTED_NOT_BOOKED", name: "報價未成交（E · P4）", delayValue: 7, delayUnit: "DAY", reasonCodes: [], templateName: "quote_followup" },
-];
-
+const TEMPLATE_TEXT = QUOTE_FOLLOWUP_TEXT;
+const RULES = FOLLOWUP_P4_RULES;
 // ★ CEO 拍板（2026-09-16）：D 類植牙/箍牙 recall = 2 條新 draft（approved=false，審批後先換對應 template；
 //   D 規則現行照用 recall_cleaning）— 3 條 draft 全文（連 quote_followup）S7 交老細審批。
-const DRAFT_TEMPLATES: { key: string; name: string; text: string }[] = [
-  {
-    key: "quote_followup",
-    name: "報價未成交跟進（E · P4）",
-    text: TEMPLATE_TEXT,
-  },
-  {
-    key: "recall_implant_annual",
-    name: "植牙年度覆診召回（D · P4）",
-    text: "{{salutation}}你好，呢度係{{clinicName}}。你嘅植牙已經過咗一段時間，建議安排一次年度覆診，檢查植牙同周圍牙肉嘅狀況，令到植牙用得耐。想約時間嘅話回覆呢條訊息就得，我哋幫你搵位。",
-  },
-  {
-    key: "recall_ortho_recheck",
-    name: "正畸覆診召回（D · P4）",
-    text: "{{salutation}}你好，呢度係{{clinicName}}。你嘅正畸療程（牙箍／隱形牙套）需要定期覆診先跟得住進度，建議安排下次覆診。想約時間嘅話回覆呢條訊息就得，我哋幫你搵位。",
-  },
-];
+const DRAFT_TEMPLATES = FOLLOWUP_P4_DRAFT_TEMPLATES;
 
 async function main() {
   // 1) 3 條 draft template（全部 approved=false — 未審批 → 過窗採用唔俾發；正常審批流管文本）

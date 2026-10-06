@@ -16,6 +16,10 @@ import { handle } from "@/lib/api-error";
  *   ★ cwi-final S0-8（N-11）：firstUseConfirmed（boolean）= 同一確認嘅簡化口徑（server 寫 firstUseConfirmedAt=now）。
  *   BEFORE_APPOINTMENT 規則首啟用（firstUseConfirmedAt 為 null）未帶確認 → 409 FIRST_USE_CONFIRM_REQUIRED。
  *   改動即時生效（下一次掃描用新值）。（v3 已剔 minAmount/cancelOnPaid — F 類整類剷走。）
+ *
+ * ★ cwi-setfix F-1：DELETE /api/admin/followups/rules/:id — 刪規則。
+ *   仲有未處理建議（SUGGESTED）指住呢條規則 → 409 HAS_OPEN_TASKS（叫用戶先停用，等建議處理完／過期）；
+ *   已處理嘅歷史 task 保留（ruleId 只係字串，唔 cascade）。
  */
 export const dynamic = "force-dynamic";
 
@@ -99,4 +103,34 @@ export const PATCH = handle(async (req, { params }) => {
     },
   });
   return NextResponse.json({ rule: updated });
+});
+
+export const DELETE = handle(async (req, { params }) => {
+  const ctx = await requireAdmin(req);
+  const { id } = await params;
+  const rule = await prisma.followupRule.findUnique({ where: { id } });
+  if (!rule) return NextResponse.json({ error: "rule not found" }, { status: 404 });
+  assertConfigScope(ctx, rule.clinicId);
+  const open = await prisma.followupTask.count({ where: { ruleId: id, status: "SUGGESTED" } });
+  if (open > 0) {
+    return NextResponse.json(
+      { error: "HAS_OPEN_TASKS", message: `仲有 ${open} 個未處理建議用緊呢條規則 — 請先停用，等建議處理完或者過期再刪`, open },
+      { status: 409 }
+    );
+  }
+  await prisma.followupRule.delete({ where: { id } });
+  await prisma.auditLog.create({
+    data: {
+      staffId: ctx.staff.id,
+      action: "FOLLOWUP_RULE_DELETED",
+      entity: "FollowupRule",
+      entityId: id,
+      // 留痕（rollback 用）— 零 PII（規則 = staff 管嘅參數）
+      meta: {
+        name: rule.name, clinicId: rule.clinicId, trigger: rule.trigger, delayValue: rule.delayValue, delayUnit: rule.delayUnit,
+        reasonCodes: rule.reasonCodes, templateName: rule.templateName, enabled: rule.enabled,
+      } as object,
+    },
+  });
+  return NextResponse.json({ id, deleted: true });
 });

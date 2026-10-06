@@ -57,6 +57,10 @@ export default function KeywordsClient({ role }: { role: string }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // cwi-setfix KW-1：新增口語表詞（以前呢頁只可以改／刪，冇新增入口）
+  const [adding, setAdding] = useState(false);
+  const [addTerm, setAddTerm] = useState("");
+  const [addCanonical, setAddCanonical] = useState("");
 
   const load = useCallback(async (query: string) => {
     setLoading(true);
@@ -90,6 +94,56 @@ export default function KeywordsClient({ role }: { role: string }) {
       /* impact 失敗唔阻編輯 — 彈層顯示「影響分析載入失敗」 */
     }
   }, []);
+
+  // cwi-setfix KW-1：新增口語表詞 → 同改／刪一樣行既有 workflows API（global row：draft + publish）
+  const addLexicon = useCallback(async () => {
+    const term = addTerm.trim();
+    const canonical = addCanonical.trim();
+    if (!term || !canonical) return;
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      const wres = await fetch(`/api/admin/workflows`, { cache: "no-store" });
+      if (!wres.ok) throw new Error(`HTTP ${wres.status}`);
+      const wdata = (await wres.json()) as { workflows: { key: string; active: { params?: { entries?: { term: string; canonical: string }[] } } }[] };
+      const lexWf = wdata.workflows.find((w) => w.key === "lexicon");
+      const current: { term: string; canonical: string }[] = lexWf?.active?.params?.entries?.map((e) => ({ term: e.term, canonical: e.canonical })) ?? [];
+      // 未有 global row（= 行緊 code 預設）→ 開 global row 時先搬入整份預設（同改／刪口徑 — 唔好偷走其餘預設詞）
+      const base = current.length === 0 ? LEXICON_DEFAULTS.entries.map((e) => ({ term: e.term, canonical: e.canonical })) : current;
+      if (base.some((e) => e.term === term)) throw new Error(`「${term}」已經喺口語表 — 喺列表撳「改」`);
+      const next = [...base, { term, canonical }];
+      if (next.length > 60) throw new Error("口語表超過 60 條上限");
+      const pres = await fetch(`/api/admin/workflows/lexicon`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clinicId: null, params: { entries: next } }),
+      });
+      if (!pres.ok) {
+        const d = await pres.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error ?? `HTTP ${pres.status}`);
+      }
+      const { id: draftId } = (await pres.json()) as { id: string };
+      const bres = await fetch(`/api/admin/workflows/lexicon/publish`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defId: draftId }),
+      });
+      if (!bres.ok) {
+        const d = await bres.json().catch(() => ({}));
+        throw new Error(`草稿已存但發佈失敗：${(d as { error?: string }).error ?? `HTTP ${bres.status}`}`);
+      }
+      setAdding(false);
+      setAddTerm("");
+      setAddCanonical("");
+      setMsg(`已新增「${term}」→ ${canonical} 並發佈`);
+      void load(q);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [addTerm, addCanonical, q, load]);
 
   // 改/刪口語表 → 既有 workflows API（draft + publish）
   const saveLexicon = useCallback(async () => {
@@ -150,8 +204,20 @@ export default function KeywordsClient({ role }: { role: string }) {
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="font-display text-[18px] text-t1">關鍵詞中心</h1>
-        <span className="text-[11.5px] text-t3">四來源交叉 — 一個詞用緊邊幾層一睇就看到</span>
+        <span className="text-[11.5px] text-t3">四來源交叉 — 一個詞用緊邊幾層一睇就看到；撳 chip 去嗰層改</span>
         <div className="ml-auto flex gap-2">
+          {isAdmin && (
+            <button
+              onClick={() => {
+                setAdding(true);
+                setErr(null);
+                setMsg(null);
+              }}
+              className="text-[12.5px] font-semibold border border-brand text-brand-text rounded-full px-4 py-2 hover:bg-brand-soft"
+            >
+              ＋ 新增口語詞
+            </button>
+          )}
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -187,6 +253,9 @@ export default function KeywordsClient({ role }: { role: string }) {
         </div>
       )}
 
+      {/* cwi-setfix KW-1：新增完彈層已閂 — 結果喺頁面顯示 */}
+      {!editRow && !adding && msg && <div className="text-[12px] text-ok-text font-semibold">{msg}</div>}
+
       <div className="bg-panel border border-line rounded-3xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-[12.5px]">
@@ -203,39 +272,41 @@ export default function KeywordsClient({ role }: { role: string }) {
                   <td className="px-4 py-2.5 font-semibold text-t1 whitespace-nowrap">{r.term}</td>
                   <td className="px-4 py-2.5">
                     <div className="flex flex-wrap gap-1.5">
+                      {/* cwi-setfix KW-2：chip = 去嗰層嘅設定頁（以前撳唔到 — 用戶唔知去邊改） */}
                       {r.lexicon && (
-                        <span className="px-2 py-0.5 rounded-full bg-brand-soft text-brand-text text-[11px] font-semibold" title="口語表（lexicon）">
+                        <a href={CHIP_HREF.lexicon} className="px-2 py-0.5 rounded-full bg-brand-soft text-brand-text text-[11px] font-semibold hover:underline" title="口語表（lexicon）— 撳去 Workflow 參數頁口語表卡">
                           口語表 → {r.lexicon.canonical}（{r.lexicon.source === "global" ? "全局" : r.lexicon.source === "clinic" ? "店" : "code 預設"}）
-                        </span>
+                        </a>
                       )}
                       {r.floorTrigger.length > 0 && (
-                        <span className="px-2 py-0.5 rounded-full bg-line text-t2 text-[11px] font-semibold" title="CONSULT_TRIGGER_FLOOR（code 常數 — 唔可刪）">
+                        <a href={CHIP_HREF.trigger} className="px-2 py-0.5 rounded-full bg-line text-t2 text-[11px] font-semibold hover:underline" title="CONSULT_TRIGGER_FLOOR（系統內建 — 唔可刪）— 撳去 AI 傾偈設定">
                           觸發 🔒 {r.floorTrigger.join("、")}
-                        </span>
+                        </a>
                       )}
                       {r.extraTrigger.length > 0 && (
-                        <span className="px-2 py-0.5 rounded-full bg-line text-t2 text-[11px]" title="附加觸發詞（ConsultSetting advanced）">
+                        <a href={CHIP_HREF.trigger} className="px-2 py-0.5 rounded-full bg-line text-t2 text-[11px] hover:underline" title="附加觸發詞 — 撳去 AI 傾偈設定 → 進階設定">
                           觸發+ {r.extraTrigger.length} 店
-                        </span>
+                        </a>
                       )}
                       {r.routing.map((x) => (
-                        <span key={x.ruleId} className="px-2 py-0.5 rounded-full bg-ok-soft text-ok-text text-[11px]" title={`RoutingRule ${x.clinicId ?? "global"}`}>
+                        <a key={x.ruleId} href={CHIP_HREF.routing} className="px-2 py-0.5 rounded-full bg-ok-soft text-ok-text text-[11px] hover:underline" title={`路由規則（${x.clinicId ? "店" : "全局"}）— 撳去路由規則頁`}>
                           路由：{x.ruleName}
-                        </span>
+                        </a>
                       ))}
                       {r.knowledge.length > 0 && (
-                        <span
-                          className="px-2 py-0.5 rounded-full bg-warn-soft text-warn-text text-[11px]"
-                          title={r.knowledge.map((k) => `${k.title}（${k.kind}）`).join("\n")}
+                        <a
+                          href={CHIP_HREF.knowledge}
+                          className="px-2 py-0.5 rounded-full bg-warn-soft text-warn-text text-[11px] hover:underline"
+                          title={`${r.knowledge.map((k) => `${k.title}（${k.kind}）`).join("\n")}\n— 撳去知識庫改關鍵詞`}
                         >
                           知識庫 ×{r.knowledge.length}：{r.knowledge.slice(0, 2).map((k) => k.title).join("、")}
                           {r.knowledge.length > 2 ? "…" : ""}
-                        </span>
+                        </a>
                       )}
                       {r.redFlagExtra.length > 0 && (
-                        <span className="px-2 py-0.5 rounded-full bg-danger-soft text-danger-text text-[11px] font-semibold" title="紅旗附加詞（pain-triage params）">
+                        <a href={CHIP_HREF.redFlag} className="px-2 py-0.5 rounded-full bg-danger-soft text-danger-text text-[11px] font-semibold hover:underline" title="紅旗附加詞 — 撳去痛症問診卡">
                           紅旗+（{[...new Set(r.redFlagExtra.map((x) => x.category))].join("、")}）
-                        </span>
+                        </a>
                       )}
                       {!r.lexicon && r.floorTrigger.length === 0 && r.extraTrigger.length === 0 && r.routing.length === 0 && r.knowledge.length === 0 && r.redFlagExtra.length === 0 && (
                         <span className="text-t3 text-[11px]">（浮詞 — 無層引用）</span>
@@ -273,6 +344,45 @@ export default function KeywordsClient({ role }: { role: string }) {
         {loadErr && <div className="px-4 py-3 text-[12px] text-danger-text">載入失敗：{loadErr}</div>}
         {loading && <div className="px-4 py-2 text-[11.5px] text-t3">載入中…</div>}
       </div>
+
+      {/* ── cwi-setfix KW-1：新增口語詞彈層 ── */}
+      {adding && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-[460px] bg-panel border border-line rounded-3xl p-5 shadow-xl">
+            <h3 className="font-display text-[15px] text-t1 mb-1">新增口語詞</h3>
+            <p className="text-[12px] text-t3 mb-3">病人講法 → 標準詞（例：「牙托」→「義齒」）。AI 理解、紅旗同路由比對前都會先換做標準詞。加喺全局口語表（全部店生效）。</p>
+            <div className="flex flex-col gap-2 mb-3">
+              <input
+                value={addTerm}
+                onChange={(e) => setAddTerm(e.target.value)}
+                placeholder="病人講法（例：牙托）"
+                maxLength={20}
+                className="text-[13px] bg-panel-2 border border-line rounded-full px-3.5 py-2 text-t1"
+              />
+              <input
+                value={addCanonical}
+                onChange={(e) => setAddCanonical(e.target.value)}
+                placeholder="標準詞（例：義齒）"
+                maxLength={20}
+                className="text-[13px] bg-panel-2 border border-line rounded-full px-3.5 py-2 text-t1"
+              />
+            </div>
+            {err && <p className="text-[12px] text-danger-text mb-3">{err}</p>}
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setAdding(false)} className="text-[12.5px] font-semibold rounded-full px-4 py-2 border border-line text-t2">
+                取消
+              </button>
+              <button
+                onClick={() => void addLexicon()}
+                disabled={busy || !addTerm.trim() || !addCanonical.trim()}
+                className="text-[12.5px] font-semibold rounded-full px-4 py-2 bg-brand text-panel disabled:opacity-40"
+              >
+                {busy ? "…" : "新增 + 發佈"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── 改/刪口語表彈層（B.4 交叉警示）── */}
       {editRow && (
@@ -382,6 +492,15 @@ export default function KeywordsClient({ role }: { role: string }) {
     </div>
   );
 }
+
+/** cwi-setfix KW-2：chip → 該層設定頁（關鍵詞中心只係總覽；真正新增／改喺各自頁面）。 */
+const CHIP_HREF = {
+  lexicon: "/admin/workflows#wf-lexicon",
+  trigger: "/admin/consult",
+  routing: "/admin/routing-rules",
+  knowledge: "/admin/knowledge",
+  redFlag: "/admin/workflows#wf-pain-triage",
+} as const;
 
 function Chip({ label, n, cls }: { label: string; n: number; cls: string }) {
   return <span className={`px-2.5 py-1 rounded-full font-semibold ${cls}`}>{label} {n}</span>;

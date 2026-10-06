@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
 import argon2 from "argon2";
+import { FOLLOWUP_BASE_TEMPLATES, FOLLOWUP_BASE_RULES } from "../src/lib/followup/factory-defaults";
 
 const prisma = new PrismaClient();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -321,33 +322,8 @@ export async function main(): Promise<void> {
   // ★ cwi-followup-v3-20260916（followup-v3 spec：員工提示層）：follow-up seed。
   // 鐵律：template 全部 approved=false（老細審批中）— 過窗採用 + 未審批 → 唔俾發（task 留 SUGGESTED）。
   //   F 欠款整類已剷（osAmt 分期係正常狀態）；C/D 類規則由 P4 seed（seed-followup-p4.ts）建。
-  const FOLLOWUP_TEMPLATES: { key: string; name: string; text: string }[] = [
-    {
-      key: "conversation_followup",
-      name: "對話跟進（A）",
-      text: "{{salutation}}你好，呢度係{{clinicName}}。留意到你過去幾日冇回覆，想跟你確認下：之前嘅嘢有冇咗解？如果仲有問題或者想重新約診，隨時覆訊息嚟，我哋幫你跟進。",
-    },
-    {
-      key: "appt_reminder",
-      name: "預約提醒（B）",
-      text: "{{salutation}}你好，呢度係{{clinicName}}。提醒你{{apptDate}}（{{apptTime}}）約咗{{providerName}}覆診，請提前 10 分鐘抵達。如需改期，請直接回覆呢條訊息，我哋幫你安排。期待見到您！",
-    },
-    {
-      key: "no_show",
-      name: "爽約跟進（B）",
-      text: "{{salutation}}你好，呢度係{{clinicName}}。你{{apptDate}}（{{apptTime}}）嘅預約我哋冇等到你到診，擔心你係有事臨時改咗。如果仲想覆診，請回覆呢條訊息重新預約；有其他情況都歡迎留言，我哋再同你聯絡。",
-    },
-    {
-      key: "post_op_check",
-      name: "術後關懷（C · P4）",
-      text: "{{salutation}}你好，呢度係{{clinicName}}。{{visitDate}}做完治療之後，想關心下你嘅情況：有冇明顯腫脹、疼痛加劇、出血或者發燒？有任何唔舒服請立即聯絡我哋。祝早日康復！",
-    },
-    {
-      key: "recall_cleaning",
-      name: "洗牙召回（D · P4）",
-      text: "{{salutation}}你好，呢度係{{clinicName}}。距離你上次洗牙已經有一段時間，建議安排一次常規洗牙，保持牙齒同牙肉健康。想約時間嘅話回覆呢條訊息就得，我哋幫你搵位。期待再見！",
-    },
-  ];
+  // ★ cwi-setfix F-1：清單搬咗去 src/lib/followup/factory-defaults.ts（UI「建立出廠規則」共用同一份）
+  const FOLLOWUP_TEMPLATES = FOLLOWUP_BASE_TEMPLATES;
   for (const t of FOLLOWUP_TEMPLATES) {
     const existing = await prisma.followupTemplate.findUnique({ where: { key: t.key } });
     if (existing) continue; // create-if-missing — 老細審批/改字後 re-seed 唔會洗走
@@ -362,17 +338,7 @@ export async function main(): Promise<void> {
   await prisma.$executeRawUnsafe("DELETE FROM \"FollowupRule\" WHERE \"trigger\"::text = 'OUTSTANDING_BALANCE'");
 
   // 出廠規則（v3：A/B 兩類先上，全係建議 — cron 只建 SUGGESTED，發送一律員工喺建議卡撳）
-  const FOLLOWUP_RULES: {
-    name: string;
-    trigger: "CONVERSATION_IDLE" | "BEFORE_APPOINTMENT" | "AFTER_NO_SHOW";
-    delayValue: number;
-    delayUnit: "HOUR" | "DAY" | "WEEK" | "MONTH";
-    templateName: string;
-  }[] = [
-    { name: "對話空窗跟進（7 日）", trigger: "CONVERSATION_IDLE", delayValue: 7, delayUnit: "DAY", templateName: "conversation_followup" },
-    { name: "預約提醒（診前 1 日）", trigger: "BEFORE_APPOINTMENT", delayValue: 1, delayUnit: "DAY", templateName: "appt_reminder" },
-    { name: "爽約跟進（1 日後）", trigger: "AFTER_NO_SHOW", delayValue: 1, delayUnit: "DAY", templateName: "no_show" },
-  ];
+  const FOLLOWUP_RULES = FOLLOWUP_BASE_RULES;
   for (const r of FOLLOWUP_RULES) {
     const existing = await prisma.followupRule.findFirst({ where: { clinicId: null, name: r.name } });
     if (existing) continue; // create-if-missing（同 routing rule 口徑 — re-seed 唔洗走 UI 改動）
@@ -381,7 +347,7 @@ export async function main(): Promise<void> {
         clinicId: null,
         name: r.name,
         // ★ cwi-final F-2（D-9）：B1 預約提醒預設關 — S2-1（只取 status 0）上線 + 前台確認之後先由 UI 開
-        enabled: r.trigger === "BEFORE_APPOINTMENT" ? false : true,
+        enabled: r.seedEnabled,
         trigger: r.trigger,
         delayValue: r.delayValue,
         delayUnit: r.delayUnit,

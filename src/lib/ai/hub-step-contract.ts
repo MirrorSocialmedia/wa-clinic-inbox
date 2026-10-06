@@ -38,13 +38,16 @@ export const HUB_STEP_CONTRACT: ReadonlyArray<readonly [string, string]> = [
  */
 export const STEP_EXTRA_LINKS: ReadonlyArray<ReadonlyArray<readonly [string, string]>> = [
   [],
-  [],
-  [],
+  // ★ cwi-setfix H-4：② 口語表真正嘅新增位喺 Workflow 參數頁 lexicon 卡（關鍵詞中心只係總覽）
+  [["加口語表", "/admin/workflows#wf-lexicon"]],
+  // ★ cwi-setfix H-1：③「預約 開／關」嘅開關喺 ⑦ 自動化頁（BOOKING_REQUEST L3/L4）— 主連結係傾偈設定
+  [["預約開關", "/admin/automation"]],
   [],
   [
     ["技能組", "/admin/skill-groups"],
   ],
-  [],
+  // ★ cwi-setfix H-2：⑥ 警示「高價值收費缺短免責聲明」要去知識庫補
+  [["知識庫（短免責聲明）", "/admin/knowledge"]],
   [],
 ];
 
