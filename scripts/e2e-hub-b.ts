@@ -317,7 +317,7 @@ async function main(): Promise<void> {
       prisma.routingRule.count({ where: { enabled: true } }),
       import("../src/lib/sessions/red-flags").then((m) => m.floorTermSet().size),
     ]);
-    const unsigned = products.filter((p) => p.approvedAt === null || !p.enabled).length;
+    const unsigned = products.filter((p) => p.enabled && p.approvedAt === null).length;
     // 口語表 = 生效詞表口徑（同 getLexicon：DB row 店優先 union；零 row → LEXICON_DEFAULTS）
     const lexWfs = await prisma.workflowDefinition.findMany({ where: { key: "lexicon", status: "ACTIVE" }, select: { clinicId: true, params: true } });
     let lexCount: number;
@@ -358,7 +358,7 @@ async function main(): Promise<void> {
     const hubAll = await apiGet("/api/admin/ai", adminCookie);
     const unsignedAll = (
       await prisma.consultProduct.findMany({ select: { approvedAt: true, enabled: true } })
-    ).filter((p) => p.approvedAt === null || !p.enabled).length;
+    ).filter((p) => p.enabled && p.approvedAt === null).length;
     check(
       "(a) ④ 未簽署方案警示 + 數字跟 DB",
       unsignedAll > 0 && (hubAll.json?.steps?.[3]?.warnings ?? []).some((w: string) => w.includes(String(unsignedAll)) && w.includes("未簽署")),

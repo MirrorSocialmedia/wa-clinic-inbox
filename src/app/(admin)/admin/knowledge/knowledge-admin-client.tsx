@@ -22,6 +22,7 @@ interface DocRow {
   keywords: string[];
   body: string;
   disclaimer: string | null;
+  shortDisclaimer: string | null;
   priceMin: number | null;
   priceMax: number | null;
   enabled: boolean;
@@ -74,6 +75,7 @@ interface FormState {
   keywords: string;
   body: string;
   disclaimer: string;
+  shortDisclaimer: string;
   priceMin: string;
   priceMax: string;
   enabled: boolean;
@@ -87,10 +89,17 @@ const emptyForm = (clinicId: string): FormState => ({
   keywords: "",
   body: "",
   disclaimer: "",
+  shortDisclaimer: "",
   priceMin: "",
   priceMax: "",
   enabled: true,
 });
+
+/** cwi-setfix K-1：同 src/lib/ai/price-guard.ts isHighValuePriceRange 一致（price-guard 帶 server log，client 唔 import）。 */
+function isHighValue(priceMin: number, priceMax: number): boolean {
+  if (!Number.isFinite(priceMin) || !Number.isFinite(priceMax) || priceMin <= 0 || priceMax <= 0) return false;
+  return priceMax / priceMin > 1.5 || priceMax >= 5000;
+}
 
 export default function KnowledgeAdmin() {
   const [clinics, setClinics] = useState<ClinicRow[]>([]);
@@ -147,6 +156,8 @@ export default function KnowledgeAdmin() {
       keywords,
       body: form.body.trim(),
       disclaimer: form.kind === "PRICE" ? form.disclaimer.trim() : null,
+      // cwi-setfix K-1：短版 disclaimer（舊表單冇呢欄 → PUT 寫 null 洗走 / 高價值條目 400 存唔到）
+      shortDisclaimer: form.kind === "PRICE" && form.shortDisclaimer.trim() ? form.shortDisclaimer.trim() : null,
       priceMin: form.kind === "PRICE" ? Number(form.priceMin) : null,
       priceMax: form.kind === "PRICE" ? Number(form.priceMax) : null,
       enabled: form.enabled,
@@ -160,6 +171,9 @@ export default function KnowledgeAdmin() {
       if (!Number.isFinite(Number(form.priceMin)) || !Number.isFinite(Number(form.priceMax)))
         return setFormErr("PRICE 條目 priceMin/priceMax 必填");
       if (Number(form.priceMin) > Number(form.priceMax)) return setFormErr("priceMin 必須 ≤ priceMax");
+      if (form.shortDisclaimer.trim().length > 12) return setFormErr("短免責聲明最多 12 字");
+      if (isHighValue(Number(form.priceMin), Number(form.priceMax)) && !form.shortDisclaimer.trim())
+        return setFormErr("高價值收費（上限 ≥ $5,000 或上下限差 > 1.5 倍）要填短免責聲明（≤12 字）");
     }
     setBusy(true);
     try {
@@ -188,6 +202,7 @@ export default function KnowledgeAdmin() {
           keywords: d.keywords,
           body: d.body,
           disclaimer: d.disclaimer,
+          shortDisclaimer: d.shortDisclaimer,
           priceMin: d.priceMin,
           priceMax: d.priceMax,
           enabled,
@@ -219,6 +234,7 @@ export default function KnowledgeAdmin() {
       keywords: d.keywords.join(", "),
       body: d.body,
       disclaimer: d.disclaimer ?? "",
+      shortDisclaimer: d.shortDisclaimer ?? "",
       priceMin: d.priceMin !== null ? String(d.priceMin) : "",
       priceMax: d.priceMax !== null ? String(d.priceMax) : "",
       enabled: d.enabled,
@@ -305,6 +321,10 @@ export default function KnowledgeAdmin() {
                       <span className="text-[11px] bg-brand-soft text-brand-text rounded px-1.5 py-0.5">
                         ${d.priceMin}–${d.priceMax}
                       </span>
+                    )}
+                    {/* cwi-setfix K-1：AI 流程 ⑥ 警示「高價值 PRICE doc 缺 shortDisclaimer」— 喺度標出嚟，撳編輯補 */}
+                    {d.kind === "PRICE" && isHighValue(d.priceMin ?? NaN, d.priceMax ?? NaN) && !d.shortDisclaimer?.trim() && (
+                      <span className="text-[11px] bg-warn-soft text-warn-text rounded px-1.5 py-0.5">⚠ 缺短免責聲明</span>
                     )}
                   </div>
                   <div className="text-xs text-t2 truncate">{d.keywords.join(" / ")}</div>
@@ -400,6 +420,19 @@ export default function KnowledgeAdmin() {
                     className="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-panel"
                     placeholder="以上為參考收費範圍，實際費用以到診評估為準"
                   />
+                </label>
+                <label className="text-xs text-t2 col-span-2">
+                  短免責聲明（≤12 字 — 高價值收費必填：AI 報價時附喺句尾）
+                  <input
+                    value={form.shortDisclaimer}
+                    maxLength={12}
+                    onChange={(e) => setForm({ ...form, shortDisclaimer: e.target.value })}
+                    className="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-panel"
+                    placeholder="實際以評估為準"
+                  />
+                  {isHighValue(Number(form.priceMin), Number(form.priceMax)) && !form.shortDisclaimer.trim() && (
+                    <span className="block mt-0.5 text-warn-text">高價值收費 — 呢欄必填</span>
+                  )}
                 </label>
                 <label className="text-xs text-t2">
                   價格下限

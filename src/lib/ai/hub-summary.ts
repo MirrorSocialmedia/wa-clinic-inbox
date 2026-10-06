@@ -218,6 +218,7 @@ export async function buildHubSummary(ctx: AuthContext): Promise<HubSummary> {
     summary: `口語表 ${lexCount} · 觸發詞 ${triggerFloorCount + triggerExtra.size} · 分流詞 ${routingKeywords.size}`,
     warnings: lexMap.size > 60 ? [`口語表 ${lexMap.size} 條超上限 60 — 運行時會被截斷`] : [],
     anchor: STEP_ANCHORS[1],
+    extraLinks: STEP_EXTRA_LINKS[1].map(([label, href]) => ({ label, href })),
     detail: { lexicon: lexCount, lexiconRaw: lexMap.size, triggerFloor: triggerFloorCount, triggerExtra: triggerExtra.size, routingKeywords: routingKeywords.size },
   };
 
@@ -237,11 +238,13 @@ export async function buildHubSummary(ctx: AuthContext): Promise<HubSummary> {
     summary: `問診 開 · 銷售 開 · 預約 ${bookingLabel}`,
     warnings: allProductsUnsigned ? ["銷售開但方案全部未簽署"] : [],
     anchor: STEP_ANCHORS[2],
+    extraLinks: STEP_EXTRA_LINKS[2].map(([label, href]) => ({ label, href })),
     detail: { painTriage: "on", consult: "on", booking: bookingLabel, bookingOnClinics: bookingOn, bookingTotal: clinics.length },
   };
 
   // ── ④ 搵資料：知識庫 + 方案 + 時段（workforce probe）──
-  const productsUnsigned = products.filter((p) => p.approvedAt === null || !p.enabled).length;
+  // ★ cwi-setfix C-1：停用嘅方案唔再算「未簽署」（以前停用都計 → 用戶停用咗誤開嘅空白方案，警示照出、冇辦法清）
+  const productsUnsigned = products.filter((p) => p.enabled && p.approvedAt === null).length;
   const wfProbe = await probeWorkforce(clinics);
   const step4Warnings: string[] = [];
   if (docs.length === 0) step4Warnings.push("知識庫 = 0");
@@ -292,7 +295,10 @@ export async function buildHubSummary(ctx: AuthContext): Promise<HubSummary> {
     detail: { skillGroups: groups.length, routingRules: rules.length, orphanRules },
   };
 
-  // ── ⑥ 出文：文案風格（greetingConfig 店數）+ guard 清單（唯讀鎖死）──
+  // ── ⑥ 出文：語氣 + guard 清單（唯讀鎖死）──
+  // ★ cwi-setfix H-2：舊摘要「文案風格 N/M 店已設」其實只係數 greetingConfig（地址／營業時間 JSON）非空嘅店 —
+  //   同語氣無關，而且系統冇任何語氣設定（語氣寫死喺 prompts.ts system prompt）→ 誤導用戶搵唔到設定位。
+  //   改為如實顯示「語氣 = 系統預設」；toneSetClinics 保留喺 detail（舊口徑 — 診所資料已填店數）。
   const toneSet = clinics.filter((c) => c.greetingConfig && Object.keys(c.greetingConfig).length > 0).length;
   const highValueMissing = docs.filter(
     (d) => d.kind === "PRICE" && isHighValuePriceDoc(d) && !(d.shortDisclaimer && d.shortDisclaimer.trim())
@@ -300,9 +306,10 @@ export async function buildHubSummary(ctx: AuthContext): Promise<HubSummary> {
   const step6: HubStep = {
     n: 6,
     name: STEP_NAMES[5],
-    summary: `文案風格 ${toneSet}/${clinics.length} 店已設 · 9 條把關 🔒`,
-    warnings: highValueMissing > 0 ? [`${highValueMissing} 個高價值 PRICE doc 缺 shortDisclaimer`] : [],
+    summary: `語氣 系統預設 · 9 條把關 🔒`,
+    warnings: highValueMissing > 0 ? [`${highValueMissing} 條高價值收費（知識庫）缺短免責聲明`] : [],
     anchor: STEP_ANCHORS[5],
+    extraLinks: STEP_EXTRA_LINKS[5].map(([label, href]) => ({ label, href })),
     detail: { toneSetClinics: toneSet, toneTotal: clinics.length, priceGuardRules: 3, claimGuardRules: 9, highValueMissingDisclaimer: highValueMissing },
   };
 

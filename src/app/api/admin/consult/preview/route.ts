@@ -73,7 +73,8 @@ export const POST = handle(async (req: NextRequest) => {
     orderBy: { sortOrder: "asc" },
   });
   const usable = all.filter(isProductUsable);
-  const unapprovedCount = all.filter((p) => p.approvedAt === null).length;
+  // ★ cwi-setfix C-1：停用嘅方案唔計「未確認」（停用 = 刻意唔用）
+  const unapprovedCount = all.filter((p) => p.enabled && p.approvedAt === null).length;
 
   // 2. PRICE doc（引用 = 第一個 usable 產品嘅 priceDocTitle — 同 worker price chain 同口徑）
   const firstTitle = usable.find((p) => p.priceDocTitle)?.priceDocTitle ?? all.find((p) => p.priceDocTitle)?.priceDocTitle ?? null;

@@ -19,14 +19,18 @@ interface Params {
 export const PUT = handle(async (req: NextRequest, { params }: Params) => {
   const ctx = await requireAdmin(req);
   const { id } = await params;
-  const body = await req.json().catch(() => null);
-  const parsed = knowledgeDocSchema.safeParse(body);
+  const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+  const existing = await prisma.knowledgeDoc.findUnique({ where: { id } });
+  if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // ★ cwi-setfix K-1：body 冇 shortDisclaimer key（舊 client／只改其他欄）→ 沿用現值，唔好當 null 洗走
+  //   （舊版 PUT 一律寫 `?? null` — 知識庫 UI 冇呢欄，撳「編輯／啟用」就清走短版 disclaimer；
+  //   高價值條目更加因 refine 必填而 400 存唔到）。明確傳 null = 清走（照舊）。
+  const merged = body && typeof body === "object" && !("shortDisclaimer" in body) ? { ...body, shortDisclaimer: existing.shortDisclaimer } : body;
+  const parsed = knowledgeDocSchema.safeParse(merged);
   if (!parsed.success) {
     return NextResponse.json({ error: "validation failed", issues: parsed.error.issues }, { status: 400 });
   }
   const d = parsed.data;
-  const existing = await prisma.knowledgeDoc.findUnique({ where: { id } });
-  if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
   // ★ cwi-final S3-1：existing.clinicId 同 body.clinicId（?? existing）雙核對
   assertConfigScope(ctx, existing.clinicId);
   assertConfigScope(ctx, d.clinicId ?? existing.clinicId);
