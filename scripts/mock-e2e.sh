@@ -8810,6 +8810,16 @@ try{const a=JSON.parse(fs.readFileSync(f,"utf8"));fs.writeFileSync(f,JSON.string
 fi
 
 # ── T680. S5-12 同號多病人：L4 + pinned + matchCount=2 → 唔自動落單（出卡 + 要揀人）──
+# ★ cwi-setfix CI（main run 37484599248）：T680 喺 CI 第 ~60 分鐘先跑 — 15:00 UTC 後開跑就會跨 HKT 午夜，
+#   新「聽日／後日／大後日」嘅 L2 行未必喺度（前面 T148 等段會刪／改 L2）→「無 15:00 空槽」。
+#   揀槽前即時 refresh 呢 3 日（mock grid 決定性 — 同 sync 同一來源）；429 等一陣再試一次。
+pc_refresh_days
+for _t680_try in 1 2; do
+  T680_RF=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/availability/refresh" -H 'Content-Type: application/json' \
+    -d "{\"clinicCode\":\"TKW\",\"dates\":[\"$PC_D1\",\"$PC_D2\",\"$PC_D3\"]}")
+  [ "$T680_RF" = "429" ] || break
+  sleep 65 # retryAfterSec 預設 60
+done
 T680_SLOT=$(pc_pick "$TKW_CLINIC_ID" "" 0)
 if [ -z "$T680_SLOT" ]; then
   fail "T680 fixture：TKW 聽日/後日/大後日 無 15:00 空槽（djb2 grid）"
