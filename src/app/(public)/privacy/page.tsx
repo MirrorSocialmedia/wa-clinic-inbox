@@ -19,7 +19,7 @@ export default function PrivacyPage() {
       <section className="mt-8 space-y-4">
         <h2 className="text-lg font-semibold">1. 關於我們</h2>
         <p>
-          BACCARAT YL LIMITED（下稱「我們」）於香港經營牙科診所，地址：ROOM 1101-02, 11/F OFFICE TOWER WEO GRAND PLAZA, 625 & 639 Nathan Road, Mong Kok, Hong Kong。
+          BACCARAT YL LIMITED（下稱「我們」）於香港經營牙科診所，地址：SHOP NO. A306 LEVEL 3 YOHO MALL II, 8 LONG YAT ROAD, YUEN LONG NT, Hong Kong。
           我們透過 WhatsApp 為病人提供查詢、預約及跟進服務。本政策說明我們如何收集、使用、
           儲存及保護你的個人資料，並按照香港《個人資料（私隱）條例》（第486章）行事。
         </p>
@@ -76,7 +76,7 @@ export default function PrivacyPage() {
           資料保障主任 Data Protection Officer<br />
           電郵 Email：info@aegisdentalhk.com<br />
           電話 Tel：+852 6704 5481<br />
-          地址 Address：ROOM 1101-02, 11/F OFFICE TOWER WEO GRAND PLAZA, 625 & 639 Nathan Road, Mong Kok, Hong Kong
+          地址 Address：SHOP NO. A306 LEVEL 3 YOHO MALL II, 8 LONG YAT ROAD, YUEN LONG NT, Hong Kong
         </p>
       </section>
 
