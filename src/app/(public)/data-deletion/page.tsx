@@ -41,7 +41,7 @@ export default function DataDeletionPage() {
         </p>
 
         <h2 className="text-lg font-semibold">聯絡</h2>
-        <p>info@aegisdentalhk.com｜+852 6704 5481｜ROOM 1101-02, 11/F OFFICE TOWER WEO GRAND PLAZA, 625 & 639 Nathan Road, Mong Kok, Hong Kong</p>
+        <p>info@aegisdentalhk.com｜+852 6704 5481｜SHOP NO. A306 LEVEL 3 YOHO MALL II, 8 LONG YAT ROAD, YUEN LONG NT, Hong Kong</p>
       </section>
 
       <section className="mt-12 space-y-4 border-t pt-8">
