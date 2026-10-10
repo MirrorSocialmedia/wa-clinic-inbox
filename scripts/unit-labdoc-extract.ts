@@ -328,24 +328,49 @@ async function main(): Promise<void> {
     const num = parseLabDocResponse("42");
     check("JSON 數字 → parse_error", num.reason === "parse_error");
 
+    // ★ cwi-labdoc-normalize：sglang 忽略 guided_json → 細偏差先整理再驗（之前一律 bad_response）
     const noTotal = invoiceSample();
     delete noTotal.total;
-    const bad1 = parseLabDocResponse(JSON.stringify(noTotal));
-    check("缺必填 total → bad_response", bad1.reason === "bad_response" && bad1.result === null);
-    const badDate = parseLabDocResponse(JSON.stringify(invoiceSample({ date: "2026/10/01" })));
-    check("date 唔係 YYYY-MM-DD → bad_response", badDate.reason === "bad_response");
-    const badMonth = parseLabDocResponse(JSON.stringify(statementSample({ statementMonth: "09/2026" })));
-    check("statementMonth 格式錯 → bad_response", badMonth.reason === "bad_response");
-    const invWithSections = parseLabDocResponse(JSON.stringify(invoiceSample({ sections: [statementSample().sections[0]] })));
-    check("INVOICE 帶 sections → bad_response（invariant）", invWithSections.reason === "bad_response");
-    const stWithGroups = parseLabDocResponse(JSON.stringify(statementSample({ groups: [invoiceSample().groups[0]] })));
-    check("STATEMENT 帶 groups → bad_response（invariant）", stWithGroups.reason === "bad_response");
-    const badLineType = statementSample();
-    badLineType.sections[0].lines[0].lineType = "XXX";
-    check("lineType 唔喺 enum → bad_response", parseLabDocResponse(JSON.stringify(badLineType)).reason === "bad_response");
+    const n1 = parseLabDocResponse(JSON.stringify(noTotal));
+    check("缺 total → 補 null（唔再 bad_response）", n1.reason === null && n1.result?.total === null);
+    const n2 = parseLabDocResponse(JSON.stringify(invoiceSample({ date: "2026/10/01" })));
+    check("date 2026/10/01 → 2026-10-01", n2.reason === null && n2.result?.date === "2026-10-01");
+    const n2b = parseLabDocResponse(JSON.stringify(invoiceSample({ date: null, dateRaw: "03/09/2026" })));
+    check("date null + dateRaw 03/09/2026 → 2026-09-03（日先）", n2b.result?.date === "2026-09-03");
+    const n2c = parseLabDocResponse(JSON.stringify(invoiceSample({ date: "31/02/2026" })));
+    check("唔存在嘅日期 → null", n2c.reason === null && n2c.result?.date === null);
+    const n3 = parseLabDocResponse(JSON.stringify(statementSample({ statementMonth: "09/2026" })));
+    check("statementMonth 09/2026 → 2026-09", n3.reason === null && n3.result?.statementMonth === "2026-09");
+    const n4 = parseLabDocResponse(JSON.stringify(invoiceSample({ sections: [statementSample().sections[0]] })));
+    check("INVOICE 帶 sections → 清走 + readIssues", n4.reason === null && n4.result?.sections.length === 0 && n4.result.readIssues.some((x) => x.includes("月結單分段")));
+    const n5 = parseLabDocResponse(JSON.stringify(statementSample({ groups: [invoiceSample().groups[0]] })));
+    check("STATEMENT 帶 groups → 清走 + readIssues", n5.reason === null && n5.result?.groups.length === 0 && n5.result.readIssues.some((x) => x.includes("invoice 分組")));
+    const lt = statementSample();
+    lt.sections[0].lines[0].lineType = "XXX";
+    const n6 = parseLabDocResponse(JSON.stringify(lt));
+    check("lineType 唔識 → CHARGE（要人手睇）", n6.reason === null && n6.result?.sections[0].lines[0].lineType === "CHARGE");
+    const lt2 = statementSample();
+    lt2.sections[0].lines[0].lineType = "b/f";
+    check("lineType b/f → BF", parseLabDocResponse(JSON.stringify(lt2)).result?.sections[0].lines[0].lineType === "BF");
+    const amt = invoiceSample();
+    amt.groups[0].lines[0].amount = "HK$ 3,200.00";
+    amt.groups[0].lines[0].qty = "1";
+    const n7 = parseLabDocResponse(JSON.stringify(amt));
+    check("amount 'HK$ 3,200.00' → 3200；qty '1' → 1", n7.reason === null && n7.result?.groups[0].lines[0].amount === 3200 && n7.result.groups[0].lines[0].qty === 1);
+    const neg = invoiceSample();
+    neg.groups[0].lines[0].amount = "(50.00)";
+    check("amount '(50.00)' → -50", parseLabDocResponse(JSON.stringify(neg)).result?.groups[0].lines[0].amount === -50);
     const badAmt = invoiceSample();
-    badAmt.groups[0].lines[0].amount = "3200";
-    check("amount 字符串 → bad_response", parseLabDocResponse(JSON.stringify(badAmt)).reason === "bad_response");
+    badAmt.groups[0].lines.push({ ...badAmt.groups[0].lines[0], amount: "見附件" });
+    const n8 = parseLabDocResponse(JSON.stringify(badAmt));
+    check("amount 讀唔到 → 掉咗嗰行 + readIssues", n8.reason === null && n8.result?.groups[0].lines.length === badAmt.groups[0].lines.length - 1 && n8.result.readIssues.some((x) => x.includes("金額讀唔到")));
+    const noKind = invoiceSample();
+    delete noKind.kind;
+    check("冇 kind → 用 kindHint", parseLabDocResponse(JSON.stringify(noKind), "INVOICE").result?.kind === "INVOICE");
+    check("冇 kind 又冇 kindHint → bad_response", parseLabDocResponse(JSON.stringify(noKind)).reason === "bad_response");
+    const sparse = parseLabDocResponse(JSON.stringify({ kind: "INVOICE", docNoRaw: "A1", groups: [{ lines: [{ description: "Crown", amount: 100 }] }] }));
+    check("漏晒可空欄 → 全部補 null／[]", sparse.reason === null && sparse.result?.lab.nameRaw === null && sparse.result.groups[0].lines[0].toothRaw === null && sparse.result.sections.length === 0);
+    check("乜都冇讀到 → bad_response", parseLabDocResponse(JSON.stringify({ unexpected: true }), "INVOICE").reason === "bad_response");
 
     const extra = parseLabDocResponse(JSON.stringify(invoiceSample({ extraField: "drop me", lab: { nameRaw: "LAB A", nameCnRaw: null, payeeRaw: null, unknownDeep: 1 } })));
     check("多餘頂層欄位丟棄", extra.reason === null && !("extraField" in (extra.result ?? {})));
@@ -504,13 +529,12 @@ async function main(): Promise<void> {
     let dec = openResp(r, env.nonce);
     check("上游非 JSON → result=null + reason=parse_error", r.status === 200 && dec?.result === null && dec?.reason === "parse_error");
 
-    const missing = invoiceSample();
-    delete missing.total;
-    upstreamMode = { kind: "content", content: JSON.stringify(missing) };
+    // cwi-labdoc-normalize：缺欄位會補；乜都讀唔到先係 bad_response
+    upstreamMode = { kind: "content", content: JSON.stringify({ unexpected: true }) };
     env = sealReq({ mode: "TEXT", kindHint: "INVOICE", labHint: null, text: "page", images: null });
     r = await hit(JSON.stringify(env));
     dec = openResp(r, env.nonce);
-    check("上游 JSON 缺必填 → result=null + reason=bad_response", r.status === 200 && dec?.result === null && dec?.reason === "bad_response");
+    check("上游 JSON 乜都冇讀到 → result=null + reason=bad_response", r.status === 200 && dec?.result === null && dec?.reason === "bad_response");
   }
   // 7f. 429 BUSY（CONCURRENCY=1 + 上游 sleep 占位）
   // ★ M-1（2026-10-04 reviewer 修復）：429 唔消耗 nonce — CWM 重試同一信封

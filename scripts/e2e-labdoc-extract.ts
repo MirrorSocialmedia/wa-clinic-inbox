@@ -511,13 +511,20 @@ async function main(): Promise<void> {
       let dec = openResp(r, env.nonce);
       check("上游非 JSON → result=null + parse_error", r.status === 200 && dec?.result === null && dec?.reason === "parse_error", `dec=${JSON.stringify(dec)}`);
 
+      // cwi-labdoc-normalize：缺欄位會補（唔再 bad_response）；乜都讀唔到先係 bad_response
       const missing = invoiceSample();
       delete missing.total;
       upstreamMode = { kind: "content", content: JSON.stringify(missing) };
       env = sealReq({ mode: "TEXT", kindHint: "INVOICE", labHint: null, text: "page", images: null });
       r = await hit(JSON.stringify(env));
       dec = openResp(r, env.nonce);
-      check("上游缺必填 → result=null + bad_response", r.status === 200 && dec?.result === null && dec?.reason === "bad_response", `dec=${JSON.stringify(dec)}`);
+      check("上游缺 total → 補 null、照回 result", r.status === 200 && dec?.reason === null && dec?.result?.total === null, `dec=${JSON.stringify(dec)?.slice(0, 200)}`);
+
+      upstreamMode = { kind: "content", content: JSON.stringify({ unexpected: true }) };
+      env = sealReq({ mode: "TEXT", kindHint: "INVOICE", labHint: null, text: "page", images: null });
+      r = await hit(JSON.stringify(env));
+      dec = openResp(r, env.nonce);
+      check("上游乜都冇讀到 → result=null + bad_response", r.status === 200 && dec?.result === null && dec?.reason === "bad_response", `dec=${JSON.stringify(dec)}`);
 
       // 輸出撞 max_tokens（finish_reason=length）→ truncated（唔係含糊嘅 parse_error）
       upstreamMode = { kind: "content", content: JSON.stringify(invoiceSample()).slice(0, 120), finishReason: "length" };

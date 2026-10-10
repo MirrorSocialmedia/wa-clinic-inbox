@@ -26,6 +26,8 @@
 import { chatWithFallback, getAiConfig, type AiContentPart } from "@/lib/ai/vllm";
 import { buildLabDocPrompt } from "@/lib/labdoc/prompt";
 import { labDocResultSchema, type LabDocResult } from "@/lib/labdoc/schema";
+import { normalizeLabDocOutput } from "@/lib/labdoc/normalize";
+import log from "@/lib/log";
 // ★ guided_json 用同一份契約文字（vLLM 強制結構；sglang 忽略 guided_json、行 response_format=json_object）
 import labDocJsonSchema from "@/lib/labdoc/schema.json";
 
@@ -163,10 +165,11 @@ function buildMessages(req: LabDocRequest): { role: "system" | "user"; content: 
 }
 
 /**
- * 解析 model 輸出（strip ``` fence + JSON.parse + zod 契約）。
+ * 解析 model 輸出（strip ``` fence + JSON.parse + 整理 normalize + zod 契約）。
  * 決定性 pure 函數 — 單測直接打呢度。
+ * `kindHint`：model 冇寫／亂寫 kind 時用請求嘅 kindHint（整理層）。
  */
-export function parseLabDocResponse(content: string): LabDocOutcome {
+export function parseLabDocResponse(content: string, kindHint: LabDocKind | null = null): LabDocOutcome {
   let s = content.trim();
   const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(s);
   if (fence) s = fence[1].trim();
@@ -179,8 +182,21 @@ export function parseLabDocResponse(content: string): LabDocOutcome {
   if (typeof j !== "object" || j === null || Array.isArray(j)) {
     return { result: null, reason: "parse_error" };
   }
-  const parsed = labDocResultSchema.safeParse(j);
-  if (!parsed.success) return { result: null, reason: "bad_response" };
+  // sglang 忽略 guided_json → model 細偏差（漏 key、"$1,100"、03/09/2026…）先整理再驗（cwi-labdoc-normalize）
+  const norm = normalizeLabDocOutput(j as Record<string, unknown>, kindHint);
+  // 整理完乜都冇（冇行、冇分段、冇總數、冇單號、冇 Lab 名）= model 冇讀到嘢 → 唔好交一張空單俾 CWM
+  const n = norm as { groups: unknown[]; sections: unknown[]; total: unknown; docNoRaw: unknown; lab: { nameRaw: unknown; nameCnRaw: unknown } };
+  if (!n.groups.length && !n.sections.length && n.total === null && n.docNoRaw === null && n.lab.nameRaw === null && n.lab.nameCnRaw === null) {
+    log.warn({ paths: ["(empty)"] }, "labdoc-extract: bad_response");
+    return { result: null, reason: "bad_response" };
+  }
+  const parsed = labDocResultSchema.safeParse(norm);
+  if (!parsed.success) {
+    // 只記欄位路徑＋錯誤類型（零值／零原文）— 方便對 model 輸出調 prompt
+    const paths = parsed.error.issues.slice(0, 10).map((i) => `${i.path.join(".")}:${i.code}`);
+    log.warn({ paths }, "labdoc-extract: bad_response");
+    return { result: null, reason: "bad_response" };
+  }
   return { result: parsed.data, reason: null };
 }
 
@@ -228,7 +244,7 @@ export async function extractLabDoc(req: LabDocRequest): Promise<LabDocOutcome> 
   }
   // 輸出撞 max_tokens → 唔好當 parse_error（JSON 半截）；明確話 CWM 知係截斷
   if (finishReason === "length") return { result: null, reason: "truncated" };
-  return parseLabDocResponse(content);
+  return parseLabDocResponse(content, req.kindHint);
 }
 
 // ── AI_MOCK fixture（零 PII 純測試文字；必須通過 zod 契約）────────────────
