@@ -64,9 +64,10 @@ echo "  OK"
 # ── 2. 起 server + worker（AI_MOCK=0 真 sglang / WA_MOCK=1） ─────────────
 echo "[2/4] start server + worker (AI_MOCK=0, WA_MOCK=1)..."
 pkill -f "src/workers/index.ts" 2>/dev/null || true
-pkill -f " server.ts" 2>/dev/null || true
+# ★ cwi-labdoc-followup m-7：舊 `pkill -f " server.ts"` 已移除（pattern kill 會誤殺本地 dev 3100 — 鐵律：禁 pattern kill）—
+#   server 清理改 port-scoped kill-by-PID（冇 listener = no-op）；-sTCP:LISTEN 防連 established connection 都列（T634 自殺教訓）。
 sleep 1
-lsof -ti:"$PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
 sleep 1
 nohup pnpm dev >/tmp/e2e-realai-server.log 2>&1 &
 SERVER_PID=$!
@@ -77,7 +78,8 @@ cleanup() {
   sleep 1
   kill -9 "$WORKER_PID" "$SERVER_PID" 2>/dev/null || true
   pkill -f "src/workers/index.ts" 2>/dev/null || true
-  pkill -f " server.ts" 2>/dev/null || true
+  # ★ cwi-labdoc-followup m-7：舊 `pkill -f " server.ts"` 已移除（pattern kill 會誤殺本地 dev 3100）— port-scoped kill-by-PID；冇 listener = no-op
+  lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
 }
 trap cleanup EXIT
 

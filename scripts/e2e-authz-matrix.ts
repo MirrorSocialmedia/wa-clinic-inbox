@@ -40,6 +40,7 @@ import { io as socketIoClient } from "socket.io-client";
 import IORedis from "ioredis";
 import { totpCode } from "../src/lib/totp";
 import { ensureKeypair, wrapAesKey, encryptGcm } from "../src/lib/flows/crypto";
+import { parseListenPids } from "./_listen-pids";
 
 // 遞迴搵 route.ts（免外部 glob 依賴 — repo 無 glob/@types/glob；行為 = globSync("src/app/api/**/route.ts")）
 function listRouteFiles(root: string): string[] {
@@ -1883,16 +1884,18 @@ async function t634EnrollAndConfirm(email: string, xff: string): Promise<string>
 function pidsOn3100(): number[] {
   // ★ 只列 LISTEN state — `lsof -ti:3100` 會連 established connection 都列（本 process 自己嘅
   //   fetch keep-alive socket！）→ kill3100 會 SIGTERM 自己（2026-09-24 T634 實測自殺）。
+  //   parse 抽成純函數（_listen-pids.ts — unit-port-kill-pids.ts 可測）。
   try {
-    const out = execSync("lsof -ti:3100 -sTCP:LISTEN", { encoding: "utf8" }).trim();
-    return out ? out.split(/\s+/).map(Number) : [];
+    const out = execSync("lsof -ti:3100 -sTCP:LISTEN", { encoding: "utf8" });
+    return parseListenPids(out);
   } catch { return []; }
 }
 
 async function kill3100(): Promise<void> {
+  // ★ cwi-labdoc-followup m-7：port-scoped kill-by-PID only（lsof LISTEN pid → kill 嗰啲 PID）；
+  //   冇 listener = no-op。舊版嘅 `pkill -f " server.ts"` fallback 已移除（pattern kill 會誤殺
+  //   本地 dev 3100 — 鐵律：禁 pattern kill）。CI 行為不變：fresh runner 3100 上只有本 script 自起嗰個 server。
   for (const p of pidsOn3100()) { try { process.kill(p, "SIGTERM"); } catch { /* */ } }
-  // fallback：殺到 tsx 真 node server（cmdline " server.ts"）— 防 lsof 漏 LISTEN pid
-  try { execSync('pkill -f " server.ts" || true', { stdio: "ignore" }); } catch { /* */ }
   for (let i = 0; i < 30; i++) {
     if (pidsOn3100().length === 0) return;
     await new Promise((r) => setTimeout(r, 500));

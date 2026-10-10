@@ -499,9 +499,10 @@ echo "[2/9] start server + worker..."
 # pre-clean：上一輪 e2e / 手動啟動嘅 tsx worker 會 spawn node 子 process，
 # kill pnpm wrapper 殺唔到 — 孤兒 worker 會搶食呢輪嘅 job（仲可能係舊 code！）。
 pkill -f "src/workers/index.ts" 2>/dev/null || true
-pkill -f " server.ts" 2>/dev/null || true
+# ★ cwi-labdoc-followup m-7：舊 `pkill -f " server.ts"` 已移除（pattern kill 會誤殺本地 dev 3100 — 鐵律：禁 pattern kill）—
+#   server 清理改 port-scoped kill-by-PID（冇 listener = no-op）；-sTCP:LISTEN 防連 established connection 都列（T634 自殺教訓）。
 sleep 1
-lsof -ti:"$PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
 sleep 1
 # ★ 2026-08-21：清 .next dev cache — prod `pnpm build` 會覆寫 .next chunk layout，
 #   之後 `next dev` lazy-compile 新 route 會撈 `Cannot find module './vendor-chunks/...'` →
@@ -543,7 +544,8 @@ cleanup() {
   kill -9 "$WORKER_PID" "$SERVER_PID" 2>/dev/null || true
   # ★ kill 要殺到 tsx 嘅 node 子 process（先係真正嘅 worker/server），否則孤兒持續搶食 queue
   pkill -f "src/workers/index.ts" 2>/dev/null || true
-  pkill -f " server.ts" 2>/dev/null || true
+  # ★ cwi-labdoc-followup m-7：舊 `pkill -f " server.ts"` 已移除（pattern kill 會誤殺本地 dev 3100）— port-scoped kill-by-PID；冇 listener = no-op
+  lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
   # 清 lock 檔（flock 嘅 lock 隨 process 消失，但檔會留低 — 用「檔在唔在」判斷嘅等待者會卡死）
   rm -f /tmp/e2e.lock
 }
@@ -4311,9 +4313,9 @@ EADM2_ID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$E2E_ADM2_EMAIL'" | jf i
 [ -n "$EADM2_ID" ] || { echo "FATAL: eadm2 id 搵唔到"; exit 1; }
 
 kill "$SERVER_PID" 2>/dev/null || true
-pkill -f " server.ts" 2>/dev/null || true
+# ★ cwi-labdoc-followup m-7：舊 `pkill -f " server.ts"` 已移除（pattern kill 會誤殺本地 dev 3100）— port-scoped kill-by-PID；冇 listener = no-op
 sleep 2
-lsof -ti:"$PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
 AUTOMATION_ADMIN_STAFF_IDS="$EADM2_ID" nohup pnpm dev >/tmp/e2e-server-e.log 2>&1 &
 SERVER_PID=$!
 EUP=0

@@ -193,9 +193,11 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
     const latencyMs = Date.now() - t0;
     const json = (await res.json().catch(() => null)) as ChatCompletionResponse | null;
     if (!res.ok) {
-      // ★ 錯訊只係 server 端錯誤描述（e.g. 404 model not found）— 唔含 prompt 內容，可以入 error
-      const msg = json?.error?.message ? ` : ${json.error.message.slice(0, 160)}` : "";
-      throw new AiCallError(`ai ${res.status}${msg} (model=${model}, ${latencyMs}ms)`);
+      // ★ cwi-labdoc-followup m-2：上游 error message 內容唔入 AiCallError（鐵律推廣到 AI client 層 —
+      //   唔賭上游行為：vLLM/sglang 嘅 error body 有冇 PII / prompt 殘片，我哋控制唔到，一律唔帶入
+      //   W 側 error/log）。留 status/model/latency 就夠診斷；上游原文喺 30000 server 自己 log，W 側唔需要。
+      //   （舊版拼 json.error.message.slice(0,160) — 已移除；見 unit-vllm-error-sanitize SENTINEL 斷言。）
+      throw new AiCallError(`ai ${res.status} (model=${model}, ${latencyMs}ms)`);
     }
     const choice = json?.choices?.[0];
     const content = choice?.message?.content;
