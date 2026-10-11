@@ -27,13 +27,18 @@ import {
  * 回應（密文內）：{ result: §5.4 JSON | null, reason: "breaker_open"|"llm_error"|"parse_error"|"bad_response"|"truncated"|"mock"|null }
  *   - truncated = 輸出撞 max_tokens（finish_reason=length）— CWM 應分頁／分段再叫，唔好原樣重試
  *   - mock = AI_MOCK=1（result 非 null）— CWM 以 result != null 判斷成功
- * 時限：LLM 總時限 85s（labdoc-llm.ts）< CWM client 95s < Cloudflare origin 100s（施工單 v1.1 §5.2）。
+ * 時限：LLM 總時限預設 240s（labdoc-llm.ts，env LABDOC_LLM_TIMEOUT_MS）< CWM client 時限。
+ * ★ 2026-10-11：長月結單 85s 寫唔完 → 改為 keep-alive streaming 回應：
+ *   驗證通過之後即刻回 200 header，每 15s 送一個空格（JSON 前置空白合法），讀完先送 sealed JSON。
+ *   Cloudflare origin 100s 限制只計「冇任何 byte」嘅時間 → 唔會 524；x-accel-buffering: no 防 nginx 緩衝。
+ *   驗證失敗（401/400/409/413/429/503）照舊即時回 JSON 錯誤碼。
  */
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const MAX_BODY = 12 * 1024 * 1024; // 12 MB（§5.2）
 const CONCURRENCY = Math.max(1, Number(process.env.LABDOC_LLM_CONCURRENCY ?? 1));
+const KEEPALIVE_MS = 15_000;
 let inflight = 0;
 
 const deny = (status: number, code: string, extra: Record<string, unknown> = {}) =>
@@ -93,6 +98,7 @@ export async function POST(req: NextRequest) {
   //   inflight++ 同 check 相鄰（中間無 await）→ 嚴格並發上限唔變。
   if (inflight >= CONCURRENCY) return deny(429, "BUSY", { retryAfterSec: 5 });
   inflight++;
+  let handedOff = false; // 交咗俾 stream → inflight 由 stream 完成時減
   try {
     // 重放保護（tag 驗過先記 nonce — 防人用垃圾 nonce 塞爆 Redis）
     let ok: "OK" | null;
@@ -103,24 +109,60 @@ export async function POST(req: NextRequest) {
     }
     if (ok === null) return deny(409, "REPLAY");
 
-    const { result, reason } = await extractLabDoc(request);
-    const resp = seal(secret, kid, { result, reason }, respContext(env.nonce));
-    // ★ 只 log metadata（鐵律：原文／images 永不入 log）
-    log.info(
-      {
-        mode: request.mode,
-        kind: request.kindHint,
-        pages: request.text !== null ? countPages(request.text) : null,
-        chars: request.text?.length ?? null,
-        images: request.images?.length ?? null,
-        hasResult: result !== null,
-        reason,
-        ms: Date.now() - t0,
+    // ★ keep-alive streaming：即刻回 header＋空格，讀完先送 sealed JSON（見文件頭）
+    const enc = new TextEncoder();
+    const nonce = env.nonce;
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const push = (txt: string) => {
+          try {
+            controller.enqueue(enc.encode(txt));
+          } catch {
+            /* client 已斷線 — 照讀完，唔理 */
+          }
+        };
+        push(" ");
+        const ka = setInterval(() => push(" "), KEEPALIVE_MS);
+        try {
+          let out: { result: unknown; reason: string | null };
+          try {
+            out = await extractLabDoc(request);
+          } catch {
+            log.warn("labdoc-extract: unexpected extract error");
+            out = { result: null, reason: "llm_error" };
+          }
+          push(JSON.stringify(seal(secret, kid, out, respContext(nonce))));
+          // ★ 只 log metadata（鐵律：原文／images 永不入 log）
+          log.info(
+            {
+              mode: request.mode,
+              kind: request.kindHint,
+              pages: request.text !== null ? countPages(request.text) : null,
+              chars: request.text?.length ?? null,
+              images: request.images?.length ?? null,
+              hasResult: out.result !== null,
+              reason: out.reason,
+              ms: Date.now() - t0,
+            },
+            "labdoc-extract: done"
+          );
+        } finally {
+          clearInterval(ka);
+          inflight--;
+          try {
+            controller.close();
+          } catch {
+            /* 已關 */
+          }
+        }
       },
-      "labdoc-extract: done"
-    );
-    return NextResponse.json(resp, { headers: { "cache-control": "no-store" } });
+    });
+    handedOff = true;
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "application/json", "cache-control": "no-store", "x-accel-buffering": "no" },
+    });
   } finally {
-    inflight--;
+    if (!handedOff) inflight--;
   }
 }

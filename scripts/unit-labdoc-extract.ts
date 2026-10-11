@@ -50,7 +50,9 @@ type UpstreamMode =
   | { kind: "content"; content: string; finishReason?: string }
   | { kind: "sleep"; ms: number; content: string }
   | { kind: "500" }
-  | { kind: "slow500"; ms: number };
+  | { kind: "slow500"; ms: number }
+  // ★ cwi-labdoc-schema：舊版 sglang 唔識 json_schema → 400；json_object 就照答
+  | { kind: "rejectSchema"; content: string };
 let upstreamMode: UpstreamMode = { kind: "content", content: "" };
 const upstreamBodies: unknown[] = [];
 const upstream = http.createServer((req, res) => {
@@ -70,6 +72,13 @@ const upstream = http.createServer((req, res) => {
     if (upstreamMode.kind === "500") {
       finish(JSON.stringify({ error: { message: "mock upstream boom" } }), 500);
       return;
+    }
+    if (upstreamMode.kind === "rejectSchema") {
+      const sentBody = upstreamBodies.at(-1) as { response_format?: { type?: string } };
+      if (sentBody?.response_format?.type === "json_schema") {
+        finish(JSON.stringify({ error: { message: "json_schema not supported" } }), 400);
+        return;
+      }
     }
     if (upstreamMode.kind === "slow500") {
       setTimeout(() => finish(JSON.stringify({ error: { message: "mock upstream slow boom" } }), 500), upstreamMode.ms);
@@ -507,6 +516,26 @@ async function main(): Promise<void> {
     check("system message = §5.3 prompt + labHint 替換", typeof sys === "string" && sys.includes("你係牙科 Lab 單據讀取器") && sys.includes("Lab 常見名：DentaLab") && !sys.includes("{labHint}"));
     check("user message = 原文 text（pass-through）", usr === text);
     check("guided_json 有送（同 schema.json 契約）", typeof sent?.guided_json === "object" && sent?.guided_json?.properties?.kind !== undefined);
+    // ★ cwi-labdoc-schema：sglang 強制欄位名（response_format json_schema；拎走 $schema/$id/description）
+    check(
+      "response_format = json_schema（labdoc_extract）",
+      sent?.response_format?.type === "json_schema" &&
+        sent?.response_format?.json_schema?.name === "labdoc_extract" &&
+        sent?.response_format?.json_schema?.schema?.properties?.lab !== undefined &&
+        sent?.response_format?.json_schema?.schema?.$schema === undefined,
+      JSON.stringify(sent?.response_format)?.slice(0, 120),
+    );
+  }
+  // 7c-2. 上游唔接受 json_schema（400）→ 退返 json_object 再讀一次
+  {
+    upstreamBodies.length = 0;
+    upstreamMode = { kind: "rejectSchema", content: JSON.stringify(invoiceSample()) };
+    const env = sealReq({ mode: "TEXT", kindHint: "INVOICE", labHint: null, text: "CLINIC INVOICE", images: null });
+    const r = await hit(JSON.stringify(env));
+    const dec = openResp(r, env.nonce);
+    check("json_schema 400 → 退返 json_object → 照讀到", r.status === 200 && dec?.reason === null && dec?.result?.docNoRaw === "INV-001", JSON.stringify(dec)?.slice(0, 120));
+    const last = upstreamBodies.at(-1) as any;
+    check("最後一次 call 用 json_object", last?.response_format?.type === "json_object");
   }
   // 7d. happy VISION（驗 image_url data URL）
   {
@@ -586,7 +615,8 @@ async function main(): Promise<void> {
   // ══════════ 8. 時限同重試（施工單 v1.1 §5.2）══════════
   console.log("[8] 時限（Cloudflare 100s）+ 重試上限 + truncated + mock 自洽");
   {
-    check("LABDOC_LLM_TIMEOUT_MS = 85s（< CWM 95s < Cloudflare 100s）", LABDOC_LLM_TIMEOUT_MS === 85_000);
+    // ★ 2026-10-11：長月結單 85s 寫唔完 → 預設 240s（Cloudflare 100s 由 route keep-alive streaming 處理）
+    check("LABDOC_LLM_TIMEOUT_MS 預設 240s（env 冇設）", LABDOC_LLM_TIMEOUT_MS === 240_000);
     const PRIMARY = "unit-primary-model";
     const FALLBACK = "unit-fallback-model";
     process.env.VLLM_MODEL = PRIMARY;

@@ -113,6 +113,11 @@ export interface AiChatOptions {
   messages: { role: "system" | "user"; content: string | AiContentPart[] }[];
   /** vLLM guided_json schema（強制結構化輸出） */
   guidedJson?: unknown;
+  /**
+   * ★ cwi-labdoc-schema（2026-10-11）：sglang 強制 JSON schema（response_format json_schema；xgrammar）。
+   *   有傳就取代 json_object — 生產實測：只用 json_object 時 model 自創欄位名（lab／billTo／docNoRaw 全部讀唔返）。
+   */
+  jsonSchema?: { name: string; schema: unknown };
   /** ★ consult v2.1 C4：per-call 參數覆寫（唔提供 = 原口徑 temperature 0 / AI_TIMEOUT_MS / 600 tokens） */
   temperature?: number;
   timeoutMs?: number;
@@ -179,6 +184,10 @@ async function chatOnce(cfg: AiConfig, model: string, opts: AiChatOptions): Prom
     if (opts.guidedJson) {
       payload.guided_json = opts.guidedJson; // vLLM 強制結構（sglang 忽略）
       payload.response_format = { type: "json_object" }; // sglang 強制合法 JSON
+    }
+    if (opts.jsonSchema) {
+      // sglang／vLLM 都支援 OpenAI response_format json_schema（強制欄位名＋結構）
+      payload.response_format = { type: "json_schema", json_schema: { name: opts.jsonSchema.name, schema: opts.jsonSchema.schema } };
     }
     // Qwen3.x thinking model：關咗先會答返入 content（sglang 實測）
     if (cfg.disableThinking) {
