@@ -30,6 +30,7 @@ import { normalizeLabDocOutput } from "@/lib/labdoc/normalize";
 import log from "@/lib/log";
 // ★ guided_json 用同一份契約文字（vLLM 強制結構；sglang 忽略 guided_json、行 response_format=json_object）
 import labDocJsonSchema from "@/lib/labdoc/schema.json";
+import { AiCallError } from "@/lib/ai/types";
 
 export const REQ_CONTEXT_LABDOC = "labdoc-extract.v1";
 
@@ -54,16 +55,23 @@ export const LABDOC_MAX_HINT_CHARS = 500;
 /** 單張圖 decode 後上限（長邊 1600 嘅 jpeg 通常 1–2MB；5MB 兜底防 pathological base64）。 */
 export const LABDOC_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 /**
- * 本層 LLM 總時限（包埋重試同 fallback）。必須 < CWM client 95s < Cloudflare origin timeout 100s，
- * 令 proxy 喺 Cloudflare 斷線（524，非密文）之前回 sealed reason。施工單 v1.1 §5.2。
+ * 本層 LLM 總時限（包埋重試同 fallback）。必須 < CWM client 時限（CWM LABDOC_CLIENT_TIMEOUT_MS）。
+ * ★ 2026-10-11：85s → 預設 240s（env LABDOC_LLM_TIMEOUT_MS）— 生產實測 40 幾行嘅月結單 85s 寫唔完。
+ *   Cloudflare origin 100s 限制由 route 嘅 keep-alive streaming 解決（每 15s 送一個空格，見 route.ts）。
  */
-export const LABDOC_LLM_TIMEOUT_MS = 85_000;
+export const LABDOC_LLM_TIMEOUT_MS = Math.max(30_000, Number(process.env.LABDOC_LLM_TIMEOUT_MS ?? 240_000) || 240_000);
 let timeoutOverrideMs: number | null = null;
 /** Test hook：縮短總時限（單測用；null = 還原 LABDOC_LLM_TIMEOUT_MS）。 */
 export function __setLabDocTimeoutForTest(ms: number | null): void {
   timeoutOverrideMs = ms;
 }
 const LABDOC_MAX_TOKENS = 8192;
+/** sglang／xgrammar 用：拎走 $schema／$id／description（metadata，唔影響結構）。 */
+const SGLANG_SCHEMA = (() => {
+  const { $schema: _s, $id: _i, description: _d, ...rest } = labDocJsonSchema as Record<string, unknown>;
+  void _s; void _i; void _d;
+  return rest;
+})();
 /** VISION 模式 user message 嘅引導行（固定文字；prompt 主體喺 system）。 */
 const VISION_USER_LEAD = "以下是單據圖片。請按規則輸出 JSON。";
 
@@ -219,22 +227,37 @@ export async function extractLabDoc(req: LabDocRequest): Promise<LabDocOutcome> 
   const cfg = req.mode === "VISION" ? { ...baseCfg, fallbackModel: "" } : baseCfg;
   let content: string;
   let finishReason: string | null;
-  try {
-    const r = await chatWithFallback(cfg, {
+  const deadline = AbortSignal.timeout(totalMs);
+  const call = (strict: boolean) =>
+    chatWithFallback(cfg, {
       messages: buildMessages(req),
       guidedJson: labDocJsonSchema,
+      // ★ cwi-labdoc-schema：sglang 強制欄位名（之前淨係 json_object → model 自創 key，Lab／單號／Sold To 全部讀唔返）
+      ...(strict ? { jsonSchema: { name: "labdoc_extract", schema: SGLANG_SCHEMA } } : {}),
       temperature: 0,
       maxTokens: LABDOC_MAX_TOKENS,
       timeoutMs: totalMs,
-      // ★ 總 deadline：chatWithFallback 內部 primary 重試 + fallback 全部共用呢個 signal —
+      // ★ 總 deadline：chatWithFallback 內部 primary 重試 + fallback（＋ schema 退返 json_object）全部共用呢個 signal —
       //   到時即 abort 在途 call（AbortError → isTimeout → 唔再 retry／fallback）
-      signal: AbortSignal.timeout(totalMs),
+      signal: deadline,
       skipBreaker: true, // 獨立 breaker（R-29）
     });
+  try {
+    let r;
+    try {
+      r = await call(true);
+    } catch (e) {
+      // 上游唔接受 json_schema（舊版 sglang → 400）→ 退返 json_object（靠 normalize 兜底）
+      if (!(e instanceof Error) || !/^ai 400 /.test(e.message)) throw e;
+      log.warn("labdoc-extract: json_schema rejected (400) — fallback json_object");
+      r = await call(false);
+    }
     fails = 0;
     content = r.content;
     finishReason = r.finishReason;
-  } catch {
+  } catch (e) {
+    // 只記類型（timeout／http status），唔記上游原文
+    log.warn({ timeout: e instanceof AiCallError && e.isTimeout === true, totalMs }, "labdoc-extract: llm_error");
     // 唔 log error message（上遊錯誤描述理論上唔含 prompt，但唔冒險 — 同 llm-extract 鐵律）
     if (++fails >= 3) {
       openUntil = Date.now() + 60_000;
