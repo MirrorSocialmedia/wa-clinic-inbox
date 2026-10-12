@@ -27,7 +27,7 @@ import {
  * 回應（密文內）：{ result: §5.4 JSON | null, reason: "breaker_open"|"llm_error"|"parse_error"|"bad_response"|"truncated"|"mock"|null }
  *   - truncated = 輸出撞 max_tokens（finish_reason=length）— CWM 應分頁／分段再叫，唔好原樣重試
  *   - mock = AI_MOCK=1（result 非 null）— CWM 以 result != null 判斷成功
- * 時限：LLM 總時限預設 240s（labdoc-llm.ts，env LABDOC_LLM_TIMEOUT_MS）< CWM client 時限。
+ * 時限：LLM 總時限預設 720s（labdoc-llm.ts，env LABDOC_LLM_TIMEOUT_MS；2026-10-12 由 240s ×3）< CWM client 時限（750s）。
  * ★ 2026-10-11：長月結單 85s 寫唔完 → 改為 keep-alive streaming 回應：
  *   驗證通過之後即刻回 200 header，每 15s 送一個空格（JSON 前置空白合法），讀完先送 sealed JSON。
  *   Cloudflare origin 100s 限制只計「冇任何 byte」嘅時間 → 唔會 524；x-accel-buffering: no 防 nginx 緩衝。
