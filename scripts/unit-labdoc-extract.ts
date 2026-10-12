@@ -197,6 +197,7 @@ async function main(): Promise<void> {
     __resetLabDocBreakerForTest,
     __setLabDocTimeoutForTest,
     LABDOC_LLM_TIMEOUT_MS,
+    LABDOC_MAX_TOKENS,
   } = await import("../src/lib/internal/labdoc-llm");
   const { LABDOC_EXTRACT_PROMPT, buildLabDocPrompt, LABDOC_MAX_HINT_CHARS } = await import("../src/lib/labdoc/prompt");
   const { POST } = await import("../src/app/api/internal/labdoc-extract/route");
@@ -616,7 +617,9 @@ async function main(): Promise<void> {
   console.log("[8] 時限（Cloudflare 100s）+ 重試上限 + truncated + mock 自洽");
   {
     // ★ 2026-10-11：長月結單 85s 寫唔完 → 預設 240s（Cloudflare 100s 由 route keep-alive streaming 處理）
-    check("LABDOC_LLM_TIMEOUT_MS 預設 240s（env 冇設）", LABDOC_LLM_TIMEOUT_MS === 240_000);
+    // ★ 2026-10-12：輸出上限 ×3（8192 → 24576）→ 時限都 ×3（240s → 720s）
+    check("LABDOC_LLM_TIMEOUT_MS 預設 720s（env 冇設）", LABDOC_LLM_TIMEOUT_MS === 720_000);
+    check("LABDOC_MAX_TOKENS 預設 24576（env 冇設）", LABDOC_MAX_TOKENS === 24_576);
     const PRIMARY = "unit-primary-model";
     const FALLBACK = "unit-fallback-model";
     process.env.VLLM_MODEL = PRIMARY;

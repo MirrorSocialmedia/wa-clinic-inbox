@@ -58,14 +58,22 @@ export const LABDOC_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
  * 本層 LLM 總時限（包埋重試同 fallback）。必須 < CWM client 時限（CWM LABDOC_CLIENT_TIMEOUT_MS）。
  * ★ 2026-10-11：85s → 預設 240s（env LABDOC_LLM_TIMEOUT_MS）— 生產實測 40 幾行嘅月結單 85s 寫唔完。
  *   Cloudflare origin 100s 限制由 route 嘅 keep-alive streaming 解決（每 15s 送一個空格，見 route.ts）。
+ * ★ 2026-10-12：240s → 預設 720s（×3，跟 LABDOC_MAX_TOKENS ×3）—— 輸出長咗三倍，寫得耐三倍。
+ *   CWM 要同步調（LABDOC_CLIENT_TIMEOUT_MS 預設 750s，一定要大過呢度）。
  */
-export const LABDOC_LLM_TIMEOUT_MS = Math.max(30_000, Number(process.env.LABDOC_LLM_TIMEOUT_MS ?? 240_000) || 240_000);
+export const LABDOC_LLM_TIMEOUT_MS = Math.max(30_000, Number(process.env.LABDOC_LLM_TIMEOUT_MS ?? 720_000) || 720_000);
 let timeoutOverrideMs: number | null = null;
 /** Test hook：縮短總時限（單測用；null = 還原 LABDOC_LLM_TIMEOUT_MS）。 */
 export function __setLabDocTimeoutForTest(ms: number | null): void {
   timeoutOverrideMs = ms;
 }
-const LABDOC_MAX_TOKENS = 8192;
+/**
+ * 單次讀單輸出上限（max_tokens）。撞到 = finish_reason=length → reason "truncated"。
+ * ★ 2026-10-12：8192 → 預設 24576（×3；env LABDOC_MAX_TOKENS 可調）—— 一頁行數好多嘅月結單（PDF 逐頁讀都）寫唔晒。
+ *   ⚠ sglang 嘅 --context-length 要裝得落「prompt＋嗰頁內容＋輸出」（輸出 24k → context 建議 ≥ 40k），
+ *   否則 sglang 會拒絕請求（llm_error），唔係截斷。
+ */
+export const LABDOC_MAX_TOKENS = Math.max(1024, Number(process.env.LABDOC_MAX_TOKENS ?? 24_576) || 24_576);
 /** sglang／xgrammar 用：拎走 $schema／$id／description（metadata，唔影響結構）。 */
 const SGLANG_SCHEMA = (() => {
   const { $schema: _s, $id: _i, description: _d, ...rest } = labDocJsonSchema as Record<string, unknown>;
