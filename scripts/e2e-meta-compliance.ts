@@ -23,9 +23,11 @@
  */
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { existsSync, writeFileSync } from "node:fs";
 import { PrismaClient } from "@prisma/client";
 import argon2 from "argon2";
 import { outboundQueue, closeRedis } from "../src/lib/queue";
+import { ensureMediaDir } from "../src/lib/wa/media";
 
 try {
   process.loadEnvFile(path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", ".env"));
@@ -50,6 +52,7 @@ const CT = {
   m7a: "e2emcct60000000000000001", // M7 過窗
   m7b: "e2emcct70000000000000001", // M7 窗內
   m8: "e2emcct80000000000000001", // M8 緊急 + opt-out
+  m9: "e2emcct90000000000000001", // M9 資料刪除
 } as const;
 const WA: Record<keyof typeof CT, string> = {
   m1: "85260100001",
@@ -61,6 +64,7 @@ const WA: Record<keyof typeof CT, string> = {
   m7a: "85260100007",
   m7b: "85260100008",
   m8: "85260100009",
+  m9: "85260100010",
 };
 const CONV = (k: keyof typeof CT) => `e2emcconv${k.replace("m", "")}000000000000001` as string; // 25 位 cuid 形
 // 每 run 獨一 nonce — BullMQ jobId 冪等：同 jobId 嘅 completed job 會留喺 queue → 重跑 add 會 reject（M2/M2b 卡死源）
@@ -70,6 +74,9 @@ const MSG2B = `e2emcmsg2b${RUN}00000001`;
 const STAFF = "e2emcstaff00000000000001";
 const STAFF_EMAIL = "e2emc@e2e.local";
 const STAFF_PASS = "e2emcpass123";
+const ADMIN = "e2emcadmin00000000000001";
+const ADMIN_EMAIL = "e2emcadmin@e2e.local";
+const ADMIN_PASS = "e2emcpass123";
 
 const prisma = new PrismaClient();
 
@@ -136,6 +143,7 @@ async function cleanup(): Promise<void> {
   await prisma.clinic.deleteMany({ where: { id: { in: [CLINIC_A, CLINIC_B] } } });
   await prisma.staffClinic.deleteMany({ where: { staffId: STAFF } });
   await prisma.staffUser.deleteMany({ where: { id: STAFF } });
+  await prisma.staffUser.deleteMany({ where: { id: ADMIN } });
   // queue 殘留 job（如有）— 防下個 e2e 撞 jobId
   await outboundQueue.remove(MSG2).catch(() => undefined);
   await outboundQueue.remove(MSG2B).catch(() => undefined);
@@ -170,6 +178,9 @@ async function main(): Promise<void> {
   });
   await prisma.staffClinic.create({ data: { staffId: STAFF, clinicId: CLINIC_A, isPrimary: true } });
   await prisma.staffClinic.create({ data: { staffId: STAFF, clinicId: CLINIC_B, isPrimary: false } });
+  // M9 用：global ADMIN（scope ALL — 跨店刪除權）
+  const adminHash = await argon2.hash(ADMIN_PASS);
+  await prisma.staffUser.create({ data: { id: ADMIN, email: ADMIN_EMAIL, passwordHash: adminHash, name: "MC E2E Admin", role: "ADMIN", scopeType: "ALL" } });
 
   // contacts + conversations（窗口開：lastInboundAt = now-1h）
   const inboundAt = new Date(Date.now() - 3_600_000);
@@ -457,6 +468,95 @@ async function main(): Promise<void> {
   check("M8 opt-out flag 未被緊急流程改動", m8Flag?.followupOptOut === true, m8Flag?.followupOptOut);
   const m8Auto = await prisma.message.count({ where: { conversationId: CONV("m8"), direction: "OUT" } });
   check("M8 零 AI 自動覆（急症唔出 AI 覆）", m8Auto === 0, m8Auto);
+
+  // ══ M9：病人資料刪除（Part D）══════════════════════════════════
+  console.log("\n[M9] 病人資料刪除（各位置真冇 + 媒體檔 + 備份說明）");
+  // PII 富 fixture：media 檔 + 訊息 + draft + fact + consent + hold（patientName/phone）
+  const mediaDir = await ensureMediaDir();
+  const mediaFile = `e2emc9-${RUN}.png`;
+  const mediaPath = path.join(mediaDir, mediaFile);
+  writeFileSync(mediaPath, Buffer.from("fake-png-pii-test"));
+  const m9MsgId = `e2emcmsg9${RUN}000000001`;
+  await prisma.message.create({
+    data: { id: m9MsgId, conversationId: CONV("m9"), direction: "IN", channel: "API", type: "image", body: "M9 測試病人影像訊息（PII）", status: "RECEIVED", waMessageId: `mock-wamid-e2emc9-${RUN}`, waTimestamp: new Date(), mediaPath, mediaName: mediaFile },
+  });
+  await prisma.aiDraft.create({
+    data: { conversationId: CONV("m9"), inReplyToMessageId: m9MsgId, draftText: "M9 測試 AI 草稿（PII）", model: "mock", latencyMs: 1, status: "PROPOSED" },
+  });
+  await prisma.patientFact.create({
+    data: { contactId: CT.m9, clinicId: CLINIC_A, kind: "SELF_REPORTED", text: "M9 測試病人自述（PII）", sourceMessageId: m9MsgId },
+  });
+  await prisma.contactConsent.create({
+    data: { contactId: CT.m9, clinicId: CLINIC_A, source: "STAFF_MANUAL", purpose: "M9 測試 consent（PII 測試）", staffId: STAFF, sourceMessageId: null },
+  });
+  await prisma.flowHoldEvent.create({
+    data: { flowToken: `e2emchold${RUN}00001`, clinicCode: CODE_A, clinicId: CLINIC_A, providerName: "E2E 醫生", date: "2026-11-01", startMin: 630, endMin: 660, patientName: "M9 測試病人", patientPhone: WA.m9, contactPhone: "5556666" },
+  });
+  check("M9 fixture 就位（media 檔 + 5 類 PII row）", existsSync(mediaPath));
+
+  // M9a：非 ADMIN 拒（STAFF → 403）
+  const m9aRes = await fetch(`${BASE}/api/admin/contacts/${CT.m9}/delete`, authed({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason: "e2e" }),
+  }));
+  check("M9a STAFF 角色 → 403（admin required）", m9aRes.status === 403, m9aRes.status);
+
+  // M9b：ADMIN 登入 + 刪除
+  const adminLogin = await fetch(`${BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: BASE },
+    body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASS }),
+  });
+  const adminCookie = (adminLogin.headers.get("set-cookie") ?? "").match(/wa_inbox_session=[^;]+/)?.[0] ?? null;
+  check("M9b ADMIN login", adminLogin.status === 200 && !!adminCookie, adminLogin.status);
+  if (!adminCookie) throw new Error("admin login 失敗");
+  const adminAuthed = (init: RequestInit) => ({ ...init, headers: { origin: BASE, ...(init.headers as Record<string, string>), cookie: adminCookie } });
+  const m9bRes = await fetch(`${BASE}/api/admin/contacts/${CT.m9}/delete`, adminAuthed({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason: "e2e 測試 — 病人要求刪除" }),
+  }));
+  const m9bBody = (await m9bRes.json().catch(() => ({}))) as Record<string, unknown> & { ok?: boolean; backupNote?: string };
+  check("M9b 刪除 → 200 ok", m9bRes.status === 200 && m9bBody.ok === true, { status: m9bRes.status, body: m9bBody });
+  check("M9b 回應含備份保留說明", typeof m9bBody.backupNote === "string" && m9bBody.backupNote.length > 0);
+
+  // M9c：各位置真冇（DB + 檔）
+  const m9contact = await prisma.contact.findUnique({ where: { id: CT.m9 } });
+  check("M9c Contact 已刪", m9contact === null);
+  const m9conv = await prisma.conversation.count({ where: { contactId: CT.m9 } });
+  check("M9c Conversation 已刪", m9conv === 0, m9conv);
+  const m9msgs = await prisma.message.count({ where: { conversationId: CONV("m9") } });
+  check("M9c Message（含 body PII）已刪", m9msgs === 0, m9msgs);
+  const m9drafts = await prisma.aiDraft.count({ where: { conversationId: CONV("m9") } });
+  check("M9c AiDraft（草稿 PII）已刪", m9drafts === 0, m9drafts);
+  const m9facts = await prisma.patientFact.count({ where: { contactId: CT.m9 } });
+  check("M9c PatientFact（自述 PII）已刪", m9facts === 0, m9facts);
+  const m9consents = await prisma.contactConsent.count({ where: { contactId: CT.m9 } });
+  check("M9c ContactConsent 已刪", m9consents === 0, m9consents);
+  const m9waids = await prisma.contact.count({ where: { waId: WA.m9 } });
+  check("M9c waId 全庫無殘留", m9waids === 0, m9waids);
+  check("M9c 媒體檔已 unlink", !existsSync(mediaPath), mediaPath);
+
+  // M9d：FlowHoldEvent row 保留但 PII scrub
+  const m9hold = await prisma.flowHoldEvent.findUnique({ where: { flowToken: `e2emchold${RUN}00001` } });
+  check("M9d hold row 保留（workforce 對賬）", m9hold !== null);
+  check("M9d hold PII 已清（name/phone null）", m9hold?.patientName === null && m9hold?.patientPhone === null && m9hold?.contactPhone === null, m9hold?.patientPhone);
+
+  // M9e：刪除憑證（metadata-only — 零完整 PII）
+  const m9audit = await prisma.auditLog.findFirst({ where: { action: "PATIENT_DATA_DELETED", entityId: CT.m9, staffId: ADMIN } });
+  check("M9e audit PATIENT_DATA_DELETED 落痕（ADMIN 執行）", m9audit !== null);
+  const m9auditMeta = JSON.stringify(m9audit?.meta ?? {});
+  check("M9e 憑證 meta 零完整 waId", !m9auditMeta.includes(WA.m9), m9auditMeta.slice(0, 200));
+  check("M9e 憑證 meta 有 counts 明細", (m9auditMeta.match(/messages/g) ?? []).length >= 1 && m9auditMeta.includes("conversations"), m9auditMeta.slice(0, 200));
+
+  // M9f：冪等 — 再刪 → 404
+  const m9fRes = await fetch(`${BASE}/api/admin/contacts/${CT.m9}/delete`, adminAuthed({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  }));
+  check("M9f 再刪 → 404（已刪）", m9fRes.status === 404, m9fRes.status);
 
   // ── evidence（report 用 — mock/local）─────────────────────────────
   console.log("\n[evidence] 關鍵軌跡（mock/local — 未經真實 WhatsApp Cloud API 驗證）:");
