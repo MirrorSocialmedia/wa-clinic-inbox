@@ -85,7 +85,7 @@
 #   T691 (cwi-final S6-3②) /api/media findUnique(mediaKey) EXPLAIN = Index Scan（Message_mediaKey_key）
 #
 # App Review 三件套（2026-08-20）：
-#   T52 (App Review §1) privacy 公開頁：無 cookie 200 + data-deletion link + 保留期 24 月 + 保密協議句式 + 公司名定稿 + 0 PII（★ cwi-legal-20260915 後更新：舊模板 id="deletion"/12月/[公司名稱] 已改定稿內容）
+#   T52 (App Review §1) privacy 公開頁：無 cookie 200 + data-deletion link + 保留期 24 月 + 診所管理系統 data-sharing 句式 + 公司名定稿 + 0 PII（★ cwi-legal-20260915 後更新：舊模板 id="deletion"/12月/[公司名稱] 已改定稿內容；★ wa-meta-compliance-20261016 A：保密協議句已改 data-sharing 定稿句）
 #   T53 (App Review §2/§2A) onboarding/templates gating：STAFF 403 / unauth 307→/login / ADMIN 200 + mock 3 色 template
 #   T54 (App Review §2.3) exchange mock flow：401/403/400(input)/404(db_update) + 完整 mock flow 寫入 clinic + AuditLog
 #       + hermetic 還原 + token/code/PIN 零入 log（grep 自證）
@@ -2052,7 +2052,9 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/privacy")
 check "T52 privacy 無 cookie → 200" "$CODE" "200"
 grep -q 'href="/data-deletion"' /tmp/e2e-privacy.html && pass "T52 刪除資料指引 link（/data-deletion）喺 HTML" || fail "T52 缺 /data-deletion link"
 grep -q '24 個月' /tmp/e2e-privacy.html && pass "T52 保留期：對話 24 個月" || fail "T52 保留期對話 24 個月缺"
-grep -q '受保密協議約束' /tmp/e2e-privacy.html && pass "T52 診所管理系統服務供應商（受保密協議約束）句式" || fail "T52 保密協議句式缺"
+# ★ wa-meta-cifix2（2026-10-16）：4b5b66a 合規改寫 privacy copy — 舊「服務供應商（受保密協議約束）」句已除；
+#   新定稿句式 = 診所管理系統 data-sharing 只取必要預約資料（compliance 拍板目標，斷言跟新 copy）。
+grep -q '該系統僅取得必要的預約資料' /tmp/e2e-privacy.html && pass "T52 診所管理系統 data-sharing 句式（wa-meta-compliance A 定稿：只取必要預約資料）" || fail "T52 診所管理系統 data-sharing 句式缺"
 grep -q 'BACCARAT YL LIMITED' /tmp/e2e-privacy.html && pass "T52 公司名定稿（BACCARAT YL LIMITED）" || fail "T52 公司名缺（定稿未落？）"
 if grep -qF "$ADMIN_EMAIL" /tmp/e2e-privacy.html || grep -qF "$PATIENT_TKW" /tmp/e2e-privacy.html; then
   fail "T52 PII：privacy 頁含 admin email / patient number"
