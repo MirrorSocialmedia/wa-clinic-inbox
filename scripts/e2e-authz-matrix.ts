@@ -811,6 +811,13 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/conversations/nope", method: "PATCH", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
   },
+  "PATCH /api/conversations/[id]/patient-requested-human": {
+    // wa-meta-compliance C.1：清病人「要求真人」flag — 權限同對話寫入口徑（assertConversationAccess + assertCanWriteConversation）
+    // fixture = convPre（F 店 = STAFF_TY/YMT 外店 → 403；SUPERVISOR 全店 access 放行但寫入邊界 → 403；CB/ALL scope 內 → 200）
+    // convPre.patientRequestedHuman = false（setup 未設）→ 200 {ok, changed:false}（冪等路徑；clear 寫入生效由 e2e-meta-compliance M9 覆蓋）
+    fixture: () => ({ url: `/api/conversations/${F.convPre}/patient-requested-human`, method: "PATCH", body: JSON.stringify({ clear: true }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 200, ADMIN_ALL: 200 },
+  },
   "GET /api/conversations/[id]/templates": {
     fixture: () => ({ url: "/api/conversations/nope/templates" }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
@@ -897,6 +904,15 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     // S3-9：access check first — msgPre = IN 訊息 @ F 店（STAFF_TY 外店）→ 403（先於 void 業務驗證）
     fixture: () => ({ url: `/api/messages/${F.msgPre}/void`, method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 403 }, // S3-9：assertConversationAccess 先行 → 403（外店）
+  },
+  "POST /api/admin/contacts/[id]/delete": {
+    // wa-meta-compliance Part D：病人資料刪除（destructive）— target = contactPre（T630F 店 prefill fixture）
+    // ★ 執行次序陷阱（行 18-20 設計註）：CB 200（F ∈ 公司 B scope）會連 contactPre+convPre+msgPre 一併刪
+    //   → 本 row 必須排喺 golden-cases/prefill + messages/void（唯一用 msgPre 嘅兩 row）之後；
+    //   expect 次序 = 403 格 → destructive 200（CB）→ ALL 404（冪等：已刪 → CONTACT_NOT_FOUND）。
+    //   200 格寫入生效斷言 + finally 清理（teardown idempotent deleteMany）見 runMatrix 特判。
+    fixture: () => ({ url: `/api/admin/contacts/${F.contactPre}/delete`, method: "POST", body: JSON.stringify({ reason: "t630 matrix" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 200, ADMIN_ALL: 404 },
   },
   "POST /api/messages/[id]/retry": {
     fixture: () => ({ url: "/api/messages/nope/retry", method: "POST", body: JSON.stringify({}) }),
@@ -1439,6 +1455,18 @@ async function runMatrix(fx: Fixtures) {
       }
       if (r.status < 300 && key === "PUT /api/admin/workflows/[key]" && pid) created.wfDef.push(pid);
     }
+  }
+
+  // ★ wa-meta-compliance Part D：delete 200 格寫入生效斷言 — contactPre/convPre/msgPre 已全部離 DB。
+  //   喺 loop 尾斷（expect 次序 = 403 格 → CB 200（destructive）→ ALL 404 冪等，row 跑完先斷）；
+  //   殘留清理由 teardown（finally）idempotent deleteMany 兜底。
+  {
+    const [c, v, m] = await Promise.all([
+      prisma.contact.count({ where: { id: F.contactPre } }),
+      prisma.conversation.count({ where: { id: F.convPre } }),
+      prisma.message.count({ where: { id: F.msgPre } }),
+    ]);
+    assertTrue("POST /api/admin/contacts/[id]/delete 200 格寫入生效: contactPre/convPre/msgPre gone", c === 0 && v === 0 && m === 0, `contact=${c} conv=${v} msg=${m}`);
   }
 
   // matrix 後即刻還原 TY（T631 要斷「改唔到 TY 設定」— matrix 破壞性 200 格寫過 TY.companyId=B）。
