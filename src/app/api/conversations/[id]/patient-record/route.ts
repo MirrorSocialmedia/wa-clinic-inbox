@@ -137,6 +137,12 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       locale: contact.locale,
       canEdit: auth.staff.role !== "SUPERVISOR",
     },
+    // ★ wa-meta-compliance-20261016（C.1）：病人要求真人 → AI 自動收聲中（staff 可「交返 AI」清旗）
+    patientRequestedHuman: {
+      active: conv.patientRequestedHuman,
+      at: conv.patientRequestedHumanAt ? conv.patientRequestedHumanAt.toISOString() : null,
+      canClear: auth.staff.role !== "SUPERVISOR",
+    },
     patient: resolved
       ? {
           patientApricotId: resolved.patientApricotId,

@@ -260,6 +260,32 @@ export function prismaConsultStore(prisma: PrismaClient, conv: ConsultConvRef): 
           sessionId: meta.sessionId,
           reason: meta.reason,
         });
+        // ★ wa-meta-compliance-20261016（C.1）：row 3 = 病人明確要求真人 → Conversation.patientRequestedHuman=true。
+        //   效果：AI 全面停自動（auto-send gate 擋 + 唔開新 booking/PAIN session）直到 staff 撳
+        //   「交返 AI 繼續」（consult-sessions resume）清旗。row 0/2/7/8（紅旗/投訴/超輪數/PRICE）
+        //   唔置旗 — 嗰啲係系統升级，唔係病人「我要真人」意圖。
+        //   fail-soft：旗寫失敗唔阻 handoff notice（gate 仍靠 session terminal + needsHuman 多重擋）。
+        if (meta.row === 3) {
+          await prisma.conversation
+            .update({
+              where: { id: ref.id },
+              data: { patientRequestedHuman: true, patientRequestedHumanAt: new Date() },
+            })
+            .then(() =>
+              prisma.auditLog.create({
+                data: {
+                  staffId: null,
+                  action: "PATIENT_REQUESTED_HUMAN",
+                  entity: "Conversation",
+                  entityId: ref.id,
+                  meta: { sessionId: meta.sessionId, row: 3, reason: meta.reason } as object,
+                },
+              })
+            )
+            .catch((err) =>
+              log.warn({ err: err instanceof Error ? err.message : String(err) }, "consult-engine: patientRequestedHuman flag write failed（fail-soft）")
+            );
+        }
       } else if (kind === "PAIN_TRIAGE") {
         await handoffNotice(prisma, ref, "CONSULT 痛症訊號 → PAIN_TRIAGE", { row: meta.row, sessionId: meta.sessionId });
       } else if (kind === "END_SESSION") {

@@ -108,6 +108,11 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
     //   remindedAt 留 null（下輪 scan 重試）— 寧可遲提醒，唔提醒已取消嘅單。
     const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
     if (!contact?.waId) continue;
+    // ★ wa-meta-compliance-20261016（B.1）：opt-out 病人唔發預約提醒（上游攔截；worker 層另有最後一刻核）。
+    if (contact.followupOptOut) {
+      log.info({ bookingId: b.id }, "reminder: patient opted out → skip（PROACTIVE_OPT_OUT）");
+      continue;
+    }
     try {
       const appts = await fetchAppointments(phoneHash(contact.waId), hkDateOffset(-7), hkDateOffset(30));
       const found = appts.appointments.find((a) => a.apricotApptId === b.apricotApptId);
@@ -156,6 +161,8 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
           } as unknown as Prisma.InputJsonValue,
           status: "QUEUED",
           sentByStaffId: null,
+          // ★ wa-meta-compliance-20261016（B.1）：預約提醒 = 系統主動 → 入統一 opt-out 攔截網
+          proactive: true,
           // cwi-window-20260901（P1）：預約提醒 template — 類別 UTILITY（declared：cron 寫入點無辦法讀
           // WA Manager 即時類別；該範本在 WA Manager 登記為 UTILITY）
           billingCategory: "UTILITY",

@@ -192,6 +192,56 @@ export async function runOutboundSend(job: OutboundJobLike, msg: MessageRow, dep
       }
     }
 
+    // ★ wa-meta-compliance-20261016（B.1/B.2）：統一主動訊息 opt-out 攔截 — **發送前最後一刻**檢查。
+    //   呢度係全部 outbound（follow-up / 預約提醒 / 術後跟進 / template / AI AUTO）唯一 choke point；
+    //   上游（scan/排程/gate）可能喺 opt-out 寫入前已排好 queue → 呢度再核最新 flag 即取消（防競態）。
+    //   只擋 proactive=true（系統主動）；staff 打字/採用（被動回覆）唔受影響。
+    //   剩餘窗口：呢次 SELECT 到 Graph call 之間（毫秒級）— 已接受 + 文檔化（工單 B.2）。
+    if (msg.proactive && contactRow.followupOptOut) {
+      await prisma.message.update({ where: { id: msg.id }, data: { status: "CANCELLED", errorCode: "PROACTIVE_OPT_OUT" } });
+      // AI AUTO 訊息：草稿回退 PROPOSED（staff 仍可以人手審批後發送 — 同 AUTO_GATE_LATE 口徑）
+      if (msg.aiDraftId) {
+        await prisma.aiDraft.updateMany({ where: { id: msg.aiDraftId, status: "SENT_AUTO" }, data: { status: "PROPOSED" } });
+      }
+      await prisma.auditLog.create({
+        data: {
+          staffId: null,
+          action: "PROACTIVE_BLOCKED_OPT_OUT",
+          entity: "Message",
+          entityId: msg.id,
+          meta: { conversationId: msg.conversationId, clinicId: clinic.id, msgType: msg.type } as object,
+        },
+      }).catch(() => undefined);
+      // staff notice（只喺首次攔截時彈 — 同對話 1h 內已有 OPT_OUT 攔截 notice 就唔重複）
+      const recentNotice = await prisma.staffNotice.findFirst({
+        where: { clinicId: clinic.id, kind: "SYSTEM", meta: { path: ["reason"], equals: "PROACTIVE_OPT_OUT" } },
+        orderBy: { createdAt: "desc" },
+        select: { createdAt: true },
+      }).catch(() => null);
+      if (!recentNotice || Date.now() - recentNotice.createdAt.getTime() > 3_600_000) {
+        await prisma.staffNotice
+          .create({
+            data: {
+              clinicId: clinic.id,
+              conversationId: msg.conversationId,
+              kind: "SYSTEM",
+              title: `主動訊息已攔截 · ${clinic.name} — 病人要求唔好再收主動訊息（opt-out 生效中）`,
+              meta: { reason: "PROACTIVE_OPT_OUT", msgId: msg.id, msgType: msg.type } as object,
+            },
+          })
+          .catch(() => undefined);
+      }
+      await publishConvEvent(convRef(conv), "message:status", {
+        conversationId: conv.id,
+        clinicId: clinic.id,
+        waMessageId: msg.waMessageId ?? msg.id,
+        status: "CANCELLED",
+        errorCode: "PROACTIVE_OPT_OUT",
+      }).catch(() => undefined);
+      log.info({ messageId, conversationId: msg.conversationId, msgType: msg.type }, "outbound: proactive message blocked — patient opted out（PROACTIVE_OPT_OUT）");
+      return;
+    }
+
     // cwi-window-20260901（P4 / W-3）：單訊息鐵律觀察點 — 5s burst guard（唔擋，先觀察）。
     // AI 自動覆拆咗多條（同對話 5s 內第 2 條 aiAutoSent OUT）= prompt 鐵律被違反 → log warn 計數，
     // 累積多先決定加硬擋。PII：只帶 id metadata，內文永不入 log。

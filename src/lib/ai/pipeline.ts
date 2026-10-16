@@ -63,7 +63,7 @@ import { getLexicon, applyLexicon, type LexiconEntry } from "@/lib/sessions/lexi
 import { matchRedFlagTerms, type RedFlagResult } from "@/lib/sessions/red-flags";
 import { triggerFloor } from "@/lib/sessions/consult-trigger";
 // ★ cwi-final S2-7（B-6）：deterministic 痛症訊號詞表（同 consult engine #1 同一份）+ hitAny（lexicon canonical 判定）
-import { PAIN_SIGNAL_TERMS, hitAny } from "@/lib/sessions/consult-engine";
+import { PAIN_SIGNAL_TERMS, HUMAN_REQUEST_TERMS, hitAny } from "@/lib/sessions/consult-engine";
 import {
   runConsultEngineTurn,
   runConsultLlmTurn,
@@ -135,6 +135,8 @@ export interface InboundConvRef {
   assigneeId: string | null;
   status: string;
   humanTookOver: boolean;
+  // ★ wa-meta-compliance-20261016（C.1）：病人明確要求真人（row 3）→ AI 全停直到 staff 交返
+  patientRequestedHuman: boolean;
   lastOutboundText: string | null;
   urgent: boolean;
   resolvedAt: Date | null;
@@ -204,6 +206,13 @@ export interface PersistPort {
     wamid: string | null;
     intent: string;
   }): Promise<void>;
+  /** ★ wa-meta-compliance-20261016（C.1）：病人要求真人 → StaffNotice + audit（worker = 真；沙盤 = no-op）。 */
+  notifyHumanRequest(args: {
+    clinicId: string;
+    conversationId: string;
+    wamid: string | null;
+    intent: string;
+  }): Promise<void>;
   /** 分類落 Conversation（worker = prisma update 返 updated row；沙盤 = in-memory 副本，零 DB）。 */
   applyClassification(args: {
     conv: InboundConvRef;
@@ -212,6 +221,8 @@ export interface PersistPort {
     urgency: string;
     aiSummary: string | null;
     urgent: boolean;
+    // ★ wa-meta-compliance-20261016（C.1）：病人明確要求真人 → 置 flag（同一 update 原子落）
+    patientRequestedHuman?: boolean;
     sessionTrigger: string | null;
     consultGateAction: string | null;
   }): Promise<InboundConvRef>;
@@ -303,7 +314,37 @@ export function livePersistPort(deps: LivePersistDeps): PersistPort {
       if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId, kind: "HANDOFF_REQUEST" });
     },
 
-    async applyClassification({ conv, intent, confidence, urgency, aiSummary, urgent, sessionTrigger, consultGateAction }) {
+    async notifyHumanRequest({ clinicId, conversationId, wamid, intent }) {
+      // ★ wa-meta-compliance-20261016（C.1）：病人明確要求真人 → 內部升級通知（commit-then-emit — 同 notifyComplaint 口徑）。
+      //   audit：PATIENT_REQUESTED_HUMAN（來源 = deterministic 詞表命中；時間 = 本訊息）— Meta 審計軌跡。
+      await prisma.auditLog
+        .create({
+          data: {
+            staffId: null,
+            action: "PATIENT_REQUESTED_HUMAN",
+            entity: "Conversation",
+            entityId: conversationId,
+            meta: { wamid, intent, source: "deterministic-terms" } as object,
+          },
+        })
+        .catch((err: unknown) => log.warn({ err: String(err) }, "human-request: audit failed（fail-soft）"));
+      await prisma.staffNotice.create({
+        data: {
+          clinicId,
+          conversationId,
+          kind: "HANDOFF_REQUEST",
+          title: "病人要求真人跟進 — 請即刻接手（AI 已自動收聲）",
+          meta: { wamid, intent, reason: "PATIENT_REQUESTED_HUMAN" },
+        },
+      });
+      const convRow = await prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+      });
+      if (convRow) await publishConvEvent(convRef(convRow), "notice:new", { conversationId, kind: "HANDOFF_REQUEST" });
+    },
+
+    async applyClassification({ conv, intent, confidence, urgency, aiSummary, urgent, patientRequestedHuman, sessionTrigger, consultGateAction }) {
       // ── 3. 分類落 Conversation（原 ai.worker.ts 逐字）──
       // ★ H-3 第二層（deterministic scrub）：scrub 後嘅 safeSummary 先落庫（caller 已算好）。
       // urgent 只 set true 唔 set false — 已標急症嘅對話唔會被新一條普通訊息蓋掉。
@@ -315,6 +356,8 @@ export function livePersistPort(deps: LivePersistDeps): PersistPort {
           urgency,
           aiSummary: aiSummary,
           ...(urgent ? { urgent: true } : {}),
+          // ★ wa-meta-compliance-20261016（C.1）：病人要求真人 flag（只 set true；清旗 = consult-sessions resume 專屬）
+          ...(patientRequestedHuman ? { patientRequestedHuman: true, patientRequestedHumanAt: new Date() } : {}),
           // ★ consult v2.1 C1（§2.2 M-2）：最近一輪最終 consult trigger（FLOOR ?? LLM）
           sessionTrigger,
           // ★ consult v2.1 C1（§2.3 M-3 gate 級）：最近一輪 consult 閘動作（過窗 + trigger）
@@ -456,9 +499,12 @@ export function noopPersistPort(deps: { clinicCode: string }): SandboxPersistPor
     async notifyComplaint() {
       // 沙盤：唔建 StaffNotice（只在 steps 顯示 intent）
     },
-    async applyClassification({ conv, urgent }) {
-      // 沙盤：唔寫 DB — in-memory 副本（urgent 只 set true 唔 set false — 同 worker 語義）
-      return { ...conv, urgent: conv.urgent || urgent };
+    async notifyHumanRequest() {
+      // 沙盤：no-op（同 notifyComplaint）
+    },
+    async applyClassification({ conv, urgent, patientRequestedHuman }) {
+      // 沙盤：唔寫 DB — in-memory 副本（urgent/flag 只 set true 唔 set false — 同 worker 語義）
+      return { ...conv, urgent: conv.urgent || urgent, patientRequestedHuman: conv.patientRequestedHuman || !!patientRequestedHuman };
     },
     async applyRouting(input) {
       // ★ 沙盤 subset（原 sandbox.ts step 8 逐字搬入）：同 function、跳 claim/audit/notice
@@ -669,6 +715,32 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
     }
   }
 
+  // ── ★ wa-meta-compliance-20261016（C.1）：人工要求 deterministic fast path（工單：「人工」「真人服務」「我要同職員傾」）──
+  //   同紅旗 fast path 同模式（code 決定性 — 零 LLM 依賴）：
+  //   ① needsHuman=true → 本輪 AI 草稿只俾 staff 審（AUTO gate 擋 needsHuman）
+  //   ② patientRequestedHuman=true 落 Conversation → 之後每一輪：auto-send gate 擋 + pipeline block
+  //      「patient-requested-human」+ 唔開新 booking/PAIN session — 直到 staff 撳「交返 AI 繼續」清旗
+  //   ③ StaffNotice（HANDOFF_REQUEST）+ audit — 真人升級實證軌跡（來源/時間）
+  //   詞表同 consult-engine #3 / mock RE_NEEDS_HUMAN 同一份（行為一致）。
+  const humanRequestedDet =
+    msg.type === "text" && msg.body ? hitAny(applyLexicon(msg.body, ptLex), HUMAN_REQUEST_TERMS) : false;
+  let humanRequestedFlag = false;
+  if (humanRequestedDet) {
+    result = { ...result, needsHuman: true };
+    humanRequestedFlag = true;
+    ensureNotAborted("notifyHumanRequest"); // ★ cwi-qa FX-08
+    await persist.notifyHumanRequest({
+      clinicId: conv.clinicId,
+      conversationId: conv.id,
+      wamid: msg.waMessageId,
+      intent: result.intent,
+    });
+    log.info(
+      { clinic: clinic.code, wamid: msg.waMessageId },
+      "human-request: deterministic fast path（patientRequestedHuman=true — AI 全停直到 staff 交返）"
+    );
+  }
+
   // ── ★ consult v2.1 C1（§2.2 M-2）：consult session trigger 最終值 = FLOOR（deterministic）?? LLM 值 ──
   // FLOOR = code 常數（CONSULT_TRIGGER_FLOOR，UI 顯示但唔可刪）—「觸發唔靠 LLM」；
   // LLM 值（result.sessionTrigger）只喺 FLOOR 唔中時補充。floor 優先（MD §2.2）。
@@ -789,6 +861,7 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
     urgency: result.urgency,
     aiSummary: safeSummary.length > 0 ? safeSummary.slice(0, 50) : null,
     urgent,
+    patientRequestedHuman: humanRequestedFlag || undefined, // ★ wa-meta-compliance-20261016（C.1）
     sessionTrigger: consultTrigger,
     consultGateAction,
   });
@@ -1013,6 +1086,8 @@ async function runInboundAiInner(input: InboundAiInput): Promise<InboundAiOutcom
     if (updatedConv.status === "RESOLVED") blocks.push("resolved");
     // ★ cwi-final S1-14：急症對話（deterministic 紅旗 intake 標記）→ AI 永不自動覆（canDraft 維持 — 草稿照出俾 staff 睇）
     if (updatedConv.urgent) blocks.push("conv-urgent");
+    // ★ wa-meta-compliance-20261016（C.1）：病人明確要求真人（row 3）→ AI 全停自動覆（gate 雙重擋）
+    if (updatedConv.patientRequestedHuman) blocks.push("patient-requested-human");
     // ★ cwi-reopenreply-20260910（T84 決策 (b) 收窄版）：翻開後**首句**三條件閘
     if (isReopenedFirstReply(updatedConv)) {
       // 「翻開前最後一次解決時間」：resolvedAt（T2 翻開已清，防禦性）→ 否則最新 auto-resolve INTERNAL 備註

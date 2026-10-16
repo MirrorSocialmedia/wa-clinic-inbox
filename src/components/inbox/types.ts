@@ -654,6 +654,12 @@ export interface PatientRecordData {
     locale: string | null;
     canEdit: boolean;
   };
+  // ★ wa-meta-compliance-20261016（C.1）：病人要求真人 → AI 自動收聲中
+  patientRequestedHuman?: {
+    active: boolean;
+    at: string | null;
+    canClear: boolean;
+  };
   patient: {
     patientApricotId: string;
     patientCode: string | null;

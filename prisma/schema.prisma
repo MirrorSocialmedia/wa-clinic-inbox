@@ -320,7 +320,29 @@ model Contact {
   optOutSource   String?                      // auto（關鍵詞）| manual（staff toggle）
   salutation     String?                      // 先生／小姐／太太（template 顯示用；B-9：唔自動估 — AI 唔准由名估性別）
   locale         String?                      // ★ cwi-followup-v3 B-9：zh（default）| en — 決定 *_en template
+  consents      ContactConsent[]
   @@unique([clinicId, waId])                  // 同一病人喺兩間店 = 兩條 Contact（隔離）
+}
+
+// ★ wa-meta-compliance-20261016（B.3 / C.2）：主動聯絡同意記錄 — 來源 / 時間 / 用途 三要素。
+// 寫入點：① staff 重新啟用主動聯絡（opt-out route CLEAR — 必帶 consent.purpose）
+//         ② 病人 WhatsApp 回覆命中 opt-in 短語（inbound worker 自動偵測）。
+// 語義：opt-out flag（Contact.followupOptOut）= 阻塞嘅單一事實來源；呢張表 = 同意 provenance 審計軌。
+//   冇對應 ACTIVE consent row 嘅 opt-out 清旗 = 400（唔准裸 flip 復活 — 工單 B.3）。
+// 備註：opt-out 本身唔會將舊 consent 行標 revoked（opt-out = flag flip + AuditLog + StaffNotice；
+//   呢度 consent row 只係「重新啟用」事件嘅歷史證據，唔會誤讀作「而家有效」）。
+model ContactConsent {
+  id              String   @id @default(cuid())
+  contactId       String
+  clinicId        String
+  kind            String   @default("PROACTIVE_CONTACT") // 固定 — 未來擴充（如 MARKETING）先加
+  source          String   // WHATSAPP_MESSAGE（病人回覆偵測）| STAFF_MANUAL（staff 重新啟用）
+  purpose         String   // 聯絡用途（staff 必填；自動偵測 = 固定文案）
+  sourceMessageId String?  // 觸發嘅 inbound Message.id（WHATSAPP_MESSAGE 必有；STAFF_MANUAL null）
+  staffId         String?  // 經手 staff（STAFF_MANUAL 必有；自動偵測 null）
+  createdAt       DateTime @default(now())
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  @@index([contactId, createdAt])
 }
 
 // ★ cwi-routing-20260906（§1）：規則式指派 + 技能組。
@@ -462,6 +484,11 @@ model Conversation {
   // ★ consult v2.1 C1（§2.1 M-1）：店員自己打字（source=typed）→ true → consult 路徑停止出草稿；
   //   「交返 AI 繼續」掣（C5 UI）負責清返 false。採用（source=adopted）唔置呢個旗。
   humanTookOver  Boolean  @default(false)
+  // ★ wa-meta-compliance-20261016（C.1）：病人要求真人（consult engine row 3 HANDOFF_HUMAN 置 true）。
+  //   效果：AI 唔再自動開新 session / 唔再 AUTO 發（auto-send gate 擋）；staff 照可以手動覆。
+  //   只可經「交返 AI 繼續」掣（consult-sessions route）清 — audit 留痕。
+  patientRequestedHuman Boolean @default(false)
+  patientRequestedHumanAt DateTime? @db.Timestamptz
   // ★ consult v2.1 C1（§2.1 M-1）：實際發出嘅最後 OUT 文字（採用/改過/typing/AUTO 都記）— 下輪 context 用。
   //   C2 起 consult 路徑改寫 ConsultSession 同名欄（session 建立時由呢度複製 — 橋接搬遷；
   //   Conversation 欄保留：C1 e2e + 非 consult 路徑仍用）。
@@ -548,6 +575,12 @@ model Message {
   //   cooldown 閘計 HUMAN_TYPED + HUMAN_APP（MD §2.1：採用唔係「真人插嘴」— 死鎖根治；
   //   手機 App 覆 = 真人喺度 → 近段壓 auto-send，但唔設 humanTookOver — 草稿照出）。
   sentVia        String?
+  // ★ wa-meta-compliance-20261016（B.1/B.2）：主動訊息標記 — 發送前最後 opt-out 攔截用。
+  //   true = 系統主動發起（follow-up / 預約提醒 / 術後跟進 / template / AI AUTO 覆）；
+  //   false = 被動回覆（staff 打字 / staff 採用草稿 / 病人 flow 完成後確認 — 病人動作觸發）。
+  //   寫入點：followup engine / reminder / AI auto-send gate 建 Message 時置 true；其餘預設 false。
+  //   outbound worker Graph 前最後一刻核：proactive=true + Contact.followupOptOut → CANCELLED（PROACTIVE_OPT_OUT）。
+  proactive      Boolean @default(false)
   voidedAt       DateTime? @db.Timestamptz
   waTimestamp    DateTime @db.Timestamptz
   createdAt      DateTime @db.Timestamptz  @default(now())

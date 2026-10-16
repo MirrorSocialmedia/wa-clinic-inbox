@@ -16,7 +16,7 @@ import { applyStatusInTx, drainPendingStatuses } from "@/lib/wa/status-apply";
 import { Prisma, type Clinic, type Contact, type Conversation, type Message } from "@prisma/client";
 import { INBOUND_CONCURRENCY } from "./concurrency";
 // ★ cwi-followup-p3-20260916：follow-up inbound hook（opt-out 偵測 + 回覆標記）
-import { detectOptOutIntent, applyFollowupOptOut } from "@/lib/followup/opt-out";
+import { detectOptOutIntent, detectOptInIntent, applyFollowupOptOut, applyFollowupOptIn } from "@/lib/followup/opt-out";
 import { markFollowupReplied } from "@/lib/followup/engine";
 
 /** 冪等寫入用嘅 DB client（top-level prisma 或 $transaction 嘅 tx — 同一套 model API）。 */
@@ -586,13 +586,19 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
     //   失敗只 log warn，唔影響訊息主流程）：
     //   ① 病人回覆咗 SENT follow-up → task COMPLETED + 「跟進回覆」badge（唔 claim、唔改 assignee）
     //   ② opt-out 短句自動偵測 → 標記 + StaffNotice（誤傷防護：≤40 字先偵測）
+    //   ③ ★ wa-meta-compliance-20261016（B.3）：opt-in 短句自動偵測（只喺已 opt-out 先睇）→
+    //      ContactConsent（來源/時間/用途）+ 清旗 + StaffNotice 確認
     try {
       await markFollowupReplied(result.msg.conversationId, waTs);
       if (result.msg.body) {
-        if (detectOptOutIntent(result.msg.body)) {
-          const convRow = result.convUpdated ?? (await prisma.conversation.findUnique({ where: { id: result.msg.conversationId }, select: { contactId: true } }));
-          if (convRow?.contactId) {
-            await applyFollowupOptOut({ contactId: convRow.contactId, source: "auto", now: waTs });
+        const convRow = result.convUpdated ?? (await prisma.conversation.findUnique({ where: { id: result.msg.conversationId }, select: { contactId: true } }));
+        const contactId = convRow?.contactId ?? null;
+        if (contactId) {
+          if (detectOptOutIntent(result.msg.body)) {
+            await applyFollowupOptOut({ contactId, source: "auto", now: waTs });
+          } else if (detectOptInIntent(result.msg.body)) {
+            // 只喺已 opt-out 嘅 contact 先有效果（applyFollowupOptIn 內部 gate）— 誤觸面 = 0
+            await applyFollowupOptIn({ contactId, msgId: result.msg.id, now: waTs });
           }
         }
       }

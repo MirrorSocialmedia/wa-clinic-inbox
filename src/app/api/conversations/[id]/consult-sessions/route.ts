@@ -207,13 +207,15 @@ export const PATCH = handle(async (req: NextRequest, { params }: Params) => {
       humanTookOver: false, lastOutboundText: null,
     };
     // C1 橋接：Conversation 過渡欄同步清（店員重設 = 對話層都返轉頭）
-    convSync = { humanTookOver: false };
+    // ★ wa-meta-compliance-20261016（C.1）：重設 = staff 明確決定 AI 重新接管 → 一併清「病人要求真人」flag
+    convSync = { humanTookOver: false, patientRequestedHuman: false, patientRequestedHumanAt: null };
   } else if (op === "resume") {
     if (!existing.humanTookOver && !conv.humanTookOver) {
       return NextResponse.json({ ok: true, op, changed: false, session: toSessionRow(existing) });
     }
     data = { humanTookOver: false };
-    convSync = { humanTookOver: false };
+    // ★ wa-meta-compliance-20261016（C.1）：「交返 AI 繼續」= staff 明確交還 → 清「病人要求真人」flag（AI 可以恢復自動）
+    convSync = { humanTookOver: false, patientRequestedHuman: false, patientRequestedHumanAt: null };
   } else {
     // clearSlot — slotKeyFinal 必係 string（上面已驗證）
     const sk = slotKeyFinal as string;
@@ -234,7 +236,14 @@ export const PATCH = handle(async (req: NextRequest, { params }: Params) => {
       action: "CONSULT_STATE_EDITED",
       entity: "ConsultSession",
       entityId: sessionId,
-      meta: { conversationId: id, clinicId: conv.clinicId, op, slotKey: slotKeyFinal } as object,
+      meta: {
+        conversationId: id,
+        clinicId: conv.clinicId,
+        op,
+        slotKey: slotKeyFinal,
+        // ★ wa-meta-compliance-20261016（C.1）：resume/reset = staff 明確交返 AI → 同時清 patientRequestedHuman flag（審計軌跡）
+        humanHandedBack: op === "resume" || op === "reset",
+      } as object,
     },
   });
   log.info({ staffId: ctx.staff.id, sessionId, op, slotKey: slotKey ?? null }, "consult-sessions: state edited");

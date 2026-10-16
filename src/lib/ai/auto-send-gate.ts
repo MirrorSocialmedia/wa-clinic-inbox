@@ -53,16 +53,26 @@ export async function sendAutoIfStillEligible(req: AutoSendRequest): Promise<Aut
   }
   try {
     return await prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<{ assigneeId: string | null; status: string; urgent: boolean; humanTookOver: boolean; lastInboundAt: Date | null }[]>`
-        SELECT "assigneeId", "status", "urgent", "humanTookOver", "lastInboundAt"
+      const rows = await tx.$queryRaw<{ assigneeId: string | null; status: string; urgent: boolean; humanTookOver: boolean; patientRequestedHuman: boolean; contactId: string | null; lastInboundAt: Date | null }[]>`
+        SELECT "assigneeId", "status", "urgent", "humanTookOver", "patientRequestedHuman", "contactId", "lastInboundAt"
         FROM "Conversation" WHERE "id" = ${req.convId} FOR UPDATE`;
       const c = rows[0];
       if (!c) return { sent: false, reason: "conv-missing" } as const;
       if (c.assigneeId !== null) return { sent: false, reason: "assigned" } as const;
       if (c.humanTookOver) return { sent: false, reason: "human-took-over" } as const;
+      // ★ wa-meta-compliance-20261016（C.1）：病人要求真人 → AI 全面停自動覆（只可 staff 撳「交返 AI 繼續」清旗）。
+      if (c.patientRequestedHuman) return { sent: false, reason: "patient-requested-human" } as const;
       if (c.status === "RESOLVED") return { sent: false, reason: "resolved" } as const;
       if (c.urgent) return { sent: false, reason: "conv-urgent" } as const;
       if (!getWindowState(c.lastInboundAt).open) return { sent: false, reason: "window-closed" } as const;
+      // ★ wa-meta-compliance-20261016（B.1/B.2）：opt-out = 病人要求唔好再收主動訊息 →
+      //   AI AUTO（系統發起、無人審批）一律唔發；staff 人手覆唔受影響（呢度只係 auto 路徑）。
+      //   FOR UPDATE 鎖 Contact row — 同 opt-out 寫入（UPDATE）串行化，讀到嘅係最新 flag（防競態）。
+      if (c.contactId) {
+        const ct = await tx.$queryRaw<{ followupOptOut: boolean }[]>`
+          SELECT "followupOptOut" FROM "Contact" WHERE "id" = ${c.contactId} FOR UPDATE`;
+        if (ct[0]?.followupOptOut) return { sent: false, reason: "proactive-opt-out" } as const;
+      }
 
       const trigger = await tx.message.findUnique({ where: { id: req.triggerMsgId }, select: { id: true, createdAt: true } });
       if (!trigger) return { sent: false, reason: "trigger-missing" } as const;
@@ -101,6 +111,9 @@ export async function sendAutoIfStillEligible(req: AutoSendRequest): Promise<Aut
           conversationId: req.convId, direction: "OUT", channel: "API", type: "text",
           body: req.text, status: "QUEUED", sentByStaffId: null,
           aiAutoSent: true, sentVia: "AI_AUTO",
+          // ★ wa-meta-compliance-20261016（B.1）：AI AUTO = 系統主動 → 入統一 opt-out 攔截網
+          //   （worker 層發送前最後一刻再核 — 防 queue 已排 + opt-out 後寫競態）。
+          proactive: true,
           aiDraftId: req.draftId ?? null,
           bookingSessionId: req.bookingSessionId ?? null,
           replyToMessageId: req.triggerMsgId,

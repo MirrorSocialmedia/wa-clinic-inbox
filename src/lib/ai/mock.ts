@@ -61,7 +61,8 @@ function hitFloorTerm(body: string): string | null {
 // ★ Phase C（cwi-sess-20260824-c1）：COMPLAINT 觸發詞（投訴/退款/賠償/服務態度）
 const RE_COMPLAINT = /投訴|退款|賠償|態度好差|太黑心/i;
 // Phase 2b：病人明確要求真人（T21 mock trigger）— 急症先判，所以「牙痛，想搵人工」會命中 URGENT
-const RE_NEEDS_HUMAN = /人工|真人|human agent|talk to a human/i;
+// ★ wa-meta-compliance-20261016：同 consult-engine HUMAN_REQUEST_TERMS 齊步（補「職員」+ EN 變體）。
+const RE_NEEDS_HUMAN = /人工|真人|職員|human agent|talk to a human|speak to a human|talk to someone|real person|human staff/i;
 const RE_BOOKING = /預約|想約|book|appointment|reschedul|改期|改約|取消預約|有冇位|冇位/i;
 // ★ Part E（E.2）：一般痛（無紅旗詞）→ PAIN → 開 PAIN_TRIAGE 問診（mock 決定性痛症詞）
 const RE_PAIN = /牙痛|牙好痛|牙咁痛|牙唔舒服|隻牙|痛|hurt|ache|pain/i;

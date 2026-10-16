@@ -238,6 +238,7 @@ export async function runSandboxTurn(input: SandboxTurnInput): Promise<SandboxTu
     assigneeId: null,
     status: "OPEN",
     humanTookOver: st.state?.humanTookOver ?? false,
+    patientRequestedHuman: false, // ★ wa-meta-compliance-20261016：沙盤不模擬 C.1 flag
     lastOutboundText: null,
     urgent: false,
     resolvedAt: null,

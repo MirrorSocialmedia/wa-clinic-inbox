@@ -147,8 +147,11 @@ export interface ConsultSignals {
 
 /** #1 痛症訊號（broad — recall 優先；FLOOR 紅旗詞先由 #0 食走）。 */
 export const PAIN_SIGNAL_TERMS = ["痛", "腫", "流血", "出血", "發燒", "崩", "甩", "pain", "hurt", "ache", "swollen", "bleed", "fever"];
-/** #3 明確要求真人（同 mock RE_NEEDS_HUMAN 同詞 — 行為一致）。 */
-export const HUMAN_REQUEST_TERMS = ["人工", "真人", "human agent", "talk to a human"];
+/** #3 明確要求真人（同 mock RE_NEEDS_HUMAN 同詞 — 行為一致）。
+ * ★ wa-meta-compliance-20261016（C.1）：補「職員」+ EN 變體（工單實測語句：「人工」「真人服務」「我要同職員傾」）。 */
+export const HUMAN_REQUEST_TERMS = [
+  "人工", "真人", "職員", "human agent", "talk to a human", "speak to a human", "talk to someone", "real person", "human staff",
+];
 /** #5 病人叫停（停止 AI 對話）。 */
 export const PATIENT_STOP_TERMS = ["唔使再講", "唔使再問", "唔使再send", "唔使再跟", "停手", "你地自己處理", "你地自己睇", "stop"];
 /** #9 高意向 lexical = booking 行為詞（§4.5「幾時有位/點約/幫我約/星期X得唔得」+ booking 同義）。

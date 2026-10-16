@@ -1472,6 +1472,9 @@ export async function sendFollowupTask(
           templateMeta,
           status: "QUEUED",
           sentByStaffId: opts.staffId ?? null,
+          // ★ wa-meta-compliance-20261016（B.1）：follow-up 跟進 = 系統主動（工單點名清單）— 即使 staff
+          //   撳掣發送亦入統一 opt-out 攔截網（病人已 stop 嘅主動跟進唔發；staff 人手回覆病人查詢唔受影響）。
+          proactive: true,
           // ★ v3：只由 UI 觸發 → 永遠 AI_ADOPTED（cooldown 只計 HUMAN_TYPED → 唔觸發）
           aiAutoSent: false,
           sentVia: "AI_ADOPTED",

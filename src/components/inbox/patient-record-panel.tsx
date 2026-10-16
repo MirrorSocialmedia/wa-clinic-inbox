@@ -122,14 +122,31 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
     const c = data?.contact;
     if (!c || !c.canEdit || optOutBusy) return;
     const next = !c.followupOptOut;
+    // ★ wa-meta-compliance-20261016（B.3）：重新啟用必須記錄病人同意嘅用途（來源/時間/用途 三要素）—
+    //   UI prompt 收集（例：「10/15 WhatsApp 回覆『可以繼續發』」）；空 = 唔可以啟用。
+    let purpose: string | null = null;
+    if (!next) {
+      purpose = window.prompt(
+        "重新啟用主動跟進需要記錄病人同意（合規要求）。\n請填寫：病人何時/點同意再收跟進？（例：10/15 WhatsApp 回覆「可以繼續發」）"
+      );
+      if (purpose === null) return; // 取消
+      purpose = purpose.trim();
+      if (!purpose) {
+        alert("請填寫病人同意嘅來源/用途，否則唔可以重新啟用。");
+        return;
+      }
+    }
     setOptOutBusy(true);
     try {
       const res = await fetch(`/api/followups/contacts/${c.id}/opt-out`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ optOut: next }),
+        body: JSON.stringify(next ? { optOut: true } : { optOut: false, consent: { purpose } }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(j?.error ?? `HTTP ${res.status}`);
+      }
       setData((prev) =>
         prev && prev.contact
           ? {
@@ -138,12 +155,39 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
             }
           : prev
       );
-    } catch {
-      alert("跟進通知更新失敗，請稍後再試");
+    } catch (e) {
+      alert(`跟進通知更新失敗，請稍後再試${e instanceof Error && e.message ? `（${e.message}）` : ""}`);
     } finally {
       setOptOutBusy(false);
     }
   }, [data, optOutBusy]);
+
+  // ★ wa-meta-compliance-20261016（C.1）：交返 AI — 清 patientRequestedHuman flag（audit HUMAN_REQUEST_CLEARED）
+  const [handBackBusy, setHandBackBusy] = useState(false);
+  const handBackToAi = useCallback(async () => {
+    if (handBackBusy) return;
+    setHandBackBusy(true);
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}/patient-requested-human`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clear: true }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(j?.error ?? `HTTP ${res.status}`);
+      }
+      setData((prev) =>
+        prev && prev.patientRequestedHuman
+          ? { ...prev, patientRequestedHuman: { ...prev.patientRequestedHuman, active: false, at: null } }
+          : prev
+      );
+    } catch (e) {
+      alert(`交返 AI 失敗，請稍後再試${e instanceof Error && e.message ? `（${e.message}）` : ""}`);
+    } finally {
+      setHandBackBusy(false);
+    }
+  }, [conversationId, handBackBusy]);
 
   // ★ cwi-followup-v3 B-9：存稱呼 + locale（PATCH /api/contacts/:id — staff+）
   const saveSalutation = useCallback(
@@ -295,6 +339,29 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
               }`}
             >
               {optOutBusy ? "更新中…" : data.contact.followupOptOut ? "恢復跟進" : "停止跟進"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* ★ wa-meta-compliance-20261016（C.1）：病人要求真人 → AI 自動收聲（staff「交返 AI」清旗） */}
+      {data?.patientRequestedHuman?.active ? (
+        <div
+          className="shrink-0 mx-2.5 mt-1.5 px-2 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2 text-[11px]"
+          data-e2e="c1-human-request-row"
+        >
+          <span className="text-amber-600 min-w-0">
+            病人要求真人跟進 — AI 自動覆已暫停
+            {data.patientRequestedHuman.at ? `（${new Date(data.patientRequestedHuman.at).toLocaleString()}）` : ""}
+          </span>
+          {data.patientRequestedHuman.canClear ? (
+            <button
+              data-e2e="c1-hand-back-btn"
+              disabled={handBackBusy}
+              onClick={() => void handBackToAi()}
+              className="shrink-0 px-2 py-0.5 rounded-md border border-amber-500/40 bg-panel text-t1 hover:bg-panel-2 disabled:opacity-50"
+            >
+              {handBackBusy ? "處理中…" : "交返 AI 繼續"}
             </button>
           ) : null}
         </div>

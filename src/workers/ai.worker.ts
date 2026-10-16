@@ -308,6 +308,7 @@ export async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, u
     assigneeId: conv.assigneeId,
     status: conv.status,
     humanTookOver: conv.humanTookOver,
+    patientRequestedHuman: conv.patientRequestedHuman, // ★ wa-meta-compliance-20261016（C.1）
     lastOutboundText: conv.lastOutboundText,
     urgent: conv.urgent,
     resolvedAt: conv.resolvedAt,
@@ -368,6 +369,8 @@ export async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, u
     // ★ cwi-final S1-14：急症對話（deterministic 紅旗 intake）唔開任何 session — 病人要嘅係即刻升級，唔係問診
     !updatedConv.urgent &&
     !job.data.urgentHit &&
+    // ★ wa-meta-compliance-20261016（C.1）：病人要求真人中 → 唔開新 session（AI 全停）
+    !updatedConv.patientRequestedHuman &&
     // ★ cwi-final S4-2：job early-exit（已有較新 IN 訊息 + L2+ 店）— 唔開新 session（較新 job 處理）
     !skipHeavy
   ) {
@@ -398,6 +401,8 @@ export async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, u
     // ★ cwi-final S1-14：急症對話唔開問診 session（同上）
     !updatedConv.urgent &&
     !job.data.urgentHit &&
+    // ★ wa-meta-compliance-20261016（C.1）：病人要求真人中 → 唔開新問診 session（同上）
+    !updatedConv.patientRequestedHuman &&
     // ★ cwi-final S4-2：job early-exit（同上）— 唔開新問診 session
     !skipHeavy &&
     // ★ cwi-final S4-3（A12 kill switch）：global cap L1 或 店 PAIN_TRIAGE row = L1 → 唔開問診
