@@ -3026,7 +3026,41 @@ export function InboxClient({
   );
 
   return (
-    <div className="h-full flex min-h-0 relative">
+    <div className="h-full flex flex-col min-h-0">
+      {/* ★ Part B：首次登入 banner 一次（localStorage flag；啟 = 請求 permission + 開桌面通知）
+          ★ cwi-notify-a9：由頂部移去底部 — 舊位置遮住列表 header 嘅「通知設定」鐘（手機未答之前撳唔到）
+          ★ cwi-inbox-r4：改為頁頂「佔位」橫條（唔再疊喺內容上面）— 底部浮層會遮住手機列表最底幾行同桌面輸入框
+            （CI backnav BN-06：列表行被遮撳唔到）；佔位就唔會遮任何嘢，亦唔會遮到鐘。 */}
+      {notifyBanner && (
+        <div className="shrink-0 bg-panel border-b border-line px-4 py-2 flex items-center gap-3" data-testid="notify-banner">
+          <span className="text-sm text-t1 flex-1">開啟通知？客人嚟訊息即刻知</span>
+          <button
+            onClick={() => {
+              void (async () => {
+                const perm = await ensurePermission();
+                updatePrefs({ ...prefsRef.current, desktop: perm === "granted" });
+                dismissNotifyBanner();
+                setNotifyBanner(false);
+                // v2：permission 授予後 → 確保 Web Push subscription（tab 閂咗都收到）
+                if (perm === "granted") void ensurePushSubscription();
+              })();
+            }}
+            className="text-xs px-3 py-1.5 rounded-full bg-brand text-white hover:opacity-90 shrink-0"
+          >
+            開啟通知
+          </button>
+          <button
+            onClick={() => {
+              dismissNotifyBanner();
+              setNotifyBanner(false);
+            }}
+            className="text-xs px-3 py-1.5 rounded-full bg-panel-2 text-t2 hover:text-t1 shrink-0"
+          >
+            唔該
+          </button>
+        </div>
+      )}
+    <div className="flex-1 flex min-h-0 relative">
       <ConversationList
         hidden={selectedConvId !== null}
         userRole={user.role}
@@ -3082,38 +3116,6 @@ export function InboxClient({
         audioStatus={{ ok: audioOk, standalone: pwaStandalone }}
         onUnlockAudio={unlockAudioNow}
       />
-
-      {/* ★ Part B：首次登入 banner 一次（localStorage flag；啟 = 請求 permission + 開桌面通知）
-          ★ cwi-notify-a9：由頂部移去底部 — 舊位置遮住列表 header 嘅「通知設定」鐘（手機未答之前撳唔到） */}
-      {notifyBanner && (
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 w-[min(94%,540px)] bg-panel border border-line rounded-xl shadow-lg px-4 py-3 flex items-center gap-3">
-          <span className="text-sm text-t1 flex-1">開啟通知？客人嚟訊息即刻知</span>
-          <button
-            onClick={() => {
-              void (async () => {
-                const perm = await ensurePermission();
-                updatePrefs({ ...prefsRef.current, desktop: perm === "granted" });
-                dismissNotifyBanner();
-                setNotifyBanner(false);
-                // v2：permission 授予後 → 確保 Web Push subscription（tab 閂咗都收到）
-                if (perm === "granted") void ensurePushSubscription();
-              })();
-            }}
-            className="text-xs px-3 py-1.5 rounded-full bg-brand text-white hover:opacity-90 shrink-0"
-          >
-            開啟通知
-          </button>
-          <button
-            onClick={() => {
-              dismissNotifyBanner();
-              setNotifyBanner(false);
-            }}
-            className="text-xs px-3 py-1.5 rounded-full bg-panel-2 text-t2 hover:text-t1 shrink-0"
-          >
-            唔該
-          </button>
-        </div>
-      )}
 
       <ChatPane
         key={`chat-${selectedConv?.id ?? "none"}`} // ★ cwi-final S1-1e（=S1-6）：換對話 remount — 舊對話殘留 messages 唔會漏入新 pane
@@ -3250,6 +3252,7 @@ export function InboxClient({
           </button>
         </div>
       )}
+    </div>
     </div>
   );
 }
