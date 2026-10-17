@@ -330,6 +330,7 @@ model Contact {
   patientCheckedAt          DateTime?
   identifiedPatientApricotId String?           // 只認到一個病人先填（多個 → null，staff 喺病人卡揀）
   identifiedCount           Int?
+  identifiedPatientCode     String?           // ★ cwi-flow-quick：認到唯一病人嘅 Apricot 編號（頂部 chip 用 — 索引未有到診都顯示到）
   consents      ContactConsent[]
   @@unique([clinicId, waId])                  // 同一病人喺兩間店 = 兩條 Contact（隔離）
 }

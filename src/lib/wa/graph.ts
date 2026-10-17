@@ -524,7 +524,7 @@ export interface FlowMessageConfig {
    * 只喺 staff 由排班板撳格發 Flow 時有（flow_action="navigate"）；canvas 收唔到時忽略（向后兼容）。
    * ★ S5-10：加 screen — 新 Meta format 嘅 flow_action_payload = { screen, data }。
    */
-  flow_action_payload?: { screen: string; data: { date: string; providerId: string; start: string } };
+  flow_action_payload?: { screen: string; data: Record<string, string> };
 }
 
 /**

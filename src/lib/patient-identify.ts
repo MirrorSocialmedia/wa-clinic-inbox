@@ -1,6 +1,6 @@
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { identifyPatient, WorkforceApiError } from "@/lib/workforce/client";
+import { identifyPatient, refreshPatient, WorkforceApiError } from "@/lib/workforce/client";
 import { convRef, publishConvEvent } from "@/lib/notify";
 import { needsIdentify, mapIdentifyStatus, type PatientStatus } from "@/lib/patient-identify-policy";
 
@@ -17,11 +17,15 @@ import { needsIdentify, mapIdentifyStatus, type PatientStatus } from "@/lib/pati
  * 🔴 私隱（擁有人拍板）：原始電話只經 POST body 傳去 workforce；唔寫 log。
  */
 const inFlight = new Set<string>();
+/** workforce refresh 必填 X-Staff-Id（審計）— 系統自動補歷史用固定標記 */
+const IDENTIFY_STAFF_ID = "system:patient-identify";
+const BACKFILL_DEPTH = 10;
 
 export interface IdentifyOutcome {
   status: PatientStatus;
   count: number;
   patientApricotId: string | null;
+  patientCode: string | null;
 }
 
 export async function identifyContact(contactId: string, opts: { force?: boolean } = {}): Promise<IdentifyOutcome | null> {
@@ -42,15 +46,18 @@ export async function identifyContact(contactId: string, opts: { force?: boolean
         status: mapIdentifyStatus(r.status),
         count: r.patients.length,
         patientApricotId: r.patients.length === 1 ? r.patients[0].patientApricotId : null,
+        patientCode: r.patients.length === 1 ? r.patients[0].patientCode || null : null,
       };
     } catch (e) {
       log.warn(
         { contactId, err: e instanceof WorkforceApiError ? `status=${e.status}` : e instanceof Error ? e.name : "unknown" },
         "patient-identify: workforce 查唔到（UNKNOWN — 稍後重試）"
       );
-      outcome = { status: "UNKNOWN", count: 0, patientApricotId: null };
+      outcome = { status: "UNKNOWN", count: 0, patientApricotId: null, patientCode: null };
     }
 
+    const prevPatientId = (await prisma.contact.findUnique({ where: { id: contactId }, select: { identifiedPatientApricotId: true } }))
+      ?.identifiedPatientApricotId;
     await prisma.contact.update({
       where: { id: contactId },
       data: {
@@ -58,6 +65,7 @@ export async function identifyContact(contactId: string, opts: { force?: boolean
         patientCheckedAt: new Date(),
         identifiedPatientApricotId: outcome.patientApricotId,
         identifiedCount: outcome.count,
+        identifiedPatientCode: outcome.patientCode,
       },
     });
 
@@ -70,6 +78,16 @@ export async function identifyContact(contactId: string, opts: { force?: boolean
         patientStatus: outcome.status,
         identifiedCount: outcome.count,
       });
+    }
+    // ★ cwi-patient-records-20261017：新認到（或換咗）唯一病人 → 背景補最近 10 次到診入索引
+    //   （冇預約／未入夜跑嘅病人索引係空 — 唔補嘅話病人記錄只有零或一次到診）。fail-soft，唔阻判定結果。
+    if (outcome.patientApricotId && outcome.patientApricotId !== prevPatientId) {
+      void refreshPatient(outcome.patientApricotId, IDENTIFY_STAFF_ID, BACKFILL_DEPTH).catch((e) =>
+        log.warn(
+          { contactId, err: e instanceof WorkforceApiError ? `status=${e.status}` : e instanceof Error ? e.name : "unknown" },
+          "patient-identify: backfill refresh failed（fail-soft — 病人卡可撳立即更新）"
+        )
+      );
     }
     log.info({ contactId, status: outcome.status, count: outcome.count }, "patient-identify: done");
     return outcome;

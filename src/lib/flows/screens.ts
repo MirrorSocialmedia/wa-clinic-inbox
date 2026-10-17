@@ -257,3 +257,30 @@ export function bookableDateScreen(opts: {
     error_message: opts.error ?? "",
   };
 }
+
+/**
+ * ★ cwi-flow-quick-20261017：撳格預選 Flow（navigate → SCR_QUICK 入口屏）嘅 data。
+ * 真機 139000 根因：舊版 navigate 去 SCR_DATE + data {date, providerId, start} — 同 Flow JSON 嘅 SCR_DATE
+ * data model 唔夾（Meta 驗 navigate payload）。SCR_QUICK = 冇入邊嘅入口屏（Flow JSON v74），
+ * 欄位**逐個**對應 JSON data model（唔多唔少 — navigate payload Meta 會嚴格驗）。
+ */
+export const SCREEN_QUICK = "SCR_QUICK";
+export function quickScreenData(opts: {
+  date: string;
+  providerId: string;
+  providerName: string;
+  time: string;
+  profileName: string;
+  error?: string;
+}): Record<string, string> {
+  return {
+    summary_date: `日期：${fmtDateFull(opts.date)}`,
+    summary_provider: `醫生：${opts.providerName}`,
+    summary_time: `時間：${opts.time}`,
+    profile_name: opts.profileName,
+    date: opts.date,
+    provider_id: opts.providerId,
+    time: opts.time,
+    error_message: opts.error ?? "",
+  };
+}

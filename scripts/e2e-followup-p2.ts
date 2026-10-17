@@ -434,7 +434,8 @@ async function main(): Promise<void> {
     // ── conv-std：chip + 抽屜 ──
     await selectConv(page, "P2-陳大文");
     const chipCode = await (page.locator('[data-e2e="p2-chip-code"]') as Locator).textContent();
-    check("chip 顯示 P0001 · 新客", !!chipCode && chipCode.includes("P0001") && chipCode.includes("新客"), chipCode);
+    // ★ cwi-flow-quick（擁有人拍板 2026-10-17：已登記 = 舊客）— 對到病人檔就係舊客（唔再按到診次數）
+    check("chip 顯示 P0001 · 舊客", !!chipCode && chipCode.includes("P0001") && chipCode.includes("舊客"), chipCode);
     const chipOs = await (page.locator('[data-e2e="p2-chip-os"]') as Locator).textContent();
     check("欠款 chip 顯示 $300（>0 先顯）", !!chipOs && chipOs.includes("300"), chipOs);
     const chipLast = await (page.locator('[data-e2e="p2-chip-lastvisit"]') as Locator).textContent();

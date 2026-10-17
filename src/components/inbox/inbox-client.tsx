@@ -3197,7 +3197,7 @@ export function InboxClient({
         onMobileClose={() => setDetailOpen(false)}
         myStaffId={user.staffId}
         // cwi-multiclinic-20260903：clinicById 打底（STAFF 多店 — SSR clinics 只冇主店）
-        clinicCode={clinicById.get(selectedConv?.clinicId ?? "")?.code ?? null}
+        clinicCode={clinicById.get(selectedConv?.handlingClinicId ?? selectedConv?.clinicId ?? "")?.code ?? selectedConv?.locationCode ?? null}
         userRole={user.role}
         onAssign={assignConversationApi}
         assignBusy={assignBusy}
