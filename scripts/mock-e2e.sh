@@ -8992,10 +8992,15 @@ else{
   if(mode==="NAVIGATE"){
     if(pa.flow_action!=="navigate")errs.push("flow_action=navigate");
     const fp=pa.flow_action_payload;
-    if(!fp||fp.screen!=="SCR_DATE")errs.push("flow_action_payload.screen");
-    if(!fp||!fp.data||fp.data.start!==expStart)errs.push("payload.data.start");
+    // ★ cwi-flow-quick-20261017：預選去入口屏 SCR_QUICK — data 欄位要同 Flow JSON v74 嘅 SCR_QUICK data model 一模一樣（多／少／非字串 = 139000）
+    if(!fp||fp.screen!=="SCR_QUICK")errs.push("flow_action_payload.screen");
+    const want="date,error_message,profile_name,provider_id,summary_date,summary_provider,summary_time,time";
+    if(!fp||!fp.data||Object.keys(fp.data).sort().join(",")!==want)errs.push("payload.data keys");
+    if(fp&&fp.data&&Object.values(fp.data).some(v=>typeof v!=="string"))errs.push("payload.data 非字串");
+    if(!fp||!fp.data||fp.data.time!==expStart)errs.push("payload.data.time");
     if(!fp||!fp.data||fp.data.date!==expDate)errs.push("payload.data.date");
-    if(!fp||!fp.data||fp.data.providerId!==expProv)errs.push("payload.data.providerId");
+    if(!fp||!fp.data||fp.data.provider_id!==expProv)errs.push("payload.data.provider_id");
+    if(!fp||!fp.data||!fp.data.summary_time||!fp.data.summary_time.includes(expStart))errs.push("payload.data.summary_time");
   } else if (pa.flow_action!=="data_exchange") errs.push("flow_action=data_exchange");
   if(pa.mode!==undefined)errs.push("mode 應無（WA_FLOW_DRAFT 未設）");
 }
