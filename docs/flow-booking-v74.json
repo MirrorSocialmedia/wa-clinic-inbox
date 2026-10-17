@@ -8,8 +8,10 @@
     "SCR_SLOT": [
       "SCR_CONFIRM"
     ],
-    "SCR_CONFIRM": [],
-    "SCR_QUICK": []
+    "SCR_QUICK": [
+      "SCR_CONFIRM"
+    ],
+    "SCR_CONFIRM": []
   },
   "screens": [
     {
@@ -308,12 +310,6 @@
     {
       "id": "SCR_QUICK",
       "title": "確認預約",
-      "terminal": true,
-      "sensitive": [
-        "name",
-        "notes",
-        "patient_phone"
-      ],
       "data": {
         "summary_date": {
           "type": "string",
@@ -353,11 +349,11 @@
         "children": [
           {
             "type": "TextHeading",
-            "text": "確認預約資料"
+            "text": "確認預約時段"
           },
           {
             "type": "TextBody",
-            "text": "診所已經幫你揀好以下時段，確認就得："
+            "text": "診所已經幫你揀好以下時段："
           },
           {
             "type": "TextBody",
@@ -383,41 +379,23 @@
             "else": []
           },
           {
-            "type": "TextInput",
-            "name": "name",
-            "label": "病人姓名",
-            "init-value": "${data.profile_name}",
-            "max-chars": 40,
-            "required": true,
-            "helper-text": "請輸入預約姓名"
-          },
-          {
-            "type": "TextInput",
-            "name": "patient_phone",
-            "label": "病人電話",
-            "input-type": "phone",
-            "helper-text": "幫屋企人/朋友預約先需要填；唔填 = 用你呢個 WhatsApp 號碼"
-          },
-          {
-            "type": "TextArea",
-            "name": "notes",
-            "label": "備註",
-            "max-length": 200,
-            "helper-text": "例如症狀、特殊需要"
-          },
-          {
             "type": "Footer",
-            "label": "確認預約",
+            "label": "下一步",
             "on-click-action": {
-              "name": "data_exchange",
+              "name": "navigate",
+              "next": {
+                "type": "screen",
+                "name": "SCR_CONFIRM"
+              },
               "payload": {
-                "user_action": "submit_confirm",
+                "summary_date": "${data.summary_date}",
+                "summary_provider": "${data.summary_provider}",
+                "summary_time": "${data.summary_time}",
+                "profile_name": "${data.profile_name}",
                 "date": "${data.date}",
                 "provider_id": "${data.provider_id}",
                 "time": "${data.time}",
-                "name": "${form.name}",
-                "patient_phone": "${form.patient_phone}",
-                "notes": "${form.notes}"
+                "error_message": ""
               }
             }
           }

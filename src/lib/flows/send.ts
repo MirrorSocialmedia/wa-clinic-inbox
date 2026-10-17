@@ -116,7 +116,7 @@ export async function sendBookingFlow(opts: {
   }
   // D.3：撳格預選 — flow_action="navigate" + flow_action_payload{screen, data}
   // ★ cwi-flow-quick-20261017：真機 139000 修正 — 舊版去 SCR_DATE + {date, providerId, start}（同 JSON data
-  //   model 唔夾）。改去 SCR_QUICK（Flow JSON v74 入口屏：時段已揀好、病人只填名 → 確認）；欄位逐個對應 JSON。
+  //   model 唔夾）。改去 SCR_QUICK（Flow JSON v74 入口屏：顯示已揀時段 → 「下一步」navigate 去 SCR_CONFIRM 填名確認）；欄位逐個對應 JSON。
   if (opts.prefill) {
     const pf = opts.prefill;
     const providerName =
