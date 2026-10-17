@@ -47,11 +47,13 @@ interface Props {
 }
 
 export function MiniSchedule({ conversation: conv, myStaffId, clinicCode, onFlowSent }: Props) {
+  // ★ cwi-flow-quick-20261017：表 + 撳格預約都跟「地點」（跟進分店 ?? 號碼店）— clinicCode 由 caller 按地點傳入
+  const locationClinicId = conv.handlingClinicId ?? conv.clinicId;
   const today = hkTodayStr();
   const [data, setData] = useState<FlowSlotsResult | null>(null);
   const [loadErr, setLoadErr] = useState(false);
   const [nowMin, setNowMin] = useState<number>(() => hkNowMin());
-  const [pick, setPick] = useState<{ providerId: string; start: string; end: string } | null>(null);
+  const [pick, setPick] = useState<{ providerId: string; providerName: string; start: string; end: string } | null>(null);
   const [sending, setSending] = useState(false);
   const [sendErr, setSendErr] = useState<string | null>(null);
   const [sentFlash, setSentFlash] = useState<string | null>(null);
@@ -141,7 +143,9 @@ export function MiniSchedule({ conversation: conv, myStaffId, clinicCode, onFlow
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prefill: { date: today, providerId: pick.providerId, start: pick.start },
+          prefill: { date: today, providerId: pick.providerId, start: pick.start, providerName: pick.providerName },
+          // ★ cwi-flow-quick：轉咗地點 → 預約落地點分店（表本身已經顯示地點分店嘅醫生）
+          ...(locationClinicId && locationClinicId !== conv.clinicId ? { bookingClinicId: locationClinicId } : {}),
         }),
       });
       const j = (await res.json().catch(() => null)) as { reused?: boolean; error?: string } | null;
@@ -232,7 +236,7 @@ export function MiniSchedule({ conversation: conv, myStaffId, clinicCode, onFlow
                           <button
                             type="button"
                             onClick={() => {
-                              setPick({ providerId: p.providerId, start: c.slot.start, end: c.slot.end });
+                              setPick({ providerId: p.providerId, providerName: p.providerName, start: c.slot.start, end: c.slot.end });
                               setSendErr(null);
                               setSentFlash(null);
                             }}

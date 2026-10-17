@@ -804,7 +804,7 @@ function DayGrid({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prefill: { date, providerId: p.providerId, start: pop.slot.start },
+          prefill: { date, providerId: p.providerId, start: pop.slot.start, providerName: p.providerName },
           // ★ cwi-ux UX-07：跨店 — 預約地點 = 目前顯示嘅店（bookingClinicId）；對話本身唔變。
           ...(cross ? { bookingClinicId: clinicId } : {}),
         }),

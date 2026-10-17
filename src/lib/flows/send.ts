@@ -17,6 +17,7 @@ import { defaultFlowConfig, requirementFlowConfig, type FlowMessageConfig } from
 import { signFlowToken, flowJwtSecret } from "@/lib/flows/crypto";
 import { getSlots } from "@/lib/availability";
 import { slotClaimEnabled } from "@/lib/workforce/client";
+import { SCREEN_QUICK, quickScreenData } from "@/lib/flows/screens";
 
 export class WindowClosedError extends Error {
   constructor() {
@@ -47,7 +48,7 @@ export async function sendBookingFlow(opts: {
    * D.3（cwi-schedv2-20260903）：排班板撳格預選 — 塞入 flow_action_payload.data（第一屏預選）。
    * 唔預先 claim（病人 submit 先 claim — claim@submit_confirm 不變）。
    */
-  prefill?: { date: string; providerId: string; start: string };
+  prefill?: { date: string; providerId: string; start: string; providerName?: string };
   /**
    * ★ cwi-ux UX-07：預約目標店（Cuid — 任何 active 診所；route 層已驗存在 + 權限）。
    * 缺/null = 對話所屬店（舊行為零改動）。token 簽名帶 + FlowSession 存 — 病人揀完用同一間店。
@@ -113,10 +114,24 @@ export async function sendBookingFlow(opts: {
     );
     config = defaultFlowConfig(token);
   }
-  // D.3：撳格預選 — ★ cwi-final S5-10：flow_action="navigate" + flow_action_payload{screen, data}
-  //   （新 Meta format；排班表預選時段專用。screen 落日期屏預選 — canvas 側對齊見 G2 真機驗證）
+  // D.3：撳格預選 — flow_action="navigate" + flow_action_payload{screen, data}
+  // ★ cwi-flow-quick-20261017：真機 139000 修正 — 舊版去 SCR_DATE + {date, providerId, start}（同 JSON data
+  //   model 唔夾）。改去 SCR_QUICK（Flow JSON v74 入口屏：顯示已揀時段 → 「下一步」navigate 去 SCR_CONFIRM 填名確認）；欄位逐個對應 JSON。
   if (opts.prefill) {
-    config = { ...config, flow_action: "navigate", flow_action_payload: { screen: "SCR_DATE", data: { ...opts.prefill } } };
+    const pf = opts.prefill;
+    const providerName =
+      pf.providerName?.trim() ||
+      (await prisma.provider.findFirst({ where: { apricotId: pf.providerId }, select: { name: true } }))?.name ||
+      "（醫生）";
+    const contact = await prisma.contact.findUnique({ where: { id: conv.contactId }, select: { profileName: true } });
+    config = {
+      ...config,
+      flow_action: "navigate",
+      flow_action_payload: {
+        screen: SCREEN_QUICK,
+        data: quickScreenData({ date: pf.date, providerId: pf.providerId, providerName, time: pf.start, profileName: contact?.profileName ?? "" }),
+      },
+    };
   }
   const session = await prisma.flowSession.create({
     data: {

@@ -1155,7 +1155,9 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             {patientChip ? (
               <div className="hidden md:flex items-center gap-1 flex-wrap" data-e2e="p2-chip-row">
                 <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-panel-2 text-t2" data-e2e="p2-chip-code">
-                  {patientChip.patientCode ?? "—"} · {patientChip.customerType === "returning" ? "舊客" : "新客"}
+                  {/* ★ cwi-flow-quick：同判定一致（擁有人拍板：已登記 = 舊客）— 有判定用判定；未判定但已對到病人檔 = 舊客 */}
+                  {patientChip.patientCode ?? "—"} ·{" "}
+                  {c.contact?.patientStatus === "NEW" ? "新客" : c.contact?.patientStatus === "UNKNOWN" ? "未確定" : "舊客"}
                 </span>
                 {patientChip.osAmt != null && patientChip.osAmt > 0 ? (
                   <span
@@ -1807,6 +1809,26 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                     <Paperclip size={17} strokeWidth={2.2} />
                   </button>
                 </>
+              )}
+              {/* ★ cwi-flow-quick-20261017：長駐 📅 發預約 Flow（以前只喺 AI 判定「想預約」先出）— 預約分店 = 地點優先 */}
+              {p.slotClaimEnabled !== false && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = flowClinicId ?? c.handlingClinicId ?? c.clinicId;
+                    const code = flowClinics?.find((x) => x.id === target)?.code ?? c.locationCode ?? c.clinicCode ?? "";
+                    requireOutConfirm(`預約 Flow（WhatsApp 預約卡）${code ? ` · 預約分店：${code}` : ""}`, () =>
+                      void sendFlow(target !== c.clinicId ? target : undefined)
+                    );
+                  }}
+                  disabled={p.flowBusy || sending}
+                  aria-label="發預約連結"
+                  title="發預約連結（WhatsApp Flow — 病人自己揀日子、醫生、時間）"
+                  data-e2e="composer-flow-btn"
+                  className="w-10 h-10 shrink-0 rounded-full text-t2 hover:text-brand-text hover:bg-panel-2 flex items-center justify-center disabled:opacity-40"
+                >
+                  {p.flowBusy ? <WMark size={17} /> : <CalendarDays size={17} strokeWidth={2.2} />}
+                </button>
               )}
               <textarea
                 value={draft}

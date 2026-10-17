@@ -643,7 +643,10 @@ async function wfGet(
   params: Record<string, string>,
   extraHeaders?: Record<string, string>,
 ) {
-  if (process.env.WORKFORCE_MOCK === "1") return mockFixture(path, params); // §4
+  if (process.env.WORKFORCE_MOCK === "1") {
+    mockRequireStaffId(path, extraHeaders);
+    return mockFixture(path, params); // §4
+  }
   return wfFetch("GET", path, params, undefined, extraHeaders);
 }
 
@@ -653,14 +656,35 @@ async function wfSend(
   params: Record<string, string>,
   body?: unknown,
   extraHeaders?: Record<string, string>,
-  opts?: { /** ★ cwi-final S5-1：Apricot booking 寫入 — 90s timeout + retry + outcome-unknown 分類 */ bookingWrite?: boolean },
+  opts?: {
+    /** ★ cwi-final S5-1：Apricot booking 寫入 — 90s timeout + retry + outcome-unknown 分類 */ bookingWrite?: boolean;
+    /** ★ cwi-flow-quick：要即時問 Apricot 幾次嘅 call（立即更新／認病人）— 預設 3s 太短，會誤報「Apricot 未接通」 */
+    timeoutMs?: number;
+  },
 ) {
   if (opts?.bookingWrite) {
     return wfSendBookingWrite(method, path, params, body, extraHeaders);
   }
-  if (process.env.WORKFORCE_MOCK === "1") return mockFixture(path, params, method, body); // §4
-  return wfFetch(method, path, params, body, extraHeaders);
+  if (process.env.WORKFORCE_MOCK === "1") {
+    mockRequireStaffId(path, extraHeaders);
+    return mockFixture(path, params, method, body); // §4
+  }
+  return wfFetch(method, path, params, body, extraHeaders, opts?.timeoutMs);
 }
+
+/**
+ * ★ cwi-flow-quick-20261017：mock 都驗 X-Staff-Id（同 CWM requireStaffId 同一組路由：visits／visits/{id}/note／refresh）—
+ *   以前 mock 唔驗 → inbox 漏帶 header 喺 CI 全綠、生產 100% 400。
+ */
+function mockRequireStaffId(path: string, headers?: Record<string, string>): void {
+  if (!/^\/api\/external\/v1\/patients\/[^/]+\/(visits(\/[^/]+\/note)?|refresh)$/.test(path)) return;
+  const v = headers?.["x-staff-id"] ?? headers?.["X-Staff-Id"] ?? "";
+  if (!v.trim()) throw new WorkforceApiError(400, path, "STAFF_ID_REQUIRED");
+}
+
+/** ★ cwi-flow-quick-20261017：立即更新（workforce 連續問 Apricot 3+ 次、每次限速 0.4s、可能抽報價）/ 認病人（逐帳號搜） */
+const WORKFORCE_REFRESH_TIMEOUT_MS = Math.max(1, Number(process.env.WORKFORCE_REFRESH_TIMEOUT_MS ?? 45_000) || 45_000);
+const WORKFORCE_IDENTIFY_TIMEOUT_MS = Math.max(1, Number(process.env.WORKFORCE_IDENTIFY_TIMEOUT_MS ?? 15_000) || 15_000);
 
 /** test-only 出入口：mock 模式下直接打 workforce 端驗證（e.g. status 白名單）— 本 repo 測試用 */
 export const wfSendForTest = wfSend;
@@ -979,7 +1003,9 @@ export type PatientIdentifyResult = z.infer<typeof PatientIdentifyResponse>;
 
 /** 🔴 原始電話只喺 POST body（唔入 URL／log）— 擁有人拍板 2026-10-17（判定一定要原始號碼先搜到 Apricot）。 */
 export async function identifyPatient(phone: string): Promise<PatientIdentifyResult> {
-  return PatientIdentifyResponse.parse(await wfSend("POST", "/api/external/v1/patients/identify", {}, { phone }));
+  return PatientIdentifyResponse.parse(
+    await wfSend("POST", "/api/external/v1/patients/identify", {}, { phone }, undefined, { timeoutMs: WORKFORCE_IDENTIFY_TIMEOUT_MS })
+  );
 }
 
 /**
@@ -997,9 +1023,17 @@ export async function fetchAppointments(phoneHash: string, from: string, to: str
 //    （EXTERNAL_NOTE_VIEWED — W 只傳 X-Staff-Id opaque，唔自己再記內容 audit）。
 
 /** #4 病人到診列表（結構化 + firstLine ≤60 字；404 NOT_FOUND = 零索引行）。 */
-export async function fetchPatientVisits(patientApricotId: string, limit = 50): Promise<PatientVisitsResult> {
+/**
+ * ★ cwi-flow-quick-20261017：CWM 側 visits／refresh 自 S5-14 起 X-Staff-Id 必填（冇 = 400 STAFF_ID_REQUIRED）—
+ *   舊版冇帶 → 生產環境到診永遠攞唔到（「workforce 降級中」）、立即更新永遠失敗（mock 唔驗 → CI 冇發現）。
+ */
+export async function fetchPatientVisits(patientApricotId: string, limit = 50, staffId?: string): Promise<PatientVisitsResult> {
   return PatientVisitsResponse.parse(
-    await wfGet(`/api/external/v1/patients/${encodeURIComponent(patientApricotId)}/visits`, { limit: String(limit) })
+    await wfGet(
+      `/api/external/v1/patients/${encodeURIComponent(patientApricotId)}/visits`,
+      { limit: String(limit) },
+      staffId ? { "x-staff-id": staffId } : undefined
+    )
   );
 }
 
@@ -1112,6 +1146,14 @@ export async function fetchPatientBalance(patientApricotId: string): Promise<Pat
  * #3 appointments clinic 模式（MD §2.6 #3）：該診所該窗全部預約（含 phoneHashes[]）。
  * from/to ≤38 日窗口（超出 400）；404 NOT_FOUND = 诊所唔存在。
  */
+/**
+ * ★ cwi-patient-records-20261017：病人喺**全部店**嘅預約（CWM 模式 C ?patientApricotId=）—
+ *   病人記錄「預約」分頁用（以前只睇 WhatsApp 號碼嗰間店）。舊版 CWM 冇模式 C → 400 → caller fallback 店模式。
+ */
+export async function fetchAppointmentsByPatient(patientApricotId: string, from: string, to: string): Promise<AppointmentsResult> {
+  return AppointmentsResponse.parse(await wfGet("/api/external/v1/appointments", { patientApricotId, from, to }));
+}
+
 export async function fetchAppointmentsByClinic(clinicCode: string, from: string, to: string): Promise<ClinicAppointmentsResult> {
   return ClinicAppointmentsResponse.parse(
     await wfGet("/api/external/v1/appointments", { clinicCode, from, to })
@@ -1119,9 +1161,17 @@ export async function fetchAppointmentsByClinic(clinicCode: string, from: string
 }
 
 /** #8 手動刷新單一病人（MD §2.8）：即時打 Apricot 三條唯讀 → upsert 索引。429 = 60s 限流（retryAfterSec）。 */
-export async function refreshPatient(patientApricotId: string): Promise<PatientRefreshResult> {
+export async function refreshPatient(patientApricotId: string, staffId?: string, depth?: number): Promise<PatientRefreshResult> {
   return PatientRefreshResponse.parse(
-    await wfSend("POST", `/api/external/v1/patients/${encodeURIComponent(patientApricotId)}/refresh`, {})
+    await wfSend(
+      "POST",
+      `/api/external/v1/patients/${encodeURIComponent(patientApricotId)}/refresh`,
+      // ★ cwi-patient-records：depth = 連帶補最近 N 個到診日（新認到嘅病人；舊版 CWM 忽略呢個參數）
+      depth && depth > 1 ? { depth: String(depth) } : {},
+      undefined,
+      staffId ? { "x-staff-id": staffId } : undefined,
+      { timeoutMs: WORKFORCE_REFRESH_TIMEOUT_MS }
+    )
   );
 }
 
@@ -1456,6 +1506,7 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
   if (path === "/api/external/v1/appointments") {
     // P2：clinic 模式（MD §2.6 #3）— phoneHash 唔傳先行 clinic 路；唔傳 = 400（同真端點）
     if (params.clinicCode) return mockClinicAppointments(params);
+    if (params.patientApricotId) return mockPatientAppointments(params);
     return mockAppointments(params);
   }
 
@@ -2245,6 +2296,22 @@ function mockPatientBalance(cpId: string): unknown {
     balance: p.balance,
     syncedAt: mockP2SyncedAt(cpId),
   };
+}
+
+/** ★ cwi-patient-records：mock 模式 C — 該病人全部店嘅預約（P2 決定性病人 + follow-up fixture） */
+function mockPatientAppointments(params: Record<string, string>): unknown {
+  const reqPath = "/api/external/v1/appointments";
+  const cpId = (params.patientApricotId ?? "").trim();
+  const from = params.from ?? "";
+  const to = params.to ?? "";
+  if (!cpId || !MOCK_DATE_RE.test(from) || !MOCK_DATE_RE.test(to)) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  const out: Record<string, unknown>[] = [];
+  for (const clinicCode of MOCK_P2_CLINICS) {
+    const r = mockClinicAppointments({ clinicCode, from, to }) as { appointments: { patientApricotId: string }[] };
+    for (const a of r.appointments) if (a.patientApricotId === cpId) out.push(a as unknown as Record<string, unknown>);
+  }
+  out.sort((x, y) => String(x.date).localeCompare(String(y.date)) || String(x.start).localeCompare(String(y.start)));
+  return { v: 1, syncedAt: new Date().toISOString(), stale: false, appointments: out };
 }
 
 function mockClinicAppointments(params: Record<string, string>): unknown {

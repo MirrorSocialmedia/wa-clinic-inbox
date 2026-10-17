@@ -35,6 +35,8 @@ const PrefillSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   providerId: z.string().min(1).max(200),
   start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  // ★ cwi-flow-quick：撳格嗰刻已知醫生名（SCR_QUICK 確認屏顯示；冇 = server 由 Provider 表查）
+  providerName: z.string().max(100).optional(),
 });
 
 export const POST = handle(async (req: NextRequest, { params }: { params: Promise<{ id: string }> }) => {

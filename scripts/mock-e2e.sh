@@ -5181,10 +5181,10 @@ else
       T101_CNT=$(q "SELECT count(*)::text c FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T101A_TOK'" | jf c)
       check "T101 FlowHoldEvent 仍 1 行（唔雙佔）" "$T101_CNT" "1"
     else echo "    ❌ T101 P1 replay fail"; T101=1; R13=1; fi
-    # ── P2：submit_confirm → 409 等價 → SCR_SLOT 重導（$T4_T 已冇）──
+    # ── P2：submit_confirm → 409 等價 → 留 SCR_CONFIRM + error（★ cwi-flow-quick：Flow routing 單向 — 唔向後導航；病人撳返回重揀）──
     OUT=$(pnpm -s flow-client stepx --clinic TKW --token "$T101B_TOK" --action data_exchange --screen SCR_CONFIRM --data "{\"user_action\":\"submit_confirm\",\"date\":\"$T4_D\",\"provider_id\":\"$T4_PROV\",\"time\":\"$T4_T\",\"name\":\"E2E T101B\",\"patient_phone\":\"\",\"notes\":\"\"}" 2>&1 || true)
     if stepx_parse "$OUT" /tmp/e2e-t101b-409.json; then
-      check "T101 P2 submit_confirm → SCR_SLOT 重導" "$(jf screen < /tmp/e2e-t101b-409.json)" "SCR_SLOT"
+      check "T101 P2 submit_confirm → 留 SCR_CONFIRM（唔向後導航）" "$(jf screen < /tmp/e2e-t101b-409.json)" "SCR_CONFIRM"
       T101B_HE=$(grep -oE '"has_error":(true|false)' /tmp/e2e-t101b-409.json | head -1 | cut -d: -f2)
       check "T101 P2 重導 has_error=true" "$T101B_HE" "true"
       grep -qE '"error_message":"[^\"]+' /tmp/e2e-t101b-409.json && pass "T101 P2 重導 error_message 非空" || { echo "    ❌ T101 P2 重導 error_message 空"; T101=1; R13=1; }
@@ -5196,7 +5196,7 @@ else
       else echo "    ❌ T101 P2 組合拒收 stepx fail"; T101=1; R13=1; fi
       T101B_HEV=$(q "SELECT count(*)::text c FROM \"FlowHoldEvent\" WHERE \"flowToken\"='$T101B_TOK'" | jf c)
       check "T101 P2 無 FlowHoldEvent（未佔位）" "$T101B_HEV" "0"
-    else echo "    ❌ T101 P2 submit_confirm fail（應該 200 + SCR_SLOT 重導）"; T101=1; R13=1; fi
+    else echo "    ❌ T101 P2 submit_confirm fail（應該 200 + 留 SCR_CONFIRM）"; T101=1; R13=1; fi
     # ── mock claim 直查：409 SLOT_TAKEN + 冪等 replay + FLOW_TOKEN_REUSED（client 層）──
     cat > .dev/t101-claim-check.ts <<'T101TS'
 import { claimSlot, WorkforceApiError } from "@/lib/workforce/client";
@@ -8992,10 +8992,15 @@ else{
   if(mode==="NAVIGATE"){
     if(pa.flow_action!=="navigate")errs.push("flow_action=navigate");
     const fp=pa.flow_action_payload;
-    if(!fp||fp.screen!=="SCR_DATE")errs.push("flow_action_payload.screen");
-    if(!fp||!fp.data||fp.data.start!==expStart)errs.push("payload.data.start");
+    // ★ cwi-flow-quick-20261017：預選去入口屏 SCR_QUICK — data 欄位要同 Flow JSON v74 嘅 SCR_QUICK data model 一模一樣（多／少／非字串 = 139000）
+    if(!fp||fp.screen!=="SCR_QUICK")errs.push("flow_action_payload.screen");
+    const want="date,error_message,profile_name,provider_id,summary_date,summary_provider,summary_time,time";
+    if(!fp||!fp.data||Object.keys(fp.data).sort().join(",")!==want)errs.push("payload.data keys");
+    if(fp&&fp.data&&Object.values(fp.data).some(v=>typeof v!=="string"))errs.push("payload.data 非字串");
+    if(!fp||!fp.data||fp.data.time!==expStart)errs.push("payload.data.time");
     if(!fp||!fp.data||fp.data.date!==expDate)errs.push("payload.data.date");
-    if(!fp||!fp.data||fp.data.providerId!==expProv)errs.push("payload.data.providerId");
+    if(!fp||!fp.data||fp.data.provider_id!==expProv)errs.push("payload.data.provider_id");
+    if(!fp||!fp.data||!fp.data.summary_time||!fp.data.summary_time.includes(expStart))errs.push("payload.data.summary_time");
   } else if (pa.flow_action!=="data_exchange") errs.push("flow_action=data_exchange");
   if(pa.mode!==undefined)errs.push("mode 應無（WA_FLOW_DRAFT 未設）");
 }

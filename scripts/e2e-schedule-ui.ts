@@ -584,7 +584,8 @@ async function main(): Promise<void> {
     const msgBody = psql(
       `SELECT body FROM "Message" WHERE "conversationId" = '${convPrefill}' AND body LIKE '%flow_action_payload%' ORDER BY "createdAt" DESC LIMIT 1;`
     );
-    if (!msgBody.includes(`"start":"12:00"`)) throw new Error("DB Message 冇 flow_action_payload.start=12:00");
+    if (!msgBody.includes(`"screen":"SCR_QUICK"`)) throw new Error("DB Message 冇 flow_action_payload.screen=SCR_QUICK");
+    if (!msgBody.includes(`"time":"12:00"`)) throw new Error("DB Message 冇 flow_action_payload.data.time=12:00");
     if (!msgBody.includes(`"date":"${today}"`)) throw new Error("DB Message 冇 flow_action_payload.date");
     ok("SCHED-T183");
   } catch (e) {

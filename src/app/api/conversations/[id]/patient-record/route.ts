@@ -8,6 +8,7 @@ import {
   fetchPatientVisits,
   fetchPatientBalance,
   fetchAppointmentsByClinic,
+  fetchAppointmentsByPatient,
   refreshPatient,
   WorkforceApiError,
 } from "@/lib/workforce/client";
@@ -70,7 +71,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   let refresh: RefreshOut | null = null;
   if (resolved && doRefresh) {
     try {
-      const r = await refreshPatient(resolved.patientApricotId);
+      const r = await refreshPatient(resolved.patientApricotId, auth.staff.id);
       refresh = { state: "ok", syncedAt: r.syncedAt };
     } catch (e) {
       if (e instanceof WorkforceApiError && e.status === 429) {
@@ -92,9 +93,15 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   // ★ cwi-ux UX-07：visits 一律拉 100（CWM 上限）— 12 個月主診醫生統計要夠行；
   //   summary 回應仍只回前 2 行（customerType 語義不變 + 輕量）。
   const [visitsRes, balanceRes, apptsRes] = await Promise.allSettled([
-    resolved ? fetchPatientVisits(resolved.patientApricotId, 100) : Promise.resolve(null),
+    resolved ? fetchPatientVisits(resolved.patientApricotId, 100, auth.staff.id) : Promise.resolve(null),
     resolved ? fetchPatientBalance(resolved.patientApricotId) : Promise.resolve(null),
-    resolved && !summary ? fetchAppointmentsByClinic(clinic.code, hkDateOffset(-30), hkDateOffset(7)) : Promise.resolve(null),
+    // ★ cwi-patient-records-20261017：病人全部店嘅預約（唔再限 WhatsApp 號碼嗰間店）；舊版 CWM 冇模式 C → fallback 店模式
+    resolved && !summary
+      ? fetchAppointmentsByPatient(resolved.patientApricotId, hkDateOffset(-30), hkDateOffset(7)).catch((e) => {
+          if (e instanceof WorkforceApiError && e.status === 400) return fetchAppointmentsByClinic(clinic.code, hkDateOffset(-30), hkDateOffset(7));
+          throw e;
+        })
+      : Promise.resolve(null),
   ]);
   const degraded = [visitsRes, balanceRes, apptsRes].some((r) => r.status === "rejected" && !is404(r.reason));
 
@@ -121,6 +128,8 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
     (visitsRes.status === "fulfilled" ? visitsRes.value?.patientCode : null) ??
     balance?.patientCode ??
     appointments[0]?.patientCode ??
+    // ★ cwi-flow-quick：判定認到嘅編號（索引未有到診／帳單都有編號顯示）
+    (resolved && resolved.patientApricotId === contact.identifiedPatientApricotId ? contact.identifiedPatientCode : null) ??
     null;
 
   return NextResponse.json({
