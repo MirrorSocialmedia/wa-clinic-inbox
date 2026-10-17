@@ -313,17 +313,21 @@ export type WorkforceTerm = z.infer<typeof TermEntrySchema>;
 export type TermMapResult = z.infer<typeof TermMapResponse>;
 
 /** 兩種樣板（MD §0.3 — 對齊 CWM NoteText）：STANDARD 四段 / TEMPLATE blocks（Tx 原文保留換行）。 */
+/** ★ cwi-walkin-20261018：處方（CWM note.rx — 藥名 + 用法摘要；舊 CWM 冇呢欄 = optional） */
+const NoteRxSchema = z.array(z.object({ name: z.string(), detail: z.string() })).optional();
 const NoteStandardSchema = z.object({
   kind: z.literal("STANDARD"),
   complaints: z.string(),
   findings: z.string(),
   diagnosis: z.string(),
   actions: z.string(),
+  rx: NoteRxSchema,
 });
 const NoteTemplateSchema = z.object({
   kind: z.literal("TEMPLATE"),
   templateName: z.string().nullable(),
   blocks: z.array(z.object({ label: z.string(), text: z.string() })),
+  rx: NoteRxSchema,
 });
 export type NoteText = z.infer<typeof NoteStandardSchema> | z.infer<typeof NoteTemplateSchema>;
 export const VisitNoteResponse = z.object({

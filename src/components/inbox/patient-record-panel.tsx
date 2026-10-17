@@ -35,13 +35,13 @@ import {
 import { WLoading } from "@/components/ui/w-loader";
 import { PatientStatusChip } from "./patient-status-chip";
 
-type TabKey = "visits" | "meds" | "bills" | "appts";
+// ★ cwi-walkin-20261018（擁有人拍板）：預約同到診合併一個時間線；藥物併入「診症及處方」做子項
+type TabKey = "visits" | "consult" | "bills";
 
 const TABS: { key: TabKey; label: string }[] = [
-  { key: "visits", label: "到診" },
-  { key: "meds", label: "藥物" },
+  { key: "visits", label: "預約／到診" },
+  { key: "consult", label: "診症及處方" },
   { key: "bills", label: "帳單" },
-  { key: "appts", label: "預約" },
 ];
 
 /** bookingStatus → 狀態 chip（§0.2 對照）。 */
@@ -519,7 +519,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
               ) : null}
             </div>
           ) : null}
-          {/* 四分頁 */}
+          {/* 三分頁（預約／到診・診症及處方・帳單） */}
           <div className="shrink-0 flex gap-1 px-2.5 pb-1.5" data-e2e="p2-tabbar">
             {TABS.map((t) => (
               <button
@@ -539,43 +539,41 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
           {/* 內容區獨立捲動（§3.2：唔會連對話一齊捲） */}
           <div className="flex-1 overflow-y-auto min-h-0 px-2.5 pb-3 space-y-2" data-e2e="p2-content">
             {tab === "visits" ? (
-              data.visits.length === 0 ? (
-                <div className="text-center py-10 text-[12px] text-t3">索引窗內冇到診記錄</div>
-              ) : (
-                data.visits.map((v) => (
-                  <VisitCard key={v.visitId} visit={v} expanded={expandedVisitId === v.visitId} noteLoading={noteLoading} noteError={noteError} noteData={noteData} onToggle={() => void toggleNote(v)} />
-                ))
-              )
+              /* ★ cwi-walkin-20261018：預約＋到診一條時間線（新→舊）。同日同店已有到診行嘅預約唔重複出 */
+              (() => {
+                const visitKeys = new Set(data.visits.map((v) => `${v.visitDate}|${v.clinicCode}`));
+                const appts = data.appointments.filter((a) => !visitKeys.has(`${a.date}|${a.clinicCode}`));
+                const items = [
+                  ...appts.map((a) => ({ kind: "appt" as const, date: a.date, appt: a })),
+                  ...data.visits.map((v) => ({ kind: "visit" as const, date: v.visitDate, visit: v })),
+                ].sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
+                return items.length === 0 ? (
+                  <div className="text-center py-10 text-[12px] text-t3">索引窗內冇預約或到診記錄</div>
+                ) : (
+                  items.map((it) =>
+                    it.kind === "appt" ? (
+                      <ApptRow key={`a-${it.appt.apricotApptId}`} appt={it.appt} />
+                    ) : (
+                      <VisitCard key={it.visit.visitId} visit={it.visit} expanded={expandedVisitId === it.visit.visitId} noteLoading={noteLoading} noteError={noteError} noteData={noteData} onToggle={() => void toggleNote(it.visit)} />
+                    ),
+                  )
+                );
+              })()
             ) : null}
-            {tab === "meds" ? (
-              /* 藥物：cwi-followup-p4 S4/S6 — #4 回 rxCodes（CWM 字典映名 + 抗生素旗；零全文） */
-              data.visits.every((v) => (v.rxCodes ?? []).length === 0) ? (
-                <div className="text-center py-10" data-e2e="p2-meds-empty">
-                  <Pill size={20} className="mx-auto mb-2 opacity-40 text-t3" />
-                  <div className="text-[12px] text-t2">索引窗內冇藥物記錄</div>
-                  <div className="text-[11px] text-t3 mt-1">藥物 code 由臨床記錄抽取；詳細內容喺「到診」分頁「展開臨床記錄」</div>
-                </div>
+            {tab === "consult" ? (
+              /* ★ cwi-walkin-20261018：診症及處方 — 每次到診嘅臨床記錄（主訴／檢查／診斷／處理）+ 處方；
+                 全文仍然展開先拉（CWM audit），藥物 code 喺卡面直接顯示 */
+              data.visits.some((v) => v.hasNote || (v.rxCodes ?? []).length > 0) ? (
+                data.visits
+                  .filter((v) => v.hasNote || (v.rxCodes ?? []).length > 0)
+                  .map((v) => (
+                    <VisitCard key={v.visitId} visit={v} showRx expanded={expandedVisitId === v.visitId} noteLoading={noteLoading} noteError={noteError} noteData={noteData} onToggle={() => void toggleNote(v)} />
+                  ))
               ) : (
-                <div className="space-y-2" data-e2e="p2-meds-list">
-                  {data.visits
-                    .filter((v) => (v.rxCodes ?? []).length > 0)
-                    .map((v) => (
-                      <div key={v.visitId} className="bg-panel border border-line rounded-xl p-3" data-e2e={`p2-meds-${v.visitId}`}>
-                        <div className="text-[11px] text-t3 mb-1.5">{v.visitDate} 用藥</div>
-                        <div className="space-y-1">
-                          {(v.rxCodes ?? []).map((rx) => (
-                            <div key={rx.code} className="flex items-center gap-2 text-[12px]" data-e2e={`p2-rx-${v.visitId}-${rx.code}`}>
-                              <Pill size={12} className="text-brand-text shrink-0" />
-                              <span className="text-t1">{rx.name}</span>
-                              <span className="text-t3 font-mono text-[10px]">({rx.code})</span>
-                              {rx.isAntibiotic && (
-                                <span className="px-1 py-0.5 rounded text-[9px] bg-danger-soft text-danger-text">抗生素</span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
+                <div className="text-center py-10" data-e2e="p2-consult-empty">
+                  <Pill size={20} className="mx-auto mb-2 opacity-40 text-t3" />
+                  <div className="text-[12px] text-t2">索引窗內冇診症記錄</div>
+                  <div className="text-[11px] text-t3 mt-1">到診後撳「立即更新」由 Apricot 攞最新臨床記錄同處方</div>
                 </div>
               )
             ) : null}
@@ -599,28 +597,6 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
                 </div>
               ) : (
                 <div className="text-center py-10 text-[12px] text-t3">冇帳單數據</div>
-              )
-            ) : null}
-            {tab === "appts" ? (
-              data.appointments.length === 0 ? (
-                <div className="text-center py-10 text-[12px] text-t3">索引窗內冇預約</div>
-              ) : (
-                data.appointments.map((a) => (
-                  <div key={a.apricotApptId} className="bg-panel border border-line rounded-xl p-2.5" data-e2e="p2-appt-row">
-                    <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
-                      <span className="font-medium text-t1">{fmtDateShort(a.date)}</span>
-                      <span className="text-t2">
-                        {a.start}–{a.end}
-                      </span>
-                      <span className="text-t3">·</span>
-                      <span className="text-t2">{a.providerName || "—"}</span>
-                      <StatusChip status={a.bookingStatus} />
-                    </div>
-                    {a.visitReasons.length > 0 ? (
-                      <div className="mt-1 text-[11px] text-t3">{a.visitReasons.join(" / ")}</div>
-                    ) : null}
-                  </div>
-                ))
               )
             ) : null}
           </div>
@@ -693,8 +669,29 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
   );
 }
 
+/** 預約行（未到診／未來 — 已有到診行嘅同日預約唔出）。 */
+function ApptRow({ appt: a }: { appt: PatientRecordData["appointments"][number] }) {
+  return (
+    <div className="bg-panel border border-line rounded-xl p-2.5" data-e2e="p2-appt-row">
+      <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
+        <span className="font-medium text-t1">{fmtDateShort(a.date)}</span>
+        <span className="text-t2">
+          {a.start}–{a.end}
+        </span>
+        <span className="text-t3">·</span>
+        <span className="text-t2">{a.clinicCode}</span>
+        <span className="text-t3">·</span>
+        <span className="text-t2">{a.providerName || "—"}</span>
+        <StatusChip status={a.bookingStatus} />
+      </div>
+      {a.visitReasons.length > 0 ? <div className="mt-1 text-[11px] text-t3">{a.visitReasons.join(" / ")}</div> : null}
+    </div>
+  );
+}
+
 function VisitCard({
   visit,
+  showRx = false,
   expanded,
   noteLoading,
   noteError,
@@ -702,22 +699,38 @@ function VisitCard({
   onToggle,
 }: {
   visit: PatientRecordVisit;
+  /** 「診症及處方」分頁：卡面顯示藥物 code（CWM 字典映名 + 抗生素旗） */
+  showRx?: boolean;
   expanded: boolean;
   noteLoading: boolean;
   noteError: string | null;
   noteData: NoteText | null;
   onToggle: () => void;
 }) {
+  const rxCodes = visit.rxCodes ?? [];
   return (
     <div className="bg-panel border border-line rounded-xl p-2.5" data-e2e="p2-visit-card" data-visit-id={visit.visitId}>
       <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
         <span className="font-medium text-t1">{fmtDateShort(visit.visitDate)}</span>
         {visit.visitReasonCodes.length > 0 ? <span className="text-t2">{visit.visitReasonCodes.join(" / ")}</span> : null}
         <span className="text-t3">·</span>
+        <span className="text-t2">{visit.clinicCode}</span>
+        <span className="text-t3">·</span>
         <span className="text-t2">{visit.providerName ?? visit.providerCode ?? "—"}</span>
         <StatusChip status={visit.bookingStatus} />
       </div>
       {visit.firstLine ? <div className="mt-1 text-[12px] text-t1" data-e2e="p2-first-line">{visit.firstLine}</div> : null}
+      {showRx && rxCodes.length > 0 ? (
+        <div className="mt-1.5 flex flex-wrap gap-1" data-e2e={`p2-meds-${visit.visitId}`}>
+          {rxCodes.map((rx) => (
+            <span key={rx.code} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-panel-2 text-[11px]" data-e2e={`p2-rx-${visit.visitId}-${rx.code}`}>
+              <Pill size={11} className="text-brand-text shrink-0" />
+              <span className="text-t1">{rx.name}</span>
+              {rx.isAntibiotic && <span className="px-1 rounded text-[9px] bg-danger-soft text-danger-text">抗生素</span>}
+            </span>
+          ))}
+        </div>
+      ) : null}
       {visit.hasNote ? (
         <button
           data-e2e="p2-expand-note"
@@ -758,20 +771,19 @@ function NoteBody({ note }: { note: NoteText }) {
   return (
     <div data-e2e="p2-note" data-kind={note.kind}>
       {note.kind === "STANDARD" ? (
+        /* ★ cwi-walkin-20261018：Apricot 四欄（Complaints／Findings／Diagnosis／Actions）全部列出 — 空欄顯示「—」 */
         <dl className="space-y-1.5">
           {[
             ["主訴", note.complaints],
-            ["癥狀", note.findings],
+            ["檢查所見", note.findings],
             ["診斷", note.diagnosis],
-            ["跟進", note.actions],
-          ].map(([label, text]) =>
-            text ? (
-              <div key={label} className="text-[12px]">
-                <dt className="inline text-t3">{label}：</dt>
-                <dd className="inline text-t1">{text}</dd>
-              </div>
-            ) : null,
-          )}
+            ["治療處理", note.actions],
+          ].map(([label, text]) => (
+            <div key={label} className="text-[12px]">
+              <dt className="text-t3">{label}</dt>
+              <dd className={`whitespace-pre-wrap ${text?.trim() ? "text-t1" : "text-t3"}`}>{text?.trim() ? text : "—"}</dd>
+            </div>
+          ))}
         </dl>
       ) : (
         <div className="space-y-1.5">
@@ -784,6 +796,25 @@ function NoteBody({ note }: { note: NoteText }) {
           ))}
         </div>
       )}
+      {/* ★ cwi-walkin-20261018：處方（Prescription）— 冇處方都講明 */}
+      <div className="mt-2 pt-1.5 border-t border-line" data-e2e="p2-note-rx">
+        <div className="text-[12px] text-t3">處方</div>
+        {note.rx && note.rx.length > 0 ? (
+          <ul className="mt-0.5 space-y-0.5">
+            {note.rx.map((r, i) => (
+              <li key={i} className="text-[12px] flex gap-1.5">
+                <Pill size={12} className="text-brand-text shrink-0 mt-0.5" />
+                <span>
+                  <span className="text-t1">{r.name}</span>
+                  {r.detail ? <span className="text-t3">　{r.detail}</span> : null}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="text-[12px] text-t3">—（冇處方）</div>
+        )}
+      </div>
       <p className="mt-2 text-[10px] text-t3" data-e2e="p2-note-warn">
         呢啲係醫生臨床記錄，請勿轉發
       </p>
