@@ -644,11 +644,19 @@ export async function sendFlowMessage(opts: {
   );
 
   const data = (await graphJsonFatalOnSocketDeath(res)) as
-    | { messages?: { id: string }[]; error?: { message?: string; code?: number } }
+    | { messages?: { id: string }[]; error?: { message?: string; code?: number; error_data?: { details?: string } } }
     | null;
   if (!res.ok || !data?.messages?.[0]?.id) {
     log.warn(
-      { phoneNumberId, to, httpStatus: res.status, waCode: data?.error?.code ?? null },
+      {
+        phoneNumberId,
+        to,
+        httpStatus: res.status,
+        waCode: data?.error?.code ?? null,
+        // ★ cwi-flow-quick：Meta 講明原因（例如 screen 唔存在／data 欄位唔夾／flow 未發布）— 淨係 code 診斷唔到
+        waMessage: data?.error?.message?.slice(0, 200) ?? null,
+        waDetails: data?.error?.error_data?.details?.slice(0, 300) ?? null,
+      },
       "graph: send flow FAILED"
     );
     // ★ cwi-final S1-15：帶 httpStatus + code → caller 可分 permanent / transient

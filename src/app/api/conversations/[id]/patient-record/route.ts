@@ -76,7 +76,9 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
     } catch (e) {
       if (e instanceof WorkforceApiError && e.status === 429) {
         refresh = { state: "rate_limited", retryAfterSec: e.retryAfterSec ?? 60 };
-      } else if (e instanceof WorkforceApiError && (e.status === 503 || e.status === 0)) {
+      } else if (e instanceof WorkforceApiError && (e.status >= 500 || e.status === 0)) {
+        // ★ cwi-flow-quick：workforce 500（刷新途中 Apricot call 出錯）都當刷新失敗 — 唔好成個病人卡 500，
+        //   到診／預約／帳單照拉照顯示；log 帶 status 方便分 503（Apricot 斷）同 500（workforce 錯）
         // 保護 4：失敗唔扮無事 — UI 顯示「Apricot 未接通，顯示緊 {syncedAt} 嘅資料」（syncedAt = 本回應舊數據）
         refresh = { state: "failed" };
         log.warn(
