@@ -33,6 +33,7 @@ import {
   type Tone,
 } from "@/lib/patient-record-state";
 import { WLoading } from "@/components/ui/w-loader";
+import { PatientStatusChip } from "./patient-status-chip";
 
 type TabKey = "visits" | "meds" | "bills" | "appts";
 
@@ -225,6 +226,20 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
     setDelError(null);
   }, [conversationId]);
 
+  // ★ cwi-patient-identify-20261017：重新判定新客／舊客（即刻再搜晒全部 Apricot 帳號）
+  const [identBusy, setIdentBusy] = useState(false);
+  const reIdentify = useCallback(async () => {
+    const c = data?.contact;
+    if (!c || identBusy) return;
+    setIdentBusy(true);
+    try {
+      const res = await fetch(`/api/contacts/${c.id}/identify`, { method: "POST" });
+      if (res.ok) await load(false, false); // 判定結果可能改咗配對病人 → 重載成張卡
+    } finally {
+      setIdentBusy(false);
+    }
+  }, [data, identBusy, load]);
+
   // ★ cwi-followup-v3 B-9：存稱呼 + locale（PATCH /api/contacts/:id — staff+）
   const saveSalutation = useCallback(
     async (salutation: string | null, locale: string | null) => {
@@ -357,6 +372,28 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
         </div>
       ) : null}
 
+      {/* ★ cwi-patient-identify：新客／舊客（電話直接搜晒全部 Apricot 帳號；唔使有預約） */}
+      {data?.contact ? (
+        <div className="shrink-0 mx-2.5 mt-1.5 px-2 py-1.5 rounded-lg bg-panel-2 flex items-center justify-between gap-2 text-[11px]" data-e2e="identify-row">
+          <span className="text-t2 inline-flex items-center gap-1.5 min-w-0">
+            新客／舊客：
+            <PatientStatusChip status={data.contact.patientStatus ?? null} count={data.contact.identifiedCount ?? null} />
+            {data.contact.patientStatus === "EXISTING" && (data.contact.identifiedCount ?? 0) > 1 ? (
+              <span className="text-t3 truncate">同一電話有 {data.contact.identifiedCount} 個病人檔 — 喺「病人」卡揀邊個</span>
+            ) : null}
+          </span>
+          <button
+            type="button"
+            disabled={identBusy}
+            onClick={() => void reIdentify()}
+            className="shrink-0 px-2 py-0.5 rounded-md border border-line bg-panel text-t2 hover:bg-panel-2 disabled:opacity-50"
+            data-e2e="identify-retry"
+          >
+            {identBusy ? <WLoading size="inline" label="搜緊…" /> : "重新判定"}
+          </button>
+        </div>
+      ) : null}
+
       {/* §4.6 跟進通知（病人卡 toggle — contact 級，未配對都顯示；SUPERVISOR 唯讀唔渲染掣） */}
       {data?.contact ? (
         <div className="shrink-0 mx-2.5 mt-1.5 px-2 py-1.5 rounded-lg bg-panel-2 flex items-center justify-between text-[11px]" data-e2e="p3-optout-row">
@@ -455,7 +492,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
               {data.patient.patientCode ?? "—"}
             </span>
             <span className="text-t3">·</span>
-            <span className="text-t2">{data.patient.source === "pinned" ? "已釘住" : "自動配對"}</span>
+            <span className="text-t2">{data.patient.source === "pinned" ? "已釘住" : data.patient.source === "identified" ? "電話認到" : "預約配對"}</span>
           </div>
           {/* ★ cwi-ux UX-07：最近到診分店 + 主診醫生（近 12 個月）— 冇記錄唔顯示（spec：T-UX07i） */}
           {data.visitStats ? (

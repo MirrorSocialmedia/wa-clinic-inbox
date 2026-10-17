@@ -61,6 +61,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   // 1. 配對（pinned → appointments phoneHashes hasSome）
   const resolved = await resolveConversationPatient({
     pinnedPatientApricotId: conv.pinnedPatientApricotId,
+    identifiedPatientApricotId: contact.identifiedPatientApricotId,
     waId: contact.waId,
     clinicCode: clinic.code,
   });
@@ -137,6 +138,10 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       locale: contact.locale,
       canEdit: auth.staff.role !== "SUPERVISOR",
       // ★ cwi-inbox-r3：ADMIN 專用「刪除病人資料」掣（同 POST /api/admin/contacts/[id]/delete 口徑：ADMIN + scope 內）
+      // ★ cwi-patient-identify：新客／舊客判定（null = 未判定）
+      patientStatus: contact.patientStatus,
+      patientCheckedAt: contact.patientCheckedAt ? contact.patientCheckedAt.toISOString() : null,
+      identifiedCount: contact.identifiedCount,
       canDelete:
         auth.staff.role === "ADMIN" && (auth.scopeType === "ALL" || auth.scopedClinicIds.includes(contact.clinicId)),
     },

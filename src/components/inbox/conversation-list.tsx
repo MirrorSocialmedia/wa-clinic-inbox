@@ -13,6 +13,7 @@ import { PushDiagnostics } from "./push-diagnostics";
 import { isIOSLike, isStandalone, requestInstall } from "@/components/inbox/install-prompt";
 // cwi-setnav NAV-02：系統返回鍵圖層堆疊
 import { useBackLayer } from "@/lib/back-stack";
+import { PatientStatusChip } from "./patient-status-chip";
 
 // ── ★ cwi-final S6-7：單行對話卡片（React.memo）────────────────────────────────────
 // 由列表 items 循環抽出 — virtualization 後只有 viewport 內行掛 DOM；
@@ -183,6 +184,8 @@ const ConversationRow = memo(function ConversationRow(props: ConversationRowProp
                         {userRole === "STAFF" ? `↔ 跨店 · ${clinicBadgeText}` : c.handlingClinicId ? `跟進：${clinicBadgeText}` : clinicBadgeText}
                       </span>
                     ))}
+                    {/* ★ cwi-patient-identify：新客／舊客 */}
+                    <PatientStatusChip status={c.contact?.patientStatus} count={c.contact?.identifiedCount} size="xs" />
                     {/* cwi-multiclinic-20260903（MD A.6.4）：「待跟進」— 未指派 + 最後一條係客人來訊（前端導出，零新欄） */}
                     {needsFollow && (
                       <span

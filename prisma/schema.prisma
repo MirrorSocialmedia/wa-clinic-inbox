@@ -323,6 +323,13 @@ model Contact {
   optOutSource   String?                      // auto（關鍵詞）| manual（staff toggle）
   salutation     String?                      // 先生／小姐／太太（template 顯示用；B-9：唔自動估 — AI 唔准由名估性別）
   locale         String?                      // ★ cwi-followup-v3 B-9：zh（default）| en — 決定 *_en template
+  // ★ cwi-patient-identify-20261017（擁有人拍板）：新客／舊客判定 — 用電話直接搜晒全部 Apricot 帳號（唔使有預約）。
+  //   patientStatus：EXISTING（任何帳號有病人檔 = 舊客，包括已登記未到診）／NEW（全部帳號搜過都冇）／
+  //   UNKNOWN（有帳號查唔到 — 唔當新客，稍後重試）；null = 未判定。
+  patientStatus             String?
+  patientCheckedAt          DateTime?
+  identifiedPatientApricotId String?           // 只認到一個病人先填（多個 → null，staff 喺病人卡揀）
+  identifiedCount           Int?
   consents      ContactConsent[]
   @@unique([clinicId, waId])                  // 同一病人喺兩間店 = 兩條 Contact（隔離）
 }

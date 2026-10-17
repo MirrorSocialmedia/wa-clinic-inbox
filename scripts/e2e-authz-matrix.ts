@@ -712,6 +712,11 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/clinics?scope=schedule" }), // ?scope=schedule 必填（否則 400）
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
   },
+  "POST /api/contacts/[id]/identify": {
+    // ★ cwi-patient-identify：重新判定新客／舊客（唯讀動作）— contact 唔存在 → 404
+    fixture: () => ({ url: "/api/contacts/nope/identify", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404 },
+  },
   "PATCH /api/contacts/[id]": {
     // ★ S3-3：SUPERVISOR 覆唔到客（稱呼/語言/labels）→ 403；STAFF_F（本店）寫入權 OK → 400 validation（labels 型錯）
     fixture: () => ({ url: `/api/contacts/${F.contactLock}`, method: "PATCH", body: JSON.stringify({ labels: "notanarray" }) }),

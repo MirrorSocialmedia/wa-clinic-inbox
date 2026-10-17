@@ -24,6 +24,7 @@ import {
 import type { ClinicLite, ConversationItem, DraftInfo, DraftTrace, FollowupSuggestion, MessageItem, PatientChip, StaffInfo } from "./types";
 import { LocationCapsule, type LocationChange } from "./location-capsule";
 import { WLoading, WLoadingGate, WMark } from "@/components/ui/w-loader";
+import { PatientStatusChip } from "./patient-status-chip";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
 // ★ cwi-followup-v3（MD §2.2）：跟進建議卡 — trigger 顯示名 + 原因行（只食結構化數據，零臨床全文）
@@ -1188,6 +1189,10 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
           variant="header"
           onChanged={(x) => p.onLocationChanged?.(x)}
         />
+        {/* ★ cwi-patient-identify：新客／舊客（桌面先顯示 — 手機頂部位唔夠，喺列表／病人卡睇） */}
+        <span className="hidden md:inline-flex shrink-0">
+          <PatientStatusChip status={c.contact?.patientStatus} count={c.contact?.identifiedCount} />
+        </span>
         {/* ★ P2（cwi-followup-p2 §3.1）：〔病人記錄〕入口 — 手機開半屏抽屜 / 桌面切右側欄分頁
             ★ cwi-ux UX-05：手機只剩 icon（字版 md: 以上）— 細屏唔好再搶名字欄位 */}
         <button

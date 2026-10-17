@@ -842,6 +842,10 @@ export function InboxClient({
                       locationName: e.locationName ?? null,
                     }
                   : {}),
+                // ★ cwi-patient-identify：背景判定完 → patch contact 新客／舊客
+                ...(e.patientStatus !== undefined && c.contact
+                  ? { contact: { ...c.contact, patientStatus: e.patientStatus, identifiedCount: e.identifiedCount ?? null } }
+                  : {}),
                 // RESOLVED 自動清急症紅標（同 API PATCH 語義一致）
                 urgent: e.status === "RESOLVED" ? false : c.urgent,
               }

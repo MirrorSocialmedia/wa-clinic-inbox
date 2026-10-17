@@ -305,7 +305,7 @@ export async function toConversationDTOs(
   const [contacts, groups, bookings, myUnreadMap] = await Promise.all([
     prisma.contact.findMany({
       where: { id: { in: contactIds } },
-      select: { id: true, waId: true, profileName: true, labels: true },
+      select: { id: true, waId: true, profileName: true, labels: true, patientStatus: true, identifiedCount: true },
     }),
     prisma.skillGroup.findMany({ where: { id: { in: groupIds } }, select: { id: true, name: true, code: true } }),
     prisma.bookingRequest.findMany({

@@ -26,6 +26,9 @@ export interface ContactInfo {
   waId: string;
   profileName: string | null;
   labels: string[];
+  /** ★ cwi-patient-identify：EXISTING 舊客／NEW 新客／UNKNOWN 未確定；null = 未判定 */
+  patientStatus?: string | null;
+  identifiedCount?: number | null;
 }
 
 export interface WindowState {
@@ -353,6 +356,9 @@ export interface ConvUpdatedEvent {
   locationCode?: string;
   locationName?: string;
   locationChanged?: boolean;
+  /** ★ cwi-patient-identify：新客／舊客判定結果（背景判定完推） */
+  patientStatus?: string | null;
+  identifiedCount?: number | null;
 }
 
 /** ★ cwi-final S2-4：跟進建議狀態變動（server emitter = followup engine / opt-out / send route claim） */
@@ -669,6 +675,10 @@ export interface PatientRecordData {
     canEdit: boolean;
     /** ★ cwi-inbox-r3：ADMIN（scope 內）先有「刪除病人資料」掣 */
     canDelete?: boolean;
+    /** ★ cwi-patient-identify：EXISTING 舊客／NEW 新客／UNKNOWN 未確定；null = 未判定 */
+    patientStatus?: string | null;
+    patientCheckedAt?: string | null;
+    identifiedCount?: number | null;
   };
   // ★ wa-meta-compliance-20261016（C.1）：病人要求真人 → AI 自動收聲中
   patientRequestedHuman?: {
@@ -679,7 +689,7 @@ export interface PatientRecordData {
   patient: {
     patientApricotId: string;
     patientCode: string | null;
-    source: "pinned" | "paired";
+    source: "pinned" | "identified" | "paired";
     /** 舊客 = 索引窗內 ≥2 次到診；新客 = 1 次（§3.1 header chip） */
     customerType: "returning" | "new";
     lastVisitDate: string | null;

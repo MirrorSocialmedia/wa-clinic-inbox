@@ -18,16 +18,22 @@ import { fetchAppointmentsByClinic, WorkforceApiError } from "@/lib/workforce/cl
 
 export interface ResolvedPatient {
   patientApricotId: string;
-  source: "pinned" | "paired";
+  source: "pinned" | "identified" | "paired";
 }
 
 export async function resolveConversationPatient(params: {
   pinnedPatientApricotId: string | null;
+  /** ★ cwi-patient-identify：用電話搜 Apricot 認到嘅唯一病人（Contact.identifiedPatientApricotId） */
+  identifiedPatientApricotId?: string | null;
   waId: string;
   clinicCode: string;
 }): Promise<ResolvedPatient | null> {
   if (params.pinnedPatientApricotId) {
     return { patientApricotId: params.pinnedPatientApricotId, source: "pinned" };
+  }
+  // ★ cwi-patient-identify-20261017：唔使有預約 — 電話直接喺 Apricot 認到嘅唯一病人
+  if (params.identifiedPatientApricotId) {
+    return { patientApricotId: params.identifiedPatientApricotId, source: "identified" };
   }
   // ★ cwi-patient-identify-20261017：新格式（多號 E.164）∪ 舊格式（8 位）— workforce 舊版預約行只有舊格式 hash，
   //   只用新格式 → 未有到診記錄嘅新預約永遠對唔上（病人記錄空白）。

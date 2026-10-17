@@ -18,6 +18,7 @@ import { INBOUND_CONCURRENCY } from "./concurrency";
 // ★ cwi-followup-p3-20260916：follow-up inbound hook（opt-out 偵測 + 回覆標記）
 import { detectOptOutIntent, detectOptInIntent, applyFollowupOptOut, applyFollowupOptIn } from "@/lib/followup/opt-out";
 import { sendOptOutAck } from "@/lib/followup/opt-out-ack";
+import { identifyContactInBackground } from "@/lib/patient-identify";
 import { markFollowupReplied } from "@/lib/followup/engine";
 
 /** 冪等寫入用嘅 DB client（top-level prisma 或 $transaction 嘅 tx — 同一套 model API）。 */
@@ -591,9 +592,11 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
     //      ContactConsent（來源/時間/用途）+ 清旗 + StaffNotice 確認
     try {
       await markFollowupReplied(result.msg.conversationId, waTs);
+      const convRow = result.convUpdated ?? (await prisma.conversation.findUnique({ where: { id: result.msg.conversationId }, select: { contactId: true } }));
+      const contactId = convRow?.contactId ?? null;
+      // ★ cwi-patient-identify-20261017：新客／舊客判定 — 背景搜晒全部 Apricot 帳號（24h 內唔重查；唔阻收訊息）
+      if (contactId) identifyContactInBackground(contactId);
       if (result.msg.body) {
-        const convRow = result.convUpdated ?? (await prisma.conversation.findUnique({ where: { id: result.msg.conversationId }, select: { contactId: true } }));
-        const contactId = convRow?.contactId ?? null;
         if (contactId) {
           if (detectOptOutIntent(result.msg.body)) {
             const r = await applyFollowupOptOut({ contactId, source: "auto", now: waTs });
