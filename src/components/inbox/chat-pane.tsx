@@ -1023,7 +1023,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
       const r = await p.onSendMedia(fileToSend, body);
       if (!r.ok) {
         // 同打字保護：423/422/413/415 → 提示；預覽條 + 文字保留（員工可修正後重發）
-        setSendError(r.takenOverBy ? "對話已被接手 — 你而家只可發內部備註" : r.error ?? "附件發送失敗");
+        setSendError(r.takenOverBy ? "對話已被接手 — 接手後先可以發送" : r.error ?? "附件發送失敗");
       } else {
         clearPending();
         setDraft("");
@@ -1052,7 +1052,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
       } else {
         // cwi-multiclinic-20260903（MD A.6.2）：423 打字保護 — 文字保留（setDraft 唔郁）；
         // toast「{name} 已接手呢個對話」由 parent（inbox-client）發出；header 負責人名 optimistic 更新。
-        setSendError(r.takenOverBy ? "對話已被接手 — 你而家只可發內部備註" : r.error ?? "發送失敗");
+        setSendError(r.takenOverBy ? "對話已被接手 — 接手後先可以發送" : r.error ?? "發送失敗");
         // Phase B：過窗 422 帶 templates 名單 → 出 template 揀選
         if (r.templates && r.templates.length > 0) setTemplateOptions(r.templates);
       }
@@ -1702,6 +1702,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
         {locked ? (
           /* ★ cwi-inbox-r3 Q3：Send Lock — 輸入框唔再變內部備註框（避免打錯位）。
              覆病人要先〔接手〕；同事之間溝通 → 右邊「內部備註」欄（紅框）。 */
+          <div className="flex flex-col gap-1.5">
           <div className="rounded-2xl border border-warn bg-warn-soft px-3 py-2.5 flex flex-wrap items-center gap-2" data-testid="lock-bar">
             <span className="text-xs font-medium text-warn-text inline-flex items-center gap-1 min-w-0">
               <Lock size={12} strokeWidth={2.75} />
@@ -1726,6 +1727,20 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 </button>
               )}
             </div>
+          </div>
+          {/* 打字保護（cwi-multiclinic A.6.2）：俾人接手前打咗嘅字唔好唔見 — 唯讀保留；〔接手〕後輸入框原文返嚟 */}
+          {draft.trim() && (
+            <div className="flex flex-col gap-1" data-testid="locked-draft">
+              <span className="text-[11px] text-t3 px-1">你未發出嘅草稿（已保留 — 接手後可以發送）</span>
+              <textarea
+                value={draft}
+                readOnly
+                rows={2}
+                aria-label="未發出嘅草稿"
+                className="w-full resize-none rounded-2xl border border-line bg-panel-2 px-3 py-2 text-sm text-t2"
+              />
+            </div>
+          )}
           </div>
         ) : c.window.open ? (
           readOnly ? (

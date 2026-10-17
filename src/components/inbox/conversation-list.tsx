@@ -273,7 +273,7 @@ const ConversationRow = memo(function ConversationRow(props: ConversationRowProp
                     ) : (
                       <span
                         className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t3 font-medium inline-flex items-center gap-0.5"
-                        title={`負責人：${c.assigneeName}（你只可發內部備註）`}
+                        title={`負責人：${c.assigneeName}（接手後先可以覆病人）`}
                       >
                         ● {c.assigneeName} 處理緊
                       </span>
