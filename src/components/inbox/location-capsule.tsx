@@ -15,6 +15,15 @@ import type { ClinicLite, ConversationItem, StaffInfo } from "./types";
  * - WhatsApp 號碼改唔到：轉咗之後顯示「跟進：MF」+ tooltip「經 TKW 號碼聯絡」。
  */
 
+interface TransferOptionLite {
+  id: string;
+  code: string;
+  name: string;
+  companyId: string | null;
+  companyName: string | null;
+  crossCompany: boolean;
+}
+
 export interface LocationChange {
   conversationId: string;
   handlingClinicId: string | null;
@@ -116,29 +125,48 @@ function TransferDialog({
 }) {
   const locId = conv.handlingClinicId ?? conv.clinicId;
   const channel = clinics.find((x) => x.id === conv.clinicId);
-  // 同公司分店（SaaS 租戶隔離 — server 亦會擋跨公司）；channel 搵唔到（STAFF 冇全店清單）→ 列晒手上有嘅
-  const options = useMemo(() => {
-    const company = channel?.companyId;
-    return clinics.filter((x) => (channel ? (x.companyId ?? null) === (company ?? null) : true));
-  }, [clinics, channel]);
-  const [target, setTarget] = useState<string>(() => options.find((x) => x.id !== locId)?.id ?? "");
+  // ★ cwi-inbox-r4：可轉選項由 server 計（同公司 ∨ 公司白名單 — 同 POST 同一套規則）
+  const [options, setOptions] = useState<TransferOptionLite[] | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [target, setTarget] = useState<string>("");
   const [reason, setReason] = useState("");
   const [assignTo, setAssignTo] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const targetClinic = clinics.find((x) => x.id === target);
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/conversations/${conv.id}/location`, { cache: "no-store" })
+      .then(async (r) => {
+        const j = (await r.json().catch(() => null)) as { options?: TransferOptionLite[]; error?: string } | null;
+        if (!alive) return;
+        if (!r.ok || !j?.options) {
+          setLoadErr(j?.error ?? `載入分店失敗（${r.status}）`);
+          return;
+        }
+        setOptions(j.options);
+        setTarget((t) => t || (j.options!.find((x) => x.id !== locId && !x.crossCompany) ?? j.options!.find((x) => x.id !== locId))?.id || "");
+      })
+      .catch(() => alive && setLoadErr("載入分店失敗（網絡）"));
+    return () => {
+      alive = false;
+    };
+  }, [conv.id, locId]);
+  const targetClinic = options?.find((x) => x.id === target);
+  const groups = useMemo(() => {
+    const m = new Map<string, { name: string; cross: boolean; items: TransferOptionLite[] }>();
+    for (const o of options ?? []) {
+      const k = o.companyId ?? "-";
+      const g = m.get(k) ?? { name: o.companyName ?? "未分公司", cross: o.crossCompany, items: [] };
+      g.items.push(o);
+      m.set(k, g);
+    }
+    return [...m.values()].sort((a, b) => Number(a.cross) - Number(b.cross));
+  }, [options]);
   const targetStaff = useMemo(() => staff.filter((s) => s.clinicId === target && s.role !== "SUPERVISOR"), [staff, target]);
 
   useEffect(() => {
     setAssignTo("");
   }, [target]);
-  // 分店清單遲到（/api/clinics 未返）→ 到咗先補預設目標
-  useEffect(() => {
-    if (!target) {
-      const first = options.find((x) => x.id !== locId);
-      if (first) setTarget(first.id);
-    }
-  }, [options, target, locId]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -190,8 +218,16 @@ function TransferDialog({
     >
       <div className="w-full max-w-sm rounded-2xl border border-line bg-panel p-4 shadow-xl space-y-3 text-sm" onClick={(e) => e.stopPropagation()}>
         <div className="font-semibold text-t1">轉地點：{name}</div>
-        <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
-          {options.map((x) => (
+        {loadErr && <div className="text-xs text-danger-text">{loadErr}</div>}
+        {!options && !loadErr && <div className="text-xs text-t3">載入分店中…</div>}
+        <div className="flex flex-col gap-1 max-h-56 overflow-y-auto">
+          {groups.map((g) => (
+            <div key={g.name} className="flex flex-col gap-1">
+              <div className="text-[11px] font-semibold text-t3 mt-1">
+                {g.name}
+                {g.cross ? "（跨公司）" : "（同公司）"}
+              </div>
+          {g.items.map((x) => (
             <label
               key={x.id}
               className={`flex items-center justify-between gap-2 rounded-xl px-3 py-1.5 border cursor-pointer ${
@@ -209,14 +245,26 @@ function TransferDialog({
                 />
                 {x.code} · {x.name}
               </span>
-              {x.id === locId && <span className="text-[11px] text-t3">目前</span>}
+              {x.id === locId ? (
+                <span className="text-[11px] text-t3">目前</span>
+              ) : x.crossCompany ? (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-warn-soft text-warn-text font-semibold">跨公司</span>
+              ) : null}
             </label>
+          ))}
+            </div>
           ))}
         </div>
         <div className="rounded-xl bg-panel-2 px-3 py-2 text-[12px] text-t2 space-y-0.5">
           <div>✔ {targetClinic?.code ?? "新分店"} 同事會喺列表見到，收通知</div>
           <div>✔ 預約、時間表預設用 {targetClinic?.code ?? "新分店"}</div>
           <div>✔ {assignTo ? "直接指派俾揀咗嘅同事" : "負責人清空，回到新分店公海"}</div>
+          {targetClinic?.crossCompany && (
+            <>
+              <div className="text-warn-text">⚠ {targetClinic.companyName ?? "對方公司"} 嘅同事會見到成段對話同病人電話</div>
+              <div className="text-warn-text">⚠ 預約會用 {targetClinic.code} 嘅 Apricot 帳號；病人喺嗰邊未有檔就要新開</div>
+            </>
+          )}
           <div className="text-warn-text">✖ 病人仍然用 {channel?.code ?? conv.clinicCode ?? "原店"} 號碼同我哋傾（WhatsApp 號碼改唔到）</div>
         </div>
         <label className="block text-xs text-t2">

@@ -6,6 +6,7 @@ import { requireAuth, assertConversationAccess, assertCanWriteConversation, Rbac
 import { handle, toResponse } from "@/lib/api-error";
 import { assignConversation } from "@/lib/assign";
 import { publishConvEvent, convRef } from "@/lib/notify";
+import { transferOptions } from "@/lib/inbox/location-policy";
 
 /**
  * ★ cwi-inbox-r3 Q5（2026-10-17）：POST /api/conversations/[id]/location — 轉地點（跟進分店）。
@@ -21,7 +22,10 @@ import { publishConvEvent, convRef } from "@/lib/notify";
  *
  * 權限（擁有人拍板 2026-10-17）：
  * - 現任負責人 ∨ ADMIN（SUPERVISOR 唯讀 → 403）；actor 要開得到呢個對話。
- * - 目標分店唔限 actor 自己有冇權限；但必須同號碼店**同一間公司**（SaaS 租戶隔離 — 唔准跨公司）。
+ * - 目標分店唔限 actor 自己有冇權限；但要喺號碼店公司可轉範圍：同公司 ∨ 公司白名單
+ *   （Company.transferToCompanyIds — ★ cwi-inbox-r4；location-policy.ts 單一來源）。
+ *
+ * GET：可轉選項（同 POST 同一套規則 — 對話框唔再靠 client 自己估；跨公司標 crossCompany）。
  */
 export const dynamic = "force-dynamic";
 
@@ -33,6 +37,16 @@ const schema = z.object({
   toClinicId: z.string().min(1).max(64),
   reason: z.string().trim().max(200).optional(),
   assignToStaffId: z.string().min(1).max(64).nullable().optional(),
+});
+
+export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
+  const auth = await requireAuth(req);
+  const { id } = await ctx.params;
+  const conv = await prisma.conversation.findUnique({ where: { id } });
+  if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
+  await assertConversationAccess(auth, conv);
+  const options = await transferOptions(conv.clinicId);
+  return NextResponse.json({ currentClinicId: conv.handlingClinicId ?? conv.clinicId, channelClinicId: conv.clinicId, options });
 });
 
 export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
@@ -55,12 +69,14 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
     prisma.clinic.findUnique({ where: { id: toClinicId }, select: { id: true, code: true, name: true, companyId: true } }),
   ]);
   if (!channelClinic || !target) return NextResponse.json({ error: "clinic not found", code: "CLINIC_NOT_FOUND" }, { status: 404 });
-  if ((target.companyId ?? null) !== (channelClinic.companyId ?? null)) {
+  const allowed = (await transferOptions(conv.clinicId)).find((o) => o.id === target.id);
+  if (!allowed) {
     return NextResponse.json(
-      { error: "只可以轉去同一間公司嘅分店", code: "CROSS_COMPANY_FORBIDDEN" },
+      { error: "呢間分店唔喺可轉範圍（跨公司要先喺「診所管理 → 跨公司轉地點」開放）", code: "CROSS_COMPANY_FORBIDDEN" },
       { status: 403 }
     );
   }
+  const crossCompany = allowed.crossCompany;
   const fromId = conv.handlingClinicId ?? conv.clinicId;
   if (fromId === target.id) return NextResponse.json({ error: "已經喺呢個地點", code: "SAME_LOCATION" }, { status: 400 });
 
@@ -80,7 +96,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   });
   if (upd.count === 0) return NextResponse.json({ error: "地點啱啱俾其他同事改咗 — 請重新整理", code: "LOCATION_CONFLICT" }, { status: 409 });
 
-  const noteText = `📍 地點由 ${fromClinic?.code ?? "?"} 轉到 ${target.code}${reason ? `（${reason}）` : ""}`;
+  const noteText = `📍 地點由 ${fromClinic?.code ?? "?"} 轉到 ${target.code}${crossCompany ? "（跨公司）" : ""}${reason ? `（${reason}）` : ""}`;
 
   // 負責人：指派指定同事 ／ 有負責人就放返新分店公海 ／ 本身未指派就只落備註
   let assigneeId: string | null = conv.assigneeId;
@@ -130,6 +146,7 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
         toClinicId: target.id,
         assignToStaffId: assignToStaffId ?? null,
         hasReason: !!reason,
+        crossCompany,
       } as object,
     },
   });

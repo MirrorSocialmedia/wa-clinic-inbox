@@ -21,6 +21,7 @@ export const GET = handle(async (req: NextRequest) => {
       name: true,
       enabled: true,
       sourceId: true, // cwi-followup-p0-20260915：workforce 快取 key（null = 未配對）
+      transferToCompanyIds: true, // ★ cwi-inbox-r4：轉地點白名單
       clinics: {
         select: { id: true, code: true, name: true },
         orderBy: { code: "asc" },

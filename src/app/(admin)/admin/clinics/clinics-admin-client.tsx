@@ -50,6 +50,8 @@ interface CompanyOpt {
   code: string;
   name: string;
   clinics: { id: string; code: string; name: string }[];
+  /** ★ cwi-inbox-r4：轉地點白名單（單向） */
+  transferToCompanyIds?: string[];
 }
 
 /** .dialog 二次確認請求 — onConfirm = 原本 confirm() 之後會做嘅個動作 */
@@ -304,6 +306,9 @@ export default function ClinicsAdmin() {
         </button>
       </div>
 
+      {/* ★ cwi-inbox-r4：跨公司轉地點白名單（全公司 ADMIN 先見 — companies API requireGlobalAdmin） */}
+      {companies.length > 1 && <CompanyTransferPolicy companies={companies} onSaved={load} />}
+
       {loading ? (
         <p className="text-sm text-t2">載入中…</p>
       ) : clinics.length === 0 ? (
@@ -552,5 +557,103 @@ export default function ClinicsAdmin() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * ★ cwi-inbox-r4（擁有人拍板 2026-10-17）：跨公司轉地點白名單。
+ * 每間公司剔「可以轉去邊幾間其他公司」（單向）；唔剔 = 只限同公司。PATCH /api/admin/companies/[id]。
+ */
+function CompanyTransferPolicy({ companies, onSaved }: { companies: CompanyOpt[]; onSaved: () => void | Promise<void> }) {
+  const [draft, setDraft] = useState<Record<string, string[]>>({});
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ id: string; ok: boolean; text: string } | null>(null);
+  const current = (c: CompanyOpt) => draft[c.id] ?? c.transferToCompanyIds ?? [];
+  const dirty = (c: CompanyOpt) => {
+    const a = [...current(c)].sort().join(",");
+    const b = [...(c.transferToCompanyIds ?? [])].sort().join(",");
+    return a !== b;
+  };
+
+  async function save(c: CompanyOpt) {
+    setBusyId(c.id);
+    setMsg(null);
+    try {
+      const res = await fetch(`/api/admin/companies/${c.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transferToCompanyIds: current(c) }),
+      });
+      const j = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        setMsg({ id: c.id, ok: false, text: j?.error ?? `儲存失敗（${res.status}）` });
+        return;
+      }
+      setDraft((d) => {
+        const n = { ...d };
+        delete n[c.id];
+        return n;
+      });
+      setMsg({ id: c.id, ok: true, text: "已儲存" });
+      await onSaved();
+    } catch {
+      setMsg({ id: c.id, ok: false, text: "儲存失敗（網絡）" });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section className="rounded-[22px] border border-line bg-panel p-4 space-y-3" data-testid="company-transfer-policy">
+      <div>
+        <h2 className="text-[17px] font-normal text-t1">跨公司轉地點</h2>
+        <p className="text-[13px] text-t2 mt-1">
+          剔咗嘅公司，佢哋嘅分店會出現喺轉地點清單（單向：A 可以轉去 B，唔代表 B 可以轉返 A）。唔剔 = 只可以轉去同公司分店。
+          對方公司同事會見到成段對話同病人電話。
+        </p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {companies.map((c) => {
+          const others = companies.filter((o) => o.id !== c.id);
+          const sel = current(c);
+          return (
+            <div key={c.id} className="rounded-2xl border border-line bg-panel-2 p-3 space-y-2">
+              <div className="text-sm font-semibold text-t1">
+                {c.name} <span className="text-t3 font-normal">可以轉去：</span>
+              </div>
+              {others.map((o) => (
+                <label key={o.id} className="flex items-center gap-2 text-[13px] text-t1 cursor-pointer">
+                  <input
+                    id={`ct-${c.id}-${o.id}`}
+                    type="checkbox"
+                    checked={sel.includes(o.id)}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        [c.id]: e.target.checked ? [...sel, o.id] : sel.filter((x) => x !== o.id),
+                      }))
+                    }
+                    className="accent-[var(--brand)]"
+                  />
+                  {o.name}
+                  <span className="text-t3 text-[12px]">（{o.clinics.map((x) => x.code).join("、") || "未有分店"}）</span>
+                </label>
+              ))}
+              <div className="flex items-center justify-end gap-2">
+                {msg?.id === c.id && <span className={`text-[12px] ${msg.ok ? "text-ok-text" : "text-danger-text"}`}>{msg.text}</span>}
+                <button
+                  type="button"
+                  disabled={!dirty(c) || busyId === c.id}
+                  onClick={() => void save(c)}
+                  className="rounded-full bg-brand text-panel text-[12px] px-3 py-1 disabled:opacity-40"
+                >
+                  {busyId === c.id ? "儲存緊…" : "儲存"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }

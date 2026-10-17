@@ -181,6 +181,9 @@ model Company {
   // ★ cwi-followup-p0-20260915（MD §1.1）：workforce 公司主資料快取 key（= CWM Company.id）。
   //   首次同步按 name 對應填；對唔上 → null + hub UI 紅字要求人手配對。
   sourceId  String?  @unique
+  // ★ cwi-inbox-r4（擁有人拍板 2026-10-17）：轉地點白名單 — 呢間公司嘅對話可以轉去邊幾間其他公司嘅分店
+  //   （單向；空 = 只限同公司）。只有全公司權限 ADMIN 改得（PATCH /api/admin/companies/[id]）。
+  transferToCompanyIds String[] @default([])
   clinics   Clinic[]
   createdAt DateTime @default(now())
 }

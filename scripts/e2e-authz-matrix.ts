@@ -363,6 +363,11 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/admin/companies" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 403 },
   },
+  "PATCH /api/admin/companies/[id]": {
+    // ★ cwi-inbox-r4：轉地點白名單 — 全公司 ADMIN 先改得（公司範圍 ADMIN 403）；ALL → 404 喺 company lookup（零改動）
+    fixture: () => ({ url: "/api/admin/companies/nope", method: "PATCH", body: JSON.stringify({ transferToCompanyIds: [] }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 404, ADMIN_COMPANY_B: 403 },
+  },
   "GET /api/admin/company-sync": {
     fixture: () => ({ url: "/api/admin/company-sync" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 403 },
@@ -768,6 +773,11 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
   "GET /api/conversations/[id]/note-read-receipts": {
     fixture: () => ({ url: "/api/conversations/nope/note-read-receipts" }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
+  },
+  "GET /api/conversations/[id]/location": {
+    // ★ cwi-inbox-r4：可轉選項（唯讀）— conv 唔存在 → 404（任何有登入角色）
+    fixture: () => ({ url: "/api/conversations/nope/location" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404 },
   },
   "POST /api/conversations/[id]/location": {
     // ★ cwi-inbox-r3 Q5：轉地點 — SUPERVISOR 唯讀先擋（403）；其餘有效 body → 404 喺 conv lookup（零狀態改動）
