@@ -172,6 +172,8 @@ const ConversationRow = memo(function ConversationRow(props: ConversationRowProp
                         canTransfer
                         variant="list"
                         onChanged={onLocationChanged}
+                        label={userRole === "STAFF" ? `↔ 跨店 · ${clinicBadgeText}` : undefined}
+                        hint={userRole === "STAFF" ? `跨店線：${c.locationName ?? c.clinicName ?? clinicBadgeText}` : undefined}
                       />
                     ) : (
                       <span

@@ -32,6 +32,8 @@ export function LocationCapsule({
   canTransfer,
   variant,
   onChanged,
+  label,
+  hint,
 }: {
   conv: ConversationItem;
   clinics: ClinicLite[];
@@ -39,6 +41,10 @@ export function LocationCapsule({
   canTransfer: boolean;
   variant: "list" | "header";
   onChanged: (c: LocationChange) => void;
+  /** 覆寫顯示字（列表：STAFF 跨店線保留「↔ 跨店 · CODE」） */
+  label?: string;
+  /** 覆寫 title（列表：STAFF 跨店線保留「跨店線：店名」— e2e badges 斷言） */
+  hint?: string;
 }) {
   const [open, setOpen] = useState(false);
   const locId = conv.handlingClinicId ?? conv.clinicId;
@@ -46,10 +52,10 @@ export function LocationCapsule({
   const channel = clinics.find((x) => x.id === conv.clinicId);
   const code = loc?.code ?? conv.locationCode ?? conv.clinicCode ?? "—";
   const moved = !!conv.handlingClinicId && conv.handlingClinicId !== conv.clinicId;
-  const text = moved ? `跟進：${code}` : code;
-  const title = moved
+  const text = label ?? (moved ? `跟進：${code}` : code);
+  const title = hint ?? (moved
     ? `跟進分店：${loc?.name ?? code} · 經 ${channel?.code ?? conv.clinicCode ?? "原店"} 號碼聯絡`
-    : `地點：${loc?.name ?? code}`;
+    : `地點：${loc?.name ?? code}`);
 
   const cls =
     variant === "header"
