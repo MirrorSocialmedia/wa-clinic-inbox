@@ -314,7 +314,7 @@ export type TermMapResult = z.infer<typeof TermMapResponse>;
 
 /** 兩種樣板（MD §0.3 — 對齊 CWM NoteText）：STANDARD 四段 / TEMPLATE blocks（Tx 原文保留換行）。 */
 /** ★ cwi-walkin-20261018：處方（CWM note.rx — 藥名 + 用法摘要；舊 CWM 冇呢欄 = optional） */
-const NoteRxSchema = z.array(z.object({ name: z.string(), detail: z.string() })).optional();
+const NoteRxSchema = z.array(z.object({ name: z.string(), detail: z.string(), caution: z.string().optional() })).optional();
 const NoteStandardSchema = z.object({
   kind: z.literal("STANDARD"),
   complaints: z.string(),
@@ -2100,7 +2100,14 @@ const MOCK_P2_PATIENTS: Record<string, MockP2Patient> = {
         visitId: "cv-std-001-1", visitDate: "2026-09-14", clinicCode: "TY", bookingStatus: 4,
         visitReasonCodes: ["FILLING", "SCALE"], providerCode: "DR1", hasNote: true, noteKind: "STANDARD",
         firstLine: "左上後牙咬痛三星期",
-        note: { kind: "STANDARD", complaints: "左上後牙咬痛三星期", findings: "#26 深齲，探痛 (+)", diagnosis: "Deep caries #26", actions: "預留根管治療" },
+        note: {
+          kind: "STANDARD", complaints: "左上後牙咬痛三星期", findings: "#26 深齲，探痛 (+)", diagnosis: "Deep caries #26", actions: "預留根管治療",
+          // ★ cwi-walkin-20261018：處方（形狀跟 CWM extractRxLines 真實樣本輸出）
+          rx: [
+            { name: "500MG AMOXICILLIN / 抗生素 500MG", detail: "每次 1粒 · 每日 3 次 · 5日 · 共 15 粒 · 每隔6小時、飯後", caution: "抗生素必須服完整個療程" },
+            { name: "PARACETAMOL / 止痛藥 500MG", detail: "每次 1粒 · 每日 4 次 · 5日 · 共 20 粒 · 有需要時服" },
+          ],
+        },
       },
     ],
     balance: { ttlAmt: 800, osAmt: 300 },

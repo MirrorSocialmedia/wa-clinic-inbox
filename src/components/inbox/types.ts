@@ -746,5 +746,7 @@ export interface NoteTemplate {
 export interface NoteRxLine {
   name: string;
   detail: string;
+  /** 用藥注意（例如「抗生素必須服完整個療程」） */
+  caution?: string;
 }
 export type NoteText = (NoteStandard | NoteTemplate) & { rx?: NoteRxLine[] };

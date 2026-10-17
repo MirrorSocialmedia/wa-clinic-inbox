@@ -806,7 +806,8 @@ function NoteBody({ note }: { note: NoteText }) {
                 <Pill size={12} className="text-brand-text shrink-0 mt-0.5" />
                 <span>
                   <span className="text-t1">{r.name}</span>
-                  {r.detail ? <span className="text-t3">　{r.detail}</span> : null}
+                  {r.detail ? <span className="block text-[11px] text-t2">{r.detail}</span> : null}
+                  {r.caution ? <span className="block text-[11px] text-warn-text">⚠ {r.caution}</span> : null}
                 </span>
               </li>
             ))}
