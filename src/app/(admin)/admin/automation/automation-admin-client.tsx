@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * 成熟度儀表板 + 級別開關 client（Phase E — cwi-ai-20260825-t5）。
@@ -163,7 +164,7 @@ export default function AutomationAdmin() {
   }, [data, load]);
 
   if (error) return <p className="text-sm text-danger-text">{error}</p>;
-  if (!data) return <p className="text-sm text-t3">載入中…</p>;
+  if (!data) return <WLoading />;
 
   return (
     <div className="max-w-6xl mx-auto">

@@ -223,8 +223,16 @@ async function main(): Promise<void> {
   check("M1 optOutSource=auto", m1Flag?.optOutSource === "auto", m1Flag?.optOutSource);
   const m1Audit = await prisma.auditLog.findFirst({ where: { action: "FOLLOWUP_OPT_OUT", entityId: CT.m1 } });
   check("M1 audit FOLLOWUP_OPT_OUT", m1Audit !== null);
-  const m1Notice = await prisma.staffNotice.findFirst({ where: { clinicId: CLINIC_A, meta: { path: ["contactId"], equals: CT.m1 } } });
+  // notice 喺 flag 之後先寫（opt-out.ts）— poll 防競態
+  const m1Notice = await pollDb("m1 staff notice", () =>
+    prisma.staffNotice.findFirst({ where: { clinicId: CLINIC_A, meta: { path: ["contactId"], equals: CT.m1 } } })
+  );
   check("M1 staff notice（自動偵測確認）", m1Notice !== null, m1Notice?.title);
+  // ★ cwi-inbox-r3：退訂後回一句固定確認（唔經 AI；只回一次）
+  const m1Ack = await pollDb("m1 opt-out ack", () =>
+    prisma.message.findFirst({ where: { conversationId: CONV("m1"), direction: "OUT", channel: "API", body: { contains: "唔會再主動發訊息" } } })
+  );
+  check("M1 退訂確認訊息（固定句 · 非 AI · proactive=false）", m1Ack !== null && m1Ack.aiAutoSent !== true && m1Ack.proactive === false, m1Ack?.status);
   evidence("M1", { msgId: m1Msg?.id, optOutAt: m1Flag?.optOutAt?.toISOString() });
 
   // ══ M4：opt-in 回覆偵測（同 contact 接力）══════════════════════════

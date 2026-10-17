@@ -28,6 +28,7 @@ import {
   type AdvancedValue,
 } from "@/lib/sessions/consult-settings";
 import { CONSULT_TRIGGER_FLOOR } from "@/lib/sessions/consult-trigger";
+import { WMark } from "@/components/ui/w-loader";
 
 type Workflow = "ORTHODONTIC_CONSULT" | "IMPLANT_CONSULT";
 
@@ -709,7 +710,7 @@ export default function ConsultSettingsAdmin({ role }: { role: "ADMIN" | "SUPERV
                     className="inline-flex items-center gap-1 text-[11px] text-t3 hover:text-brand"
                     title="重新預覽"
                   >
-                    <RefreshCw size={11} strokeWidth={2.5} className={previewLoading ? "animate-spin" : ""} /> 重新預覽
+                    {previewLoading ? <WMark size={11} className="text-brand" /> : <RefreshCw size={11} strokeWidth={2.5} />} 重新預覽
                   </button>
                 </div>
                 <div className="mt-2 text-[11px] text-t3">

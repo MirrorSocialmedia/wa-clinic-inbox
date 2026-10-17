@@ -26,6 +26,8 @@ export interface CapsuleCtx {
 export interface CapsuleRow {
   id: string;
   clinicId: string;
+  /** ★ cwi-inbox-r3 Q5：跟進分店（轉地點）— 地點 = 呢個 ?? clinicId */
+  handlingClinicId?: string | null;
   assigneeId: string | null;
   // ★ cwi-final S1-2：client ConversationItem 呢兩欄係 optional（`?: string | null`）— 接受 undefined
   routedStaffId?: string | null;
@@ -42,10 +44,12 @@ export function matchCapsule(
 ): boolean {
   // 公海（unassigned）永遠唔含外店線（I-2 鐵律）— clinic 維度雙保險
   // （server scope 已限；client 端 activeClinicId tab 收窄同步）
+  // ★ cwi-inbox-r3 Q5：店維度 = 地點（跟進分店 ?? 號碼店）— 同 server clinicPredicate 同源
+  const loc = c.handlingClinicId ?? c.clinicId;
   const inClinic =
     x.activeClinicId !== "all"
-      ? c.clinicId === x.activeClinicId
-      : x.scopeClinicIds === null || x.scopeClinicIds.includes(c.clinicId);
+      ? loc === x.activeClinicId
+      : x.scopeClinicIds === null || x.scopeClinicIds.includes(loc);
   switch (key) {
     case "all":
       return true;

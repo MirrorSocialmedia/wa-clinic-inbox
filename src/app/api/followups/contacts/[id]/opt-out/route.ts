@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireAuth, scopedClinicSet } from "@/lib/rbac";
+import { requireAuth, assertContactAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { applyFollowupOptOut, clearFollowupOptOut } from "@/lib/followup/opt-out";
 
@@ -27,8 +27,10 @@ export const PATCH = handle(async (req, { params }) => {
   if (typeof body?.optOut !== "boolean") return NextResponse.json({ error: "optOut: true|false" }, { status: 400 });
   const contact = await prisma.contact.findUnique({ where: { id }, select: { id: true, clinicId: true } });
   if (!contact) return NextResponse.json({ error: "contact not found" }, { status: 404 });
-  const clinicSet = scopedClinicSet(ctx);
-  if (clinicSet && !clinicSet.includes(contact.clinicId)) {
+  // ★ cwi-inbox-r3 Q5：店集合 ∨ 轉咗地點嘅跟進分店（assertContactAccess）
+  try {
+    await assertContactAccess(ctx, contact);
+  } catch {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
   if (body.optOut) {

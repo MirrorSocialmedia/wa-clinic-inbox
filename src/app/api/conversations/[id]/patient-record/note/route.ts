@@ -40,6 +40,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const resolved = await resolveConversationPatient({
     pinnedPatientApricotId: conv.pinnedPatientApricotId,
+    identifiedPatientApricotId: contact.identifiedPatientApricotId,
     waId: contact.waId,
     clinicCode: clinic.code,
   });

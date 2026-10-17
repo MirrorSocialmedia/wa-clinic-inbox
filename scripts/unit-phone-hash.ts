@@ -63,7 +63,13 @@ function main(): void {
   check("P3 5 位 → 丟", eq(normalizeHkPhones("91234"), []));
   check("P3 8 位 1 開頭 → 丟", eq(normalizeHkPhones("12345678"), []));
   check("P3 8 位 0 開頭 → 丟", eq(normalizeHkPhones("01234567"), []));
-  check("P3 內含空格片段 → 全丟（spec 行為 — 空格係分隔符）", eq(normalizeHkPhones("9123 4567 / 6123 4567"), []));
+  // ★ cwi-patient-identify-20261017：號內空格照收（取代舊「空格係分隔符 → 全丟」）
+  check("P3 號內空格 → 照收", eq(normalizeHkPhones("9123 4567 / 6123 4567"), ["+85291234567", "+85261234567"]));
+  check("P3 +852 帶空格 → 照收", eq(normalizeHkPhones("+852 9123 4567"), ["+85291234567"]));
+  check("P3 空格分隔兩個號（冇符號）", eq(normalizeHkPhones("9123 4567 6123 4567"), ["+85291234567", "+85261234567"]));
+  check("P3 內地 +86 帶空格", eq(normalizeHkPhones("+86 138 1234 5678"), ["+8613812345678"]));
+  check("P3 內地 86 開頭（WhatsApp waId 格式）", eq(normalizeHkPhones("8613812345678"), ["+8613812345678"]));
+  check("P3 內地冇國碼 11 位", eq(normalizeHkPhones("13812345678"), ["+8613812345678"]));
   check("P3 混合：1 個合法 + 1 個唔合法 → 只留合法", eq(normalizeHkPhones("91234567 12345"), ["+85291234567"]));
 
   // ── P4 空值 ───────────────────────────────────────────────────────

@@ -20,7 +20,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { requireAuth, assertBookingAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { sendLockResponse } from "@/lib/send-lock";
 import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
@@ -41,7 +41,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   const booking = await prisma.bookingRequest.findUnique({ where: { id } });
   if (!booking) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(ctx, booking.clinicId); // STAFF 別店 → 403
+  await assertBookingAccess(ctx, booking); // STAFF 別店 → 403（★ cwi-inbox-r3 Q5：轉地點後跟進分店照撳得）
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   const conv = await prisma.conversation.findUnique({ where: { id: booking.conversationId } });

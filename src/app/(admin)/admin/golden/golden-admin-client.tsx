@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * ★ Part F（cwi-raggolden-20260904，F.5/F.6）GoldenCase 評測集管理 client（ADMIN-only）。
@@ -184,7 +185,7 @@ export default function GoldenAdmin() {
       </div>
 
       {err && <div className="bg-danger-soft text-danger text-sm rounded-md px-3 py-2">{err}</div>}
-      {loading && <div className="text-sm text-t2">載入中…</div>}
+      {loading && <WLoading />}
       {!loading && visible.length === 0 && <div className="text-sm text-t2">（冇 case）</div>}
 
       {visible.map((c) => (

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * ★ cwi-followup-p0-20260915（MD §1.1）：公司同步健康卡（hub 總覽）。
@@ -110,7 +111,7 @@ export function CompanySyncCard() {
       </div>
 
       {loadErr && <p className="text-sm text-danger-text mb-3">載入失敗：{loadErr}</p>}
-      {!status && !loadErr && <p className="text-sm text-t3">載入中…</p>}
+      {!status && !loadErr && <WLoading />}
 
       {status && (
         <>

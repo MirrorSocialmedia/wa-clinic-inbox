@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, CalendarDays, Check, Loader2, Lock, RotateCcw } from "lucide-react";
+import { AlertTriangle, CalendarDays, Check, Lock, RotateCcw } from "lucide-react";
 import type { BookingInfo, ConversationItem } from "./types";
+import { WMark } from "@/components/ui/w-loader";
 
 /**
  * 預約請求卡 — 兩態（booking-ui D，MD §3 照 mockup）
@@ -468,7 +469,7 @@ export function BookingCard({ conversation: c, booking: b, myStaffId, onActionDo
               {/* ★ S5-1：寫入狀態帶（WRITING 轉圈 / UNKNOWN 黃 / FAILED 按 code）*/}
               {writing && (
                 <div className="rounded-2xl bg-panel-2 border border-line px-3 py-2.5 text-xs text-t1 inline-flex items-center gap-2">
-                  <Loader2 size={14} className="animate-spin text-brand" strokeWidth={2.5} />
+                  <WMark size={14} className="text-brand" />
                   落單處理緊…（寫入 Apricot）
                 </div>
               )}

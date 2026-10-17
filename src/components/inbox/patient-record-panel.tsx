@@ -18,7 +18,7 @@
  *   STAFF 自己範圍）— 本組件 GET-only + §4.6 opt-out toggle（PATCH；SUPERVISOR canEdit=false 唔渲染）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Loader2, Pill } from "lucide-react";
+import { ChevronDown, ChevronUp, Pill } from "lucide-react";
 import type { NoteText, PatientRecordData, PatientRecordVisit } from "./types";
 import {
   REFRESH_COOLDOWN_MS,
@@ -32,6 +32,8 @@ import {
   type RefreshPhase,
   type Tone,
 } from "@/lib/patient-record-state";
+import { WLoading } from "@/components/ui/w-loader";
+import { PatientStatusChip } from "./patient-status-chip";
 
 type TabKey = "visits" | "meds" | "bills" | "appts";
 
@@ -189,6 +191,55 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
     }
   }, [conversationId, handBackBusy]);
 
+  // ★ cwi-inbox-r3：ADMIN 專用「刪除病人資料」（POST /api/admin/contacts/[id]/delete — 不可還原）
+  // 兩步：撳掣 → 頁內確認框（打「刪除」+ 可選原因）→ 執行；成功後返 /inbox 重載（對話已一併刪除）
+  const [delOpen, setDelOpen] = useState(false);
+  const [delConfirm, setDelConfirm] = useState("");
+  const [delReason, setDelReason] = useState("");
+  const [delBusy, setDelBusy] = useState(false);
+  const [delError, setDelError] = useState<string | null>(null);
+  const deletePatient = useCallback(async () => {
+    const c = data?.contact;
+    if (!c?.canDelete || delBusy || delConfirm.trim() !== "刪除") return;
+    setDelBusy(true);
+    setDelError(null);
+    try {
+      const res = await fetch(`/api/admin/contacts/${c.id}/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(delReason.trim() ? { reason: delReason.trim().slice(0, 300) } : {}),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(j?.error ?? `HTTP ${res.status}`);
+      }
+      window.location.assign("/inbox");
+    } catch (e) {
+      setDelError(`刪除失敗${e instanceof Error && e.message ? `（${e.message}）` : ""}`);
+      setDelBusy(false);
+    }
+  }, [data, delBusy, delConfirm, delReason]);
+  useEffect(() => {
+    setDelOpen(false);
+    setDelConfirm("");
+    setDelReason("");
+    setDelError(null);
+  }, [conversationId]);
+
+  // ★ cwi-patient-identify-20261017：重新判定新客／舊客（即刻再搜晒全部 Apricot 帳號）
+  const [identBusy, setIdentBusy] = useState(false);
+  const reIdentify = useCallback(async () => {
+    const c = data?.contact;
+    if (!c || identBusy) return;
+    setIdentBusy(true);
+    try {
+      const res = await fetch(`/api/contacts/${c.id}/identify`, { method: "POST" });
+      if (res.ok) await load(false, false); // 判定結果可能改咗配對病人 → 重載成張卡
+    } finally {
+      setIdentBusy(false);
+    }
+  }, [data, identBusy, load]);
+
   // ★ cwi-followup-v3 B-9：存稱呼 + locale（PATCH /api/contacts/:id — staff+）
   const saveSalutation = useCallback(
     async (salutation: string | null, locale: string | null) => {
@@ -306,7 +357,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
 
       {loading && !data ? (
         <div className="flex-1 flex items-center justify-center text-t3" data-e2e="p2-loading">
-          <Loader2 size={18} className="animate-spin" />
+          <WLoading label="載入緊病人記錄…" />
         </div>
       ) : null}
 
@@ -318,6 +369,28 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
               呢個對話未釘住病人、預約索引窗內又冇配對 — 可喺詳情「病人」卡手動釘住
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {/* ★ cwi-patient-identify：新客／舊客（電話直接搜晒全部 Apricot 帳號；唔使有預約） */}
+      {data?.contact ? (
+        <div className="shrink-0 mx-2.5 mt-1.5 px-2 py-1.5 rounded-lg bg-panel-2 flex items-center justify-between gap-2 text-[11px]" data-e2e="identify-row">
+          <span className="text-t2 inline-flex items-center gap-1.5 min-w-0">
+            新客／舊客：
+            <PatientStatusChip status={data.contact.patientStatus ?? null} count={data.contact.identifiedCount ?? null} />
+            {data.contact.patientStatus === "EXISTING" && (data.contact.identifiedCount ?? 0) > 1 ? (
+              <span className="text-t3 truncate">同一電話有 {data.contact.identifiedCount} 個病人檔 — 喺「病人」卡揀邊個</span>
+            ) : null}
+          </span>
+          <button
+            type="button"
+            disabled={identBusy}
+            onClick={() => void reIdentify()}
+            className="shrink-0 px-2 py-0.5 rounded-md border border-line bg-panel text-t2 hover:bg-panel-2 disabled:opacity-50"
+            data-e2e="identify-retry"
+          >
+            {identBusy ? <WLoading size="inline" label="搜緊…" /> : "重新判定"}
+          </button>
         </div>
       ) : null}
 
@@ -419,7 +492,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
               {data.patient.patientCode ?? "—"}
             </span>
             <span className="text-t3">·</span>
-            <span className="text-t2">{data.patient.source === "pinned" ? "已釘住" : "自動配對"}</span>
+            <span className="text-t2">{data.patient.source === "pinned" ? "已釘住" : data.patient.source === "identified" ? "電話認到" : "預約配對"}</span>
           </div>
           {/* ★ cwi-ux UX-07：最近到診分店 + 主診醫生（近 12 個月）— 冇記錄唔顯示（spec：T-UX07i） */}
           {data.visitStats ? (
@@ -553,6 +626,69 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
           </div>
         </>
       ) : null}
+
+      {/* ★ cwi-inbox-r3：ADMIN 專用 — 刪除病人資料（病人要求刪除 → 核實身份後執行；不可還原） */}
+      {data?.contact?.canDelete ? (
+        <div className="shrink-0 mx-2.5 my-2 rounded-lg border border-danger/40 px-2 py-1.5 text-[11px]" data-e2e="admin-delete-patient">
+          {!delOpen ? (
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-t3">病人要求刪除資料（ADMIN）</span>
+              <button
+                type="button"
+                onClick={() => setDelOpen(true)}
+                className="px-2 py-0.5 rounded-md border border-danger-text/30 bg-danger-soft text-danger-text text-[11px]"
+              >
+                刪除病人資料
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <div className="text-danger-text font-semibold">
+                永久刪除 {data.contact.profileName || "呢個病人"} 嘅所有對話、訊息、媒體、預約暫存同同意記錄 — 不可還原
+              </div>
+              <div className="text-t3">（資料庫備份 ≤30 日內仍可能保留，到期後徹底消失；Apricot 病歷唔受影響）</div>
+              <input
+                value={delReason}
+                maxLength={300}
+                onChange={(e) => setDelReason(e.target.value)}
+                placeholder="原因（可選）例：病人 WhatsApp 要求，已核實身份"
+                className="w-full rounded-md border border-line bg-panel px-2 py-1 text-[11px] text-t1"
+              />
+              <input
+                value={delConfirm}
+                onChange={(e) => setDelConfirm(e.target.value)}
+                placeholder="打「刪除」確認"
+                aria-label="打刪除確認"
+                className="w-full rounded-md border border-danger/40 bg-panel px-2 py-1 text-[11px] text-t1"
+              />
+              {delError ? <div className="text-danger-text">{delError}</div> : null}
+              <div className="flex justify-end gap-1.5">
+                <button
+                  type="button"
+                  disabled={delBusy}
+                  onClick={() => {
+                    setDelOpen(false);
+                    setDelConfirm("");
+                    setDelError(null);
+                  }}
+                  className="px-2 py-0.5 rounded-md border border-line text-t2 text-[11px]"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={delBusy || delConfirm.trim() !== "刪除"}
+                  onClick={() => void deletePatient()}
+                  className="px-2 py-0.5 rounded-md bg-danger text-white text-[11px] font-semibold disabled:opacity-40"
+                  data-e2e="admin-delete-confirm"
+                >
+                  {delBusy ? "刪除緊…" : "確認永久刪除"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -604,7 +740,7 @@ function VisitCard({
         <div className="mt-2 border-t border-line pt-2" data-e2e="p2-note">
           {noteLoading ? (
             <div className="flex items-center gap-1.5 text-[11px] text-t3 py-1">
-              <Loader2 size={12} className="animate-spin" /> 載入臨床記錄…
+              <WLoading size="inline" label="載入臨床記錄…" />
             </div>
           ) : null}
           {noteError ? <div className="text-[11px] text-danger-text" data-e2e="p2-note-error">{noteError}</div> : null}

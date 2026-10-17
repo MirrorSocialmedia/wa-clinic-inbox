@@ -5,6 +5,7 @@ import { io } from "socket.io-client";
 import Link from "next/link";
 import { Clock } from "lucide-react";
 import { relTime } from "./time";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * /bookings 預約隊列 client（MD §8.3）。
@@ -152,7 +153,7 @@ export function BookingsClient({ user: _user }: { user: UserCtx }) {
   }
 
   if (bookings === null) {
-    return <div className="p-8 text-sm text-t3">載入中…</div>;
+    return <WLoading size="page" label="載入緊預約…" />;
   }
 
   // 「9/1」+ 星期（清單式日期欄）

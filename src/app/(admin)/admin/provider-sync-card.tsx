@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * ★ cwi-roster-20261001：醫生名錄同步健康卡（hub 總覽）— 公司同步卡隔離（同頁、同設計語言）。
@@ -93,7 +94,7 @@ export function ProviderSyncCard() {
       </div>
 
       {loadErr && <p className="text-sm text-danger-text mb-3">載入失敗：{loadErr}</p>}
-      {!status && !loadErr && <p className="text-sm text-t3">載入中…</p>}
+      {!status && !loadErr && <WLoading />}
 
       {status && (
         <>

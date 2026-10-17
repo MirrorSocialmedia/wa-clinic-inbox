@@ -12,24 +12,32 @@
  * 限制（已知）：配對只 cover 預約索引窗內有行嘅病人；walk-in 無預約嘅病人要人手釘住。
  *   鐵律（§6）：wa-inbox 唔直接打 Apricot — 全部經 workforce external API。
  */
-import { phoneHashes } from "@/lib/phone-hash";
+import { phoneHash, phoneHashes } from "@/lib/phone-hash";
 import { hkDateOffset } from "@/lib/availability";
 import { fetchAppointmentsByClinic, WorkforceApiError } from "@/lib/workforce/client";
 
 export interface ResolvedPatient {
   patientApricotId: string;
-  source: "pinned" | "paired";
+  source: "pinned" | "identified" | "paired";
 }
 
 export async function resolveConversationPatient(params: {
   pinnedPatientApricotId: string | null;
+  /** ★ cwi-patient-identify：用電話搜 Apricot 認到嘅唯一病人（Contact.identifiedPatientApricotId） */
+  identifiedPatientApricotId?: string | null;
   waId: string;
   clinicCode: string;
 }): Promise<ResolvedPatient | null> {
   if (params.pinnedPatientApricotId) {
     return { patientApricotId: params.pinnedPatientApricotId, source: "pinned" };
   }
-  const H = phoneHashes(params.waId);
+  // ★ cwi-patient-identify-20261017：唔使有預約 — 電話直接喺 Apricot 認到嘅唯一病人
+  if (params.identifiedPatientApricotId) {
+    return { patientApricotId: params.identifiedPatientApricotId, source: "identified" };
+  }
+  // ★ cwi-patient-identify-20261017：新格式（多號 E.164）∪ 舊格式（8 位）— workforce 舊版預約行只有舊格式 hash，
+  //   只用新格式 → 未有到診記錄嘅新預約永遠對唔上（病人記錄空白）。
+  const H = [...phoneHashes(params.waId), ...(params.waId.replace(/\D/g, "") ? [phoneHash(params.waId)] : [])];
   if (!H.length) return null; // waId 無合法電話格式 → 配唔到（唔 throw）
   const set = new Set(H);
   try {

@@ -31,6 +31,7 @@ import type { FlowDay, FlowSlot, FlowSlotsResult, FlowProvider } from "@/lib/flo
 import type { ConversationItem } from "./types";
 import { WindowExits } from "./window-exits";
 import { hkNowMin, hhmmToMin } from "./time";
+import { WLoading, WMark } from "@/components/ui/w-loader";
 
 type BoardData = FlowSlotsResult & { fetchedAt: string | null };
 
@@ -361,7 +362,7 @@ export function ScheduleBoard({
           onClick={() => void doRefresh()}
           title={disableSec > 0 ? `限流中(${disableSec}s 後再試)` : "立即同步(workforce → Apricot → 本地 cache 全鏈)"}
         >
-          <RefreshCw size={12} className={refreshing || busy ? "animate-spin" : ""} />
+          {refreshing || busy ? <WMark size={12} className="text-brand" /> : <RefreshCw size={12} />}
           {disableSec > 0
             ? `${disableSec}s 後再試`
             : refreshing
@@ -427,7 +428,7 @@ export function ScheduleBoard({
         )
       ) : (
         <div className="rounded-xl bg-panel-2 p-8 text-center">
-          <div className="text-sm text-t1 font-medium">{busy ? "載入中..." : "未有資料"}</div>
+          <div className="text-sm text-t1 font-medium">{busy ? <WLoading size="inline" label="載入緊時間表…" /> : "未有資料"}</div>
           <div className="text-xs text-t3 mt-1">時間表嚟自 clinic-workforce(未接入或本週無排更)</div>
         </div>
       )}

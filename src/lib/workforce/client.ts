@@ -53,7 +53,7 @@ import { readFileSync, appendFileSync, writeFileSync, existsSync, unlinkSync } f
 import path from "node:path";
 import log from "@/lib/log";
 import { invalidateAvailabilityDay } from "@/lib/availability";
-import { phoneHashes } from "@/lib/phone-hash";
+import { phoneHash as legacyPhoneHash, phoneHashes } from "@/lib/phone-hash";
 
 // ── zod contract（§2 原樣）───────────────────────────────────────────────
 
@@ -961,6 +961,27 @@ export async function lookupPatient(phoneHash: string, clinicCode?: string | nul
   return PatientLookupResponse.parse(await wfGet("/api/external/v1/patient-lookup", params));
 }
 
+// ★ cwi-patient-identify-20261017：用電話認病人（新客／舊客判定 — 搜晒全部 Apricot 帳號，唔使有預約）
+export const PatientIdentifyResponse = z.object({
+  v: z.literal(1),
+  status: z.enum(["FOUND", "NOT_FOUND", "PARTIAL"]),
+  patients: z.array(z.object({
+    patientApricotId: z.string(),
+    patientCode: z.string(),
+    patientName: z.string(),
+    source: z.string(),
+    clinicId: z.string().nullable(),
+    clinicLabel: z.string(),
+  })),
+  sources: z.array(z.object({ label: z.string(), ok: z.boolean(), found: z.number(), error: z.string().optional() })),
+});
+export type PatientIdentifyResult = z.infer<typeof PatientIdentifyResponse>;
+
+/** 🔴 原始電話只喺 POST body（唔入 URL／log）— 擁有人拍板 2026-10-17（判定一定要原始號碼先搜到 Apricot）。 */
+export async function identifyPatient(phone: string): Promise<PatientIdentifyResult> {
+  return PatientIdentifyResponse.parse(await wfSend("POST", "/api/external/v1/patients/identify", {}, { phone }));
+}
+
 /**
  * 病人 appointments（patient-context 側欄 — upcoming 過濾喺 wa-inbox 做）。
  * from/to = YYYY-MM-DD（clinic 時區）；workforce 限制 ≤38 天窗口（超出 400）。
@@ -1426,6 +1447,10 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
 
   if (path === "/api/external/v1/patient-lookup") {
     return mockPatientLookup(params);
+  }
+
+  if (path === "/api/external/v1/patients/identify") {
+    return mockPatientIdentify(body);
   }
 
   if (path === "/api/external/v1/appointments") {
@@ -1926,6 +1951,22 @@ function mockPatientLookup(params: Record<string, string>): unknown {
   const data = mockPatientData(phoneHash);
   log.info({ path, mock: true, status: 200 }, "workforce MOCK: patient-lookup");
   return { v: 1, matches: data?.matches ?? [] };
+}
+
+/** ★ cwi-patient-identify：mock 認病人 — 同 patient-lookup fixture 同源（舊格式 hash）；冇 = NOT_FOUND */
+function mockPatientIdentify(body: unknown): unknown {
+  const path = "/api/external/v1/patients/identify";
+  const phone = (body as { phone?: unknown } | undefined)?.phone;
+  if (typeof phone !== "string" || phone.replace(/\D/g, "").length < 8) throw new WorkforceApiError(400, path, "BAD_PHONE");
+  const data = mockPatientData(legacyPhoneHash(phone));
+  const matches = (data?.matches ?? []) as { patientApricotId: string; patientCode: string; patientName: string }[];
+  log.info({ path, mock: true, status: 200, found: matches.length }, "workforce MOCK: patients/identify");
+  return {
+    v: 1,
+    status: matches.length > 0 ? "FOUND" : "NOT_FOUND",
+    patients: matches.map((m) => ({ patientApricotId: m.patientApricotId, patientCode: m.patientCode, patientName: m.patientName, source: "MOCK", clinicId: null, clinicLabel: "MOCK" })),
+    sources: [{ label: "MOCK", ok: true, found: matches.length }],
+  };
 }
 
 function mockAppointments(params: Record<string, string>): unknown {

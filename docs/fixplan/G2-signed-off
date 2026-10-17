@@ -1,0 +1,14 @@
+G2 閘（ALLOW_SLOT_CLAIM — 網上預約 WhatsApp Flow 佔位／commit）簽核記錄
+
+簽核：系統擁有人（2026-10-17，對話指示「你直接幫我改吧」— 開放網上預約 Flow 測試）
+效用：scripts/predeploy-check.sh 見到呢個檔先准 ALLOW_SLOT_CLAIM=1。
+
+開閘步驟（兩邊都要）：
+1. wa-inbox：伺服器 .env 加 ALLOW_SLOT_CLAIM=1，並設 FLOW_ID（未發佈嘅 Flow 加 WA_FLOW_DRAFT=1），
+   然後 pm2 restart wa-inbox wa-worker（兩個 process 都讀呢個旗）。
+2. clinic-workforce-mvp：.env 加 ALLOW_SLOT_CLAIM=1（docker-compose.yml 已傳入 container — 見該 repo
+   commit「[wa-booking-gate]」），再 deploy 或 docker compose -p clinic up -d app。
+   可選：APRICOT_WRITE=1 = 佔位時自動寫入 Apricot；0 = 留 HELD，前台喺 Apricot 入單後喺收件箱撳確認。
+
+開閘後建議（原 Stage 5 計劃）：用測試號碼喺收件箱撳「📅 發預約」真機走完 10 次 Flow
+（揀日 → 揀時段 → 確認 → 收件箱見到 hold 卡 → 確認入 Apricot），有異常即刻將兩邊設返 0。

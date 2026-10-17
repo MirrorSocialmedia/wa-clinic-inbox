@@ -2,7 +2,8 @@
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, BellRing, CalendarDays, MessageCircle, Search, Settings, X, BadgeDollarSign } from "lucide-react";
-import type { ClinicInfo, ConversationItem, ConvStatus, StaffNoticeItem } from "./types";
+import type { ClinicInfo, ClinicLite, ConversationItem, ConvStatus, StaffInfo, StaffNoticeItem } from "./types";
+import { LocationCapsule, type LocationChange } from "./location-capsule";
 import { relTime } from "./time";
 // ★ cwi-final S1-2（L-3）：膠囊 predicate — client 同 server 共用單一來源（計數不變式）
 import { matchCapsule, type CapsuleKey } from "@/lib/inbox/capsule";
@@ -12,6 +13,7 @@ import { PushDiagnostics } from "./push-diagnostics";
 import { isIOSLike, isStandalone, requestInstall } from "@/components/inbox/install-prompt";
 // cwi-setnav NAV-02：系統返回鍵圖層堆疊
 import { useBackLayer } from "@/lib/back-stack";
+import { PatientStatusChip } from "./patient-status-chip";
 
 // ── ★ cwi-final S6-7：單行對話卡片（React.memo）────────────────────────────────────
 // 由列表 items 循環抽出 — virtualization 後只有 viewport 內行掛 DOM；
@@ -26,22 +28,30 @@ interface ConversationRowProps {
   clinicById?: Map<string, { code: string; name: string }>;
   myStaffId: string;
   mentionUnread: Record<string, number>;
+  /** ★ cwi-inbox-r3 Q5：地點膠囊轉地點（負責人 ∨ ADMIN） */
+  allClinics?: ClinicLite[];
+  allStaff?: StaffInfo[];
+  onLocationChanged?: (c: LocationChange) => void;
 }
 
 const ConversationRow = memo(function ConversationRow(props: ConversationRowProps) {
-  const { c, selected, onSelect, userRole, activeClinicId, myClinicIds, clinicById, myStaffId, mentionUnread } = props;
+  const { c, selected, onSelect, userRole, activeClinicId, myClinicIds, clinicById, myStaffId, mentionUnread, allClinics, allStaff, onLocationChanged } = props;
 
           const intentMeta = c.intent ? INTENT_META[c.intent] : null;
           const urgentRow = c.urgent && c.status !== "RESOLVED";
           // cwi-multiclinic-20260903（MD A.6.4）：badge 導出（零新欄）
           // 店名 badge：STAFF → 線唔喺自己綁定店；ADMIN → 只喺「全部診所」視圖
+          // ★ cwi-inbox-r3 Q5：badge = 地點（跟進分店 ?? 號碼店）；轉咗地點嘅對話永遠顯示
+          const locId = c.handlingClinicId ?? c.clinicId;
           const showClinicBadge =
-            userRole === "STAFF"
-              ? myClinicIds.length > 0 && !myClinicIds.includes(c.clinicId)
-              : activeClinicId === "all";
+            !!c.handlingClinicId ||
+            (userRole === "STAFF"
+              ? myClinicIds.length > 0 && !myClinicIds.includes(locId)
+              : activeClinicId === "all");
           const clinicBadgeText = showClinicBadge
-            ? (clinicById?.get(c.clinicId)?.code ?? c.clinicCode ?? c.clinicName ?? null)
+            ? (clinicById?.get(locId)?.code ?? c.locationCode ?? c.clinicCode ?? c.clinicName ?? null)
             : null;
+          const canTransfer = userRole !== "SUPERVISOR" && (userRole === "ADMIN" || c.assigneeId === myStaffId);
           // cwi-inboxfix-20260905（MD I-4）：跨店指派俾我 — 整行左彩邊 + 「你（由 X 派嚟）」
           // ★ cwi-realtime-v2 §4：跨店語義（「線唔喺自己綁定店」）只對 STAFF 成立 —
           //   ADMIN/SUPERVISOR clinicIds=[]（全店視圖）→ 唔好標「跨店 / 由 X 派嚟」。
@@ -153,14 +163,29 @@ const ConversationRow = memo(function ConversationRow(props: ConversationRowProp
                       ADMIN/SUPERVISOR：只喺「全部診所」視圖顯（逐店視圖本身就單一店）
                       cwi-inboxfix-20260905（I-4）：文案加「↔ 跨店 ·」前綴
                       ★ cwi-realtime-v2 §4：前綴只限 STAFF — ADMIN 只顯示店名 badge（TKW） */}
-                  {clinicBadgeText && (
-                    <span
-                      className="text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t2 font-semibold inline-flex items-center gap-0.5"
-                      title={userRole === "STAFF" ? `跨店線：${c.clinicName ?? clinicBadgeText}` : `店：${c.clinicName ?? clinicBadgeText}`}
-                    >
-                      {userRole === "STAFF" ? `↔ 跨店 · ${clinicBadgeText}` : clinicBadgeText}
-                    </span>
-                  )}
+                  {clinicBadgeText &&
+                    (canTransfer && onLocationChanged && allClinics && allClinics.length > 0 ? (
+                      // ★ cwi-inbox-r3 Q5：負責人 ∨ ADMIN 撳膠囊轉地點
+                      <LocationCapsule
+                        conv={c}
+                        clinics={allClinics}
+                        staff={allStaff ?? []}
+                        canTransfer
+                        variant="list"
+                        onChanged={onLocationChanged}
+                        label={userRole === "STAFF" ? `↔ 跨店 · ${clinicBadgeText}` : undefined}
+                        hint={userRole === "STAFF" ? `跨店線：${c.locationName ?? c.clinicName ?? clinicBadgeText}` : undefined}
+                      />
+                    ) : (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t2 font-semibold inline-flex items-center gap-0.5"
+                        title={userRole === "STAFF" ? `跨店線：${c.locationName ?? c.clinicName ?? clinicBadgeText}` : `店：${c.locationName ?? c.clinicName ?? clinicBadgeText}`}
+                      >
+                        {userRole === "STAFF" ? `↔ 跨店 · ${clinicBadgeText}` : c.handlingClinicId ? `跟進：${clinicBadgeText}` : clinicBadgeText}
+                      </span>
+                    ))}
+                    {/* ★ cwi-patient-identify：新客／舊客 */}
+                    <PatientStatusChip status={c.contact?.patientStatus} count={c.contact?.identifiedCount} size="xs" />
                     {/* cwi-multiclinic-20260903（MD A.6.4）：「待跟進」— 未指派 + 最後一條係客人來訊（前端導出，零新欄） */}
                     {needsFollow && (
                       <span
@@ -253,7 +278,7 @@ const ConversationRow = memo(function ConversationRow(props: ConversationRowProp
                     ) : (
                       <span
                         className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-panel-2 text-t3 font-medium inline-flex items-center gap-0.5"
-                        title={`負責人：${c.assigneeName}（你只可發內部備註）`}
+                        title={`負責人：${c.assigneeName}（接手後先可以覆病人）`}
                       >
                         ● {c.assigneeName} 處理緊
                       </span>
@@ -266,6 +291,10 @@ const ConversationRow = memo(function ConversationRow(props: ConversationRowProp
 });
 
 interface Props {
+  /** ★ cwi-inbox-r3 Q5：地點膠囊轉地點 */
+  allClinics?: ClinicLite[];
+  allStaff?: StaffInfo[];
+  onLocationChanged?: (c: LocationChange) => void;
   /** 手機：入咗聊天就藏列表（桌面永遠顯示） */
   hidden?: boolean;
   userRole: "ADMIN" | "STAFF" | "SUPERVISOR"; // ★ cwi-routing-20260906 §8
@@ -1188,6 +1217,9 @@ export function ConversationList(p: Props) {
                 clinicById={p.clinicById}
                 myStaffId={p.myStaffId}
                 mentionUnread={p.mentionUnread}
+                allClinics={p.allClinics}
+                allStaff={p.allStaff}
+                onLocationChanged={p.onLocationChanged}
               />
             </div>
           )}

@@ -36,7 +36,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     const conv = hold.conversationId
       ? await prisma.conversation.findUnique({
           where: { id: hold.conversationId },
-          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+          select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true, handlingClinicId: true },
         })
       : null;
     if (conv && conv.clinicId !== hold.clinicId) {

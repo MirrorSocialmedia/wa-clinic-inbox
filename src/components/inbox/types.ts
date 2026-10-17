@@ -17,6 +17,8 @@ export interface ClinicLite {
   id: string;
   code: string;
   name: string;
+  /** ★ cwi-inbox-r3 Q5：轉地點只列同公司分店 */
+  companyId?: string | null;
 }
 
 export interface ContactInfo {
@@ -24,6 +26,9 @@ export interface ContactInfo {
   waId: string;
   profileName: string | null;
   labels: string[];
+  /** ★ cwi-patient-identify：EXISTING 舊客／NEW 新客／UNKNOWN 未確定；null = 未判定 */
+  patientStatus?: string | null;
+  identifiedCount?: number | null;
 }
 
 export interface WindowState {
@@ -71,6 +76,12 @@ export interface ConversationItem {
   /** cwi-multiclinic-20260903（MD A.3/A.6.4）：跨店線店名 badge（全 row 都有值；前端決定顯唔顯示） */
   clinicName?: string | null;
   clinicCode?: string | null;
+  /** ★ cwi-inbox-r3 Q5/Q6：跟進分店（轉地點；null = 號碼店跟進） */
+  handlingClinicId?: string | null;
+  /** ★ cwi-inbox-r3 Q5/Q6：地點 = 跟進分店 ?? 號碼店（列表膠囊 / 對話頂部） */
+  locationClinicId?: string;
+  locationCode?: string | null;
+  locationName?: string | null;
   contactId: string;
   status: ConvStatus;
   assigneeId: string | null;
@@ -339,6 +350,15 @@ export interface ConvUpdatedEvent {
   /** ★ Realtime P0 (R5)：新 version（PATCH assigneeId 變動 → +1） */
   assignVersion?: number;
   unreadCount?: number;
+  /** ★ cwi-inbox-r3 Q5：轉地點（locationChanged=true 時有值） */
+  handlingClinicId?: string | null;
+  locationClinicId?: string;
+  locationCode?: string;
+  locationName?: string;
+  locationChanged?: boolean;
+  /** ★ cwi-patient-identify：新客／舊客判定結果（背景判定完推） */
+  patientStatus?: string | null;
+  identifiedCount?: number | null;
 }
 
 /** ★ cwi-final S2-4：跟進建議狀態變動（server emitter = followup engine / opt-out / send route claim） */
@@ -653,6 +673,12 @@ export interface PatientRecordData {
     /** ★ cwi-followup-v3 B-9：zh（default）| en — 決定 *_en template */
     locale: string | null;
     canEdit: boolean;
+    /** ★ cwi-inbox-r3：ADMIN（scope 內）先有「刪除病人資料」掣 */
+    canDelete?: boolean;
+    /** ★ cwi-patient-identify：EXISTING 舊客／NEW 新客／UNKNOWN 未確定；null = 未判定 */
+    patientStatus?: string | null;
+    patientCheckedAt?: string | null;
+    identifiedCount?: number | null;
   };
   // ★ wa-meta-compliance-20261016（C.1）：病人要求真人 → AI 自動收聲中
   patientRequestedHuman?: {
@@ -663,7 +689,7 @@ export interface PatientRecordData {
   patient: {
     patientApricotId: string;
     patientCode: string | null;
-    source: "pinned" | "paired";
+    source: "pinned" | "identified" | "paired";
     /** 舊客 = 索引窗內 ≥2 次到診；新客 = 1 次（§3.1 header chip） */
     customerType: "returning" | "new";
     lastVisitDate: string | null;

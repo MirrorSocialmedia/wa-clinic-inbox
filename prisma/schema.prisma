@@ -181,6 +181,9 @@ model Company {
   // ★ cwi-followup-p0-20260915（MD §1.1）：workforce 公司主資料快取 key（= CWM Company.id）。
   //   首次同步按 name 對應填；對唔上 → null + hub UI 紅字要求人手配對。
   sourceId  String?  @unique
+  // ★ cwi-inbox-r4（擁有人拍板 2026-10-17）：轉地點白名單 — 呢間公司嘅對話可以轉去邊幾間其他公司嘅分店
+  //   （單向；空 = 只限同公司）。只有全公司權限 ADMIN 改得（PATCH /api/admin/companies/[id]）。
+  transferToCompanyIds String[] @default([])
   clinics   Clinic[]
   createdAt DateTime @default(now())
 }
@@ -320,6 +323,13 @@ model Contact {
   optOutSource   String?                      // auto（關鍵詞）| manual（staff toggle）
   salutation     String?                      // 先生／小姐／太太（template 顯示用；B-9：唔自動估 — AI 唔准由名估性別）
   locale         String?                      // ★ cwi-followup-v3 B-9：zh（default）| en — 決定 *_en template
+  // ★ cwi-patient-identify-20261017（擁有人拍板）：新客／舊客判定 — 用電話直接搜晒全部 Apricot 帳號（唔使有預約）。
+  //   patientStatus：EXISTING（任何帳號有病人檔 = 舊客，包括已登記未到診）／NEW（全部帳號搜過都冇）／
+  //   UNKNOWN（有帳號查唔到 — 唔當新客，稍後重試）；null = 未判定。
+  patientStatus             String?
+  patientCheckedAt          DateTime?
+  identifiedPatientApricotId String?           // 只認到一個病人先填（多個 → null，staff 喺病人卡揀）
+  identifiedCount           Int?
   consents      ContactConsent[]
   @@unique([clinicId, waId])                  // 同一病人喺兩間店 = 兩條 Contact（隔離）
 }
@@ -493,6 +503,10 @@ model Conversation {
   //   C2 起 consult 路徑改寫 ConsultSession 同名欄（session 建立時由呢度複製 — 橋接搬遷；
   //   Conversation 欄保留：C1 e2e + 非 consult 路徑仍用）。
   lastOutboundText String?
+  // ★ cwi-inbox-r3 Q5（2026-10-17）：跟進分店（轉地點）— null = 由 clinicId（病人 WhatsApp 嗰間店）跟進。
+  //   有值 = 列表／權限／通知／預約預設跟呢間店；WhatsApp 收發照用 clinicId 嘅號碼（號碼改唔到）。
+  //   只由 POST /api/conversations/[id]/location 寫（同公司分店；轉返原店 = 清返 null）。
+  handlingClinicId String?
   // ★ cwi-final S1-12：通用更新時間戳 — S1-2 delta 改 `updatedAt >= after`，
   //   令狀態／指派／分類改動都入 delta（@default(now()) 必有 — 否則現有行 migration 失敗）。
   updatedAt        DateTime   @default(now()) @updatedAt @db.Timestamptz
@@ -504,6 +518,7 @@ model Conversation {
   @@index([clinicId, updatedAt])              // ★ cwi-final S1-12：S1-2 delta 用
   @@index([routedGroupId, assigneeId])        // 「派俾我」膠囊 + 升級 sweep 輔助
   @@index([routedStaffId])
+  @@index([handlingClinicId, status, lastMessageAt]) // ★ cwi-inbox-r3 Q5：跟進分店列表
 }
 
 model Message {

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Check, Pencil, Trash2, RefreshCw } from "lucide-react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * 報價確認隊列 client — cwi-followup-p4-20260916 S6（MD §5.3/S3）。
@@ -199,7 +200,7 @@ export default function Quotes({ canTeach }: { canTeach: boolean }) {
       </div>
 
       {loading ? (
-        <div className="text-[13px] text-t3 py-10 text-center">載入中…</div>
+        <WLoading />
       ) : loadErr ? (
         <div className="bg-danger-soft text-danger-text text-[13px] rounded-xl p-3" data-e2e="q-err">{loadErr}</div>
       ) : quotes.length === 0 ? (

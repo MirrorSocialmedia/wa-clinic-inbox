@@ -50,7 +50,12 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   let mentions: string[] = [];
   if (parsed.data.mentions?.length) {
     const staff = await prisma.staffUser.findMany({
-      where: { id: { in: parsed.data.mentions }, active: true, clinicId: conv.clinicId },
+      // ★ cwi-inbox-r3 Q5：號碼店 ∨ 跟進分店嘅同事都可以 @
+      where: {
+        id: { in: parsed.data.mentions },
+        active: true,
+        clinicId: { in: conv.handlingClinicId ? [conv.clinicId, conv.handlingClinicId] : [conv.clinicId] },
+      },
       select: { id: true },
     });
     const valid = new Set(staff.map((s) => s.id));

@@ -5,6 +5,7 @@ import { buildGraph, type WorkflowGraph, type WorkflowKey } from "@/lib/workflow
 // ★ Part E（cwi-paintriage-20260903）：結構化欄編輯器用嘅 pure 常數（零 side-effect，client-safe）
 import { RED_FLAG_FLOOR, RED_FLAG_CATEGORIES } from "@/lib/sessions/red-flags";
 import { IMPRESSION_KEYS, IMPRESSION_META } from "@/lib/sessions/impressions";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * Workflow 參數化 builder v1 client（Phase D — cwi-ai-20260825-t4）。
@@ -844,7 +845,7 @@ export default function WorkflowsAdmin() {
       </div>
       {error ? <p className="text-sm text-danger-text">{error}</p> : null}
       {loading ? (
-        <p className="text-sm text-t2">載入中…</p>
+        <WLoading />
       ) : (
         <>
           {workflows.map((wf) => (

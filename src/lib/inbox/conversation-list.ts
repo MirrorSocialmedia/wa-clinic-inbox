@@ -18,7 +18,7 @@
 import type { Prisma, Conversation } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { scopedClinicSet, myGroupIds as loadMyGroupIds, type AuthContext } from "@/lib/rbac";
+import { scopedClinicSet, myGroupIds as loadMyGroupIds, locationIn, type AuthContext } from "@/lib/rbac";
 import { latestHoldsByConversation } from "@/lib/flows/hold-sweep";
 import { LIST_PAGE_SIZE, RESOLVED_TAIL } from "./list-constants";
 import type { CapsuleKey } from "./capsule";
@@ -55,10 +55,11 @@ export function routedPredicate(s: ListScope): Prisma.ConversationWhereInput {
   return { assigneeId: null, OR: or };
 }
 
-/** 店範圍（公海用 — 公海永遠唔含外店線，I-2 鐵律） */
+/** 店範圍（公海用 — 公海永遠唔含外店線，I-2 鐵律）
+ *  ★ cwi-inbox-r3 Q5：店 = 對話「地點」（跟進分店 ?? 號碼店）— 轉咗地點嘅對話跟新分店列表。 */
 export function clinicPredicate(s: ListScope): Prisma.ConversationWhereInput {
-  if (s.scopedSet === null) return s.clinicParam ? { clinicId: s.clinicParam } : {};
-  return { clinicId: s.clinicParam ?? { in: s.scopedSet } };
+  if (s.scopedSet === null) return s.clinicParam ? locationIn(s.clinicParam) : {};
+  return locationIn(s.clinicParam ?? s.scopedSet);
 }
 
 /**
@@ -66,7 +67,7 @@ export function clinicPredicate(s: ListScope): Prisma.ConversationWhereInput {
  * ★ 一律用 AND 組合（唔准 spread — 兩個 OR spread 會互相覆蓋 = 越權）。
  */
 export function baseScope(s: ListScope): Prisma.ConversationWhereInput {
-  if (s.scopedSet === null) return s.clinicParam ? { clinicId: s.clinicParam } : {};
+  if (s.scopedSet === null) return s.clinicParam ? locationIn(s.clinicParam) : {};
   return { OR: [clinicPredicate(s), { assigneeId: s.meId }, routedPredicate(s)] };
 }
 
@@ -296,7 +297,7 @@ export async function toConversationDTOs(
 ): Promise<ConversationItem[]> {
   if (rows.length === 0) return [];
   const contactIds = [...new Set(rows.map((r) => r.contactId))];
-  const clinicIds = [...new Set(rows.map((r) => r.clinicId))];
+  const clinicIds = [...new Set(rows.flatMap((r) => (r.handlingClinicId ? [r.clinicId, r.handlingClinicId] : [r.clinicId])))];
   const rowStaffIds = rows.flatMap((r) => [r.assigneeId, r.routedStaffId]).filter((x): x is string => !!x);
   const groupIds = [...new Set(rows.map((r) => r.routedGroupId).filter((x): x is string => !!x))];
   // 裁決 9：bookings 先查（staffIds 要併入 booking.handledByStaffId）
@@ -304,7 +305,7 @@ export async function toConversationDTOs(
   const [contacts, groups, bookings, myUnreadMap] = await Promise.all([
     prisma.contact.findMany({
       where: { id: { in: contactIds } },
-      select: { id: true, waId: true, profileName: true, labels: true },
+      select: { id: true, waId: true, profileName: true, labels: true, patientStatus: true, identifiedCount: true },
     }),
     prisma.skillGroup.findMany({ where: { id: { in: groupIds } }, select: { id: true, name: true, code: true } }),
     prisma.bookingRequest.findMany({
@@ -355,6 +356,11 @@ export async function toConversationDTOs(
       // cwi-multiclinic-20260903（MD A.6.4）：跨店線店名 badge（code + 全名；前端決定顯示）
       clinicName: clinicMap.get(cv.clinicId)?.name ?? null,
       clinicCode: clinicMap.get(cv.clinicId)?.code ?? null,
+      // ★ cwi-inbox-r3 Q5/Q6：地點（跟進分店 ?? 號碼店）— 列表膠囊 / 對話頂部顯示呢個
+      handlingClinicId: cv.handlingClinicId ?? null,
+      locationClinicId: cv.handlingClinicId ?? cv.clinicId,
+      locationCode: clinicMap.get(cv.handlingClinicId ?? cv.clinicId)?.code ?? null,
+      locationName: clinicMap.get(cv.handlingClinicId ?? cv.clinicId)?.name ?? null,
       contactId: cv.contactId,
       status: cv.status,
       assigneeId: cv.assigneeId,

@@ -16,7 +16,8 @@
  * refresh：conversationId / refreshKey 變 + 5s poll（輕量 — 單對話兩行）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, RotateCcw, Stethoscope } from "lucide-react";
+import { RotateCcw, Stethoscope } from "lucide-react";
+import { WLoading } from "@/components/ui/w-loader";
 
 // ── 全中文 label 表（零技術詞 — 畫面只出現呢啲字） ─────────────────────
 
@@ -168,7 +169,7 @@ export function ConsultStatusCard({
   if (loading && !data) {
     return (
       <div className="bg-panel-2 rounded-[16px] p-3 flex items-center gap-2 text-t3 text-xs">
-        <Loader2 size={13} className="animate-spin" /> 載入中…
+        <WLoading size="inline" label="載入緊諮詢狀態…" />
       </div>
     );
   }

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { applyLexicon } from "@/lib/sessions/lexicon-core"; // pure — client-safe（★ cwi-auditfix-20260908 H-1）
 // cwi-setnav SET-05：技能組入口連結（同一份契約清單 — 同 AI 流程第⑤步共用）
 import { STEP_EXTRA_LINKS } from "@/lib/ai/hub-step-contract";
+import { WLoading } from "@/components/ui/w-loader";
 const SKILL_GROUP_LINK = STEP_EXTRA_LINKS[4][0]; // ["技能組", "/admin/skill-groups"]
 
 /**
@@ -197,7 +198,7 @@ export default function RoutingRulesAdmin() {
   if (!data) {
     return (
       <div className="rounded-[24px] bg-panel border border-line p-6">
-        {error ? <div className="text-sm text-danger-text">{error}</div> : <div className="text-sm text-t3">載入中…</div>}
+        {error ? <div className="text-sm text-danger-text">{error}</div> : <WLoading />}
       </div>
     );
   }

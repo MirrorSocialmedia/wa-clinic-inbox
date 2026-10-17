@@ -363,6 +363,11 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/admin/companies" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 403 },
   },
+  "PATCH /api/admin/companies/[id]": {
+    // ★ cwi-inbox-r4：轉地點白名單 — 全公司 ADMIN 先改得（公司範圍 ADMIN 403）；ALL → 404 喺 company lookup（零改動）
+    fixture: () => ({ url: "/api/admin/companies/nope", method: "PATCH", body: JSON.stringify({ transferToCompanyIds: [] }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 404, ADMIN_COMPANY_B: 403 },
+  },
   "GET /api/admin/company-sync": {
     fixture: () => ({ url: "/api/admin/company-sync" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 403 },
@@ -707,6 +712,11 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/clinics?scope=schedule" }), // ?scope=schedule 必填（否則 400）
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
   },
+  "POST /api/contacts/[id]/identify": {
+    // ★ cwi-patient-identify：重新判定新客／舊客（唯讀動作）— contact 唔存在 → 404
+    fixture: () => ({ url: "/api/contacts/nope/identify", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404 },
+  },
   "PATCH /api/contacts/[id]": {
     // ★ S3-3：SUPERVISOR 覆唔到客（稱呼/語言/labels）→ 403；STAFF_F（本店）寫入權 OK → 400 validation（labels 型錯）
     fixture: () => ({ url: `/api/contacts/${F.contactLock}`, method: "PATCH", body: JSON.stringify({ labels: "notanarray" }) }),
@@ -768,6 +778,16 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
   "GET /api/conversations/[id]/note-read-receipts": {
     fixture: () => ({ url: "/api/conversations/nope/note-read-receipts" }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
+  },
+  "GET /api/conversations/[id]/location": {
+    // ★ cwi-inbox-r4：可轉選項（唯讀）— conv 唔存在 → 404（任何有登入角色）
+    fixture: () => ({ url: "/api/conversations/nope/location" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404 },
+  },
+  "POST /api/conversations/[id]/location": {
+    // ★ cwi-inbox-r3 Q5：轉地點 — SUPERVISOR 唯讀先擋（403）；其餘有效 body → 404 喺 conv lookup（零狀態改動）
+    fixture: () => ({ url: "/api/conversations/nope/location", method: "POST", body: JSON.stringify({ toClinicId: "t630nope0000000000000001" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 403 },
   },
   "POST /api/conversations/[id]/notes": {
     fixture: () => ({ url: "/api/conversations/nope/notes", method: "POST", body: JSON.stringify({ body: "t630" }) }), // 有效 body → 404 喺 conv lookup
