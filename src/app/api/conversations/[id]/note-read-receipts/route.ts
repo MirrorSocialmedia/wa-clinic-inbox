@@ -24,7 +24,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
 
   const conv = await prisma.conversation.findUnique({
     where: { id },
-    select: { id: true, clinicId: true, assigneeId: true },
+    select: { id: true, clinicId: true, assigneeId: true, handlingClinicId: true },
   });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   await assertConversationAccess(auth, conv); // STAFF 別店 → 403

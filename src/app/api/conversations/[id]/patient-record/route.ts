@@ -136,6 +136,9 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       salutation: contact.salutation,
       locale: contact.locale,
       canEdit: auth.staff.role !== "SUPERVISOR",
+      // ★ cwi-inbox-r3：ADMIN 專用「刪除病人資料」掣（同 POST /api/admin/contacts/[id]/delete 口徑：ADMIN + scope 內）
+      canDelete:
+        auth.staff.role === "ADMIN" && (auth.scopeType === "ALL" || auth.scopedClinicIds.includes(contact.clinicId)),
     },
     // ★ wa-meta-compliance-20261016（C.1）：病人要求真人 → AI 自動收聲中（staff 可「交返 AI」清旗）
     patientRequestedHuman: {

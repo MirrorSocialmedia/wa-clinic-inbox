@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, memo, useRef, useState, type RefObject } from "react";
+import { Fragment, forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, memo, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
   AlertTriangle,
@@ -20,12 +20,10 @@ import {
   RotateCw,
   Send,
   Sparkles,
-  StickyNote,
-  Users,
   XCircle,
 } from "lucide-react";
-import type { ClinicLite, ConversationItem, DraftInfo, DraftTrace, FollowupSuggestion, MessageItem, NoteReceipt, PatientChip, StaffInfo } from "./types";
-import { noteTickState } from "./types";
+import type { ClinicLite, ConversationItem, DraftInfo, DraftTrace, FollowupSuggestion, MessageItem, PatientChip, StaffInfo } from "./types";
+import { LocationCapsule, type LocationChange } from "./location-capsule";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
 // ★ cwi-followup-v3（MD §2.2）：跟進建議卡 — trigger 顯示名 + 原因行（只食結構化數據，零臨床全文）
@@ -133,9 +131,8 @@ interface Props {
   /** ★ cwi-final S6-9④：發附件（圖片/PDF）— FormData POST /api/messages/media；
    *  caption = composer 文字（可空）；423/422/413/415 處理同 onSend 一致 */
   onSendMedia?: (file: File, caption: string) => Promise<{ ok: boolean; error?: string; takenOverBy?: string | null }>;
-  /** ★ H1：發內部備註（lock 模式 composer 用；INTERNAL — 唔出 WhatsApp）
-   *  ★ H2：mentions = @ 咗嘅 staffId 陣列（後端會再校驗同店 active） */
-  onSendNote: (body: string, mentions?: string[]) => Promise<{ ok: boolean; error?: string }>;
+  /** ★ cwi-inbox-r3 Q3：打開右邊「內部備註」欄（手機 = 詳情層；桌面 = 右欄備註分頁）— 內部溝通唯一入口 */
+  onOpenNotes?: () => void;
   /** ★ H1：〔接手〕— POST assign {toStaffId: self}（lock 翻轉） */
   onTakeover: () => Promise<{ ok: boolean; error?: string }>;
   /** ★ H1：接手進行中（disable 掣） */
@@ -146,12 +143,14 @@ interface Props {
   onRelease?: () => Promise<{ ok: boolean; error?: string }>;
   /** cwi-multiclinic-20260903：放手進行中（disable 掣） */
   releaseBusy?: boolean;
-  /** ★ H1：店內 staff 列表（INTERNAL note 顯示發送者名 + ★ H2：@ 自動補全） */
+  /** ★ H1：店內 staff 列表 */
   staff: StaffInfo[];
-  /** ★ H2：已讀回執（選中對話嘅 receipts — tick 重算 + hover 已讀名單） */
-  readReceipts: NoteReceipt[];
-  /** ★ H2：note 進入 viewport → 冪等 POST /api/notes/[id]/read（client 去重，唔重複打） */
-  onNoteRead: (messageId: string) => void;
+  /** ★ cwi-inbox-r3 Q4：全公司 staff（發送人名 — 跨店同事唔再顯示「Staff」） */
+  allStaff?: StaffInfo[];
+  /** ★ cwi-inbox-r3 Q5/Q6：全部分店（頂部地點膠囊 + 轉地點對話框） */
+  allClinics?: ClinicLite[];
+  /** ★ cwi-inbox-r3 Q5：轉地點成功 → parent patch row + 重拉列表 */
+  onLocationChanged?: (c: LocationChange) => void;
   /** ★ booking-ui（D）：預約卡寫動作完成（代落單/確認/重發 Flow/撤銷）→ parent 重拉對話 + 側欄 */
   onBookingActionDone?: () => void;
   /** ★ P2（cwi-followup-p2）：header〔病人記錄〕— 手機開半屏抽屜 / 桌面切右側欄分頁（parent 依斷點分流） */
@@ -168,47 +167,23 @@ interface Props {
   suggestionBusy?: boolean;
 }
 
-// ── ★ H2：@mention helper（純函數 — autocomplete 偵測 + 內文反推 mentions + 高亮渲染） ──
+// ★ cwi-inbox-r3 Q3：@mention helper 已搬去 note-mentions.tsx（內部備註只喺右邊備註欄寫）
 
-/** 由 cursor 前嘅文字偵測 `@query`（行首或空白後；query 唔含空白/@）→ autocomplete 開關 + @ 插入點。 */
-export function detectMention(value: string, caret: number): { query: string; atPos: number } | null {
-  const before = value.slice(0, caret);
-  const m = before.match(/(^|\s)@([^\s@]*)$/);
-  if (!m) return null;
-  return { query: m[2], atPos: caret - m[2].length - 1 };
+/** ★ cwi-inbox-r3 Q4：發出訊息嘅發送者分組 key（連續同 key 只顯示一次標籤） */
+function outSenderKey(m: Pick<MessageItem, "aiAutoSent" | "sentByStaffId" | "channel">): string {
+  if (m.aiAutoSent === true) return "ai";
+  if (m.channel === "APP_ECHO") return "app";
+  return m.sentByStaffId ? `s:${m.sentByStaffId}` : "sys";
 }
 
-/** 由 note 內文反推 mentions（autocomplete 插入格式 `@Name`；長名先 match 避開前綴撞車）。
- *  手打 @Name（唔經 dropdown）都會計入 — 行為一致。 */
-export function mentionsFromBody(body: string, staff: StaffInfo[]): string[] {
-  if (!body) return [];
-  return staff
-    .filter((s) => s.name && body.includes(`@${s.name}`))
-    .map((s) => s.id);
-}
-
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|\]\\]/g, "\$&");
-}
-
-/** note 內文渲染：@Name 高亮（MD §5：note 內文渲染 @B 高亮） */
-function renderNoteBody(body: string, staff: StaffInfo[]) {
-  const names = staff.map((s) => s.name).filter(Boolean).sort((a, b) => b.length - a.length);
-  if (!body || names.length === 0) return body;
-  const re = new RegExp(`@(${names.map(escapeRe).join("|")})`, "g");
-  const parts = body.split(re);
-  if (parts.length === 1) return body;
-  return parts.map((part, i) =>
-    i % 2 === 1 ? (
-      <span key={i} className="text-ok-text font-semibold whitespace-pre-wrap">
-        @{part}
-      </span>
-    ) : (
-      <span key={i} className="whitespace-pre-wrap">
-        {part}
-      </span>
-    )
-  );
+/** ★ cwi-inbox-r3 Q4：發送者標籤 — 員工名 ／ AI 自動回覆 ／ 系統（範本、提醒等冇員工嘅自動發送） */
+function outSenderLabel(
+  m: Pick<MessageItem, "aiAutoSent" | "sentByStaffId" | "channel">,
+  staffNameById: Map<string, string>
+): { kind: "staff" | "ai" | "system"; text: string } {
+  if (m.aiAutoSent === true) return { kind: "ai", text: "AI 自動回覆" };
+  if (m.sentByStaffId) return { kind: "staff", text: staffNameById.get(m.sentByStaffId) ?? "同事" };
+  return { kind: "system", text: "系統" };
 }
 
 /** status tick（OUT API 訊息）— lucide 版 */
@@ -409,10 +384,7 @@ interface MessageBubbleProps {
   m: MessageItem;
   prev: MessageItem | null;
   gapBefore: boolean;
-  assigneeId: string | null;
-  staff: StaffInfo[];
   staffNameById: Map<string, string>;
-  readReceipts: NoteReceipt[];
   myStaffId: string;
   retryBusyId: string | null;
   retryMessage: (id: string) => Promise<{ ok: boolean; error?: string }>;
@@ -420,53 +392,6 @@ interface MessageBubbleProps {
   onRetryMessage?: (id: string) => Promise<{ ok: boolean; error?: string }>;
   openGolden: (id: string) => void;
   onInsertCorrection: (body: string) => void;
-  // H2 note 已讀回執 reporter（virtualization：每行自 observe；root = virtuoso scroller；50% 可見 → 冪等 POST）
-  scrollerElRef: RefObject<HTMLDivElement | null>;
-  noteReadSentRef: RefObject<Set<string>>;
-  onNoteReadRef: RefObject<(id: string) => void>;
-}
-
-/** H2：note 50% 入 viewport → 冪等 POST read（per-row 一個 observer；noteReadSentRef 去重） */
-function NoteReadReporter({
-  elRef,
-  id,
-  scrollerElRef,
-  noteReadSentRef,
-  onNoteReadRef,
-}: Pick<MessageBubbleProps, "scrollerElRef" | "noteReadSentRef" | "onNoteReadRef"> & {
-  elRef: RefObject<HTMLDivElement | null>;
-  id: string;
-}) {
-  useEffect(() => {
-    const el = elRef.current;
-    const root = scrollerElRef.current;
-    if (!el) return;
-    let done = false;
-    const fire = () => {
-      if (done || noteReadSentRef.current.has(id)) return;
-      done = true;
-      noteReadSentRef.current.add(id);
-      onNoteReadRef.current(id);
-    };
-    if (!root || typeof IntersectionObserver === "undefined") {
-      fire();
-      return;
-    }
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const en of entries) {
-          if (en.isIntersecting) {
-            fire();
-            io.disconnect();
-          }
-        }
-      },
-      { root, threshold: 0.5 }
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [id, elRef, scrollerElRef, noteReadSentRef, onNoteReadRef]);
-  return null;
 }
 
 const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
@@ -474,10 +399,7 @@ const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
     m,
     prev,
     gapBefore,
-    assigneeId,
-    staff,
     staffNameById,
-    readReceipts,
     myStaffId,
     retryBusyId,
     retryMessage,
@@ -485,75 +407,41 @@ const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
     onRetryMessage,
     openGolden,
     onInsertCorrection,
-    scrollerElRef,
-    noteReadSentRef,
-    onNoteReadRef,
   } = props;
-  const noteElRef = useRef<HTMLDivElement>(null);
 
           const isOut = m.direction === "OUT";
           const isEcho = m.channel === "APP_ECHO";
           const isHistory = m.channel === "HISTORY";
-          const isNote = m.channel === "INTERNAL"; // ★ H1：內部備註（黃底🔒，視覺上同病人訊息完全區隔）
           const isFlow = m.type === "interactive";
           const isAuto = isOut && m.aiAutoSent === true;
           const media = mediaSrc(m.mediaPath);
           // ★ T2：中間斷層分隔線插喺此 row 之前（gapBefore = parent 計好傳入）
-          // ★ H1：INTERNAL note — 黃底 + 🔒 + 發送者名（staff 對 staff；病人睇唔到）
-          if (isNote) {
-            // ★ H2：tick 語義（似 WhatsApp）— 藍 ✓✓ = 全部被 mention staff 已讀；無 mention → 現任 assignee 已讀
-            const tick = noteTickState(m, assigneeId, readReceipts);
-            const gotIds = new Set(tick.readBy.map((r) => r.staffId));
-            const readList = tick.readBy
-              .map((r) => `${staffNameById.get(r.staffId) ?? "Staff"} · ${relTime(r.readAt)}`)
-              .join("、");
-            const pendingList = tick.requiredStaff
-              .filter((s) => !gotIds.has(s))
-              .map((s) => staffNameById.get(s) ?? "Staff")
-              .join("、");
-            const tickTitle = tick.allRead
-              ? `已讀：${readList || "—"}`
-              : pendingList
-                ? `等待已讀：${pendingList}${readList ? `（已讀：${readList}）` : ""}`
-                : "等待已讀…";
-            return (
-              <Fragment key={m.id}>
-                {gapBefore && (
-                  <div key={`${m.id}::hole-divider`} role="separator" className="text-center text-[11px] text-t3 py-1">
-                    ⋯ 中間有訊息未載入，向上捲查看 ⋯
-                  </div>
-                )}
-                <div id={`msg-${m.id}`} data-note-id={m.id} ref={noteElRef} className="flex justify-end">
-                <div className="max-w-[70%] px-3.5 py-2.5 rounded-[20px] border border-warn bg-danger-soft text-t1">
-                  <div className="text-[10.5px] font-semibold text-warn-text mb-1 inline-flex items-center gap-1">
-                    🔒 內部備註 · 唔會發去 WhatsApp
-                  </div>
-                  {m.body && <div className="break-words text-[13px] leading-[1.6]">{renderNoteBody(m.body, staff)}</div>}
-                  <div className="flex items-center gap-1 mt-1.5 justify-end">
-                    {m.sentByStaffId && (
-                      <span className="text-[10px] text-t2">{staffNameById.get(m.sentByStaffId) ?? "Staff"} · </span>
-                    )}
-                    <span className="text-[10px] text-t3">{bubbleTime(m.waTimestamp, prev?.waTimestamp)}</span>
-                    {/* ★ H2：已讀 tick — 灰 ✓ = 已發出；綠 ✓✓ = 全部目標已讀（hover 彈已讀名單） */}
-                    <span title={tickTitle} className="inline-flex align-middle">
-                      {tick.allRead ? (
-                        <CheckCheck size={13} strokeWidth={2.75} className="text-brand-hover" />
-                      ) : (
-                        <Check size={13} strokeWidth={2.75} className="text-t3" />
-                      )}
-                    </span>
-                  </div>
-                </div>
-                <NoteReadReporter elRef={noteElRef} id={m.id} scrollerElRef={scrollerElRef} noteReadSentRef={noteReadSentRef} onNoteReadRef={onNoteReadRef} />
-                </div>
-              </Fragment>
-            );
-          }
+          // ★ cwi-inbox-r3 Q3：INTERNAL note 已喺 parent filter 走（只喺右邊備註欄顯示）
+          // ★ cwi-inbox-r3 Q4：發出訊息頂一行標明邊個發（員工名 / AI 自動回覆 / 系統）—
+          //   同一發送者連續幾條（15 分鐘內）只喺第一條顯示；手機 App（APP_ECHO）氣泡已有標籤唔重複。
+          const sender = isOut && !isHistory && !isEcho ? outSenderLabel(m, staffNameById) : null;
+          const showSender =
+            sender !== null &&
+            (!prev ||
+              prev.direction !== "OUT" ||
+              outSenderKey(prev) !== outSenderKey(m) ||
+              new Date(m.waTimestamp).getTime() - new Date(prev.waTimestamp).getTime() > 15 * 60_000);
           return (
             <Fragment key={m.id}>
               {gapBefore && (
                 <div key={`${m.id}::hole-divider`} role="separator" className="text-center text-[11px] text-t3 py-1">
                   ⋯ 中間有訊息未載入，向上捲查看 ⋯
+                </div>
+              )}
+              {showSender && sender && (
+                <div className="flex justify-end pr-1 -mb-1" data-testid="out-sender">
+                  <span
+                    className={`text-[10.5px] font-semibold ${
+                      sender.kind === "ai" ? "text-warn-text" : sender.kind === "system" ? "text-t3" : "text-brand-text"
+                    }`}
+                  >
+                    {sender.text}
+                  </span>
                 </div>
               )}
             <div id={`msg-${m.id}`} className={`group flex ${isOut ? "justify-end" : "justify-start"}`}>
@@ -666,7 +554,6 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   // ★ cwi-final S1-13（D-6）：堆疊入目前展示緊嘅卡（parent 已 clamp index）
   const shownDraft = p.pendingDrafts[p.draftIndex] ?? null;
   const [sending, setSending] = useState(false);
-  const [sendingNote, setSendingNote] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   // ★ cwi-final S6-9④：附件預覽條（圖片縮圖／PDF 名 + 大小 + ✕）— objectURL 生命周期：
   //   揀檔 create → 換檔/清走/換對話/unmount revoke（effect 跟 state 做 cleanup）
@@ -802,17 +689,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   const adoptedDraftRef = useRef<string | null>(null);
   // ★ cwi-followup-v3：composer 內文字係咪由跟進建議「採用並編輯」嚟 — 發送時帶 followupTaskId（claim SENT）
   const adoptedFollowupRef = useRef<string | null>(null);
-  // ★ H2：@ autocomplete（note composer）— {query, atPos} = 偵測到嘅 @ 後字串 + @ 字位置
-  const [mentionState, setMentionState] = useState<{ query: string; atPos: number } | null>(null);
-  const [mentionIdx, setMentionIdx] = useState(0);
   const taRef = useRef<HTMLTextAreaElement>(null);
-  // ★ H2：note auto-read 去重（per conversation；server 側本來就冪等，呢度只係慳 request）
-  const noteReadSentRef = useRef<Set<string>>(new Set());
-  // 穩定 callback ref（observer 唔好跟住每次 render 重綁 inline fn）
-  const onNoteReadRef = useRef(p.onNoteRead);
-  useEffect(() => {
-    onNoteReadRef.current = p.onNoteRead;
-  });
   // ★ cwi-final S6-9 ①：〔重試〕— POST /api/messages/[id]/retry（成功 → 氣泡轉 QUEUED，parent 回執更新 state）
   //   stable callback（ref 模式 — deps 零，MessageBubble memo 有效）
   const onRetryMessageRef = useRef(p.onRetryMessage);
@@ -835,19 +712,26 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
 
   // ★ cwi-final S1-1e（=S1-6）render 防呆：濾走「別對話」訊息（慢回應 race 殘留）—
   //   layer 1（async guard）之後嘅最後一道防線；同 conversation 之外嘅 row 唔 render。
-  const visible = useMemo(
+  const sameConv = useMemo(
     () => p.messages.filter((m) => m.conversationId === p.conversation?.id),
     [p.messages, p.conversation?.id]
   );
   useEffect(() => {
-    if (visible.length !== p.messages.length) {
+    if (sameConv.length !== p.messages.length) {
       // eslint-disable-next-line no-console -- v2 §3 race 留痕（N>0 = 捉到一次 foreign 殘留）
-      console.warn("[rt] foreign messages dropped", { kept: visible.length, total: p.messages.length });
+      console.warn("[rt] foreign messages dropped", { kept: sameConv.length, total: p.messages.length });
     }
-  }, [visible.length, p.messages.length]);
+  }, [sameConv.length, p.messages.length]);
+  // ★ cwi-inbox-r3 Q3：內部備註（channel=INTERNAL）唔再喺病人對話串出現 — 只喺右邊「內部備註」欄
+  //   （detail-pane）睇同寫，避免同病人訊息混埋 / 打錯位。已讀回條改由備註欄回報。
+  const visible = useMemo(() => sameConv.filter((m) => m.channel !== "INTERNAL"), [sameConv]);
 
   // ★ cwi-final S6-7：staffNameById memo（MessageBubble memo 依賴穩定 ref）— 必喺 early return 之前（條件 hook 會 break hook order）
-  const staffNameById = useMemo(() => new Map(p.staff.map((s) => [s.id, s.name])), [p.staff]);
+  // ★ cwi-inbox-r3 Q4：本店 + 全公司 staff（跨店同事發嘅訊息都顯示到名）
+  const staffNameById = useMemo(
+    () => new Map([...(p.allStaff ?? []), ...p.staff].map((s) => [s.id, s.name])),
+    [p.staff, p.allStaff]
+  );
 
   // ★ cwi-final S6-7：載舊（prepend）後補償錨點 — scrollTop += scrollHeight delta（react-window 口徑）。
   //   virtuoso 量不到 off-screen 行 → 只有 scrollHeight 可用；誤差 = 估計高 vs 實量（幾 px，可接受）。
@@ -889,14 +773,11 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   useEffect(() => {
     setDraft("");
     setSendError(null);
-    setMentionState(null);
-    setMentionIdx(0);
     setTemplateOptions(null);
     setIsAtBottom(true); // ★ cwi-final S6-7：換對話（= remount 前）貼最新
     autoFilledDraftRef.current = null;
     filledTextRef.current = null; // ★ cwi-final S1-13（D-6）：換對話 → 填入基準重置
     adoptedFollowupRef.current = null; // ★ cwi-followup-v3：換對話 → 建議採用旗清掉
-    noteReadSentRef.current = new Set();
   }, [p.conversation?.id]);
 
   useEffect(() => {
@@ -966,6 +847,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   const cv0 = p.conversation;
   const cv0Id = cv0?.id ?? null;
   const cv0ClinicId = cv0?.clinicId ?? null;
+  // ★ cwi-inbox-r3 Q5：轉咗地點 → 預約分店預設 = 跟進分店（優先過主診醫生最近店）
+  const cv0HandlingId = cv0?.handlingClinicId ?? null;
   const flowBarVisible =
     !!cv0 && !cv0.holdEvent && !cv0.pendingBooking && cv0.intent === "BOOKING_REQUEST" && cv0.window.open && p.slotClaimEnabled !== false;
   useEffect(() => {
@@ -1005,8 +888,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
       return;
     }
     const primary = flowClinics?.find((x) => x.code === flowPrimaryClinicCode) ?? null;
-    setFlowClinicId(primary?.id ?? cv0ClinicId);
-  }, [flowBarVisible, cv0ClinicId, flowClinics, flowPrimaryClinicCode]);
+    setFlowClinicId(cv0HandlingId ?? primary?.id ?? cv0ClinicId);
+  }, [flowBarVisible, cv0ClinicId, cv0HandlingId, flowClinics, flowPrimaryClinicCode]);
 
   if (!p.conversation) {
     // ★ cwi-final S1-3（N-3）：對話 row 補載中（深連結 / push / bell 指向唔喺列表嘅對話）— skeleton + 返回掣。
@@ -1070,28 +953,6 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
       ? -1
       : visible.findIndex((m) => new Date(m.createdAt).getTime() > (p.gapDividerAfterMs as number));
   // ★ H2：@ autocomplete candidates（query 前綴 match；長名先；cap 8 — 輕量計算，staff 陣列細，唔使 memo）
-  const mentionCandidates =
-    mentionState === null
-      ? []
-      : p.staff
-          .filter((s) => s.name && s.name.toLowerCase().startsWith(mentionState.query.toLowerCase()))
-          .sort((a, b) => b.name.length - a.name.length)
-          .slice(0, 8);
-
-  /** 揀中 candidate → 把 `@query` 換做 `@Name `（cursor 跟落去） */
-  function applyMention(name: string) {
-    const el = taRef.current;
-    if (!mentionState || !el) return;
-    const caret = el.selectionStart ?? draft.length;
-    const before = draft.slice(0, mentionState.atPos);
-    const after = draft.slice(caret);
-    const next = `${before}@${name} ${after}`;
-    setDraft(next);
-    setMentionState(null);
-    const pos = before.length + name.length + 2;
-    requestAnimationFrame(() => el.setSelectionRange(pos, pos));
-  }
-
   const windowChipCls =
     c.window.tone === "red"
       ? "bg-danger-soft text-danger-text"
@@ -1118,21 +979,6 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
     if (!r.ok) setFlowError(r.error ?? "發送失敗");
   }
 
-  async function sendNote() {
-    const body = draft.trim();
-    if (!body || sendingNote || !c) return;
-    // ★ H2：mentions 由內文 @Name token 反推（autocomplete 同手打行為一致）
-    const mentions = mentionsFromBody(body, p.staff);
-    setSendingNote(true);
-    setSendError(null);
-    const r = await p.onSendNote(body, mentions);
-    if (!r.ok) setSendError(r.error ?? "內部備註發送失敗");
-    else {
-      setDraft("");
-      setMentionState(null);
-    }
-    setSendingNote(false);
-  }
 
   // ── cwi-final S6-9④：附件（圖片/PDF）─────────────────────────────
   /** 前端先驗類型 + 大小（超過即提示、唔上載）— server 仍會 magic bytes 重驗（雙保險） */
@@ -1296,7 +1142,6 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             </div>
             {/* ★ cwi-ux UX-05：手機第 2 行 — 店碼 + 負責人（細字 truncate）；電話/chip 列/負責人列只 md: 以上 */}
             <div className="md:hidden text-[10px] text-t3 truncate">
-              {c.clinicCode ? `${c.clinicCode} · ` : ""}
               {assigneeName ? (
                 <span className={locked ? "text-warn-text" : undefined}>
                   負責人：{c.assigneeId === p.myStaffId ? "你" : assigneeName}
@@ -1335,6 +1180,15 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             )}
           </div>
         </button>
+        {/* ★ cwi-inbox-r3 Q6：頂部固定顯示地點（跟進分店 ?? 號碼店）；Q5：負責人 ∨ ADMIN 撳得轉地點 */}
+        <LocationCapsule
+          conv={c}
+          clinics={p.allClinics ?? []}
+          staff={p.allStaff ?? p.staff}
+          canTransfer={p.userRole !== "SUPERVISOR" && (p.userRole === "ADMIN" || c.assigneeId === p.myStaffId)}
+          variant="header"
+          onChanged={(x) => p.onLocationChanged?.(x)}
+        />
         {/* ★ P2（cwi-followup-p2 §3.1）：〔病人記錄〕入口 — 手機開半屏抽屜 / 桌面切右側欄分頁
             ★ cwi-ux UX-05：手機只剩 icon（字版 md: 以上）— 細屏唔好再搶名字欄位 */}
         <button
@@ -1529,10 +1383,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   m={m}
                   prev={visible[i - 1] ?? null}
                   gapBefore={i === gapDividerIdx}
-                  assigneeId={c.assigneeId}
-                  staff={p.staff}
                   staffNameById={staffNameById}
-                  readReceipts={p.readReceipts}
                   myStaffId={p.myStaffId}
                   retryBusyId={retryBusyId}
                   retryMessage={retryMessage}
@@ -1540,9 +1391,6 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   onRetryMessage={p.onRetryMessage}
                   openGolden={openGolden}
                   onInsertCorrection={onInsertCorrection}
-                  scrollerElRef={scrollerElRef}
-                  noteReadSentRef={noteReadSentRef}
-                  onNoteReadRef={onNoteReadRef}
                 />
               )}
             />
@@ -1852,116 +1700,38 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
         )}
 
         {locked ? (
-          /* ★ H1 Send Lock：amber 內部備註 composer — 發 WhatsApp 已停用，只可發 staff↔staff 備註
-             ★ H2：打 @ 彈同店 staff 自動補全（選中 → mentions；發去後端校驗） */
-          <div className="rounded-2xl border border-warn bg-warn-soft p-2.5">
-            {/* ★ cwi-inboxfix-20260905（MD §3 I-7）：兩行結構 — 接手掣（行 1 右）同發送掣（行 2）垂直相距 ≥16px；
-                行 2 發送掣 absolute -top-2（8px 凸出）→ 行距要 ≥ 16+8 → mb-7（28px）= 實測 edge gap 20px */}
-            <div className="flex items-center gap-2 mb-7">
-              <span className="text-xs font-medium text-warn-text inline-flex items-center gap-1">
-                <Lock size={12} strokeWidth={2.75} />
-                此對話由 {assigneeName ?? "其他同事"} 負責 — 你只可發內部備註
-              </span>
+          /* ★ cwi-inbox-r3 Q3：Send Lock — 輸入框唔再變內部備註框（避免打錯位）。
+             覆病人要先〔接手〕；同事之間溝通 → 右邊「內部備註」欄（紅框）。 */
+          <div className="rounded-2xl border border-warn bg-warn-soft px-3 py-2.5 flex flex-wrap items-center gap-2" data-testid="lock-bar">
+            <span className="text-xs font-medium text-warn-text inline-flex items-center gap-1 min-w-0">
+              <Lock size={12} strokeWidth={2.75} />
+              此對話由 {assigneeName ?? "其他同事"} 負責 — 接手後先可以覆病人
+            </span>
+            <div className="ml-auto flex items-center gap-2 shrink-0">
+              {p.onOpenNotes && (
+                <button
+                  onClick={() => p.onOpenNotes?.()}
+                  className="text-xs px-3 py-1 rounded-full border border-danger text-danger-text font-semibold hover:bg-danger-soft"
+                >
+                  內部備註
+                </button>
+              )}
               {!readOnly && (
                 <button
                   onClick={() => void p.onTakeover()}
                   disabled={p.takeoverBusy}
-                  className="ml-auto shrink-0 text-xs px-3 py-1 rounded-full bg-warn text-warn-text font-semibold hover:opacity-90 disabled:opacity-40 inline-flex items-center gap-1"
+                  className="text-xs px-3 py-1 rounded-full bg-warn text-warn-text font-semibold hover:opacity-90 disabled:opacity-40"
                 >
-                  <StickyNote size={12} strokeWidth={2.75} />
                   {p.takeoverBusy ? "接手咗…" : "接手"}
                 </button>
               )}
-            </div>
-            <div className="relative">
-              {/* ★ H2：@ 自動補全 dropdown（同店 active staff；↑↓ 揀 / Enter 選 / Esc 收） */}
-              {mentionState && mentionCandidates.length > 0 && (
-                <div className="absolute bottom-full left-0 mb-1 w-64 max-h-56 overflow-y-auto rounded-2xl border border-line bg-panel shadow-lg z-20 py-1">
-                  <div className="px-3 py-1 text-[10px] text-t3 inline-flex items-center gap-1">
-                    <Users size={10} strokeWidth={2.75} /> @ 通知同事（同店）
-                  </div>
-                  {mentionCandidates.map((s, i) => (
-                    <button
-                      key={s.id}
-                      onMouseDown={(e) => {
-                        e.preventDefault(); // 唔好 blur textarea
-                        applyMention(s.name);
-                      }}
-                      onMouseEnter={() => setMentionIdx(i)}
-                      className={`w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 ${
-                        i === mentionIdx ? "bg-brand-soft text-brand-text" : "text-t1 hover:bg-panel-2"
-                      }`}
-                    >
-                      <span className="w-5 h-5 rounded-full bg-panel-2 text-t2 flex items-center justify-center text-[10px] font-medium shrink-0">
-                        {s.name.charAt(0)}
-                      </span>
-                      <span className="truncate">{s.name}</span>
-                      {s.role === "ADMIN" && <span className="ml-auto text-[10px] text-t3">ADMIN</span>}
-                      {s.role === "SUPERVISOR" && <span className="ml-auto text-[10px] text-t3">主管</span>}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <textarea
-                ref={taRef}
-                value={draft}
-                onChange={(e) => {
-                  setDraft(e.target.value);
-                  setMentionState(detectMention(e.target.value, e.target.selectionStart ?? e.target.value.length));
-                  setMentionIdx(0);
-                }}
-                onKeyDown={(e) => {
-                  // ★ cwi-final S6-9（②）：IME 組字中（keyCode 229 = Safari 舊版）唔當發送
-                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-                  // ★ H2：dropdown 開住時 — 方向鍵/Enter/Tab 揀 candidate，唔係發送
-                  if (mentionState && mentionCandidates.length > 0) {
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      setMentionIdx((v) => (v + 1) % mentionCandidates.length);
-                      return;
-                    }
-                    if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setMentionIdx((v) => (v - 1 + mentionCandidates.length) % mentionCandidates.length);
-                      return;
-                    }
-                    if (e.key === "Enter" || e.key === "Tab") {
-                      e.preventDefault();
-                      applyMention(mentionCandidates[mentionIdx].name);
-                      return;
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setMentionState(null);
-                      return;
-                    }
-                  }
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    setMentionState(null);
-                    void sendNote();
-                  }
-                }}
-                rows={1}
-                placeholder="寫內部備註…"
-                data-testid="c5-composer-note"
-                className="w-full resize-none rounded-full bg-panel border border-warn px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-warn"
-              />
-              <button
-                onClick={() => void sendNote()}
-                disabled={sendingNote || !draft.trim()}
-                aria-label="發送內部備註"
-                className="absolute -top-2 -right-2 w-9 h-9 shrink-0 rounded-full bg-warn hover:opacity-90 text-warn-text flex items-center justify-center disabled:opacity-40"
-              >
-                <Send size={15} strokeWidth={2.75} />
-              </button>
             </div>
           </div>
         ) : c.window.open ? (
           readOnly ? (
             /* ★ cwi-routing-20260906 §8：SUPERVISOR 全店唯讀 — 無覆客 composer（API 層 403 雙保險） */
             <div className="rounded-2xl border border-line bg-panel-2 px-4 py-2.5 text-xs text-t3">
-              主管（唯讀）— 可以睇對話、發內部備註，但唔可以覆病人（由當值同事 / 負責人處理）
+              主管（唯讀）— 可以睇對話，唔可以覆病人（由當值同事 / 負責人處理）；同事溝通請用右邊「內部備註」
             </div>
           ) : (
           <div className="flex flex-col gap-1.5">

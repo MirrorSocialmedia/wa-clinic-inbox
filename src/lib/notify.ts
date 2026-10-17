@@ -144,16 +144,21 @@ export interface ConvRef {
   assigneeId: string | null;
   routedStaffId: string | null;
   routedGroupId: string | null;
+  /** ★ cwi-inbox-r3 Q5：跟進分店（轉地點）— undefined = caller 冇 select（publishConvEvent 自己查） */
+  handlingClinicId?: string | null;
 }
 
 /** Prisma Conversation（或任何帶齊五欄嘅 row）→ ConvRef（structural typing）。 */
-export function convRef(c: Pick<ConvRef, "id" | "clinicId" | "assigneeId" | "routedStaffId" | "routedGroupId">): ConvRef {
+export function convRef(
+  c: Pick<ConvRef, "id" | "clinicId" | "assigneeId" | "routedStaffId" | "routedGroupId"> & { handlingClinicId?: string | null }
+): ConvRef {
   return {
     id: c.id,
     clinicId: c.clinicId,
     assigneeId: c.assigneeId,
     routedStaffId: c.routedStaffId,
     routedGroupId: c.routedGroupId,
+    ...(c.handlingClinicId !== undefined ? { handlingClinicId: c.handlingClinicId } : {}),
   };
 }
 
@@ -257,14 +262,27 @@ export async function publishConvEvent(conv: ConvRef, event: string, payload: Re
     log.warn({ event, clinicId: conv.clinicId }, "publishConvEvent: 事件無註冊 schema（契約缺口 — 補 realtime-events.ts）");
   }
 
+  // ★ cwi-inbox-r3 Q5：轉咗地點 → 事件同時發去跟進分店 room；payload.clinicId 改報「地點」
+  //   （client 用佢做靜音／店名／列表 tab 判斷 — 地點先啱）。同一 eventId → 兩個 room 都喺嘅人 client 去重。
+  let handling = conv.handlingClinicId;
+  if (handling === undefined) {
+    handling = await prisma.conversation
+      .findUnique({ where: { id: conv.id }, select: { handlingClinicId: true } })
+      .then((r) => r?.handlingClinicId ?? null)
+      .catch(() => null);
+  }
+  const loc = handling ?? conv.clinicId;
+  if (loc !== conv.clinicId && "clinicId" in p) p.clinicId = loc;
+
   publishNotify(conv.clinicId, event, p);
-  for (const staffId of await crossClinicTargets(conv)) {
-    publishStaffNotify(staffId, conv.clinicId, event, p);
+  if (loc !== conv.clinicId) publishNotify(loc, event, p);
+  for (const staffId of await crossClinicTargets(conv, loc)) {
+    publishStaffNotify(staffId, loc, event, p);
   }
 }
 
 /** 跨店補推目標：assignee 有 → 只 assignee；assignee null → routedStaffId + 組員；再過濾「已覆蓋呢間店」嘅人。 */
-async function crossClinicTargets(conv: ConvRef): Promise<string[]> {
+async function crossClinicTargets(conv: ConvRef, loc: string = conv.clinicId): Promise<string[]> {
   const ids = new Set<string>();
   if (conv.assigneeId) {
     ids.add(conv.assigneeId);
@@ -277,7 +295,8 @@ async function crossClinicTargets(conv: ConvRef): Promise<string[]> {
   }
   const out: string[] = [];
   for (const id of ids) {
-    if (!(await staffCoversClinicCached(id, conv.clinicId))) out.push(id);
+    // ★ cwi-inbox-r3 Q5：號碼店 room 或者地點 room 任一覆蓋 = 已收到
+    if (!(await staffCoversClinicCached(id, conv.clinicId)) && (loc === conv.clinicId || !(await staffCoversClinicCached(id, loc)))) out.push(id);
   }
   return out;
 }

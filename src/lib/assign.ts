@@ -91,14 +91,15 @@ export interface AssignResult {
  */
 export function assertCanAssign(
   ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">,
-  conv: { clinicId: string; assigneeId: string | null },
+  conv: { clinicId: string; assigneeId: string | null; handlingClinicId?: string | null },
   toStaffId: string | null
 ): void {
   const set = scopedClinicSet(ctx);
   // ALL scope ADMIN（set=null 且非 SUPERVISOR）→ 任何動作（現行 ADMIN 行為）
   if (ctx.staff.role === "ADMIN" && set === null) return;
   // SUPERVISOR：set=null 但無 scope 概念 → 當空集合（只可透過單線授權：現任 assignee）
-  const inMyClinic = set ? set.includes(conv.clinicId) : false;
+  // ★ cwi-inbox-r3 Q5：號碼店 ∨ 跟進分店（轉咗地點 → 新分店同事接手得）
+  const inMyClinic = set ? set.includes(conv.clinicId) || (!!conv.handlingClinicId && set.includes(conv.handlingClinicId)) : false;
   // §0 access：店集合 ∨ 單線授權（我係現任 assignee）
   const hasLineAccess = inMyClinic || conv.assigneeId === ctx.staff.id;
 

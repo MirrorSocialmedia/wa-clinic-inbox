@@ -14,7 +14,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { requireAuth, assertBookingAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { effectiveBookingClinicId } from "@/lib/booking/effective-clinic";
 import { handle } from "@/lib/api-error";
 import { publishConvEvent, convRef } from "@/lib/notify";
@@ -30,7 +30,7 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   const booking = await prisma.bookingRequest.findUnique({ where: { id } });
   if (!booking) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(ctx, booking.clinicId); // STAFF 別店 → 403
+  await assertBookingAccess(ctx, booking); // STAFF 別店 → 403（★ cwi-inbox-r3 Q5：轉地點後跟進分店照撳得）
   assertCanWriteConversation(ctx); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
   if (booking.status !== "CONFIRMED" || !booking.apricotApptId) {

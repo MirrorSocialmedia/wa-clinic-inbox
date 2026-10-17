@@ -26,7 +26,7 @@ export const GET = handle(async (req: NextRequest) => {
     // ★ cwi-hub-a-20260914（Part A）：時間表店列表跟 scope — scoped ADMIN（COMPANY/CLINICS）只得範圍內店；
     //   STAFF / SUPERVISOR 保持全店列表（cwi-sched T-B 跨店時間表讀 + SCHEDULE_VIEW audit）
     where: set ? { id: { in: set } } : undefined,
-    select: { id: true, code: true, name: true },
+    select: { id: true, code: true, name: true, companyId: true }, // ★ cwi-inbox-r3 Q5：轉地點只列同公司
     orderBy: { code: "asc" },
   });
   return NextResponse.json({ ok: true, scope, clinics });

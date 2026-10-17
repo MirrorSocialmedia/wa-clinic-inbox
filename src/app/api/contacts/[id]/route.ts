@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertClinicAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { requireAuth, assertContactAccess, assertCanWriteConversation } from "@/lib/rbac";
 import { handle, toResponse } from "@/lib/api-error";
 
 /**
@@ -27,7 +27,7 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
   const { id } = await ctx.params;
   const contact = await prisma.contact.findUnique({ where: { id } });
   if (!contact) return NextResponse.json({ error: "not found" }, { status: 404 });
-  assertClinicAccess(auth, contact.clinicId);
+  await assertContactAccess(auth, contact); // ★ cwi-inbox-r3 Q5：轉地點後跟進分店都改得
   // ★ cwi-final S2-8（= S3-3 同一項）：SUPERVISOR 覆唔到客 — 稱呼/語言/labels 一律 403
   assertCanWriteConversation(auth);
 

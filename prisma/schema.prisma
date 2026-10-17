@@ -493,6 +493,10 @@ model Conversation {
   //   C2 起 consult 路徑改寫 ConsultSession 同名欄（session 建立時由呢度複製 — 橋接搬遷；
   //   Conversation 欄保留：C1 e2e + 非 consult 路徑仍用）。
   lastOutboundText String?
+  // ★ cwi-inbox-r3 Q5（2026-10-17）：跟進分店（轉地點）— null = 由 clinicId（病人 WhatsApp 嗰間店）跟進。
+  //   有值 = 列表／權限／通知／預約預設跟呢間店；WhatsApp 收發照用 clinicId 嘅號碼（號碼改唔到）。
+  //   只由 POST /api/conversations/[id]/location 寫（同公司分店；轉返原店 = 清返 null）。
+  handlingClinicId String?
   // ★ cwi-final S1-12：通用更新時間戳 — S1-2 delta 改 `updatedAt >= after`，
   //   令狀態／指派／分類改動都入 delta（@default(now()) 必有 — 否則現有行 migration 失敗）。
   updatedAt        DateTime   @default(now()) @updatedAt @db.Timestamptz
@@ -504,6 +508,7 @@ model Conversation {
   @@index([clinicId, updatedAt])              // ★ cwi-final S1-12：S1-2 delta 用
   @@index([routedGroupId, assigneeId])        // 「派俾我」膠囊 + 升級 sweep 輔助
   @@index([routedStaffId])
+  @@index([handlingClinicId, status, lastMessageAt]) // ★ cwi-inbox-r3 Q5：跟進分店列表
 }
 
 model Message {

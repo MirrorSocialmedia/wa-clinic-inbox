@@ -17,6 +17,8 @@ export interface ClinicLite {
   id: string;
   code: string;
   name: string;
+  /** ★ cwi-inbox-r3 Q5：轉地點只列同公司分店 */
+  companyId?: string | null;
 }
 
 export interface ContactInfo {
@@ -71,6 +73,12 @@ export interface ConversationItem {
   /** cwi-multiclinic-20260903（MD A.3/A.6.4）：跨店線店名 badge（全 row 都有值；前端決定顯唔顯示） */
   clinicName?: string | null;
   clinicCode?: string | null;
+  /** ★ cwi-inbox-r3 Q5/Q6：跟進分店（轉地點；null = 號碼店跟進） */
+  handlingClinicId?: string | null;
+  /** ★ cwi-inbox-r3 Q5/Q6：地點 = 跟進分店 ?? 號碼店（列表膠囊 / 對話頂部） */
+  locationClinicId?: string;
+  locationCode?: string | null;
+  locationName?: string | null;
   contactId: string;
   status: ConvStatus;
   assigneeId: string | null;
@@ -339,6 +347,12 @@ export interface ConvUpdatedEvent {
   /** ★ Realtime P0 (R5)：新 version（PATCH assigneeId 變動 → +1） */
   assignVersion?: number;
   unreadCount?: number;
+  /** ★ cwi-inbox-r3 Q5：轉地點（locationChanged=true 時有值） */
+  handlingClinicId?: string | null;
+  locationClinicId?: string;
+  locationCode?: string;
+  locationName?: string;
+  locationChanged?: boolean;
 }
 
 /** ★ cwi-final S2-4：跟進建議狀態變動（server emitter = followup engine / opt-out / send route claim） */
@@ -653,6 +667,8 @@ export interface PatientRecordData {
     /** ★ cwi-followup-v3 B-9：zh（default）| en — 決定 *_en template */
     locale: string | null;
     canEdit: boolean;
+    /** ★ cwi-inbox-r3：ADMIN（scope 內）先有「刪除病人資料」掣 */
+    canDelete?: boolean;
   };
   // ★ wa-meta-compliance-20261016（C.1）：病人要求真人 → AI 自動收聲中
   patientRequestedHuman?: {

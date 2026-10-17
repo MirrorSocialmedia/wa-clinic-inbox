@@ -17,6 +17,7 @@ import { Prisma, type Clinic, type Contact, type Conversation, type Message } fr
 import { INBOUND_CONCURRENCY } from "./concurrency";
 // ★ cwi-followup-p3-20260916：follow-up inbound hook（opt-out 偵測 + 回覆標記）
 import { detectOptOutIntent, detectOptInIntent, applyFollowupOptOut, applyFollowupOptIn } from "@/lib/followup/opt-out";
+import { sendOptOutAck } from "@/lib/followup/opt-out-ack";
 import { markFollowupReplied } from "@/lib/followup/engine";
 
 /** 冪等寫入用嘅 DB client（top-level prisma 或 $transaction 嘅 tx — 同一套 model API）。 */
@@ -595,7 +596,9 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
         const contactId = convRow?.contactId ?? null;
         if (contactId) {
           if (detectOptOutIntent(result.msg.body)) {
-            await applyFollowupOptOut({ contactId, source: "auto", now: waTs });
+            const r = await applyFollowupOptOut({ contactId, source: "auto", now: waTs });
+            // ★ cwi-inbox-r3：新退訂 → 回一句固定確認（唔經 AI；重複講 STOP 唔再回）
+            if (r.changed) await sendOptOutAck(result.msg.conversationId);
           } else if (detectOptInIntent(result.msg.body)) {
             // 只喺已 opt-out 嘅 contact 先有效果（applyFollowupOptIn 內部 gate）— 誤觸面 = 0
             await applyFollowupOptIn({ contactId, msgId: result.msg.id, now: waTs });

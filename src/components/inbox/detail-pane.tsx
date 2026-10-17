@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarClock, CheckCheck, ChevronLeft, ChevronRight, Lock, Sparkles, Tag, X } from "lucide-react";
 import type { ClinicLite, ConversationItem, ConvStatus, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
 import { relTime } from "./time";
 import { MiniSchedule } from "./mini-schedule";
 import { ConsultStatusCard } from "./consult-status-card";
 import { PatientRecordPanel } from "./patient-record-panel";
+import { NoteComposer, renderNoteBody } from "./note-mentions";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -37,6 +38,10 @@ interface Props {
   /** ★ P2（cwi-followup-p2 §3.4）：側欄分頁（備註／病人記錄／AI）— 桌面＋mobile sheet 共用 */
   tab?: "notes" | "patient" | "ai";
   onTabChange?: (t: "notes" | "patient" | "ai") => void;
+  /** ★ cwi-inbox-r3 Q3：備註顯示喺備註欄（唔再喺對話串）→ 由呢度回報已讀（冪等 POST） */
+  onNoteRead?: (messageId: string) => void;
+  /** ★ cwi-inbox-r3 Q3：@ 通知跳轉 → 備註欄展開 + 閃該條 */
+  highlightNoteId?: string | null;
 }
 
 const STATUS_SEG: { key: ConvStatus; label: string }[] = [
@@ -81,6 +86,8 @@ export function DetailPane({
   onBookingUiChanged,
   ctxRefreshKey = 0,
   notesRefreshKey = 0,
+  onNoteRead,
+  highlightNoteId = null,
   tab = "notes",
   onTabChange = () => {},
 }: Props) {
@@ -103,7 +110,6 @@ export function DetailPane({
   const [notes, setNotes] = useState<{ id: string; body: string; sentByStaffId: string | null; waTimestamp: string | null }[]>([]);
   const [notesLoading, setNotesLoading] = useState(false);
   const [notesExpanded, setNotesExpanded] = useState(false);
-  const [noteDraft, setNoteDraft] = useState("");
   const [noteBusy, setNoteBusy] = useState(false);
   const [noteReceipts, setNoteReceipts] = useState<{ messageId: string; staffId: string; readAt: string }[]>([]);
   // 聯絡人卡：標籤圖標按鈕展開狀態（§4 壓一格）
@@ -146,7 +152,6 @@ export function DetailPane({
   useEffect(() => {
     setNotes([]);
     setNotesExpanded(false);
-    setNoteDraft("");
     setNoteReceipts([]);
     setShowLabelEditor(false);
     if (!conversation?.id) return;
@@ -158,28 +163,71 @@ export function DetailPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notesRefreshKey]);
 
-  async function addNote() {
+  // ★ cwi-inbox-r3 Q3：備註只喺呢度寫（NoteComposer — @ 自動補全 + mentions）
+  async function addNote(body: string, mentions: string[]): Promise<boolean> {
     const conv = conversation;
-    if (!conv || noteBusy || !noteDraft.trim()) return;
+    if (!conv || noteBusy || !body) return false;
     setNoteBusy(true);
     try {
       const res = await fetch(`/api/conversations/${conv.id}/notes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body: noteDraft.trim() }),
+        body: JSON.stringify(mentions.length > 0 ? { body, mentions } : { body }),
       });
       if (!res.ok) {
         const j = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(j?.error ?? `HTTP ${res.status}`);
       }
-      setNoteDraft("");
       await loadNotes(conv.id);
+      return true;
     } catch {
-      /* fail-soft：保留 draft 俾用戶重試 */
+      return false; // fail-soft：保留 draft 俾用戶重試
     } finally {
       setNoteBusy(false);
     }
   }
+
+  // ★ cwi-inbox-r3 Q3：員工名（本店 + 全公司 — 跨店同事唔再顯示「Staff」）
+  const nameStaff = useMemo(() => {
+    const m = new Map<string, StaffInfo>();
+    for (const x of allStaff) m.set(x.id, x);
+    for (const x of staff) m.set(x.id, x);
+    return [...m.values()];
+  }, [staff, allStaff]);
+  const nameOf = (id: string | null) => (id ? nameStaff.find((x) => x.id === id)?.name : null) ?? "系統";
+  // ★ cwi-inbox-r3 Q5：@ 候選 = 號碼店 + 跟進分店同事（server 同口徑校驗）；冇全公司名單 → 本店 staff
+  const mentionStaff = useMemo(() => {
+    const ids = [conversation?.clinicId, conversation?.handlingClinicId].filter((x): x is string => !!x);
+    const fromAll = allStaff.filter((x) => x.clinicId !== null && ids.includes(x.clinicId));
+    return fromAll.length > 0 ? fromAll : staff;
+  }, [allStaff, staff, conversation?.clinicId, conversation?.handlingClinicId]);
+
+  // ★ cwi-inbox-r3 Q3：@ 跳轉 → 展開 + 捲去該條
+  useEffect(() => {
+    if (!highlightNoteId) return;
+    const i = notes.findIndex((n) => n.id === highlightNoteId);
+    if (i < 0) return;
+    if (i >= 5) setNotesExpanded(true);
+    requestAnimationFrame(() => document.getElementById(`note-${highlightNoteId}`)?.scrollIntoView({ block: "center", behavior: "smooth" }));
+  }, [highlightNoteId, notes]);
+
+  // ★ cwi-inbox-r3 Q3：已讀回條 — 備註欄真係見到（桌面 lg+ 備註分頁 / 手機詳情層打開）先回報；
+  //   每條每次載入對話只報一次（server upsert 冪等）。
+  const noteReadSentRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    noteReadSentRef.current = new Set();
+  }, [conversation?.id]);
+  useEffect(() => {
+    if (!onNoteRead || notes.length === 0) return;
+    const desktopVisible = typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches && tab === "notes";
+    if (!desktopVisible && !mobileOpen) return;
+    const shown = notesExpanded ? notes : notes.slice(0, 5);
+    for (const n of shown) {
+      if (n.sentByStaffId === myStaffId || noteReadSentRef.current.has(n.id)) continue;
+      noteReadSentRef.current.add(n.id);
+      onNoteRead(n.id);
+    }
+  }, [notes, notesExpanded, tab, mobileOpen, onNoteRead, myStaffId]);
 
   // 故意只對 conversation?.id 敏感（conversation object identity 每次列表更新都變 — 入 deps 會過度重拉）
   // ctxRefreshKey = socket booking:changed / 寫入後 parent 重拉訊號
@@ -496,9 +544,10 @@ export function DetailPane({
       <ConsultStatusCard conversationId={c.id} refreshKey={(ctxRefreshKey ?? 0) + (notesRefreshKey ?? 0)} />
 
       {/* ★ cwi-h6 §4：內部備註卡（staff-only，唔入 AI；5 條 + 展開全部 + 已讀 receipt；realtime = note:new → parent 重拉） */}
-      <div className="bg-panel-2 rounded-[16px] p-3">
+      {/* ★ cwi-inbox-r3 Q3：內部溝通唯一入口 — 紅框同病人對話明顯區隔 */}
+      <div className="bg-panel-2 rounded-[16px] p-3 border-2 border-danger" data-testid="notes-card">
         <div className="flex items-center justify-between gap-2">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 inline-flex items-center gap-1.5">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-danger-text inline-flex items-center gap-1.5">
             <Lock size={11} strokeWidth={2.75} /> 內部備註
           </div>
           <div className="text-[10px] text-t3">staff 獨見 · 唔入 AI</div>
@@ -509,9 +558,13 @@ export function DetailPane({
           {(notesExpanded ? notes : notes.slice(0, 5)).map((n) => {
             const readCount = noteReceipts.filter((r) => r.messageId === n.id).length;
             return (
-              <div key={n.id} className="rounded-[12px] bg-panel border border-line px-2.5 py-1.5">
+              <div
+                key={n.id}
+                id={`note-${n.id}`}
+                className={`rounded-[12px] bg-panel border px-2.5 py-1.5 ${n.id === highlightNoteId ? "border-danger ring-2 ring-danger/30" : "border-line"}`}
+              >
                 <div className="flex items-center gap-1.5 text-[10px] text-t3">
-                  <span className="text-t2 font-medium">{staff.find((s) => s.id === n.sentByStaffId)?.name ?? "Staff"}</span>
+                  <span className="text-t2 font-medium">{nameOf(n.sentByStaffId)}</span>
                   <span>{relTime(n.waTimestamp)}</span>
                   {readCount > 0 && (
                     <span className="text-brand inline-flex items-center gap-0.5">
@@ -519,7 +572,7 @@ export function DetailPane({
                     </span>
                   )}
                 </div>
-                <div className="mt-0.5 text-xs text-t1 whitespace-pre-wrap break-words">{n.body}</div>
+                <div className="mt-0.5 text-xs text-t1 whitespace-pre-wrap break-words">{renderNoteBody(n.body, nameStaff)}</div>
               </div>
             );
           })}
@@ -529,25 +582,7 @@ export function DetailPane({
             {notesExpanded ? "收起" : `展開全部（${notes.length}）`}
           </button>
         )}
-        <div className="mt-2 flex items-center gap-1.5">
-          <input
-            value={noteDraft}
-            onChange={(e) => setNoteDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && noteDraft.trim()) void addNote();
-            }}
-            placeholder="加備註…"
-            aria-label="新增內部備註"
-            className="flex-1 min-w-0 text-xs rounded-full bg-panel border border-line px-3 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand"
-          />
-          <button
-            onClick={() => void addNote()}
-            disabled={noteBusy || !noteDraft.trim()}
-            className="shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-50"
-          >
-            加
-          </button>
-        </div>
+        <NoteComposer staff={mentionStaff} busy={noteBusy} onSend={addNote} />
       </div>
 
       {/* ★ booking-ui（A）：病人 context — 獨立卡 + 18px 內卡（Organic） */}

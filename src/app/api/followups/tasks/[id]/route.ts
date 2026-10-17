@@ -41,7 +41,7 @@ export const POST = handle(async (req, { params }) => {
   if (task.conversationId) {
     const conv = await prisma.conversation.findUnique({
       where: { id: task.conversationId },
-      select: { clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true },
+      select: { clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true, handlingClinicId: true },
     });
     if (!conv) return NextResponse.json({ error: "conversation missing" }, { status: 404 });
     await assertConversationAccess(ctx, conv);

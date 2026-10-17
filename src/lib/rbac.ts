@@ -437,12 +437,27 @@ export function invalidateGroupCache(staffId?: string): void {
  */
 export async function assertConversationAccess(
   ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">,
-  conv: { clinicId: string; assigneeId: string | null; routedStaffId?: string | null; routedGroupId?: string | null }
+  conv: {
+    id?: string;
+    clinicId: string;
+    assigneeId: string | null;
+    routedStaffId?: string | null;
+    routedGroupId?: string | null;
+    /** ★ cwi-inbox-r3 Q5：跟進分店（轉地點）— undefined = caller 冇 select（有 id 就自己查） */
+    handlingClinicId?: string | null;
+  }
 ): Promise<void> {
   // ★ cwi-hub-a-20260914：ALL scope / SUPERVISOR 全店放行（現行 ADMIN/SUPERVISOR 行為）；
   //   其餘（COMPANY / CLINICS，任何角色）= 店集合 ∨ 單線授權（assignee / routed）。
   const set = scopedClinicSet(ctx);
   if (set === null || set.includes(conv.clinicId)) return;
+  // ★ cwi-inbox-r3 Q5：轉咗地點 → 跟進分店嘅同事都開得到（原店 = 號碼店照開得 — 上面已放行）
+  let handling = conv.handlingClinicId;
+  if (handling === undefined && conv.id) {
+    handling =
+      (await prisma.conversation.findUnique({ where: { id: conv.id }, select: { handlingClinicId: true } }))?.handlingClinicId ?? null;
+  }
+  if (handling && set.includes(handling)) return;
   if (conv.assigneeId === ctx.staff.id) return; // 單線授權（指派）
   // ★ cwi-auditfix-20260908（B-1）：路由單線授權
   if (conv.routedStaffId && conv.routedStaffId === ctx.staff.id) return;
@@ -459,7 +474,59 @@ export function conversationScope(ctx: Pick<AuthContext, "staff" | "scopeType" |
   const set = scopedClinicSet(ctx);
   if (set === null) return {}; // ALL / SUPERVISOR → 全店
   if (ctx.staff.role === "STAFF" && set.length === 0) throw new RbacError(401, "staff session missing clinics");
-  return { OR: [{ clinicId: { in: set } }, { assigneeId: ctx.staff.id }] };
+  // ★ cwi-inbox-r3 Q5：地點 = 跟進分店 ?? 號碼店（轉咗地點 → 跟新分店列表）
+  return { OR: [{ ...locationIn(set) }, { assigneeId: ctx.staff.id }] };
+}
+
+/**
+ * ★ cwi-inbox-r3 Q5：對話「地點」過濾 — 地點 = handlingClinicId ?? clinicId（轉地點後跟新分店）。
+ * 一律用 AND 包住再組合（OR 唔好 spread — 會互相覆蓋）。
+ */
+export function locationIn(ids: string | string[]): { OR: Array<Record<string, unknown>> } {
+  const v = typeof ids === "string" ? ids : { in: ids };
+  return { OR: [{ handlingClinicId: v }, { handlingClinicId: null, clinicId: v }] };
+}
+
+/**
+ * ★ cwi-inbox-r3 Q5：預約卡（BookingRequest）訪問 — 店集合 ∨ 對話跟進分店喺 scope 內（轉咗地點嘅對話，
+ * 跟進分店同事都要撳得預約卡；booking.clinicId 係建立時嘅號碼店）。
+ */
+export async function assertBookingAccess(
+  ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">,
+  booking: { clinicId: string; conversationId: string }
+): Promise<void> {
+  const set = scopedClinicSet(ctx);
+  if (set === null || set.includes(booking.clinicId)) return;
+  // 只認「轉咗地點」：對話跟進分店喺 scope 內（跨店負責人 ≠ 店級 entity 權限 — S3-3 口徑）
+  const conv = await prisma.conversation.findUnique({
+    where: { id: booking.conversationId },
+    select: { handlingClinicId: true },
+  });
+  if (!conv?.handlingClinicId || !set.includes(conv.handlingClinicId)) {
+    throw new RbacError(403, "cross-clinic access denied");
+  }
+}
+
+/**
+ * ★ cwi-inbox-r3 Q5：聯絡人（Contact）訪問 — 店集合 ∨ 佢有條對話轉咗去 scope 內分店
+ * （轉咗地點：跟進分店同事改稱呼／labels／停止跟進都要得；跨店負責人唔計 — S3-3 口徑）。
+ */
+export async function assertContactAccess(
+  ctx: Pick<AuthContext, "staff" | "scopeType" | "scopedClinicIds">,
+  contact: { id: string; clinicId: string }
+): Promise<void> {
+  const set = scopedClinicSet(ctx);
+  if (set === null || set.includes(contact.clinicId)) return;
+  const conv = await prisma.conversation.findFirst({
+    where: { contactId: contact.id, handlingClinicId: { in: set } },
+    select: { id: true },
+  });
+  if (!conv) throw new RbacError(403, "cross-clinic access denied");
+}
+
+/** ★ cwi-inbox-r3 Q5：對話地點（跟進分店 ?? 號碼店） */
+export function locationOf(conv: { clinicId: string; handlingClinicId?: string | null }): string {
+  return conv.handlingClinicId ?? conv.clinicId;
 }
 
 /** 單店訪問檢查（clinic 級 entity：booking / contact / flow hold 等）。

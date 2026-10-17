@@ -189,6 +189,41 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
     }
   }, [conversationId, handBackBusy]);
 
+  // ★ cwi-inbox-r3：ADMIN 專用「刪除病人資料」（POST /api/admin/contacts/[id]/delete — 不可還原）
+  // 兩步：撳掣 → 頁內確認框（打「刪除」+ 可選原因）→ 執行；成功後返 /inbox 重載（對話已一併刪除）
+  const [delOpen, setDelOpen] = useState(false);
+  const [delConfirm, setDelConfirm] = useState("");
+  const [delReason, setDelReason] = useState("");
+  const [delBusy, setDelBusy] = useState(false);
+  const [delError, setDelError] = useState<string | null>(null);
+  const deletePatient = useCallback(async () => {
+    const c = data?.contact;
+    if (!c?.canDelete || delBusy || delConfirm.trim() !== "刪除") return;
+    setDelBusy(true);
+    setDelError(null);
+    try {
+      const res = await fetch(`/api/admin/contacts/${c.id}/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(delReason.trim() ? { reason: delReason.trim().slice(0, 300) } : {}),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(j?.error ?? `HTTP ${res.status}`);
+      }
+      window.location.assign("/inbox");
+    } catch (e) {
+      setDelError(`刪除失敗${e instanceof Error && e.message ? `（${e.message}）` : ""}`);
+      setDelBusy(false);
+    }
+  }, [data, delBusy, delConfirm, delReason]);
+  useEffect(() => {
+    setDelOpen(false);
+    setDelConfirm("");
+    setDelReason("");
+    setDelError(null);
+  }, [conversationId]);
+
   // ★ cwi-followup-v3 B-9：存稱呼 + locale（PATCH /api/contacts/:id — staff+）
   const saveSalutation = useCallback(
     async (salutation: string | null, locale: string | null) => {
@@ -552,6 +587,69 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
             ) : null}
           </div>
         </>
+      ) : null}
+
+      {/* ★ cwi-inbox-r3：ADMIN 專用 — 刪除病人資料（病人要求刪除 → 核實身份後執行；不可還原） */}
+      {data?.contact?.canDelete ? (
+        <div className="shrink-0 mx-2.5 my-2 rounded-lg border border-danger/40 px-2 py-1.5 text-[11px]" data-e2e="admin-delete-patient">
+          {!delOpen ? (
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-t3">病人要求刪除資料（ADMIN）</span>
+              <button
+                type="button"
+                onClick={() => setDelOpen(true)}
+                className="px-2 py-0.5 rounded-md border border-danger-text/30 bg-danger-soft text-danger-text text-[11px]"
+              >
+                刪除病人資料
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <div className="text-danger-text font-semibold">
+                永久刪除 {data.contact.profileName || "呢個病人"} 嘅所有對話、訊息、媒體、預約暫存同同意記錄 — 不可還原
+              </div>
+              <div className="text-t3">（資料庫備份 ≤30 日內仍可能保留，到期後徹底消失；Apricot 病歷唔受影響）</div>
+              <input
+                value={delReason}
+                maxLength={300}
+                onChange={(e) => setDelReason(e.target.value)}
+                placeholder="原因（可選）例：病人 WhatsApp 要求，已核實身份"
+                className="w-full rounded-md border border-line bg-panel px-2 py-1 text-[11px] text-t1"
+              />
+              <input
+                value={delConfirm}
+                onChange={(e) => setDelConfirm(e.target.value)}
+                placeholder="打「刪除」確認"
+                aria-label="打刪除確認"
+                className="w-full rounded-md border border-danger/40 bg-panel px-2 py-1 text-[11px] text-t1"
+              />
+              {delError ? <div className="text-danger-text">{delError}</div> : null}
+              <div className="flex justify-end gap-1.5">
+                <button
+                  type="button"
+                  disabled={delBusy}
+                  onClick={() => {
+                    setDelOpen(false);
+                    setDelConfirm("");
+                    setDelError(null);
+                  }}
+                  className="px-2 py-0.5 rounded-md border border-line text-t2 text-[11px]"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={delBusy || delConfirm.trim() !== "刪除"}
+                  onClick={() => void deletePatient()}
+                  className="px-2 py-0.5 rounded-md bg-danger text-white text-[11px] font-semibold disabled:opacity-40"
+                  data-e2e="admin-delete-confirm"
+                >
+                  {delBusy ? "刪除緊…" : "確認永久刪除"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       ) : null}
     </div>
   );

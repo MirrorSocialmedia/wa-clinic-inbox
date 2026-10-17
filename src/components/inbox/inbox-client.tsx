@@ -60,6 +60,7 @@ import { ConversationList } from "./conversation-list";
 import { ChatPane, type ChatPaneHandle } from "./chat-pane";
 import { DetailPane } from "./detail-pane";
 import { PatientDrawer } from "./patient-drawer";
+import type { LocationChange } from "./location-capsule";
 // cwi-setnav NAV-01/02：手機系統返回鍵圖層堆疊（conv / detail / patient）
 import { backLayerReplaceUrl, isMobileViewport, pushBackLayer, useBackLayer } from "@/lib/back-stack";
 
@@ -283,6 +284,36 @@ export function InboxClient({
   // ★ P2（cwi-followup-p2）：病人記錄 — 手機半屏抽屜（§3.2）＋ 桌面右側欄分頁（§3.4）
   const [patientDrawerOpen, setPatientDrawerOpen] = useState(false);
   const [detailTab, setDetailTab] = useState<"notes" | "patient" | "ai">("notes");
+  // ★ cwi-inbox-r3 Q3：內部備註只喺右邊備註欄 — 「內部備註」掣 / @ 通知跳轉都開呢度
+  const [highlightNoteId, setHighlightNoteId] = useState<string | null>(null);
+  // ★ cwi-inbox-r3 Q5：socket handler（effect 早過 scheduleListRefresh 定義）經 ref 叫
+  const scheduleListRefreshRef = useRef<() => void>(() => {});
+  // ★ cwi-inbox-r3 Q5：轉地點成功（本機）→ patch row + 重拉列表（可能唔再喺目前 tab）
+  const onLocationChanged = useCallback((x: LocationChange) => {
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === x.conversationId
+          ? {
+              ...c,
+              handlingClinicId: x.handlingClinicId,
+              locationClinicId: x.locationClinicId,
+              locationCode: x.locationCode,
+              locationName: x.locationName,
+              assigneeId: x.assigneeId,
+              assignVersion: x.assignVersion,
+              assigneeName: x.assigneeId
+                ? allStaffRef.current.find((s) => s.id === x.assigneeId)?.name ?? staffRef.current.find((s) => s.id === x.assigneeId)?.name ?? null
+                : null,
+            }
+          : c
+      )
+    );
+    scheduleListRefreshRef.current();
+  }, []);
+  const openNotes = useCallback(() => {
+    setDetailTab("notes");
+    if (!window.matchMedia("(min-width: 1024px)").matches) setDetailOpen(true);
+  }, []);
   useEffect(() => {
     setDetailOpen(false);
   }, [selectedConvId]);
@@ -431,7 +462,7 @@ export function InboxClient({
   activeClinicRef.current = activeClinicId;
 
   // ── ★ H2：已讀回執（tick 語義）+ mention 通知（bell badge / 黃點 / Notification） ──
-  const [receipts, setReceipts] = useState<NoteReceipt[]>([]); // 選中對話嘅回執（socket note:read 增量更新）
+  const [, setReceipts] = useState<NoteReceipt[]>([]); // 選中對話嘅回執（socket note:read 增量更新）
   const [mentionUnread, setMentionUnread] = useState<Record<string, number>>({}); // conversationId → 未讀 mention 數
   const lastMentionRef = useRef<{ conversationId: string; messageId: string } | null>(null);
   const mentionUnreadRef = useRef<Record<string, number>>({});
@@ -800,12 +831,23 @@ export function InboxClient({
                   : {}),
                 ...(typeof e.assignVersion === "number" ? { assignVersion: e.assignVersion } : {}),
                 ...(typeof e.unreadCount === "number" ? { unreadCount: e.unreadCount } : {}),
+                // ★ cwi-inbox-r3 Q5：轉地點 — patch 地點欄
+                ...(e.locationChanged
+                  ? {
+                      handlingClinicId: e.handlingClinicId ?? null,
+                      locationClinicId: e.locationClinicId,
+                      locationCode: e.locationCode ?? null,
+                      locationName: e.locationName ?? null,
+                    }
+                  : {}),
                 // RESOLVED 自動清急症紅標（同 API PATCH 語義一致）
                 urgent: e.status === "RESOLVED" ? false : c.urgent,
               }
             : c
         )
       );
+      // ★ cwi-inbox-r3 Q5：轉地點 → 列表成員變（新分店要見到 / 舊分店要消失）→ 重拉
+      if (e.locationChanged) scheduleListRefreshRef.current();
     });
 
     // ── ★ cwi-ux UX-01：一鍵已讀跨裝置同步（staff:{staffId} room 定向；其他裝置 badge 同步變 0）──
@@ -1598,6 +1640,7 @@ export function InboxClient({
       void fetchConversations(activeClinicRef.current);
     }, 1200);
   }, [fetchConversations]);
+  scheduleListRefreshRef.current = scheduleListRefresh;
   useEffect(
     () => () => {
       if (listRefreshTimerRef.current) clearTimeout(listRefreshTimerRef.current);
@@ -2055,6 +2098,8 @@ export function InboxClient({
   // ── ★ H2：跳到被 mention 嘅 note 位置（bell / browser Notification 撳） ──────
   // ★ cwi-final S6-7：virtualized thread — 目標 row 未必掛 DOM（數據緊攞 / off-viewport）：
   //   先試 ChatPane API（scrollToIndex + flash）；未中 → 每 300ms 重試至多 6 次；再未中 fallback 舊 DOM 路徑。
+  const openNotesRef = useRef(openNotes);
+  openNotesRef.current = openNotes;
   const jumpToMention = useCallback(
     async (convId: string, msgId: string) => {
       if (selectedIdRef.current !== convId) {
@@ -2062,20 +2107,11 @@ export function InboxClient({
         //   — 舊式只補兩個 fetch 唔清 messages（merge 語義 → 上一病人嘅行會留喺畫面）
         selectConvRef.current(convId);
       }
-      const tryApi = (n: number): boolean => {
-        const ok = chatPaneApiRef.current?.scrollToMessage(msgId) ?? false;
-        if (ok) return true;
-        if (n <= 0) return false;
-        window.setTimeout(() => void tryApi(n - 1), 300);
-        return true; // 已排 async 重試
-      };
+      // ★ cwi-inbox-r3 Q3：備註唔再喺對話串 → 打開右邊備註欄 + 閃該條（換對話會關詳情層 → 延遲開）
       window.setTimeout(() => {
-        if (tryApi(6)) return;
-        const el = document.getElementById(`msg-${msgId}`);
-        if (!el) return;
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        el.classList.add("msg-flash");
-        window.setTimeout(() => el.classList.remove("msg-flash"), 1600);
+        openNotesRef.current();
+        setHighlightNoteId(msgId);
+        window.setTimeout(() => setHighlightNoteId((cur) => (cur === msgId ? null : cur)), 3000);
       }, 450);
     },
     [] // ★ cwi-audit2-20260908 T1：只經 selectConvRef / chatPaneApiRef（ref 恆定）→ 唔需要 reactive deps
@@ -2725,58 +2761,6 @@ export function InboxClient({
   // ── Phase 3：發 Booking Flow（📅 掣） ─────────────────────
   const [flowBusy, setFlowBusy] = useState(false);
 
-  // ── ★ H1：內部備註（lock 模式 composer）──────────────────────
-  const sendNote = useCallback(
-    async (body: string, mentions?: string[]): Promise<{ ok: boolean; error?: string }> => {
-      const convId = selectedIdRef.current;
-      if (!convId) return { ok: false, error: "未選擇對話" };
-      try {
-        const res = await fetch(`/api/conversations/${convId}/notes`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ body, mentions: mentions ?? [] }),
-        });
-        const data = (await res.json().catch(() => null)) as {
-          ok?: boolean;
-          messageId?: string;
-          error?: string;
-        } | null;
-        if (!res.ok) {
-          return { ok: false, error: data?.error ?? `內部備註發送失敗（${res.status}）` };
-        }
-        // 樂觀更新：INTERNAL 氣泡（黃底🔒；mentions 即刻入氣泡 — tick 由 receipts 重算）
-        const optimistic: MessageItem = {
-          id: data?.messageId ?? `optimistic-note-${Date.now()}`,
-          conversationId: convId,
-          waMessageId: null,
-          direction: "OUT",
-          channel: "INTERNAL",
-          type: "note",
-          body,
-          mediaPath: null,
-          status: "SENT",
-          errorCode: null,
-          sentByStaffId: user.staffId,
-          mentions: mentions ?? [],
-          waTimestamp: new Date().toISOString(),
-          createdAt: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, optimistic]);
-        setConversations((prev) =>
-          prev.map((c) =>
-            c.id === convId
-              ? { ...c, lastMessageAt: optimistic.waTimestamp, preview: "🔒 內部備註" }
-              : c
-          )
-        );
-        return { ok: true };
-      } catch {
-        return { ok: false, error: "網絡錯誤" };
-      }
-    },
-    [user.staffId]
-  );
-
   // ── ★ H1：轉交 / 接手 / 放返隊列（POST assign）──────────────────────
   const [takeoverBusy, setTakeoverBusy] = useState(false);
   const [assignBusy, setAssignBusy] = useState(false);
@@ -3021,7 +3005,7 @@ export function InboxClient({
     const src = statusFilter === "RESOLVED" ? resolvedRows : conversations;
     if (user.role === "STAFF") return src; // 已 scoped（fetch 已帶 clinic scope）
     if (activeClinicId === "all") return src;
-    return src.filter((c) => c.clinicId === activeClinicId);
+    return src.filter((c) => (c.handlingClinicId ?? c.clinicId) === activeClinicId); // ★ cwi-inbox-r3 Q5：地點
   }, [statusFilter, resolvedRows, conversations, activeClinicId, user.role]);
 
   const selectedConv = useMemo(
@@ -3062,6 +3046,9 @@ export function InboxClient({
         scopeClinicIds={scopeClinicIds}
         myClinicIds={user.clinicIds}
         clinicById={clinicById}
+        allClinics={allClinics}
+        allStaff={allStaff}
+        onLocationChanged={onLocationChanged}
         mentionUnread={mentionUnread}
         mentionTotal={mentionTotal}
         onBellClick={() => void onBellClick()}
@@ -3166,14 +3153,15 @@ export function InboxClient({
         flowBusy={flowBusy}
         slotClaimEnabled={slotClaimEnabled}
         myStaffId={user.staffId}
-        onSendNote={sendNote}
+        onOpenNotes={openNotes}
+        allStaff={allStaff}
+        allClinics={allClinics}
+        onLocationChanged={onLocationChanged}
         onTakeover={takeover}
         takeoverBusy={takeoverBusy}
         onRelease={release}
         releaseBusy={assignBusy}
         staff={staff}
-        readReceipts={receipts}
-        onNoteRead={markNoteRead}
         onBookingActionDone={() => {
           void fetchConversations(activeClinicRef.current);
           setCtxRefreshKey((k) => k + 1);
@@ -3209,6 +3197,8 @@ export function InboxClient({
         notesRefreshKey={notesRefreshKey}
         tab={detailTab}
         onTabChange={setDetailTab}
+        onNoteRead={markNoteRead}
+        highlightNoteId={highlightNoteId}
       />
 
       {/* ★ P2（cwi-followup-p2 §3.2）：手機半屏抽屜（50vh→90vh；桌面唔渲染 — 走右側欄分頁） */}

@@ -769,6 +769,11 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/conversations/nope/note-read-receipts" }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
   },
+  "POST /api/conversations/[id]/location": {
+    // ★ cwi-inbox-r3 Q5：轉地點 — SUPERVISOR 唯讀先擋（403）；其餘有效 body → 404 喺 conv lookup（零狀態改動）
+    fixture: () => ({ url: "/api/conversations/nope/location", method: "POST", body: JSON.stringify({ toClinicId: "t630nope0000000000000001" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 403 },
+  },
   "POST /api/conversations/[id]/notes": {
     fixture: () => ({ url: "/api/conversations/nope/notes", method: "POST", body: JSON.stringify({ body: "t630" }) }), // 有效 body → 404 喺 conv lookup
     expect: { UNAUTH: 401, STAFF_TY: 404 },

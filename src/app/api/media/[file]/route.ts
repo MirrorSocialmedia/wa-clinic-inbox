@@ -60,7 +60,7 @@ export const GET = handle(
     }
     const conv = await prisma.conversation.findUnique({
       where: { id: msg.conversationId },
-      select: { clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true }, // ★ cwi-auditfix-20260908（B-1）：路由單線授權支路
+      select: { clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true, handlingClinicId: true }, // ★ cwi-auditfix-20260908（B-1）：路由單線授權支路；cwi-inbox-r3 Q5：跟進分店
     });
     if (!conv) {
       return NextResponse.json({ error: "not found" }, { status: 404 });

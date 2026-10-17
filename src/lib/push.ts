@@ -216,11 +216,15 @@ export function pushEvent(e: { kind: "message" | "urgent"; clinicId: string; con
   if (!ensureVapid()) return;
   void (async () => {
     try {
-      const [conv, clinicRow] = await Promise.all([
-        prisma.conversation.findUnique({ where: { id: e.conversationId }, select: { assigneeId: true } }),
-        prisma.clinic.findUnique({ where: { id: e.clinicId }, select: { code: true, companyId: true } }),
-      ]);
-      if (!conv || !clinicRow?.code) return;
+      // ★ cwi-inbox-r3 Q5：轉咗地點 → 收件人／靜音／店名跟「地點」（跟進分店 ?? 號碼店）
+      const conv = await prisma.conversation.findUnique({
+        where: { id: e.conversationId },
+        select: { assigneeId: true, handlingClinicId: true },
+      });
+      if (!conv) return;
+      if (conv.handlingClinicId) e = { ...e, clinicId: conv.handlingClinicId };
+      const clinicRow = await prisma.clinic.findUnique({ where: { id: e.clinicId }, select: { code: true, companyId: true } });
+      if (!clinicRow?.code) return;
 
       const payload: PushPayload = { kind: e.kind, clinicShort: clinicRow.code, conversationId: e.conversationId };
 
