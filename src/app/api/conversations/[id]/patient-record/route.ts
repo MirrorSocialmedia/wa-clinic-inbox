@@ -74,7 +74,12 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       const r = await refreshPatient(resolved.patientApricotId, auth.staff.id);
       refresh = { state: "ok", syncedAt: r.syncedAt };
     } catch (e) {
-      if (e instanceof WorkforceApiError && e.status === 429) {
+      if (e instanceof WorkforceApiError && e.status === 404) {
+        // ★ cwi-flow-quick：workforce 404 = Apricot 冇「已到診」記錄可索引（只有未到診預約／walk-in 冇預約）—
+        //   唔係斷線，唔好報「Apricot 未接通」；refresh=null → UI 顯示「尚未同步到病人記錄」，其餘照拉
+        refresh = null;
+        log.info({ conversationId: conv.id, clinic: clinic.code }, "patient-record: refresh 404（Apricot 未有到診記錄）");
+      } else if (e instanceof WorkforceApiError && e.status === 429) {
         refresh = { state: "rate_limited", retryAfterSec: e.retryAfterSec ?? 60 };
       } else if (e instanceof WorkforceApiError && (e.status >= 500 || e.status === 0)) {
         // ★ cwi-flow-quick：workforce 500（刷新途中 Apricot call 出錯）都當刷新失敗 — 唔好成個病人卡 500，
