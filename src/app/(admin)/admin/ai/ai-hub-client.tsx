@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import FollowupHubTab from "./followup-hub-tab";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * ★ cwi-hub-b-20260914（Part B B.2/B.3/B.5）：AI 流程 hub client。
@@ -590,7 +591,7 @@ export default function AiHub({ role }: { role: string }) {
               ))}
             </div>
           ))}
-          {!summary && !loadErr && <div className="px-5 py-6 text-[12.5px] text-t3">載入中…</div>}
+          {!summary && !loadErr && <WLoading />}
         </div>
       </section>
       </>

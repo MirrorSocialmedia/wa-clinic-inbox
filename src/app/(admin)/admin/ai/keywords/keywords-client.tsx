@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { LEXICON_DEFAULTS } from "@/lib/workflow/definitions";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * ★ cwi-hub-b-20260914（Part B B.4）：關鍵詞中心 client。
@@ -342,7 +343,7 @@ export default function KeywordsClient({ role }: { role: string }) {
           </table>
         </div>
         {loadErr && <div className="px-4 py-3 text-[12px] text-danger-text">載入失敗：{loadErr}</div>}
-        {loading && <div className="px-4 py-2 text-[11.5px] text-t3">載入中…</div>}
+        {loading && <WLoading />}
       </div>
 
       {/* ── cwi-setfix KW-1：新增口語詞彈層 ── */}
@@ -469,7 +470,7 @@ export default function KeywordsClient({ role }: { role: string }) {
                   impact.affected.extraTriggerClinics.length === 0 && <span className="text-t3">無其他層引用 — 改動只影響口語表本身。</span>}
               </div>
             ) : (
-              <p className="text-[12px] text-t3 mb-3">影響分析載入中…（載唔到都可以先存，但建議等佢出）</p>
+              <p className="text-[12px] text-t3 mb-3"><WLoading size="inline" label="影響分析載入中…（載唔到都可以先存，但建議等佢出）" /></p>
             )}
 
             {msg && <p className="text-[12px] text-ok-text font-semibold mb-3">{msg}</p>}

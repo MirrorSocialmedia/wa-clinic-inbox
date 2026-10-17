@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Lock } from "lucide-react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * hub 第二 tab「主動跟進」（MD §5.4 — cwi-followup-p4 S6 → ★ cwi-followup-v3-20260916）。
@@ -76,7 +77,7 @@ export default function FollowupHubTab() {
     return <div className="bg-danger-soft text-danger-text text-[13px] rounded-xl p-3" data-e2e="fhub-err">{loadErr}</div>;
   }
   if (!data) {
-    return <div className="text-[13px] text-t3 py-8 text-center">載入中…</div>;
+    return <WLoading />;
   }
 
   const bad = data.health.filter((h) => !h.ok);

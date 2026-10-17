@@ -18,7 +18,7 @@
  *   STAFF 自己範圍）— 本組件 GET-only + §4.6 opt-out toggle（PATCH；SUPERVISOR canEdit=false 唔渲染）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Loader2, Pill } from "lucide-react";
+import { ChevronDown, ChevronUp, Pill } from "lucide-react";
 import type { NoteText, PatientRecordData, PatientRecordVisit } from "./types";
 import {
   REFRESH_COOLDOWN_MS,
@@ -32,6 +32,7 @@ import {
   type RefreshPhase,
   type Tone,
 } from "@/lib/patient-record-state";
+import { WLoading } from "@/components/ui/w-loader";
 
 type TabKey = "visits" | "meds" | "bills" | "appts";
 
@@ -341,7 +342,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
 
       {loading && !data ? (
         <div className="flex-1 flex items-center justify-center text-t3" data-e2e="p2-loading">
-          <Loader2 size={18} className="animate-spin" />
+          <WLoading label="載入緊病人記錄…" />
         </div>
       ) : null}
 
@@ -702,7 +703,7 @@ function VisitCard({
         <div className="mt-2 border-t border-line pt-2" data-e2e="p2-note">
           {noteLoading ? (
             <div className="flex items-center gap-1.5 text-[11px] text-t3 py-1">
-              <Loader2 size={12} className="animate-spin" /> 載入臨床記錄…
+              <WLoading size="inline" label="載入臨床記錄…" />
             </div>
           ) : null}
           {noteError ? <div className="text-[11px] text-danger-text" data-e2e="p2-note-error">{noteError}</div> : null}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * 員工 CRUD client — 列表 + 建立/編輯 + password reset + 停用 + 刪除。
@@ -241,7 +242,7 @@ export default function StaffAdmin() {
       </div>
 
       {loading ? (
-        <p className="text-sm text-t2">載入中…</p>
+        <WLoading />
       ) : (
         <table className="w-full text-sm bg-panel rounded-[22px] border border-line overflow-hidden">
           <thead className="bg-panel-2 text-left text-t2">

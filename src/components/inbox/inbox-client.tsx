@@ -188,6 +188,8 @@ export function InboxClient({
   //   fail-soft：拉唔到 → 選單降級只本店 / badge 唔顯（唔阻 inbox）。
   const [allStaff, setAllStaff] = useState<StaffInfo[]>([]);
   const [allClinics, setAllClinics] = useState<ClinicLite[]>([]);
+  // ★ cwi-inbox-r4：對話串首頁載完未（換對話 → null；首頁 apply／fetch 失敗 → convId）— 未載完唔顯示「冇訊息」
+  const [threadLoadedFor, setThreadLoadedFor] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -1656,6 +1658,7 @@ export function InboxClient({
   const applyLatestPage = useCallback(
     (convId: string, data: { messages: MessageItem[]; hasMore: boolean }): number => {
       if (selectedIdRef.current !== convId) return 0; // fetch 期間已換咗對話 → 舊結果棄
+      setThreadLoadedFor(convId);
       // ★ cwi-realtime-v2 §3：回傳新增行數
       const prevIds = new Set(messagesRef.current.map((m) => m.id));
       const addedCount = data.messages.filter((m) => !prevIds.has(m.id)).length;
@@ -1683,11 +1686,14 @@ export function InboxClient({
   const fetchMessagesLatest = useCallback(async (convId: string): Promise<number> => {
     try {
       const res = await fetch(`/api/conversations/${convId}/messages?limit=${PAGE_SIZE}`);
-      if (!res.ok) return 0;
+      if (!res.ok) {
+        if (selectedIdRef.current === convId) setThreadLoadedFor(convId); // 失敗都收 loader（唔好卡住）
+        return 0;
+      }
       const data = (await res.json()) as { messages: MessageItem[]; hasMore: boolean };
       return applyLatestPage(convId, data);
     } catch {
-      /* ignore */
+      if (selectedIdRef.current === convId) setThreadLoadedFor(convId);
     }
     return 0;
   }, [applyLatestPage]);
@@ -2289,6 +2295,7 @@ export function InboxClient({
       // cwi-setnav NAV-02：換對話 → replaceState（唔疊多層 — 返回一下就返列表；桌面同步 ?conv= URL）
       backLayerReplaceUrl("conv", `/inbox?conv=${encodeURIComponent(convId)}`);
       setMessages([]); // F-8：換對話先清（fetchMessagesLatest 已改 merge — 唔清會混兩對話）
+      setThreadLoadedFor(null);
       setHasMore(false); // ★ cwi-final S6-7：hasMore 單調口徑下換對話必須重置（否則上一對話嘅 true 漏入新對話）
       setGapDividerAfterMs(null); // T2：換對話清中間斷層分隔線
       holeFilledRef.current.clear(); // T3：換對話清補洞標記
@@ -2328,6 +2335,7 @@ export function InboxClient({
       );
       selectedIdRef.current = selectedConvId;
       setMessages([]);
+      setThreadLoadedFor(null);
       setGapDividerAfterMs(null); // T2：補載入 = 重頭載 → 清中間斷層分隔線
       holeFilledRef.current.clear(); // T3：補載入 = 重頭載 → 清補洞標記（防重載後洞唔補）
       void fetchMessagesLatest(selectedConvId);
@@ -3114,6 +3122,7 @@ export function InboxClient({
         hasMore={hasMore}
         gapDividerAfterMs={gapDividerAfterMs}
         loadingOlder={loadingOlder}
+        threadLoading={!!selectedConvId && threadLoadedFor !== selectedConvId}
         onScrollTop={() => void loadOlder()}
         window={selectedConv?.window ?? null}
         onSend={sendMessage}

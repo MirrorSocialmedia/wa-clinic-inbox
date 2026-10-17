@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * 學習迴路 review queue client（Phase E — cwi-ai-20260825-t5）。
@@ -271,7 +272,7 @@ export default function SuggestionsAdmin() {
         週一 05:00 自動 mining（上週數據）。批准 = 生效（FAQ 入 greetingConfig / WORKFLOW_DIFF 出 DRAFT）；拒絕 = 純標記。
       </p>
       {error ? <p className="text-sm text-danger-text mb-3">{error}</p> : null}
-      {!rows ? <p className="text-sm text-t3">載入中…</p> : null}
+      {!rows ? <WLoading /> : null}
       {rows && rows.length === 0 ? <p className="text-sm text-t3">暫時冇新建議</p> : null}
       {rows && rows.length > 0 ? (
         <>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * /admin/usage client — cwi-window-20260901（P4 / W-4）
@@ -80,7 +81,7 @@ export default function UsageClient() {
   }, [data]);
 
   if (err) return <div className="p-4 text-sm text-danger">載入失敗：{err}</div>;
-  if (!data) return <div className="p-4 text-sm text-t2">載入中…</div>;
+  if (!data) return <WLoading />;
 
 
   const hasCompanies = (data.companies ?? []).length > 0;

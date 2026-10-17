@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * ★ Part F（cwi-raggolden-20260904，F.2）知識庫管理 client（ADMIN-only）。
@@ -294,7 +295,7 @@ export default function KnowledgeAdmin() {
         )}
       </div>
 
-      {loading && <div className="text-sm text-t2">載入中…</div>}
+      {loading && <WLoading />}
 
       {/* 列表按 kind 分組 */}
       {KIND_ORDER.map((k) => {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * 技能組管理 client — ★ cwi-routing-20260906（MD §4.1）。
@@ -95,7 +96,7 @@ export default function SkillGroupsAdmin() {
   if (!data) {
     return (
       <div className="rounded-[24px] bg-panel border border-line p-6">
-        {error ? <div className="text-sm text-danger-text">{error}</div> : <div className="text-sm text-t3">載入中…</div>}
+        {error ? <div className="text-sm text-danger-text">{error}</div> : <WLoading />}
       </div>
     );
   }

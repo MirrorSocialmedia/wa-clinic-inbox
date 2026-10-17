@@ -18,6 +18,7 @@ import type { FlowSlotsResult } from "@/lib/flow-slots";
 import type { ConversationItem } from "./types";
 import { WindowExits } from "./window-exits";
 import { hhmmToMin, hkNowMin } from "./time";
+import { WLoading } from "@/components/ui/w-loader";
 
 const REFRESH_MS = 15 * 60 * 1000;
 const MAX_ROWS = 10;
@@ -198,7 +199,7 @@ export function MiniSchedule({ conversation: conv, myStaffId, clinicCode, onFlow
         </div>
       )}
       {!loadErr && !data && (
-        <div className="text-[10.5px] text-t3 rounded-lg border border-line bg-panel-2 p-2">載入中…</div>
+        <div className="text-[10.5px] text-t3 rounded-lg border border-line bg-panel-2 p-2"><WLoading size="inline" label="載入緊可約時段…" /></div>
       )}
 
       {grid && grid.rows.length > 0 && (

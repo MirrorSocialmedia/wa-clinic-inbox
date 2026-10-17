@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Plus, Save, Trash2 } from "lucide-react";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * 術語對照表 client — cwi-followup-p4-20260916 S6（MD §5.3）。
@@ -131,7 +132,7 @@ export default function ClinicalTerms({ canEdit = true }: { canEdit?: boolean })
       </div>
 
       {loading ? (
-        <div className="text-[13px] text-t3 py-8 text-center">載入中…</div>
+        <WLoading />
       ) : loadErr ? (
         <div className="bg-danger-soft text-danger-text text-[13px] rounded-xl p-3" data-e2e="ct-err">載入失敗：{loadErr}</div>
       ) : (

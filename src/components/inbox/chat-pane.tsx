@@ -15,7 +15,6 @@ import {
   Lock,
   MessageCircle,
   MoreHorizontal,
-  Loader2,
   Paperclip,
   RotateCw,
   Send,
@@ -24,6 +23,7 @@ import {
 } from "lucide-react";
 import type { ClinicLite, ConversationItem, DraftInfo, DraftTrace, FollowupSuggestion, MessageItem, PatientChip, StaffInfo } from "./types";
 import { LocationCapsule, type LocationChange } from "./location-capsule";
+import { WLoading, WLoadingGate, WMark } from "@/components/ui/w-loader";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
 // ★ cwi-followup-v3（MD §2.2）：跟進建議卡 — trigger 顯示名 + 原因行（只食結構化數據，零臨床全文）
@@ -93,6 +93,8 @@ interface Props {
    * 喺第一條 createdAt > 邊界嘅 row（最舊已載入訊息）之上 render 分隔線；null = 無 */
   gapDividerAfterMs?: number | null;
   loadingOlder: boolean;
+  /** ★ cwi-inbox-r4：對話串首頁未載完（未載完唔顯示「冇訊息」— 顯示 W 載入） */
+  threadLoading?: boolean;
   onScrollTop: () => void;
   window: { open: boolean; remainingMs: number; tone: string } | null;
   onSend: (body: string, source?: "adopted" | "typed", /** ★ cwi-followup-v3：窗口內 free-form 採用 — 帶跟進建議 task id（server fail-soft claim SUGGESTED→SENT） */ followupTaskId?: string, /** ★ cwi-final S1-13（D-6）：員工實際採用嘅草稿 id（切換過就係切換後嗰個） */ aiDraftId?: string) => Promise<{ ok: boolean; error?: string; templates?: { name: string; language: string }[]; /** cwi-multiclinic-20260903：423 打字保護 — 帶新負責人 id（draft 保留由 composer 行為保證） */ takenOverBy?: string | null; /** ★ cwi-final S0-6：409 FOLLOWUP_NOT_SENDABLE 失效原因 */ notSendableReason?: string }>;
@@ -901,13 +903,10 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             <button onClick={p.onBack} aria-label="返回列表" className="md:hidden p-1 -ml-1 text-brand-text">
               <ChevronLeft size={20} />
             </button>
-            <div className="h-5 w-40 rounded bg-panel-2 animate-pulse" />
           </div>
-          <div className="flex-1 space-y-4 p-4 overflow-hidden">
-            <div className="h-10 w-1/2 self-start rounded-xl bg-panel-2 animate-pulse" />
-            <div className="h-10 w-3/5 self-end rounded-xl bg-panel-2 animate-pulse" />
-            <div className="h-5 w-1/3 self-start rounded bg-panel-2 animate-pulse" />
-            <div className="h-10 w-2/3 self-start rounded-xl bg-panel-2 animate-pulse" />
+          {/* ★ cwi-inbox-r4：灰色骨架 → W 一筆畫 */}
+          <div className="flex-1 flex items-center justify-center p-4 overflow-hidden">
+            <WLoading label="載入緊對話…" />
           </div>
         </section>
       );
@@ -1327,7 +1326,9 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
         }}
       >
         {visible.length === 0 && !p.loadingOlder ? (
-          <div className="text-center text-t3 text-sm py-8">（呢個對話仲冇訊息）</div>
+          <WLoadingGate loading={!!p.threadLoading} label="載入緊對話…" className="py-10" testId="thread-loading">
+            <div className="text-center text-t3 text-sm py-8">（呢個對話仲冇訊息）</div>
+          </WLoadingGate>
         ) : (
           <>
             {p.loadingOlder && (
@@ -1858,7 +1859,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 className="w-10 h-10 max-md:w-12 max-md:h-12 shrink-0 rounded-full bg-brand hover:bg-brand-hover text-panel flex items-center justify-center disabled:opacity-40"
               >
                 {/* ★ S6-9④：附件發送中 → 轉圈（📎 同時 disabled） */}
-                {sending && pendingFile ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} strokeWidth={2.75} />}
+                {sending && pendingFile ? <WMark size={15} /> : <Send size={15} strokeWidth={2.75} />}
               </button>
             </div>
             {/* ★ cwi-final S6-9（③）：右下細字 toggle「Enter 發送／Enter 換行」（撳即存 PATCH /api/staff/me/prefs） */}

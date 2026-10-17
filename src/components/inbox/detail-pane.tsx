@@ -8,6 +8,7 @@ import { MiniSchedule } from "./mini-schedule";
 import { ConsultStatusCard } from "./consult-status-card";
 import { PatientRecordPanel } from "./patient-record-panel";
 import { NoteComposer, renderNoteBody } from "./note-mentions";
+import { WLoading } from "@/components/ui/w-loader";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -552,7 +553,7 @@ export function DetailPane({
           </div>
           <div className="text-[10px] text-t3">staff 獨見 · 唔入 AI</div>
         </div>
-        {notesLoading && notes.length === 0 && <div className="mt-2 text-[11px] text-t3">載入中…</div>}
+        {notesLoading && notes.length === 0 && <WLoading label="載入緊備註…" className="!py-3" />}
         {!notesLoading && notes.length === 0 && <div className="mt-2 text-[11px] text-t3">未有備註</div>}
         <div className="mt-2 space-y-1.5">
           {(notesExpanded ? notes : notes.slice(0, 5)).map((n) => {
@@ -591,7 +592,7 @@ export function DetailPane({
           <CalendarClock size={12} strokeWidth={2.75} /> 病人 context
         </div>
         {ctxError && <div className="text-[10px] text-danger-text mb-1.5">⚠ {ctxError}</div>}
-        {ctxLoading && !ctx && <div className="text-[11px] text-t3">載入中…</div>}
+        {ctxLoading && !ctx && <WLoading size="inline" label="載入緊病人資料…" className="text-[11px]" />}
         {ctx && (
           <>
             {ctx.pinned ? (

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { relTime } from "@/components/inbox/time";
+import { WLoading } from "@/components/ui/w-loader";
 
 /**
  * 診所 CRUD client — 逐店卡（Organic P2）+ 建立/編輯（含 greetingConfig JSON 編輯器）+ 刪除。
@@ -310,7 +311,7 @@ export default function ClinicsAdmin() {
       {companies.length > 1 && <CompanyTransferPolicy companies={companies} onSaved={load} />}
 
       {loading ? (
-        <p className="text-sm text-t2">載入中…</p>
+        <WLoading />
       ) : clinics.length === 0 ? (
         <div className="border border-dashed border-line-strong rounded-[26px] p-10 text-center text-sm text-t2">
           未設診所

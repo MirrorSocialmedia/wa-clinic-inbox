@@ -217,3 +217,27 @@ body {
     transition: background-color 0.15s ease, border-color 0.15s ease;
   }
 }
+
+/* ★ cwi-inbox-r4（擁有人拍板 2026-10-17）：W 一筆畫載入動畫 — 左上落筆畫到右上，停一停，再由左向右擦走（2s 一圈）。
+   pathLength=100 → dasharray 100；減少動態 → 唔描線，改淡入淡出。元件：src/components/ui/w-loader.tsx */
+@keyframes w-draw-kf {
+  0% { stroke-dashoffset: 100; }
+  55% { stroke-dashoffset: 0; }
+  75% { stroke-dashoffset: 0; }
+  100% { stroke-dashoffset: -100; }
+}
+@keyframes w-pulse-kf {
+  50% { opacity: 0.35; }
+}
+.w-draw {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  animation: w-draw-kf 2s cubic-bezier(0.6, 0.05, 0.3, 1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .w-draw {
+    stroke-dasharray: none;
+    stroke-dashoffset: 0;
+    animation: w-pulse-kf 1.6s ease-in-out infinite;
+  }
+}
