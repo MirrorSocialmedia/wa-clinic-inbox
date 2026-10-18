@@ -31,7 +31,7 @@ import type { FlowDay, FlowSlot, FlowSlotsResult, FlowProvider } from "@/lib/flo
 import type { ConversationItem } from "./types";
 import { WindowExits } from "./window-exits";
 import { hkNowMin, hhmmToMin } from "./time";
-import { WLoading, WMark } from "@/components/ui/w-loader";
+import { WLoading, WMark, useDelayedLoading } from "@/components/ui/w-loader";
 
 type BoardData = FlowSlotsResult & { fetchedAt: string | null };
 
@@ -133,14 +133,19 @@ export function ScheduleBoard({
     initialData ? { ...initialData, fetchedAt: new Date().toISOString() } : null
   );
   const [busy, setBusy] = useState(false);
+  // ★ cwi-mobile-ux-20261018：切店／上下週／週日視圖（前景載入）先顯示 W — 5 分鐘背景 refetch 唔閃
+  const [fgBusy, setFgBusy] = useState(false);
+  const { show: showFgLoader } = useDelayedLoading(fgBusy);
+  const hasInitialRef = useRef(!!initialData);
   const [banner403, setBanner403] = useState(false);
   const reqSeq = useRef(0);
   const argsRef = useRef({ clinicCode, view, date });
 
-  const load = useCallback(async (cc: string, v: "week" | "day", d: string) => {
+  const load = useCallback(async (cc: string, v: "week" | "day", d: string, foreground = false) => {
     if (!cc) return;
     const seq = ++reqSeq.current;
     setBusy(true);
+    if (foreground) setFgBusy(true);
     try {
       // 週視圖:d = 窗口首日;日視圖:d = 該日
       const fromStr = d;
@@ -160,7 +165,10 @@ export function ScheduleBoard({
     } catch {
       if (seq === reqSeq.current) setData({ ...EMPTY_DATA, connected: false, fetchedAt: null });
     } finally {
-      if (seq === reqSeq.current) setBusy(false);
+      if (seq === reqSeq.current) {
+        setBusy(false);
+        setFgBusy(false);
+      }
     }
   }, []);
 
@@ -168,7 +176,8 @@ export function ScheduleBoard({
   useEffect(() => {
     argsRef.current = { clinicCode, view, date };
     if (!clinicCode) return;
-    void load(clinicCode, view, date);
+    // 有 server 預載（initialData）= 已經係新數據 → 背景再對一次就夠，唔使出 W
+    void load(clinicCode, view, date, !hasInitialRef.current);
     const t = setInterval(() => void load(clinicCode, view, date), REFETCH_MS);
     return () => clearInterval(t);
   }, [clinicCode, view, date, load]);
@@ -406,7 +415,12 @@ export function ScheduleBoard({
       )}
 
       {/* 內容 */}
-      {data && !data.connected ? (
+      {showFgLoader && data ? (
+        <div className="rounded-xl bg-panel-2 py-10 flex flex-col items-center justify-center gap-2" role="status" aria-live="polite" data-e2e="sched-loading">
+          <WMark size={34} variant="card" className="text-brand-text" />
+          <span className="text-[12px] text-t2">載入緊時間表…</span>
+        </div>
+      ) : data && !data.connected ? (
         <div className="rounded-xl bg-danger-soft border border-warn p-6 text-sm text-danger-text text-center">
           clinic-workforce 未接通 - 讀唔到時間表(key 失效或服務離線;5 分鐘後自動重試)
         </div>

@@ -451,11 +451,12 @@ async function main(): Promise<void> {
     check("上半對話可見（chat 伸入抽屜之上 >40px）", !!drawerBox && !!chatBox && chatBox.y < drawerBox.y && chatBox.height > drawerBox.y + 40, { chat: chatBox, drawer: drawerBox });
 
     // 內容獨立捲動容器（overflow-y auto — §3.2 結構）
-    const scrollInfo = await ((page.locator('[data-e2e="p2-content"]') as Locator).evaluate((el) => {
+    // ★ cwi-mobile-ux-20261018：抽屜成個面板一齊捲（半頁都捲得 — 頂部行跟住捲走，分頁列黐頂）
+    const scrollInfo = await ((page.locator('[data-e2e="p2-drawer"] [data-e2e="p2-panel"]') as Locator).evaluate((el) => {
       const cs = getComputedStyle(el);
       return { overflowY: cs.overflowY };
     }));
-    check("內容區獨立捲動容器（overflow-y:auto）", (scrollInfo as { overflowY: string }).overflowY === "auto", scrollInfo);
+    check("抽屜面板獨立捲動容器（overflow-y:auto）", (scrollInfo as { overflowY: string }).overflowY === "auto", scrollInfo);
 
     // 首行（STANDARD）+ 狀態 chip
     const fl = await ((page.locator('[data-e2e="p2-first-line"]') as unknown as Locator).first().textContent());
