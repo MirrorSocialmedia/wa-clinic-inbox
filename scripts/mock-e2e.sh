@@ -6141,7 +6141,8 @@ else
   check "T173 ② picker GET → 200" "$CODE" "200"
   W173_NAMES=$(node -e "try{const d=require('/tmp/e2e-w173-tpl.json');console.log(d.templates.map(t=>t.name).sort().join(','))}catch(e){console.log('ERR')}" 2>/dev/null)
   # a2 fix：預期值要同 node `.sort()`（JS lexicographic）同序 — o<t 所以 appointment_reminder 排前（原寫反 = 假紅）
-  check "T173 只列 APPROVED+UTILITY（2 款）" "$W173_NAMES" "appointment_reminder,appt_reminder_zh"
+  # ★ 擁有人 2026-10-18：mock 加咗冇變數 UTILITY template clinic_hello_zh → 3 款（MARKETING post_op_promo_zh 仍然唔列）
+  check "T173 只列 APPROVED+UTILITY（3 款）" "$W173_NAMES" "appointment_reminder,appt_reminder_zh,clinic_hello_zh"
   W173_PREFILL=$(node -e "try{const d=require('/tmp/e2e-w173-tpl.json');const p=d.prefill;console.log(p?[p.patientName,p.clinicName,p.requestedDate,p.requestedTime,p.providerName].join('|'):'NULL')}catch(e){console.log('ERR')}" 2>/dev/null)
   check "T173 變數預填（病人名/診所/日期/時間/醫生）" "$W173_PREFILL" "E2E-A-WINDOW|TKW 診所（試點店）|2026-10-01|10:30|陳明軒（主理）"
   # 發送成功（picker 掣同一 outbound 路徑：POST /api/messages/send templateName）
