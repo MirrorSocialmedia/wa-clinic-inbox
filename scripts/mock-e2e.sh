@@ -3620,6 +3620,16 @@ if [ "$T92" = 0 ]; then
   # 3) 400 分支：approved 但冇 builder / 唔存在 / body+template 同傳
   h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"templateName\":\"appointment_reminder\"}"
   check "T92 approved 但冇 builder → 400 template_not_supported" "$(grep -oE '"error":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)" "template_not_supported"
+  # ★ 擁有人 2026-10-18：冇變數 template（clinic_hello_zh mock）— 唔使預約都發得 → 202 + SENT
+  h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"templateName\":\"clinic_hello_zh\"}"
+  check "T92b 冇變數 template 發送 → 202" "$H1_CODE" "202"
+  T92B_MID=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+  if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T92B_MID'" '[{"s":"SENT"}]' 45; then
+    pass "T92b 冇變數 template Message SENT"
+  else
+    fail "T92b 冇變數 template 未 SENT"
+    T92=1
+  fi
   h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"templateName\":\"no_such_template\"}"
   check "T92 唔存在 template → 400 template_not_found" "$(grep -oE '"error":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)" "template_not_found"
   h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"body\":\"x\",\"templateName\":\"appt_reminder_zh\"}"

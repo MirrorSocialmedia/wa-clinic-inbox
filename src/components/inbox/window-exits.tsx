@@ -31,7 +31,7 @@ interface Props {
 export function WindowExits({ conversation: c, myStaffId, draftText, onTemplateSent, onError }: Props) {
   // ② template picker（GET /templates）— 過窗 + 未 lock 先拉（同 chat-pane P3 gate 一致）
   const [picker, setPicker] = useState<{
-    templates: { name: string; language: string; category: string; supported: boolean; preview: string | null }[];
+    templates: { name: string; language: string; category: string; supported: boolean; needsBooking?: boolean; preview: string | null }[];
     prefill: { patientName: string | null; clinicName: string; requestedDate: string; requestedTime: string; providerName: string } | null;
   } | null>(null);
   const [pickerLoading, setPickerLoading] = useState(false);
@@ -108,6 +108,7 @@ export function WindowExits({ conversation: c, myStaffId, draftText, onTemplateS
     setHandoffBusy(false);
   }
 
+  const selTpl = picker?.templates.find((t) => t.name === pickerSel) ?? null;
   const digits = (c.contact?.waId ?? "").replace(/[^0-9]/g, "");
   const waUrl = digits
     ? `https://wa.me/${digits}${draftText ? `?text=${encodeURIComponent(draftText)}` : ""}`
@@ -164,7 +165,10 @@ export function WindowExits({ conversation: c, myStaffId, draftText, onTemplateS
               發送（逐條收費）
             </button>
             <span className="w-full text-[10px] text-t3">
-              {picker.prefill
+              {/* ★ 擁有人 2026-10-18：冇變數 template 唔使預約 — 直接顯示內容 */}
+              {selTpl?.supported && selTpl.needsBooking === false
+                ? `內容：${selTpl.preview ?? ""}`
+                : picker.prefill
                 ? `變數已填好：${picker.prefill.patientName ?? "病人"} · ${picker.prefill.requestedDate} ${picker.prefill.requestedTime} · ${picker.prefill.providerName} · ${picker.prefill.clinicName}`
                 : "冇 CONFIRMED 預約 — 呢款 template 需要日期/時間/醫生（落單確認後重試）"}
             </span>
