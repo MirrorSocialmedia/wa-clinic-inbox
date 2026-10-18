@@ -555,19 +555,21 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   // ★ cwi-final S6-9（③）：enterSends 有效值 = 偏好 AND 非手機（手機永遠 Enter 換行）
   // ★ cwi-ux UX-05：同一個 isMobile 亦用嚟縮短手機 placeholder（「輸入訊息…」）— 唔好喺 early return 之後再開 hook。
   const isMobile = useIsMobile();
-  // ★ cwi-mobile-ux-20261018：composer 😊 emoji 面板 + 手機 AI 草稿卡摺埋／展開
+  // ★ cwi-mobile-ux-20261018：composer 😊 emoji 面板
   const [emojiOpen, setEmojiOpen] = useState(false);
-  const [draftExpanded, setDraftExpanded] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  const shownDraftId = p.pendingDrafts[p.draftIndex]?.id ?? null;
-  useEffect(() => setDraftExpanded(false), [shownDraftId]);
+  // ★ 擁有人 2026-10-18：手機字多（>1 行）→ 輸入欄獨佔一整行，📎 📅 😊 + 發送移落下一行（唔再擠到每行得幾個字）；
+  //   清空先縮返單行（唔按字數來回切 — 闊咗會變返 1 行，會不停跳）
+  const [composerWide, setComposerWide] = useState(false);
   // 程式填字（AI 草稿自動填／採用／emoji）都要跟住增高 — 以前只喺打字 onChange 先計，自動填入會被切走第二行
   useEffect(() => {
     const el = composerRef.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 136)}px`;
-  }, [draft]);
+    if (!isMobile || !draft.trim()) setComposerWide(false);
+    else if (el.scrollHeight > 48) setComposerWide(true); // 單行 ≈ 36px（20 行高 + 16 內距）
+  }, [draft, isMobile, composerWide]);
   const enterSendsActive = (p.enterSends ?? true) && !isMobile;
   // ★ cwi-final S1-13（D-6）：堆疊入目前展示緊嘅卡（parent 已 clamp index）
   const shownDraft = p.pendingDrafts[p.draftIndex] ?? null;
@@ -1623,7 +1625,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             cwi-window-20260901（P2）：COPY_ONLY（過窗）= banner + 複製掣 + 採用並發送 disable
             ★ cwi-final S1-13（D-6）：堆疊 — 1/3 計數 + ‹› 切換 + stale 灰字 + 改字切換確認 */}
         {shownDraft && (
-          // ★ cwi-mobile-ux-20261018：手機細版（約 95px）— 標題＋掣同一行、草稿一行（撳開全文）、stale 縮做「· 舊」
+          // ★ cwi-mobile-ux-20261018：手機細版 — 標題＋掣同一行、草稿按字數自動加行、stale 縮做「· 舊」
           <div className={`mb-2 rounded-[18px] md:rounded-[26px] border-[1.5px] md:border-2 bg-panel p-2.5 md:p-3.5 ${isCopyOnly ? "border-warn" : "border-brand"} ${shownDraft.stale ? "opacity-60" : ""}`} data-testid="c5-draft-card">
             <div className="flex items-center gap-1.5 mb-1 md:mb-1.5 flex-nowrap md:flex-wrap">
               <Sparkles size={15} strokeWidth={2.75} className={isCopyOnly ? "text-warn-text" : "text-brand-text"} />
@@ -1722,11 +1724,9 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             {locked && !isCopyOnly && (
               <div className="text-[10px] text-warn-text mb-1">🔒 先〔接手〕成為負責人，先可以採用草稿發去 WhatsApp</div>
             )}
+            {/* ★ 擁有人 2026-10-18：草稿字多就自動加行（唔截斷）— 手機最多約 5 行，再多先喺卡內捲 */}
             <div
-              onClick={() => isMobile && setDraftExpanded((v) => !v)}
-              className={`text-[13px] leading-[1.65] text-t1 ${
-                isMobile && !draftExpanded ? "truncate" : "whitespace-pre-wrap break-words max-h-32 overflow-y-auto"
-              }`}
+              className="text-[13px] leading-[1.6] md:leading-[1.65] text-t1 whitespace-pre-wrap break-words max-h-[6.5rem] md:max-h-32 overflow-y-auto"
               data-e2e="draft-text"
             >
               {shownDraft.draftText}
@@ -1841,7 +1841,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 {mediaPickError}
               </div>
             )}
-            <div className="flex items-end gap-1 md:gap-2">
+            <div className={`flex items-end gap-1 md:gap-2 ${composerWide ? "flex-wrap gap-y-1.5" : ""}`} data-e2e="composer-row" data-wide={composerWide ? "1" : "0"}>
               {/* ★ cwi-final S6-9④：📎（hidden file input — 選咗檔即出預覽條；拖放對話區同效） */}
               {canAttach && (
                 <>
@@ -1961,14 +1961,14 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   isMobile ? "輸入訊息…" : enterSendsActive ? "輸入訊息…（Enter 發送，Shift+Enter 換行）" : "輸入訊息…（Enter 換行，Ctrl/⌘+Enter 發送）"
                 }
                 data-testid="c5-composer"
-                className="flex-1 resize-none rounded-[20px] bg-panel-2 border border-transparent px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
+                className={`flex-1 resize-none rounded-[20px] bg-panel-2 ${composerWide ? "order-first basis-full" : ""} border border-transparent px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel`}
               />
               <button
                 onClick={() => void send()}
                 disabled={sending || (!draft.trim() && !pendingFile)}
                 aria-label="發送"
                 data-testid="c5-send-btn"
-                className="w-10 h-10 shrink-0 rounded-full bg-brand hover:bg-brand-hover text-panel flex items-center justify-center disabled:opacity-40"
+                className={`w-10 h-10 shrink-0 rounded-full bg-brand hover:bg-brand-hover text-panel flex items-center justify-center disabled:opacity-40 ${composerWide ? "ml-auto" : ""}`}
               >
                 {/* ★ S6-9④：附件發送中 → 轉圈（📎 同時 disabled） */}
                 {sending && pendingFile ? <WMark size={15} /> : <Send size={15} strokeWidth={2.75} />}
