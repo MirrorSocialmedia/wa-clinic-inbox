@@ -37,6 +37,9 @@ export const dynamic = "force-dynamic";
 
 type Ctx = { params: Promise<{ id: string }> };
 
+/** 立即更新補幾多個到診日（CWM 上限 12） */
+const MANUAL_REFRESH_DEPTH = 10;
+
 const is404 = (e: unknown) => e instanceof WorkforceApiError && e.status === 404;
 
 type RefreshOut =
@@ -71,7 +74,9 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   let refresh: RefreshOut | null = null;
   if (resolved && doRefresh) {
     try {
-      const r = await refreshPatient(resolved.patientApricotId, auth.staff.id);
+      // ★ cwi-walkin-20261018：立即更新都補最近 N 個到診日 — 舊版只刷最新一日（例如今日到診冇 note），
+      //   更早嘅診症記錄（walk-in）永遠入唔到索引。CWM 帳單用 overview → 補幾多日都係 3 個 Apricot call。
+      const r = await refreshPatient(resolved.patientApricotId, auth.staff.id, MANUAL_REFRESH_DEPTH);
       refresh = { state: "ok", syncedAt: r.syncedAt };
     } catch (e) {
       if (e instanceof WorkforceApiError && e.status === 404) {
