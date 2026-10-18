@@ -460,7 +460,7 @@ async function main(): Promise<void> {
     // 首行（STANDARD）+ 狀態 chip
     const fl = await ((page.locator('[data-e2e="p2-first-line"]') as unknown as Locator).first().textContent());
     check("首行顯示正確（STANDARD 樣板）", fl === "左上後牙咬痛三星期", fl);
-    const statusChip = await ((page.locator('[data-e2e="p2-status-chip"]') as unknown as Locator).first().textContent());
+    const statusChip = await ((page.locator('[data-e2e="p2-visit-card"] [data-e2e="p2-status-chip"]') as unknown as Locator).first().textContent());
     check("到診卡狀態 chip 已完成（st=4）", statusChip === "已完成", statusChip);
 
     // 展開臨床記錄（STANDARD 四段 + 灰字警告 + audit call）
@@ -468,7 +468,7 @@ async function main(): Promise<void> {
     await ((page.locator('[data-e2e="p2-expand-note"]') as unknown as Locator).first().click());
     await page.waitForSelector('[data-e2e="p2-note"][data-kind="STANDARD"]', { timeout: 10000 });
     const noteTxt = await (page.locator('[data-e2e="p2-note"][data-kind="STANDARD"]') as Locator).textContent();
-    check("展開 STANDARD：四段齊（主訴/癥狀/診斷/跟進）", !!noteTxt && ["主訴", "癥狀", "診斷", "跟進"].every((l) => noteTxt.includes(l)), noteTxt?.slice(0, 120));
+    check("展開 STANDARD：四段齊（主訴/檢查所見/診斷/治療處理）+ 處方欄", !!noteTxt && ["主訴", "檢查所見", "診斷", "治療處理", "處方"].every((l) => noteTxt.includes(l)), noteTxt?.slice(0, 160));
     check("灰字警告「請勿轉發」", (await (page.locator('[data-e2e="p2-note-warn"]') as Locator).textContent())?.includes("請勿轉發") ?? false);
     check("展開 = 1 次 note call（CWM audit 來源）", noteCalls.length === before + 1, noteCalls.length - before);
 
@@ -480,14 +480,18 @@ async function main(): Promise<void> {
     await page.waitForSelector('[data-e2e="p2-note"][data-kind="STANDARD"]', { timeout: 10000 });
     check("收埋再展開 = 再 call（唔 cache）", noteCalls.length === mid + 1, { mid, now: noteCalls.length });
 
-    // 藥物 tab empty-state / 帳單總額卡 / 預約
-    await ((page.locator('[data-e2e="p2-tab-meds"]') as Locator).click());
-    check("藥物 tab：empty-state 指引", (await (page.locator('[data-e2e="p2-meds-empty"]') as Locator).textContent())?.includes("臨床記錄") ?? false);
+    // ★ cwi-walkin-20261018：診症及處方 tab（有 note 嘅到診卡）/ 帳單總額卡 / 預約／到診時間線
+    await ((page.locator('[data-e2e="p2-tab-consult"]') as Locator).click());
+    check("診症及處方 tab：有臨床記錄卡（9/14）", (await (page.locator('[data-e2e="p2-visit-card"]') as Locator).count()) === 1);
     await ((page.locator('[data-e2e="p2-tab-bills"]') as Locator).click());
     const balTxt = await (page.locator('[data-e2e="p2-balance-card"]') as Locator).textContent();
     check("帳單 tab：總額卡（$800 / 欠 $300）", !!balTxt && balTxt.includes("$800") && balTxt.includes("$300"), balTxt);
-    await ((page.locator('[data-e2e="p2-tab-appts"]') as Locator).click());
-    check("預約 tab：2 筆", (await (page.locator('[data-e2e="p2-appt-row"]') as Locator).count()) === 2);
+    await ((page.locator('[data-e2e="p2-tab-visits"]') as Locator).click());
+    check(
+      "預約／到診 tab：9/22 預約 + 9/14 到診（同日同店預約唔重複）",
+      (await (page.locator('[data-e2e="p2-appt-row"]') as Locator).count()) === 1 &&
+        (await (page.locator('[data-e2e="p2-visit-card"]') as Locator).count()) === 1
+    );
 
     // 拖高 → 90vh
     const handle = page.locator('[data-e2e="p2-drawer-handle"]') as Locator;
