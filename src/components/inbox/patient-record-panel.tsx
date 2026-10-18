@@ -70,9 +70,12 @@ interface Props {
   conversationId: string;
   /** 抽屜／分頁切換時重掛 = false（保持內部狀態）；對話切換靠 conversationId effect 重載。 */
   resetKey?: number;
+  /** ★ cwi-mobile-ux-20261018：手機半頁抽屜 — 成個面板一齊捲（頂部幾行跟住捲走，分頁列黐頂）；
+   *  半頁時固定嘅頂部行食晒位 → 內容區捲唔到嘅根因 */
+  scrollAll?: boolean;
 }
 
-export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
+export function PatientRecordPanel({ conversationId, resetKey = 0, scrollAll = false }: Props) {
   const [data, setData] = useState<PatientRecordData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -333,7 +336,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
   const btn = refreshButton(base, phase, now);
 
   return (
-    <div data-e2e="p2-panel" className="flex flex-col min-h-0 h-full bg-canvas">
+    <div data-e2e="p2-panel" className={scrollAll ? "h-full overflow-y-auto overscroll-contain bg-canvas" : "flex flex-col min-h-0 h-full bg-canvas"}>
       {/* 刷新列（§3.1b 五態常駐） */}
       <div className={`shrink-0 px-2.5 py-1.5 flex items-center gap-2 ${TONE_CLS[display.tone]}`} data-e2e="p2-syncbar">
         <span className="text-[11px] flex-1 min-w-0 truncate">{display.text}</span>
@@ -521,7 +524,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
             </div>
           ) : null}
           {/* 三分頁（預約／到診・診症及處方・帳單） */}
-          <div className="shrink-0 flex gap-1 px-2.5 pb-1.5" data-e2e="p2-tabbar">
+          <div className={`shrink-0 flex gap-1 px-2.5 pb-1.5 ${scrollAll ? "sticky top-0 z-10 bg-canvas pt-1" : ""}`} data-e2e="p2-tabbar">
             {TABS.map((t) => (
               <button
                 key={t.key}
@@ -538,7 +541,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
             ))}
           </div>
           {/* 內容區獨立捲動（§3.2：唔會連對話一齊捲） */}
-          <div className="flex-1 overflow-y-auto min-h-0 px-2.5 pb-3 space-y-2" data-e2e="p2-content">
+          <div className={scrollAll ? "px-2.5 pb-3 space-y-2" : "flex-1 overflow-y-auto min-h-0 px-2.5 pb-3 space-y-2"} data-e2e="p2-content">
             {tab === "visits" ? (
               /* ★ cwi-walkin-20261018：預約＋到診一條時間線（新→舊）。同日同店已有到診行嘅預約唔重複出 */
               (() => {

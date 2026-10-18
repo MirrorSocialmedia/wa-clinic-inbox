@@ -16,6 +16,7 @@ import {
   MessageCircle,
   MoreHorizontal,
   Paperclip,
+  Smile,
   RotateCw,
   Send,
   Sparkles,
@@ -24,6 +25,7 @@ import {
 import type { ClinicLite, ConversationItem, DraftInfo, DraftTrace, FollowupSuggestion, MessageItem, PatientChip, StaffInfo } from "./types";
 import { LocationCapsule, type LocationChange } from "./location-capsule";
 import { WLoading, WLoadingGate, WMark } from "@/components/ui/w-loader";
+import { EmojiPicker } from "./emoji-picker";
 import { PatientStatusChip } from "./patient-status-chip";
 import { bubbleTime, relTime, windowCountdown } from "./time";
 
@@ -553,6 +555,21 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   // ★ cwi-final S6-9（③）：enterSends 有效值 = 偏好 AND 非手機（手機永遠 Enter 換行）
   // ★ cwi-ux UX-05：同一個 isMobile 亦用嚟縮短手機 placeholder（「輸入訊息…」）— 唔好喺 early return 之後再開 hook。
   const isMobile = useIsMobile();
+  // ★ cwi-mobile-ux-20261018：composer 😊 emoji 面板
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  // ★ 擁有人 2026-10-18：手機字多（>1 行）→ 輸入欄獨佔一整行，📎 📅 😊 + 發送移落下一行（唔再擠到每行得幾個字）；
+  //   清空先縮返單行（唔按字數來回切 — 闊咗會變返 1 行，會不停跳）
+  const [composerWide, setComposerWide] = useState(false);
+  // 程式填字（AI 草稿自動填／採用／emoji）都要跟住增高 — 以前只喺打字 onChange 先計，自動填入會被切走第二行
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 136)}px`;
+    if (!isMobile || !draft.trim()) setComposerWide(false);
+    else if (el.scrollHeight > 48) setComposerWide(true); // 單行 ≈ 36px（20 行高 + 16 內距）
+  }, [draft, isMobile, composerWide]);
   const enterSendsActive = (p.enterSends ?? true) && !isMobile;
   // ★ cwi-final S1-13（D-6）：堆疊入目前展示緊嘅卡（parent 已 clamp index）
   const shownDraft = p.pendingDrafts[p.draftIndex] ?? null;
@@ -934,6 +951,20 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   const isCopyOnly = shownDraft?.mode === "COPY_ONLY";
 
   // ★ cwi-final S1-13（D-6）：堆疊切換（‹› 掣 / Alt+↑↓）— 改咗字先撳 → 確認 dialog（取消 = 文字保留、index 不變）
+  /** ★ cwi-mobile-ux-20261018：emoji 插入游標位（手機唔 focus — 唔彈返鍵盤；桌面保持游標喺 emoji 後面） */
+  function insertEmoji(e: string) {
+    const el = composerRef.current;
+    const start = el?.selectionStart ?? draft.length;
+    const end = el?.selectionEnd ?? draft.length;
+    setDraft(draft.slice(0, start) + e + draft.slice(end));
+    requestAnimationFrame(() => {
+      if (!el) return;
+      const pos = start + e.length;
+      el.setSelectionRange(pos, pos);
+      if (!isMobile) el.focus();
+    });
+  }
+
   function switchDraft(i: number) {
     const target = p.pendingDrafts[i];
     if (!target) return;
@@ -1124,21 +1155,23 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
       {/* header：avatar + contact + 窗口 chip
           ★ cwi-ux UX-05：h-[52px] → min-h-[52px] py-1.5（名字欄 4 行會溢出 52px → 同上下疊埋根因）；
           手機 <md 名字欄只留 2 行（姓名 + 店碼·負責人），右側掣收細；桌面（≥md）零改變。 */}
-      <div className="min-h-[52px] py-1.5 shrink-0 bg-panel border-b border-line flex items-center gap-2 md:gap-2.5 px-2 md:px-4">
-        <button onClick={p.onBack} aria-label="返回列表" className="md:hidden p-1 -ml-1 text-brand-text">
+      {/* ★ cwi-mobile-ux-20261018（擁有人揀 A）：手機拆兩行 — 第一行 ‹ 頭像 名＋負責人·編號·新舊客 窗口；
+          第二行 地點 · 病人記錄 · ⋯（order + basis-full 斷行；桌面 md:order-none 照舊一行） */}
+      <div className="min-h-[52px] py-1.5 shrink-0 bg-panel border-b border-line flex flex-wrap md:flex-nowrap items-center gap-x-2 gap-y-1.5 md:gap-2.5 px-2 md:px-4">
+        <button onClick={p.onBack} aria-label="返回列表" className="md:hidden order-1 p-1 -ml-1 text-brand-text">
           <ChevronLeft size={20} />
         </button>
         <button
           onClick={p.onOpenDetail}
           // ★ cwi-ux UX-05：flex-1 min-w-[80px] — 名字欄保底 80px 唔會被右側掣擠到 0 闊（手機姓名唔見根因）
-          className="flex items-center gap-2.5 flex-1 min-w-[80px] text-left lg:pointer-events-none"
+          className="order-2 md:order-none flex items-center gap-2 md:gap-2.5 flex-1 min-w-[80px] text-left lg:pointer-events-none"
           aria-label="開啟聯絡人詳情"
         >
-          <div className="w-[38px] h-[38px] rounded-full bg-brand text-panel flex items-center justify-center text-[15px] font-medium shrink-0">
+          <div className="w-8 h-8 md:w-[38px] md:h-[38px] rounded-full bg-brand text-panel flex items-center justify-center text-[14px] md:text-[15px] font-medium shrink-0">
             {initialOf(c)}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="font-display text-[17px] leading-tight text-t1 truncate">
+            <div className="font-display text-[16px] md:text-[17px] leading-tight text-t1 truncate">
               {c.contact?.profileName || "未命名聯絡人"}
             </div>
             {/* ★ cwi-ux UX-05：手機第 2 行 — 店碼 + 負責人（細字 truncate）；電話/chip 列/負責人列只 md: 以上 */}
@@ -1150,6 +1183,10 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
               ) : (
                 "未指派"
               )}
+              {/* ★ cwi-mobile-ux-20261018：手機第 2 行加病人編號 · 新舊客（桌面喺 chip 列） */}
+              {patientChip?.patientCode ? ` · ${patientChip.patientCode}` : ""}
+              {c.contact?.patientStatus ? ` · ${c.contact.patientStatus === "NEW" ? "新客" : c.contact.patientStatus === "UNKNOWN" ? "未確定" : "舊客"}` : ""}
+              {patientChip && patientChip.linkedCount > 1 ? ` ＋${patientChip.linkedCount - 1}` : ""}
             </div>
             {c.contact?.waId && <div className="hidden md:block text-[11px] text-t3">{c.contact.waId}</div>}
             {/* ★ P2（cwi-followup-p2 §3.1）+ v3：病人 chip — patientCode·舊客/新客 + 未結餘額（中性灰，>0 先顯）+ 上次到診 */}
@@ -1193,7 +1230,10 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             )}
           </div>
         </button>
+        {/* 手機斷行（第二行由呢度開始） */}
+        <div className="md:hidden order-4 basis-full h-0" aria-hidden="true" />
         {/* ★ cwi-inbox-r3 Q6：頂部固定顯示地點（跟進分店 ?? 號碼店）；Q5：負責人 ∨ ADMIN 撳得轉地點 */}
+        <div className="order-5 md:order-none shrink-0 max-md:ml-8">
         <LocationCapsule
           conv={c}
           clinics={p.allClinics ?? []}
@@ -1202,6 +1242,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
           variant="header"
           onChanged={(x) => p.onLocationChanged?.(x)}
         />
+        </div>
         {/* ★ cwi-patient-identify：新客／舊客（桌面先顯示 — 手機頂部位唔夠，喺列表／病人卡睇） */}
         <span className="hidden md:inline-flex shrink-0">
           <PatientStatusChip status={c.contact?.patientStatus} count={c.contact?.identifiedCount} />
@@ -1211,15 +1252,15 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
         <button
           data-e2e="p2-open-record"
           onClick={() => p.onOpenPatientRecord?.()}
-          className="shrink-0 p-1.5 md:px-2.5 md:py-1 rounded-full text-brand-text border border-line bg-brand-soft hover:opacity-80"
+          className="order-6 md:order-none shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-brand-text border border-line bg-brand-soft hover:opacity-80"
           aria-label="病人記錄"
           title="病人記錄"
         >
-          <ClipboardList size={15} strokeWidth={2.75} className="md:hidden" />
-          <span className="hidden md:inline text-[11px]">病人記錄</span>
+          <ClipboardList size={13} strokeWidth={2.75} className="md:hidden" />
+          <span className="text-[11px]">病人記錄</span>
         </button>
         {/* ★ Phase E：「⋯」menu — 標記投訴 / 標記 AI 錯誤（前線先見到問題） */}
-        <div className="relative">
+        <div className="relative order-7 md:order-none">
           <button
             onClick={() => {
               setFlagMenuOpen(!flagMenuOpen);
@@ -1308,7 +1349,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
         )}
         {releaseError && <span className="hidden md:inline text-[10px] text-warn-text whitespace-nowrap">{releaseError}</span>}
         <span
-          className={`ml-auto shrink-0 text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${windowChipCls}`}
+          className={`order-3 md:order-none ml-auto shrink-0 text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap inline-flex items-center gap-1 ${windowChipCls}`}
           title="24 小時客服窗口倒數｜窗口內：用 API（呢度覆）｜過窗三出路：① 開手機 App 免費覆（W-5：只覆主動搵過我哋嘅人、唔好複製同一段派多人、叫停即停）② 發 template（逐條收費）③ 等病人下次搵你"
         >
           <Clock size={13} strokeWidth={2.75} className="shrink-0" />
@@ -1584,12 +1625,15 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             cwi-window-20260901（P2）：COPY_ONLY（過窗）= banner + 複製掣 + 採用並發送 disable
             ★ cwi-final S1-13（D-6）：堆疊 — 1/3 計數 + ‹› 切換 + stale 灰字 + 改字切換確認 */}
         {shownDraft && (
-          <div className={`mb-2 rounded-[26px] border-2 bg-panel p-3.5 ${isCopyOnly ? "border-warn" : "border-brand"} ${shownDraft.stale ? "opacity-60" : ""}`} data-testid="c5-draft-card">
-            <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+          // ★ cwi-mobile-ux-20261018：手機細版 — 標題＋掣同一行、草稿按字數自動加行、stale 縮做「· 舊」
+          <div className={`mb-2 rounded-[18px] md:rounded-[26px] border-[1.5px] md:border-2 bg-panel p-2.5 md:p-3.5 ${isCopyOnly ? "border-warn" : "border-brand"} ${shownDraft.stale ? "opacity-60" : ""}`} data-testid="c5-draft-card">
+            <div className="flex items-center gap-1.5 mb-1 md:mb-1.5 flex-nowrap md:flex-wrap">
               <Sparkles size={15} strokeWidth={2.75} className={isCopyOnly ? "text-warn-text" : "text-brand-text"} />
               <span className={`text-[12.5px] font-semibold ${isCopyOnly ? "text-warn-text" : "text-brand-text"}`}>
-                AI 草稿{isCopyOnly ? "（只可複製）" : ""} · {(shownDraft.latencyMs / 1000).toFixed(1)}s
+                AI 草稿{isCopyOnly ? "（只可複製）" : ""}
+                <span className="hidden md:inline"> · {(shownDraft.latencyMs / 1000).toFixed(1)}s</span>
               </span>
+              {shownDraft.stale && <span className="md:hidden text-[10px] text-t3 whitespace-nowrap">· 舊</span>}
               {/* ★ cwi-inboxfix-20260905（MD §2）：model 名移入 ⓘ tooltip；AI trace 同係呢粒 ⓘ 撳先展開（內容唔變） */}
               <button
                 onClick={() => shownDraft?.traceJson && setTraceOpen((v) => !v)}
@@ -1621,7 +1665,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   </button>
                 </span>
               )}
-              <span className="ml-auto flex gap-1.5 max-md:w-full max-md:order-last max-md:mt-2 max-md:[&>button]:flex-1">
+              <span className="ml-auto flex gap-1.5 shrink-0">
                 {!isCopyOnly && (
                   <button
                     onClick={() => {
@@ -1632,9 +1676,10 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                     }}
                     disabled={p.draftBusy || locked}
                     title={locked ? "先接手（become 負責人）先可以採用草稿發 WhatsApp" : undefined}
-                    className="text-xs px-3 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-40"
+                    className="text-xs px-3 py-1 rounded-full bg-brand hover:bg-brand-hover text-panel font-medium disabled:opacity-40 whitespace-nowrap"
                   >
-                    採用並編輯
+                    <span className="md:hidden">採用</span>
+                    <span className="hidden md:inline">採用並編輯</span>
                   </button>
                 )}
                 {isCopyOnly && (
@@ -1647,7 +1692,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                     }}
                     className="text-xs px-3 py-1 rounded-full bg-warn hover:opacity-90 text-warn-text font-medium"
                   >
-                    {copiedDraft ? "✓ 已複製" : "複製去手機 App"}
+                    {copiedDraft ? "✓ 已複製" : isMobile ? "複製" : "複製去手機 App"}
                   </button>
                 )}
                 <button
@@ -1661,7 +1706,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             </div>
             {/* ★ cwi-final S1-13（D-6）：stale = 呢個草稿之後病人再講咗嘢（非回覆最新嗰句） */}
             {shownDraft.stale && (
-              <div className="text-[11px] text-t3 mb-1.5" data-testid="draft-stale">
+              <div className="hidden md:block text-[11px] text-t3 mb-1.5" data-testid="draft-stale">
                 病人之後再講咗嘢
               </div>
             )}
@@ -1679,7 +1724,11 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             {locked && !isCopyOnly && (
               <div className="text-[10px] text-warn-text mb-1">🔒 先〔接手〕成為負責人，先可以採用草稿發去 WhatsApp</div>
             )}
-            <div className="text-[13px] leading-[1.65] text-t1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
+            {/* ★ 擁有人 2026-10-18：草稿字多就自動加行（唔截斷）— 手機最多約 5 行，再多先喺卡內捲 */}
+            <div
+              className="text-[13px] leading-[1.6] md:leading-[1.65] text-t1 whitespace-pre-wrap break-words max-h-[6.5rem] md:max-h-32 overflow-y-auto"
+              data-e2e="draft-text"
+            >
               {shownDraft.draftText}
             </div>
             {/* ★ Part F（cwi-raggolden-20260904，F.7）：trace panel — ★ cwi-inboxfix-20260905（MD §2）：收埋做 ⓘ 掣展開（內容唔變） */}
@@ -1792,7 +1841,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 {mediaPickError}
               </div>
             )}
-            <div className="flex items-end gap-2">
+            <div className={`flex items-end gap-1 md:gap-2 ${composerWide ? "flex-wrap gap-y-1.5" : ""}`} data-e2e="composer-row" data-wide={composerWide ? "1" : "0"}>
               {/* ★ cwi-final S6-9④：📎（hidden file input — 選咗檔即出預覽條；拖放對話區同效） */}
               {canAttach && (
                 <>
@@ -1815,7 +1864,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                     aria-label="發圖片或 PDF"
                     title="發圖片或 PDF（JPG／PNG ≤5MB、PDF ≤10MB）"
                     data-e2e="media-attach-btn"
-                    className="w-10 h-10 shrink-0 rounded-full text-t2 hover:text-brand-text hover:bg-panel-2 flex items-center justify-center disabled:opacity-40"
+                    className="w-9 h-9 md:w-10 md:h-10 shrink-0 rounded-full text-t2 hover:text-brand-text hover:bg-panel-2 flex items-center justify-center disabled:opacity-40"
                   >
                     <Paperclip size={17} strokeWidth={2.2} />
                   </button>
@@ -1836,12 +1885,37 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   aria-label="發預約連結"
                   title="發預約連結（WhatsApp Flow — 病人自己揀日子、醫生、時間）"
                   data-e2e="composer-flow-btn"
-                  className="w-10 h-10 shrink-0 rounded-full text-t2 hover:text-brand-text hover:bg-panel-2 flex items-center justify-center disabled:opacity-40"
+                  className="w-9 h-9 md:w-10 md:h-10 shrink-0 rounded-full text-t2 hover:text-brand-text hover:bg-panel-2 flex items-center justify-center disabled:opacity-40"
                 >
                   {p.flowBusy ? <WMark size={17} /> : <CalendarDays size={17} strokeWidth={2.2} />}
                 </button>
               )}
+              {/* ★ cwi-mobile-ux-20261018：😊 emoji（單色 icon 同 📎 📅 一致）— 手機面板頂替鍵盤；桌面彈細框 */}
+              <div className="relative shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!emojiOpen && isMobile) composerRef.current?.blur(); // 收鍵盤，面板頂上
+                    setEmojiOpen(!emojiOpen);
+                  }}
+                  disabled={sending}
+                  aria-label="插入 emoji"
+                  aria-expanded={emojiOpen}
+                  title="插入 emoji"
+                  data-e2e="composer-emoji-btn"
+                  className={`w-9 h-9 md:w-10 md:h-10 rounded-full flex items-center justify-center disabled:opacity-40 ${
+                    emojiOpen ? "text-brand-text bg-brand-soft" : "text-t2 hover:text-brand-text hover:bg-panel-2"
+                  }`}
+                >
+                  <Smile size={17} strokeWidth={2.2} />
+                </button>
+                {emojiOpen && !isMobile && <EmojiPicker variant="popover" onPick={insertEmoji} onClose={() => setEmojiOpen(false)} />}
+              </div>
               <textarea
+                ref={composerRef}
+                onFocus={() => {
+                  if (isMobile) setEmojiOpen(false); // 撳輸入欄 = 返鍵盤
+                }}
                 value={draft}
                 onChange={(e) => {
                   const v = e.target.value;
@@ -1887,22 +1961,24 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   isMobile ? "輸入訊息…" : enterSendsActive ? "輸入訊息…（Enter 發送，Shift+Enter 換行）" : "輸入訊息…（Enter 換行，Ctrl/⌘+Enter 發送）"
                 }
                 data-testid="c5-composer"
-                className="flex-1 resize-none rounded-full bg-panel-2 border border-transparent px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
+                className={`flex-1 resize-none rounded-[20px] bg-panel-2 ${composerWide ? "order-first basis-full" : ""} border border-transparent px-4 py-2 text-sm text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel`}
               />
               <button
                 onClick={() => void send()}
                 disabled={sending || (!draft.trim() && !pendingFile)}
                 aria-label="發送"
                 data-testid="c5-send-btn"
-                className="w-10 h-10 max-md:w-12 max-md:h-12 shrink-0 rounded-full bg-brand hover:bg-brand-hover text-panel flex items-center justify-center disabled:opacity-40"
+                className={`w-10 h-10 shrink-0 rounded-full bg-brand hover:bg-brand-hover text-panel flex items-center justify-center disabled:opacity-40 ${composerWide ? "ml-auto" : ""}`}
               >
                 {/* ★ S6-9④：附件發送中 → 轉圈（📎 同時 disabled） */}
                 {sending && pendingFile ? <WMark size={15} /> : <Send size={15} strokeWidth={2.75} />}
               </button>
             </div>
-            {/* ★ cwi-final S6-9（③）：右下細字 toggle「Enter 發送／Enter 換行」（撳即存 PATCH /api/staff/me/prefs） */}
+            {emojiOpen && isMobile && <EmojiPicker variant="sheet" onPick={insertEmoji} onClose={() => setEmojiOpen(false)} />}
+            {/* ★ cwi-final S6-9（③）：右下細字 toggle「Enter 發送／Enter 換行」（撳即存 PATCH /api/staff/me/prefs）
+                ★ cwi-mobile-ux-20261018：手機唔顯示（細字佔位；手機撳掣發送）*/}
             {p.onToggleEnterSends && (
-              <div className="flex items-center justify-end">
+              <div className="hidden md:flex items-center justify-end">
                 <button
                   type="button"
                   onClick={p.onToggleEnterSends}

@@ -99,10 +99,11 @@ export function PatientDrawer({
           data-e2e="p2-drawer-handle"
           aria-label="拖高或向下掃關閉"
         >
-          <div className="w-10 h-1 rounded-full bg-line" />
+          <div className="w-14 h-1.5 rounded-full bg-line-strong" />
         </div>
         <div className="flex-1 min-h-0">
-          <PatientRecordPanel key={`${conversationId}:${patientKey}`} conversationId={conversationId} />
+          {/* ★ cwi-mobile-ux-20261018：半頁都直接捲（拖灰條先係拉高／收埋） */}
+          <PatientRecordPanel key={`${conversationId}:${patientKey}`} conversationId={conversationId} scrollAll />
         </div>
       </div>
     </div>
