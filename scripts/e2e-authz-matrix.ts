@@ -815,6 +815,32 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: `/api/conversations/${F.convLock}/patient-pin`, method: "DELETE" }),
     expect: { UNAUTH: 401, STAFF_YMT: 403, SUPERVISOR: 403 },
   },
+  // ★ cwi-consult-history-20261018：診症及處方歷史（唯讀 — 同 note 口徑）
+  "GET /api/conversations/[id]/patient-record/consultations": {
+    fixture: () => ({ url: "/api/conversations/nope/patient-record/consultations?page=0" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404 },
+  },
+  // ★ cwi-multi-patient-20261018：搜病人／電話 ↔ 病人連結 — 寫入同 patient-pin 口徑（SUPERVISOR 覆客 403；外店 403）
+  "GET /api/conversations/[id]/patient-search": {
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/patient-search?q=t630` }),
+    expect: { UNAUTH: 401, STAFF_YMT: 403, SUPERVISOR: 403 },
+  },
+  "GET /api/conversations/[id]/patient-links": {
+    fixture: () => ({ url: "/api/conversations/nope/patient-links" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404 },
+  },
+  "POST /api/conversations/[id]/patient-links": {
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/patient-links`, method: "POST", body: JSON.stringify({ patientApricotId: "t630apr" }) }),
+    expect: { UNAUTH: 401, STAFF_YMT: 403, SUPERVISOR: 403 },
+  },
+  "PATCH /api/conversations/[id]/patient-links/[patientApricotId]": {
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/patient-links/t630apr`, method: "PATCH", body: JSON.stringify({ relation: "SELF" }) }),
+    expect: { UNAUTH: 401, STAFF_YMT: 403, SUPERVISOR: 403 },
+  },
+  "DELETE /api/conversations/[id]/patient-links/[patientApricotId]": {
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/patient-links/t630apr`, method: "DELETE" }),
+    expect: { UNAUTH: 401, STAFF_YMT: 403, SUPERVISOR: 403 },
+  },
   "GET /api/conversations/[id]/patient-record/note": {
     fixture: () => ({ url: "/api/conversations/nope/patient-record/note" }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
