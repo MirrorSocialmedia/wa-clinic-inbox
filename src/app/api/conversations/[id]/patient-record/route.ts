@@ -37,6 +37,9 @@ export const dynamic = "force-dynamic";
 
 type Ctx = { params: Promise<{ id: string }> };
 
+/** 立即更新補幾多個到診日（CWM 上限 12） */
+const MANUAL_REFRESH_DEPTH = 10;
+
 const is404 = (e: unknown) => e instanceof WorkforceApiError && e.status === 404;
 
 type RefreshOut =
@@ -71,7 +74,9 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   let refresh: RefreshOut | null = null;
   if (resolved && doRefresh) {
     try {
-      const r = await refreshPatient(resolved.patientApricotId, auth.staff.id);
+      // ★ cwi-walkin-20261018：立即更新都補最近 N 個到診日 — 舊版只刷最新一日（例如今日到診冇 note），
+      //   更早嘅診症記錄（walk-in）永遠入唔到索引。CWM 帳單用 overview → 補幾多日都係 3 個 Apricot call。
+      const r = await refreshPatient(resolved.patientApricotId, auth.staff.id, MANUAL_REFRESH_DEPTH);
       refresh = { state: "ok", syncedAt: r.syncedAt };
     } catch (e) {
       if (e instanceof WorkforceApiError && e.status === 404) {
@@ -137,6 +142,13 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
     appointments[0]?.patientCode ??
     // ★ cwi-flow-quick：判定認到嘅編號（索引未有到診／帳單都有編號顯示）
     (resolved && resolved.patientApricotId === contact.identifiedPatientApricotId ? contact.identifiedPatientCode : null) ??
+    // ★ cwi-multi-patient：加入咗呢個電話嘅家人（搜尋加入時記低編號）
+    (resolved
+      ? (await prisma.contactPatientLink.findUnique({
+          where: { contactId_patientApricotId: { contactId: contact.id, patientApricotId: resolved.patientApricotId } },
+          select: { patientCode: true },
+        }))?.patientCode
+      : null) ??
     null;
 
   return NextResponse.json({
@@ -158,6 +170,8 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       patientStatus: contact.patientStatus,
       patientCheckedAt: contact.patientCheckedAt ? contact.patientCheckedAt.toISOString() : null,
       identifiedCount: contact.identifiedCount,
+      // ★ cwi-multi-patient-20261018：呢個電話連咗幾多位病人（頂部 chip「＋N」）
+      linkedPatientCount: await prisma.contactPatientLink.count({ where: { contactId: contact.id } }),
       canDelete:
         auth.staff.role === "ADMIN" && (auth.scopeType === "ALL" || auth.scopedClinicIds.includes(contact.clinicId)),
     },

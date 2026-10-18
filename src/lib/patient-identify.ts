@@ -3,6 +3,7 @@ import log from "@/lib/log";
 import { identifyPatient, refreshPatient, WorkforceApiError } from "@/lib/workforce/client";
 import { convRef, publishConvEvent } from "@/lib/notify";
 import { needsIdentify, mapIdentifyStatus, type PatientStatus } from "@/lib/patient-identify-policy";
+import { upsertPatientLink } from "@/lib/patient-links";
 
 /**
  * ★ cwi-patient-identify-20261017（擁有人拍板）：新客／舊客判定。
@@ -26,6 +27,7 @@ export interface IdentifyOutcome {
   count: number;
   patientApricotId: string | null;
   patientCode: string | null;
+  patientName: string | null;
 }
 
 export async function identifyContact(contactId: string, opts: { force?: boolean } = {}): Promise<IdentifyOutcome | null> {
@@ -47,13 +49,14 @@ export async function identifyContact(contactId: string, opts: { force?: boolean
         count: r.patients.length,
         patientApricotId: r.patients.length === 1 ? r.patients[0].patientApricotId : null,
         patientCode: r.patients.length === 1 ? r.patients[0].patientCode || null : null,
+        patientName: r.patients.length === 1 ? r.patients[0].patientName || null : null,
       };
     } catch (e) {
       log.warn(
         { contactId, err: e instanceof WorkforceApiError ? `status=${e.status}` : e instanceof Error ? e.name : "unknown" },
         "patient-identify: workforce 查唔到（UNKNOWN — 稍後重試）"
       );
-      outcome = { status: "UNKNOWN", count: 0, patientApricotId: null, patientCode: null };
+      outcome = { status: "UNKNOWN", count: 0, patientApricotId: null, patientCode: null, patientName: null };
     }
 
     const prevPatientId = (await prisma.contact.findUnique({ where: { id: contactId }, select: { identifiedPatientApricotId: true } }))
@@ -68,6 +71,18 @@ export async function identifyContact(contactId: string, opts: { force?: boolean
         identifiedPatientCode: outcome.patientCode,
       },
     });
+
+    // ★ cwi-multi-patient-20261018：只認到一個病人 → 自動加入「此電話嘅病人」（多個 → 留喺電話配對清單俾 staff 確認）
+    if (outcome.patientApricotId) {
+      await upsertPatientLink({
+        contactId,
+        patientApricotId: outcome.patientApricotId,
+        patientCode: outcome.patientCode,
+        patientName: outcome.patientName,
+        source: "IDENTIFIED",
+        staffId: null,
+      }).catch((e) => log.warn({ contactId, err: e instanceof Error ? e.message : String(e) }, "patient-identify: link upsert failed（fail-soft）"));
+    }
 
     // 即時推俾畫面（列表 chip／對話頂部）— 呢個 contact 嘅開放對話
     const convs = await prisma.conversation.findMany({ where: { contactId }, select: { id: true, clinicId: true, assigneeId: true, routedStaffId: true, routedGroupId: true, handlingClinicId: true } });

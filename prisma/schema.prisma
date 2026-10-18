@@ -332,7 +332,28 @@ model Contact {
   identifiedCount           Int?
   identifiedPatientCode     String?           // ★ cwi-flow-quick：認到唯一病人嘅 Apricot 編號（頂部 chip 用 — 索引未有到診都顯示到）
   consents      ContactConsent[]
+  patientLinks  ContactPatientLink[]
   @@unique([clinicId, waId])                  // 同一病人喺兩間店 = 兩條 Contact（隔離）
+}
+
+// ★ cwi-multi-patient-20261018（擁有人拍板）：一個電話連幾個病人檔（本人／年老父母／子女共用一個 WhatsApp）。
+// 掛喺 Contact（電話）唔係對話 — 新對話／轉店都帶住。對話嘅「目前處理中病人」= Conversation.pinnedPatientApricotId。
+// 來源：IDENTIFIED（電話判定只認到一個 → 自動加）／LOOKUP（電話配對清單撳加入或釘住）／SEARCH（人手搜編號／姓名／電話加入）。
+// 只存 Apricot id + 編號 + 名（顯示用；同 pinnedPatientName 一樣喺 PII 白名單）；移除 = 硬刪 + AuditLog。
+model ContactPatientLink {
+  id               String   @id @default(cuid())
+  contactId        String
+  contact          Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  patientApricotId String
+  patientCode      String?
+  patientName      String?
+  relation         String?  // SELF 本人／PARENT 父母／CHILD 子女／SPOUSE 配偶／SIBLING 兄弟姊妹／OTHER 其他；null = 未填
+  source           String   // IDENTIFIED | LOOKUP | SEARCH
+  createdByStaffId String?  // 系統自動 = null
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([contactId, patientApricotId])
 }
 
 // ★ wa-meta-compliance-20261016（B.3 / C.2）：主動聯絡同意記錄 — 來源 / 時間 / 用途 三要素。

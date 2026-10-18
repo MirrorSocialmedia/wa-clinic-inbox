@@ -3220,6 +3220,7 @@ export function InboxClient({
       <PatientDrawer
         open={patientDrawerOpen}
         conversationId={selectedConv?.id ?? null}
+        patientKey={selectedConv?.pinnedPatientApricotId ?? ""}
         onClose={() => setPatientDrawerOpen(false)}
       />
 

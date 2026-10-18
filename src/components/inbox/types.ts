@@ -639,6 +639,8 @@ export interface PatientChip {
   /** billOsAmt — 只喺 >0 顯示「未結餘額」chip（§3.1 中性顯示 — 非催收） */
   osAmt: number | null;
   lastVisitDate: string | null; // YYYY-MM-DD
+  /** ★ cwi-multi-patient-20261018：呢個電話連咗幾多位病人（>1 → chip「＋N」） */
+  linkedCount: number;
 }
 
 export interface PatientRecordVisit {

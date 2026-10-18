@@ -136,6 +136,8 @@ export async function deletePatientData(input: {
     // contact 直屬
     const facts = await tx.patientFact.deleteMany({ where: { contactId } });
     const consents = await tx.contactConsent.deleteMany({ where: { contactId } });
+    // ★ cwi-multi-patient-20261018：電話 ↔ 病人檔連結（FK cascade 都會刪 — 明寫一次，唔靠隱性）
+    await tx.contactPatientLink.deleteMany({ where: { contactId } });
     // StaffNotice：contactId 藏喺 meta Json（無 FK）— 雙路：conversation 關聯 + meta.contactId 精確匹配
     const notices = await tx.staffNotice.deleteMany({
       where: { OR: [{ conversationId: { in: convIds } }, { clinicId, meta: { path: ["contactId"], equals: contactId } }] },

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarClock, CheckCheck, ChevronLeft, ChevronRight, Lock, Sparkles, Tag, X } from "lucide-react";
+import { PatientLinksCard } from "./patient-links-card";
 import type { ClinicLite, ConversationItem, ConvStatus, PatientAppointment, PatientContext, PatientMatch, StaffInfo } from "./types";
 import { relTime } from "./time";
 import { MiniSchedule } from "./mini-schedule";
@@ -592,6 +593,16 @@ export function DetailPane({
           <CalendarClock size={12} strokeWidth={2.75} /> 病人 context
         </div>
         {ctxError && <div className="text-[10px] text-danger-text mb-1.5">⚠ {ctxError}</div>}
+        {/* ★ cwi-multi-patient-20261018：一個電話連幾個病人檔（家人共用電話）— 加入／設為目前／關係 */}
+        <PatientLinksCard
+          conversationId={c.id}
+          activePatientApricotId={ctx?.pinned?.patientApricotId ?? c.pinnedPatientApricotId ?? null}
+          phoneMatches={ctx?.matches ?? null}
+          onChanged={() => {
+            void refreshCtx();
+            onBookingUiChanged?.();
+          }}
+        />
         {ctxLoading && !ctx && <WLoading size="inline" label="載入緊病人資料…" className="text-[11px]" />}
         {ctx && (
           <>
@@ -599,7 +610,7 @@ export function DetailPane({
               <div className="rounded-[18px] bg-panel border border-line p-3 text-xs space-y-1.5">
                 <div className="flex items-start justify-between gap-2">
                   <div>
-                    <div className="text-[10px] text-t3">姓名（已釘住）</div>
+                    <div className="text-[10px] text-t3">目前病人（已釘住）</div>
                     <div className="text-t1 font-medium">{ctx.pinned.patientName ?? "—"}</div>
                   </div>
                   <button
@@ -634,7 +645,7 @@ export function DetailPane({
               </div>
             ) : (
               <div className="rounded-[18px] bg-panel border border-line p-3 text-xs space-y-2">
-                <div className="text-[10px] text-t3">查到匹配舊客 — 撳〔釘住〕先可以用代落單</div>
+                <div className="text-[10px] text-t3">查到匹配舊客 — 撳〔釘住〕設為目前病人（代落單／改期要釘住）</div>
                 {(ctx.matches ?? []).map((m) => (
                   <div key={m.patientApricotId} className="space-y-1">
                     <div className="flex items-center justify-between gap-2">
@@ -959,7 +970,8 @@ export function DetailPane({
       </div>
       {tab === "patient" ? (
         <div className="flex-1 min-h-0">
-          <PatientRecordPanel conversationId={c.id} />
+          {/* ★ cwi-multi-patient：換「目前病人」→ 重新載入（病人記錄跟目前病人） */}
+          <PatientRecordPanel key={`${c.id}:${c.pinnedPatientApricotId ?? ""}`} conversationId={c.id} />
         </div>
       ) : (
         <div className="flex-1 min-h-0 overflow-y-auto">

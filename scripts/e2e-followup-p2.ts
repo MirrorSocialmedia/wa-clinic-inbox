@@ -482,7 +482,13 @@ async function main(): Promise<void> {
 
     // ★ cwi-walkin-20261018：診症及處方 tab（有 note 嘅到診卡）/ 帳單總額卡 / 預約／到診時間線
     await ((page.locator('[data-e2e="p2-tab-consult"]') as Locator).click());
-    check("診症及處方 tab：有臨床記錄卡（9/14）", (await (page.locator('[data-e2e="p2-visit-card"]') as Locator).count()) === 1);
+    // ★ cwi-consult-history-20261018：Apricot 全部記錄（逐頁）— 最新 2 筆直接展開
+    await page.waitForSelector('[data-e2e="p2-consult-card"]', { timeout: 15000 });
+    check(
+      "診症及處方 tab：Apricot 記錄卡（9/14）直接展開 + 處方",
+      (await (page.locator('[data-e2e="p2-consult-card"][data-open="1"]') as Locator).count()) === 1 &&
+        ((await (page.locator('[data-e2e="p2-consult-list"]') as Locator).textContent()) ?? "").includes("AMOXICILLIN")
+    );
     await ((page.locator('[data-e2e="p2-tab-bills"]') as Locator).click());
     const balTxt = await (page.locator('[data-e2e="p2-balance-card"]') as Locator).textContent();
     check("帳單 tab：總額卡（$800 / 欠 $300）", !!balTxt && balTxt.includes("$800") && balTxt.includes("$300"), balTxt);
