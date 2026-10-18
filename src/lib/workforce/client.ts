@@ -340,6 +340,41 @@ export const VisitNoteResponse = z.object({
 });
 export type VisitNoteResult = z.infer<typeof VisitNoteResponse>;
 
+/** ★ cwi-consult-history-20261018：診症及處方歷史（CWM 直接逐頁問 Apricot — 唔經到診索引） */
+export const PatientConsultationsResponse = z.object({
+  v: z.literal(1),
+  page: z.number().int(),
+  hasMore: z.boolean(),
+  consultations: z.array(
+    z.object({
+      noteId: z.string(),
+      date: z.string(),
+      conTime: z.string().nullable(),
+      clinicCode: z.string().nullable(),
+      providerCode: z.string().nullable(),
+      providerName: z.string().nullable(),
+      isDraft: z.boolean(),
+      note: z.discriminatedUnion("kind", [NoteStandardSchema, NoteTemplateSchema]),
+    })
+  ),
+});
+export type PatientConsultationsResult = z.infer<typeof PatientConsultationsResponse>;
+
+/** ★ cwi-multi-patient-20261018：搜病人（編號／姓名／電話；CWM 搜晒全部 Apricot 帳號） */
+export const PatientSearchResponse = z.object({
+  v: z.literal(1),
+  patients: z.array(
+    z.object({
+      patientApricotId: z.string(),
+      patientCode: z.string(),
+      patientName: z.string(),
+      clinicLabel: z.string(),
+    })
+  ),
+  sources: z.array(z.object({ label: z.string(), ok: z.boolean(), found: z.number(), error: z.string().optional() })),
+});
+export type PatientSearchResult = z.infer<typeof PatientSearchResponse>;
+
 export const PatientBalanceResponse = z.object({
   v: z.literal(1),
   patientCode: z.string(),
@@ -646,12 +681,13 @@ async function wfGet(
   path: string,
   params: Record<string, string>,
   extraHeaders?: Record<string, string>,
+  opts?: { timeoutMs?: number },
 ) {
   if (process.env.WORKFORCE_MOCK === "1") {
     mockRequireStaffId(path, extraHeaders);
     return mockFixture(path, params); // §4
   }
-  return wfFetch("GET", path, params, undefined, extraHeaders);
+  return wfFetch("GET", path, params, undefined, extraHeaders, opts?.timeoutMs);
 }
 
 async function wfSend(
@@ -681,7 +717,7 @@ async function wfSend(
  *   以前 mock 唔驗 → inbox 漏帶 header 喺 CI 全綠、生產 100% 400。
  */
 function mockRequireStaffId(path: string, headers?: Record<string, string>): void {
-  if (!/^\/api\/external\/v1\/patients\/[^/]+\/(visits(\/[^/]+\/note)?|refresh)$/.test(path)) return;
+  if (!/^\/api\/external\/v1\/patients\/([^/]+\/(visits(\/[^/]+\/note)?|refresh|consultations)|search)$/.test(path)) return;
   const v = headers?.["x-staff-id"] ?? headers?.["X-Staff-Id"] ?? "";
   if (!v.trim()) throw new WorkforceApiError(400, path, "STAFF_ID_REQUIRED");
 }
@@ -1038,6 +1074,25 @@ export async function fetchPatientVisits(patientApricotId: string, limit = 50, s
       { limit: String(limit) },
       staffId ? { "x-staff-id": staffId } : undefined
     )
+  );
+}
+
+/** ★ cwi-consult-history-20261018：診症及處方一頁（每頁 8 筆，新→舊；CWM 每次 audit）。即時問 Apricot → 用長 timeout。 */
+export async function fetchPatientConsultations(patientApricotId: string, page: number, staffId: string): Promise<PatientConsultationsResult> {
+  return PatientConsultationsResponse.parse(
+    await wfGet(
+      `/api/external/v1/patients/${encodeURIComponent(patientApricotId)}/consultations`,
+      { page: String(page) },
+      { "x-staff-id": staffId },
+      { timeoutMs: WORKFORCE_IDENTIFY_TIMEOUT_MS }
+    )
+  );
+}
+
+/** ★ cwi-multi-patient-20261018：搜病人（逐 Apricot 帳號搜 → 用長 timeout）。q 唔入 log。 */
+export async function searchPatientsByKeyword(q: string, staffId: string): Promise<PatientSearchResult> {
+  return PatientSearchResponse.parse(
+    await wfGet("/api/external/v1/patients/search", { q }, { "x-staff-id": staffId }, { timeoutMs: WORKFORCE_IDENTIFY_TIMEOUT_MS })
   );
 }
 
@@ -1523,6 +1578,9 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
     if (op === "balance" && !method) return mockPatientBalance(cpId);
     if (op === "refresh" && method === "POST") return mockPatientRefresh(cpId, path);
   }
+  if (path === "/api/external/v1/patients/search") return mockPatientSearch(params);
+  const p2consult = path.match(/^\/api\/external\/v1\/patients\/([^/]+)\/consultations$/);
+  if (p2consult) return mockPatientConsultations(decodeURIComponent(p2consult[1]), params);
   const p2note = path.match(/^\/api\/external\/v1\/patients\/([^/]+)\/visits\/([^/]+)\/note$/);
   if (p2note) {
     return mockVisitNote(decodeURIComponent(p2note[1]), decodeURIComponent(p2note[2]), path);
@@ -2280,6 +2338,48 @@ function mockVisitNote(cpId: string, visitId: string, reqPath: string): unknown 
   if (!v.hasNote || !v.note) throw new WorkforceApiError(404, reqPath, "NOTE_NOT_FOUND");
   log.info({ path: reqPath, mock: true, status: 200 }, "workforce MOCK: visit note（audit = CWM 側 EXTERNAL_NOTE_VIEWED）");
   return { v: 1, visitId: v.visitId, patientApricotId: cpId, visitDate: v.visitDate, noteKind: v.noteKind, note: v.note };
+}
+
+/** ★ cwi-consult-history-20261018：mock 診症歷史 = 有 note 嘅到診（新→舊），每頁 8 筆 */
+function mockPatientConsultations(cpId: string, params: Record<string, string>): unknown {
+  const reqPath = "/api/external/v1/patients/{cpId}/consultations";
+  const page = Number(params.page ?? "0");
+  if (!Number.isInteger(page) || page < 0) throw new WorkforceApiError(400, reqPath, "BAD_PAGE");
+  const p = MOCK_P2_PATIENTS[cpId];
+  const all = (p?.visits ?? [])
+    .filter((v) => v.hasNote && v.note)
+    .sort((a, b) => (a.visitDate < b.visitDate ? 1 : -1))
+    .map((v) => ({
+      noteId: `note-${v.visitId}`,
+      date: v.visitDate,
+      conTime: `${v.visitDate}T02:00:00.000Z`,
+      clinicCode: v.clinicCode,
+      providerCode: v.providerCode,
+      providerName: null,
+      isDraft: false,
+      note: v.note as NoteText,
+    }));
+  const slice = all.slice(page * 8, page * 8 + 8);
+  log.info({ path: reqPath, mock: true, status: 200, page, count: slice.length }, "workforce MOCK: consultations（audit = CWM 側 EXTERNAL_CONSULTATIONS_VIEWED）");
+  return { v: 1, page, hasMore: all.length > page * 8 + 8, consultations: slice };
+}
+
+/** ★ cwi-multi-patient-20261018：mock 搜病人 — 編號／（mock 冇名）cpId 包含 q */
+function mockPatientSearch(params: Record<string, string>): unknown {
+  const reqPath = "/api/external/v1/patients/search";
+  const q = (params.q ?? "").trim().toLowerCase();
+  if (q.length < 2) throw new WorkforceApiError(400, reqPath, "Q_TOO_SHORT");
+  const qd = q.replace(/\D/g, "");
+  const patients = Object.entries(MOCK_P2_PATIENTS)
+    .filter(([cpId, p]) => p.patientCode.toLowerCase().includes(q) || cpId.includes(q) || (qd.length >= 8 && p.phones.some((ph) => ph.replace(/\D/g, "").endsWith(qd))))
+    .map(([cpId, p]) => ({
+      patientApricotId: cpId,
+      patientCode: p.patientCode,
+      patientName: p.appointments[0]?.patientName ?? p.patientCode,
+      clinicLabel: p.visits[0]?.clinicCode ?? "MOCK",
+    }));
+  log.info({ path: reqPath, mock: true, status: 200, found: patients.length }, "workforce MOCK: patients/search");
+  return { v: 1, patients, sources: [{ label: "MOCK", ok: true, found: patients.length }] };
 }
 
 function mockPatientBalance(cpId: string): unknown {

@@ -22,10 +22,13 @@ const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n
 export function PatientDrawer({
   open,
   conversationId,
+  patientKey = "",
   onClose,
 }: {
   open: boolean;
   conversationId: string | null;
+  /** ★ cwi-multi-patient：對話目前病人（換人 → 病人記錄重新載入） */
+  patientKey?: string;
   onClose: () => void;
 }) {
   const [h, setH] = useState<number>(MIN_H);
@@ -99,7 +102,7 @@ export function PatientDrawer({
           <div className="w-10 h-1 rounded-full bg-line" />
         </div>
         <div className="flex-1 min-h-0">
-          <PatientRecordPanel conversationId={conversationId} />
+          <PatientRecordPanel key={`${conversationId}:${patientKey}`} conversationId={conversationId} />
         </div>
       </div>
     </div>

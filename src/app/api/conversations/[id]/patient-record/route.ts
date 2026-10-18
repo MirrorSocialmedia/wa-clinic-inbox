@@ -142,6 +142,13 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
     appointments[0]?.patientCode ??
     // ★ cwi-flow-quick：判定認到嘅編號（索引未有到診／帳單都有編號顯示）
     (resolved && resolved.patientApricotId === contact.identifiedPatientApricotId ? contact.identifiedPatientCode : null) ??
+    // ★ cwi-multi-patient：加入咗呢個電話嘅家人（搜尋加入時記低編號）
+    (resolved
+      ? (await prisma.contactPatientLink.findUnique({
+          where: { contactId_patientApricotId: { contactId: contact.id, patientApricotId: resolved.patientApricotId } },
+          select: { patientCode: true },
+        }))?.patientCode
+      : null) ??
     null;
 
   return NextResponse.json({
@@ -163,6 +170,8 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       patientStatus: contact.patientStatus,
       patientCheckedAt: contact.patientCheckedAt ? contact.patientCheckedAt.toISOString() : null,
       identifiedCount: contact.identifiedCount,
+      // ★ cwi-multi-patient-20261018：呢個電話連咗幾多位病人（頂部 chip「＋N」）
+      linkedPatientCount: await prisma.contactPatientLink.count({ where: { contactId: contact.id } }),
       canDelete:
         auth.staff.role === "ADMIN" && (auth.scopeType === "ALL" || auth.scopedClinicIds.includes(contact.clinicId)),
     },

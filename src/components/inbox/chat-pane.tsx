@@ -832,6 +832,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
           customerType: j.patient.customerType === "returning" ? "returning" : "new",
           osAmt: j.balance?.balance.osAmt ?? null,
           lastVisitDate: j.patient.lastVisitDate ?? null,
+          linkedCount: typeof j.contact?.linkedPatientCount === "number" ? j.contact.linkedPatientCount : 0,
         });
       })
       .catch(() => {
@@ -841,7 +842,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
       on = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [p.conversation?.id]);
+  }, [p.conversation?.id, p.conversation?.pinnedPatientApricotId]);
 
   // ★ cwi-ux UX-07：Flow bar「預約分店」— 數據 = 全部 active 店（/api/clinics?scope=schedule）
   //   + 該病人主診醫生最近當值店（patient-record?summary=1 → visitStats.primaryDoctor.lastClinicCode）。
@@ -1159,6 +1160,16 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   {patientChip.patientCode ?? "—"} ·{" "}
                   {c.contact?.patientStatus === "NEW" ? "新客" : c.contact?.patientStatus === "UNKNOWN" ? "未確定" : "舊客"}
                 </span>
+                {/* ★ cwi-multi-patient-20261018：呢個電話仲連住其他病人（家人）— 喺右欄「病人」卡切換 */}
+                {patientChip.linkedCount > 1 ? (
+                  <span
+                    className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-brand-soft text-brand-text"
+                    title={`呢個電話連咗 ${patientChip.linkedCount} 位病人 — 喺右欄「病人 context」切換目前病人`}
+                    data-e2e="p2-chip-linked"
+                  >
+                    ＋{patientChip.linkedCount - 1}
+                  </span>
+                ) : null}
                 {patientChip.osAmt != null && patientChip.osAmt > 0 ? (
                   <span
                     className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-panel-2 text-t2"

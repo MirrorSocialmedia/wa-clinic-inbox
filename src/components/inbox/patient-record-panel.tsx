@@ -34,6 +34,7 @@ import {
 } from "@/lib/patient-record-state";
 import { WLoading } from "@/components/ui/w-loader";
 import { PatientStatusChip } from "./patient-status-chip";
+import { ConsultationHistory, NoteBody } from "./consultation-history";
 
 // ★ cwi-walkin-20261018（擁有人拍板）：預約同到診合併一個時間線；藥物併入「診症及處方」做子項
 type TabKey = "visits" | "consult" | "bills";
@@ -561,20 +562,11 @@ export function PatientRecordPanel({ conversationId, resetKey = 0 }: Props) {
               })()
             ) : null}
             {tab === "consult" ? (
-              /* ★ cwi-walkin-20261018：診症及處方 — 每次到診嘅臨床記錄（主訴／檢查／診斷／處理）+ 處方；
-                 全文仍然展開先拉（CWM audit），藥物 code 喺卡面直接顯示 */
-              data.visits.some((v) => v.hasNote || (v.rxCodes ?? []).length > 0) ? (
-                data.visits
-                  .filter((v) => v.hasNote || (v.rxCodes ?? []).length > 0)
-                  .map((v) => (
-                    <VisitCard key={v.visitId} visit={v} showRx expanded={expandedVisitId === v.visitId} noteLoading={noteLoading} noteError={noteError} noteData={noteData} onToggle={() => void toggleNote(v)} />
-                  ))
+              /* ★ cwi-consult-history-20261018：診症及處方 = Apricot 全部記錄（逐頁；最新 2 筆展開） */
+              data.patient ? (
+                <ConsultationHistory conversationId={conversationId} patientKey={data.patient.patientApricotId} />
               ) : (
-                <div className="text-center py-10" data-e2e="p2-consult-empty">
-                  <Pill size={20} className="mx-auto mb-2 opacity-40 text-t3" />
-                  <div className="text-[12px] text-t2">索引窗內冇診症記錄</div>
-                  <div className="text-[11px] text-t3 mt-1">到診後撳「立即更新」由 Apricot 攞最新臨床記錄同處方</div>
-                </div>
+                <div className="text-center py-10 text-[12px] text-t3" data-e2e="p2-consult-empty">未配對到病人 — 喺右欄「病人」卡加入／釘住病人</div>
               )
             ) : null}
             {tab === "bills" ? (
@@ -765,62 +757,3 @@ function VisitCard({
     </div>
   );
 }
-
-/** 兩種樣板渲染（MD §0.3 — 自訂樣板 Tx 原文保留換行）。 */
-function NoteBody({ note }: { note: NoteText }) {
-  return (
-    <div data-e2e="p2-note" data-kind={note.kind}>
-      {note.kind === "STANDARD" ? (
-        /* ★ cwi-walkin-20261018：Apricot 四欄（Complaints／Findings／Diagnosis／Actions）全部列出 — 空欄顯示「—」 */
-        <dl className="space-y-1.5">
-          {[
-            ["主訴", note.complaints],
-            ["檢查所見", note.findings],
-            ["診斷", note.diagnosis],
-            ["治療處理", note.actions],
-          ].map(([label, text]) => (
-            <div key={label} className="text-[12px]">
-              <dt className="text-t3">{label}</dt>
-              <dd className={`whitespace-pre-wrap ${text?.trim() ? "text-t1" : "text-t3"}`}>{text?.trim() ? text : "—"}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : (
-        <div className="space-y-1.5">
-          {note.templateName ? <div className="text-[10px] text-t3">樣板：{note.templateName}</div> : null}
-          {note.blocks.map((b, i) => (
-            <div key={i} className="text-[12px]">
-              <span className="text-t3">{b.label}：</span>
-              <span className="text-t1 whitespace-pre-wrap">{b.text}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      {/* ★ cwi-walkin-20261018：處方（Prescription）— 冇處方都講明 */}
-      <div className="mt-2 pt-1.5 border-t border-line" data-e2e="p2-note-rx">
-        <div className="text-[12px] text-t3">處方</div>
-        {note.rx && note.rx.length > 0 ? (
-          <ul className="mt-0.5 space-y-0.5">
-            {note.rx.map((r, i) => (
-              <li key={i} className="text-[12px] flex gap-1.5">
-                <Pill size={12} className="text-brand-text shrink-0 mt-0.5" />
-                <span>
-                  <span className="text-t1">{r.name}</span>
-                  {r.detail ? <span className="block text-[11px] text-t2">{r.detail}</span> : null}
-                  {r.caution ? <span className="block text-[11px] text-warn-text">⚠ {r.caution}</span> : null}
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <div className="text-[12px] text-t3">—（冇處方）</div>
-        )}
-      </div>
-      <p className="mt-2 text-[10px] text-t3" data-e2e="p2-note-warn">
-        呢啲係醫生臨床記錄，請勿轉發
-      </p>
-    </div>
-  );
-}
-
-
