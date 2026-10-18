@@ -331,7 +331,10 @@ async function main(): Promise<void> {
     await clockCtx.addCookies([{ name: "wa_inbox_session", value: sessionValue, domain: "127.0.0.1", path: "/" }]);
     const PC = await clockCtx.newPage();
     if (!PC.clock) throw new Error("playwright clock API 缺（需 ≥1.45）");
-    await PC.clock.pauseAt(new Date(`${today}T10:59:00+08:00`));
+    // ★ cwi-mobile-ux-20261018：/schedule 加咗 route loading.tsx（串流 Suspense）— 內容換入要 timer，
+    //   開頁前就 pauseAt 會永遠停喺 loading 畫面（真用戶時鐘照行，冇呢個問題）。
+    //   改：install 10:58（時間照行）→ 開頁等而家線 → 再 pauseAt 10:59 凍結（之後 tick 斷言不變）。
+    await PC.clock.install({ time: new Date(`${today}T10:58:00+08:00`) });
 
     await PC.goto(`${base}/schedule?clinic=TKW&view=day&date=${today}`, { waitUntil: "domcontentloaded", timeout: 60000 });
     // 等 hydration + mount effect 出而家線（nowMin 初始 -1 → effect 後先 render；SSR 無線 → 零 mismatch）
@@ -357,6 +360,8 @@ async function main(): Promise<void> {
       await PC.waitForTimeout(500);
     }
     if (!posInfo) throw new Error("而家線缺失（data-now-line）或 30s 內位置未到（hydration？）");
+    const fakeNow = (await PC.evaluate(() => Date.now())) as number;
+    await PC.clock.pauseAt(new Date(Math.max(Date.parse(`${today}T10:59:00+08:00`), fakeNow + 1000)));
     if (!posInfo.prev.includes("10:00") || !posInfo.next.includes("10:30"))
       throw new Error(`而家線位置錯（prev=${posInfo.prev.slice(0, 12)} next=${posInfo.next.slice(0, 12)}）`);
     if (!posInfo.inViewport) throw new Error("auto-scroll 未生效（而家線唔喺 viewport）");
