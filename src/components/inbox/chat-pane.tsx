@@ -78,6 +78,7 @@ import { fmtAmt, fmtDateShort } from "@/lib/patient-record-state";
 import { BookingCard } from "./booking-card";
 import { HoldCard } from "./hold-card";
 import { WindowExits } from "./window-exits";
+import { ConversationStatusBanners } from "./conversation-status-banners";
 // cwi-setnav NAV-02：對話內彈窗／popover — 系統返回先閂彈窗（WhatsApp 式）
 import { useBackLayer } from "@/lib/back-stack";
 
@@ -745,6 +746,11 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   // ★ cwi-inbox-r3 Q3：內部備註（channel=INTERNAL）唔再喺病人對話串出現 — 只喺右邊「內部備註」欄
   //   （detail-pane）睇同寫，避免同病人訊息混埋 / 打錯位。已讀回條改由備註欄回報。
   const visible = useMemo(() => sameConv.filter((m) => m.channel !== "INTERNAL"), [sameConv]);
+  // 頂部橫額：收到新病人訊息就重拉（要求真人／STOP 都係由病人訊息觸發）
+  const lastInboundId = useMemo(() => {
+    for (let i = visible.length - 1; i >= 0; i--) if (visible[i].direction === "IN") return visible[i].id;
+    return null;
+  }, [visible]);
 
   // ★ cwi-final S6-7：staffNameById memo（MessageBubble memo 依賴穩定 ref）— 必喺 early return 之前（條件 hook 會 break hook order）
   // ★ cwi-inbox-r3 Q4：本店 + 全公司 staff（跨店同事發嘅訊息都顯示到名）
@@ -1157,14 +1163,16 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
           手機 <md 名字欄只留 2 行（姓名 + 店碼·負責人），右側掣收細；桌面（≥md）零改變。 */}
       {/* ★ cwi-mobile-ux-20261018（擁有人揀 A）：手機拆兩行 — 第一行 ‹ 頭像 名＋負責人·編號·新舊客 窗口；
           第二行 地點 · 病人記錄 · ⋯（order + basis-full 斷行；桌面 md:order-none 照舊一行） */}
-      <div className="min-h-[52px] py-1.5 shrink-0 bg-panel border-b border-line flex flex-wrap md:flex-nowrap items-center gap-x-2 gap-y-1.5 md:gap-2.5 px-2 md:px-4">
+      {/* ★ 擁有人 2026-10-18：桌面中欄窄（三欄 + 病人 chip + 放手）時名字欄被擠到「k…」、負責人逐字斷行 —
+          改為桌面都容許斷行：名字欄保底 220px，掣列唔夠位就自動落第二行 */}
+      <div className="min-h-[52px] py-1.5 shrink-0 bg-panel border-b border-line flex flex-wrap items-center gap-x-2 gap-y-1.5 md:gap-x-2.5 px-2 md:px-4">
         <button onClick={p.onBack} aria-label="返回列表" className="md:hidden order-1 p-1 -ml-1 text-brand-text">
           <ChevronLeft size={20} />
         </button>
         <button
           onClick={p.onOpenDetail}
           // ★ cwi-ux UX-05：flex-1 min-w-[80px] — 名字欄保底 80px 唔會被右側掣擠到 0 闊（手機姓名唔見根因）
-          className="order-2 md:order-none flex items-center gap-2 md:gap-2.5 flex-1 min-w-[80px] text-left lg:pointer-events-none"
+          className="order-2 md:order-none flex items-center gap-2 md:gap-2.5 flex-1 min-w-[80px] md:min-w-[220px] text-left lg:pointer-events-none"
           aria-label="開啟聯絡人詳情"
         >
           <div className="w-8 h-8 md:w-[38px] md:h-[38px] rounded-full bg-brand text-panel flex items-center justify-center text-[14px] md:text-[15px] font-medium shrink-0">
@@ -1216,14 +1224,14 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   </span>
                 ) : null}
                 {patientChip.lastVisitDate ? (
-                  <span className="text-[10px] text-t3" data-e2e="p2-chip-lastvisit">
+                  <span className="text-[10px] text-t3 whitespace-nowrap" data-e2e="p2-chip-lastvisit">
                     上次到診 {fmtDateShort(patientChip.lastVisitDate)}
                   </span>
                 ) : null}
               </div>
             ) : null}
             {assigneeName && (
-              <div className={`hidden md:inline-flex items-center gap-0.5 text-[10px] ${locked ? "text-warn-text" : "text-t3"}`}>
+              <div className={`hidden md:inline-flex items-center gap-0.5 text-[10px] whitespace-nowrap ${locked ? "text-warn-text" : "text-t3"}`}>
                 <Lock size={9} />
                 負責人：{c.assigneeId === p.myStaffId ? "你" : assigneeName}
               </div>
@@ -1368,6 +1376,9 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
           )}
         </span>
       </div>
+
+      {/* ★ 擁有人 2026-10-18：🙋 要求真人／🔕 已退訂 橫額（對話欄頂部 — 唔使開右欄都見到） */}
+      <ConversationStatusBanners conversationId={c.id} lastInboundId={lastInboundId} compact={isMobile} />
 
       {/* messages — ★ cwi-final S6-7：virtualization（react-virtuoso normal mode — 只有 viewport 內 row 掛 DOM）
           startReached = 載舊（prepend 用 scrollHeight delta 補償錨點）；followOutput = 貼最新（atBottom 先跟）

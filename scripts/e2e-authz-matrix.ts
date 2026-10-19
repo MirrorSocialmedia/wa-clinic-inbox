@@ -857,6 +857,11 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/conversations/nope", method: "PATCH", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 404 },
   },
+  // ★ 擁有人 2026-10-18：對話欄頂部橫額狀態（讀取口徑 — 唔存在對話 → 404）
+  "GET /api/conversations/[id]/patient-requested-human": {
+    fixture: () => ({ url: "/api/conversations/nope/patient-requested-human" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404 },
+  },
   "PATCH /api/conversations/[id]/patient-requested-human": {
     // wa-meta-compliance C.1：清病人「要求真人」flag — 權限同對話寫入口徑（assertConversationAccess + assertCanWriteConversation）
     // fixture = convPre（F 店 = STAFF_TY/YMT 外店 → 403；SUPERVISOR 全店 access 放行但寫入邊界 → 403；CB/ALL scope 內 → 200）

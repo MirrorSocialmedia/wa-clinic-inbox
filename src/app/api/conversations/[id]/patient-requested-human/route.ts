@@ -20,6 +20,35 @@ import { handle } from "@/lib/api-error";
  */
 export const dynamic = "force-dynamic";
 
+/**
+ * ★ 擁有人 2026-10-18：GET — 對話欄頂部橫額用嘅輕量狀態（唔使拉成個病人記錄／唔打 workforce）
+ *   { humanRequest: { active, at }, optOut: { active, at, contactId }, canWrite }
+ *   權限：同對話讀取口徑（assertConversationAccess）；canWrite = 非 SUPERVISOR（掣顯示用）。
+ */
+export const GET = handle(async (req: NextRequest, { params }) => {
+  const ctx = await requireAuth(req);
+  const { id } = await params;
+  const conv = await prisma.conversation.findUnique({ where: { id } });
+  if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
+  await assertConversationAccess(ctx, conv);
+  const contact = await prisma.contact.findUnique({
+    where: { id: conv.contactId },
+    select: { id: true, followupOptOut: true, optOutAt: true },
+  });
+  return NextResponse.json({
+    humanRequest: {
+      active: conv.patientRequestedHuman,
+      at: conv.patientRequestedHumanAt ? conv.patientRequestedHumanAt.toISOString() : null,
+    },
+    optOut: {
+      active: !!contact?.followupOptOut,
+      at: contact?.optOutAt ? contact.optOutAt.toISOString() : null,
+      contactId: contact?.id ?? null,
+    },
+    canWrite: ctx.staff.role !== "SUPERVISOR",
+  });
+});
+
 export const PATCH = handle(async (req: NextRequest, { params }) => {
   const ctx = await requireAuth(req);
   const { id } = await params;
