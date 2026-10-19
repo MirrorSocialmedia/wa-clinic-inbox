@@ -274,7 +274,8 @@ export async function sendTemplateMessage(opts: {
         template: {
           name: templateName,
           language: { code: language },
-          components,
+          // 冇變數 template（hello_world 類）唔帶 components
+          ...(components.length > 0 ? { components } : {}),
         },
       }),
       // ★ cwi-final S1-15：同 sendTextMessage — 10s 超时 → TimeoutError → UNKNOWN 路徑
@@ -674,6 +675,8 @@ export interface MessageTemplate {
   language: string;
   category: string; // UTILITY / MARKETING / SERVICE
   status: string; // APPROVED / PENDING / REJECTED / DISABLED
+  /** Meta template 結構（HEADER/BODY/FOOTER/BUTTONS）— 判斷有冇變數；mock 舊 fixture 冇呢欄 */
+  components?: { type: string; format?: string; text?: string; buttons?: unknown[] }[];
 }
 
 /** mock fixture：APPROVED / PENDING / REJECTED 各一（§2A 驗收：三條正確上色）。
@@ -686,6 +689,14 @@ const MOCK_TEMPLATES: MessageTemplate[] = [
   { name: "appt_reminder_zh", language: "zh_HK", category: "UTILITY", status: "APPROVED" },
   // ★ cwi-final S2-5（T742）：MARKETING APPROVED — 過窗 template 計費真 category 路徑（billingCategory=MARKETING）
   { name: "post_op_promo_zh", language: "zh_HK", category: "MARKETING", status: "APPROVED" },
+  // ★ 擁有人 2026-10-18：冇變數 template（hello_world 類）— 過窗 picker 直接可發
+  {
+    name: "clinic_hello_zh",
+    language: "zh_HK",
+    category: "UTILITY",
+    status: "APPROVED",
+    components: [{ type: "BODY", text: "你好！我哋係診所前台，想跟進返你之前嘅查詢，方便時請回覆我哋 🙂" }],
+  },
 ];
 
 /**
@@ -695,7 +706,7 @@ const MOCK_TEMPLATES: MessageTemplate[] = [
 export async function listMessageTemplates(wabaId: string): Promise<MessageTemplate[]> {
   if (waMock()) return MOCK_TEMPLATES;
   const res = await graphFetch(
-    `${GRAPH_BASE}/${wabaId}/message_templates?fields=name,language,category,status&limit=50`,
+    `${GRAPH_BASE}/${wabaId}/message_templates?fields=name,language,category,status,components&limit=50`,
     { headers: { authorization: `Bearer ${accessToken()}` }, signal: AbortSignal.timeout(10000) }
   ); // ★ cwi-qa FX-19：GET 無副作用 — 網絡錯誤保持原樣
   if (!res.ok) throw new Error(`templates http ${res.status}`);

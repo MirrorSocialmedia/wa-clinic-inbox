@@ -11,11 +11,13 @@ import { getWindowState } from "@/lib/wa/window";
 import { billingCategoryForTemplate, BILLING_SERVICE } from "@/lib/wa/billing";
 import { assignConversation } from "@/lib/assign";
 import { precheckAdoptedTask } from "@/lib/followup/engine";
+import { waMock, type MessageTemplate } from "@/lib/wa/graph";
 import {
-  listMessageTemplates,
-  waMock,
-  type MessageTemplate,
-} from "@/lib/wa/graph";
+  approvedTemplateList as approvedAllCategories,
+  clinicWabaId,
+  isPlainTemplate,
+  plainTemplatePreview,
+} from "@/lib/wa/approved-templates";
 import {
   buildTemplateComponents,
   confirmPreviewText,
@@ -78,13 +80,8 @@ const ENQUEUE_TIMEOUT_MS = 1500;
 
 /** APPROVED + UTILITY template 名單（422 回應 + template 發送校驗共用）。失敗回 []（唔阻 422）。 */
 async function approvedTemplateList(clinic: { waBusinessAccountId: string | null }): Promise<MessageTemplate[]> {
-  try {
-    if (!clinic.waBusinessAccountId && !waMock()) return [];
-    const all = await listMessageTemplates(clinic.waBusinessAccountId ?? "");
-    return all.filter((t) => t.status === "APPROVED" && t.category === "UTILITY");
-  } catch {
-    return [];
-  }
+  // ★ 擁有人 2026-10-18：共用 lib（店冇 WABA id → .env WA_WABA_ID）；呢度仍然只收 UTILITY
+  return (await approvedAllCategories(clinic)).filter((t) => t.category === "UTILITY");
 }
 
 export const POST = handle(async (req: NextRequest) => {
@@ -158,7 +155,7 @@ export const POST = handle(async (req: NextRequest) => {
   let templatePreview = "";
   if (isTemplateSend) {
     // ── template 發送校驗（失敗一律唔 claim / 唔落 Message）──
-    if (!clinic.waBusinessAccountId && !waMock()) {
+    if (!clinicWabaId(clinic) && !waMock()) {
       return NextResponse.json(
         { error: "waba_not_configured", message: "呢間店未設定 WABA id — 唔可以發 template" },
         { status: 400 }
@@ -184,40 +181,52 @@ export const POST = handle(async (req: NextRequest) => {
     }
     const isReminder = tpl.name === reminderTemplateName();
     const isConfirm = tpl.name === confirmTemplateName();
-    if (!isReminder && !isConfirm) {
+    // ★ 擁有人 2026-10-18：冇變數 template（hello_world 類）— 唔使預約資料，components 空陣列
+    const isPlain = !isReminder && !isConfirm && isPlainTemplate(tpl);
+    if (!isReminder && !isConfirm && !isPlain) {
       return NextResponse.json(
         {
           error: "template_not_supported",
-          message: "v1 只支援 appt_reminder_zh / appt_confirm_zh（有 builder 嘅 template）",
+          message: "只支援 appt_reminder_zh / appt_confirm_zh（有 builder）或者冇變數嘅 template",
         },
         { status: 400 }
       );
     }
-    // 變數：client 帶 templateParams → 用；冇 → 自動攞對話最新 CONFIRMED booking（同 T-24h 提醒同源）
-    let input: TemplateInput;
-    if (parsed.data.templateParams) {
-      input = { ...parsed.data.templateParams, clinicName: clinic.name };
+    if (isPlain) {
+      templateMeta = {
+        name: tpl.name,
+        language: tpl.language,
+        category: tpl.category,
+        components: [],
+      } as unknown as Prisma.InputJsonValue;
+      templatePreview = plainTemplatePreview(tpl) || tpl.name;
     } else {
-      const br = await prisma.bookingRequest.findFirst({
-        where: { conversationId: conv.id, status: "CONFIRMED" },
-        orderBy: { createdAt: "desc" },
-      });
-      if (!br || !br.requestedTime) {
-        return NextResponse.json(
-          { error: "template_params_required", message: "對話冇 CONFIRMED 預約 — 請帶 templateParams（日期/時間/醫生）" },
-          { status: 400 }
-        );
+      // 變數：client 帶 templateParams → 用；冇 → 自動攞對話最新 CONFIRMED booking（同 T-24h 提醒同源）
+      let input: TemplateInput;
+      if (parsed.data.templateParams) {
+        input = { ...parsed.data.templateParams, clinicName: clinic.name };
+      } else {
+        const br = await prisma.bookingRequest.findFirst({
+          where: { conversationId: conv.id, status: "CONFIRMED" },
+          orderBy: { createdAt: "desc" },
+        });
+        if (!br || !br.requestedTime) {
+          return NextResponse.json(
+            { error: "template_params_required", message: "對話冇 CONFIRMED 預約 — 請帶 templateParams（日期/時間/醫生）" },
+            { status: 400 }
+          );
+        }
+        input = { requestedDate: br.requestedDate, requestedTime: br.requestedTime, providerName: br.providerName, clinicName: clinic.name };
       }
-      input = { requestedDate: br.requestedDate, requestedTime: br.requestedTime, providerName: br.providerName, clinicName: clinic.name };
+      templateMeta = {
+        name: tpl.name,
+        language: tpl.language,
+        // cwi-window-20260901（P1）：template 類別快照 — /admin/usage 計費同 backfill 冪等性用
+        category: tpl.category,
+        components: buildTemplateComponents(input),
+      } as unknown as Prisma.InputJsonValue;
+      templatePreview = isReminder ? reminderPreviewText(input) : confirmPreviewText(input);
     }
-    templateMeta = {
-      name: tpl.name,
-      language: tpl.language,
-      // cwi-window-20260901（P1）：template 類別快照 — /admin/usage 計費同 backfill 冪等性用
-      category: tpl.category,
-      components: buildTemplateComponents(input),
-    } as unknown as Prisma.InputJsonValue;
-    templatePreview = isReminder ? reminderPreviewText(input) : confirmPreviewText(input);
     log.info(
       { clinicId: clinic.id, conversationId: conv.id, staffId: ctx.staff.id, templateName: tpl.name },
       "send: template send validated（window-closed 合法路徑）"

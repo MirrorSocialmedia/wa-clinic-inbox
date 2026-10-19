@@ -1346,17 +1346,21 @@ q "UPDATE \"WorkforceSyncState\" SET \"lastOkAt\" = now()" >/dev/null
 q "UPDATE \"Clinic\" SET \"lastWebhookEventAt\" = CASE WHEN id='$TKW_CLINIC_ID' THEN now() - interval '40 minutes' ELSE now() END WHERE \"lastWebhookEventAt\" IS NOT NULL" >/dev/null
 
 # (1) inject：webhook stale（TKW -40min）+ queue depth 假高（ai=150）+ AI breaker open
+# ★ 2026-10-18：背景 worker 每分鐘自己跑 health-check（冇 overrides → 真 queue/breaker 正常 → auto-resolve），
+#   可能喺 inject 同斷言之間收咗 queue_depth / ai_breaker_open → 斷言一律睇「T0 之後開過」嘅 Alert（唔理已解決未）
+T35_T0=$(q "SELECT floor(extract(epoch from now())*1000)::text t" | jf t)
+T35_SINCE="\"createdAt\" >= to_timestamp(${T35_T0:-0}/1000.0)"
 pnpm -s e2e:cron health-check '{"overrides":{"queueDepth":{"ai":{"waiting":150,"failed":0}},"breakerState":"open"}}' >/dev/null 2>&1 || T35=1
-if wait_for "SELECT (SELECT count(*) FROM \"Alert\" WHERE \"resolvedAt\" IS NULL AND type IN ('webhook_stale','queue_depth','ai_breaker_open'))::text c" '[{"c":"3"}]' 30; then
-  pass "T35 inject 3 種異常 → 3 條未解決 Alert"
+if wait_for "SELECT (SELECT count(DISTINCT type) FROM \"Alert\" WHERE $T35_SINCE AND type IN ('webhook_stale','queue_depth','ai_breaker_open'))::text c" '[{"c":"3"}]' 30; then
+  pass "T35 inject 3 種異常 → 3 種 Alert 已開"
 else
   fail "T35 3 條 Alert 未齊"
 fi
 WSC=$(q "SELECT \"clinicCode\"::text cc FROM \"Alert\" WHERE type='webhook_stale' AND \"resolvedAt\" IS NULL" | jf cc)
 check "T35 webhook_stale 指咗 TKW（有 traffic 先計 stale）" "$WSC" "TKW"
-QSS=$(q "SELECT \"severity\"::text s FROM \"Alert\" WHERE type='queue_depth' AND \"resolvedAt\" IS NULL" | jf s)
+QSS=$(q "SELECT \"severity\"::text s FROM \"Alert\" WHERE type='queue_depth' AND $T35_SINCE ORDER BY \"createdAt\" DESC LIMIT 1" | jf s)
 check "T35 queue_depth severity=MEDIUM" "$QSS" "MEDIUM"
-BSS=$(q "SELECT \"severity\"::text s FROM \"Alert\" WHERE type='ai_breaker_open' AND \"resolvedAt\" IS NULL" | jf s)
+BSS=$(q "SELECT \"severity\"::text s FROM \"Alert\" WHERE type='ai_breaker_open' AND $T35_SINCE ORDER BY \"createdAt\" DESC LIMIT 1" | jf s)
 check "T35 ai_breaker_open severity=HIGH" "$BSS" "HIGH"
 
 # (2) 通知（ALERT_CHANNEL=log 預設）：worker log 見到 metadata-only 警報行，0 PII
@@ -3620,6 +3624,16 @@ if [ "$T92" = 0 ]; then
   # 3) 400 分支：approved 但冇 builder / 唔存在 / body+template 同傳
   h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"templateName\":\"appointment_reminder\"}"
   check "T92 approved 但冇 builder → 400 template_not_supported" "$(grep -oE '"error":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)" "template_not_supported"
+  # ★ 擁有人 2026-10-18：冇變數 template（clinic_hello_zh mock）— 唔使預約都發得 → 202 + SENT
+  h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"templateName\":\"clinic_hello_zh\"}"
+  check "T92b 冇變數 template 發送 → 202" "$H1_CODE" "202"
+  T92B_MID=$(grep -oE '"messageId":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)
+  if wait_for "SELECT \"status\"::text s FROM \"Message\" WHERE id='$T92B_MID'" '[{"s":"SENT"}]' 45; then
+    pass "T92b 冇變數 template Message SENT"
+  else
+    fail "T92b 冇變數 template 未 SENT"
+    T92=1
+  fi
   h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"templateName\":\"no_such_template\"}"
   check "T92 唔存在 template → 400 template_not_found" "$(grep -oE '"error":"[^"]*"' "$H1_OUT" | head -1 | cut -d'"' -f4)" "template_not_found"
   h1_req "$COOKIE_TKW" POST "$BASE/api/messages/send" "{\"conversationId\":\"$REMB_CONV\",\"body\":\"x\",\"templateName\":\"appt_reminder_zh\"}"
@@ -6131,7 +6145,8 @@ else
   check "T173 ② picker GET → 200" "$CODE" "200"
   W173_NAMES=$(node -e "try{const d=require('/tmp/e2e-w173-tpl.json');console.log(d.templates.map(t=>t.name).sort().join(','))}catch(e){console.log('ERR')}" 2>/dev/null)
   # a2 fix：預期值要同 node `.sort()`（JS lexicographic）同序 — o<t 所以 appointment_reminder 排前（原寫反 = 假紅）
-  check "T173 只列 APPROVED+UTILITY（2 款）" "$W173_NAMES" "appointment_reminder,appt_reminder_zh"
+  # ★ 擁有人 2026-10-18：mock 加咗冇變數 UTILITY template clinic_hello_zh → 3 款（MARKETING post_op_promo_zh 仍然唔列）
+  check "T173 只列 APPROVED+UTILITY（3 款）" "$W173_NAMES" "appointment_reminder,appt_reminder_zh,clinic_hello_zh"
   W173_PREFILL=$(node -e "try{const d=require('/tmp/e2e-w173-tpl.json');const p=d.prefill;console.log(p?[p.patientName,p.clinicName,p.requestedDate,p.requestedTime,p.providerName].join('|'):'NULL')}catch(e){console.log('ERR')}" 2>/dev/null)
   check "T173 變數預填（病人名/診所/日期/時間/醫生）" "$W173_PREFILL" "E2E-A-WINDOW|TKW 診所（試點店）|2026-10-01|10:30|陳明軒（主理）"
   # 發送成功（picker 掣同一 outbound 路徑：POST /api/messages/send templateName）

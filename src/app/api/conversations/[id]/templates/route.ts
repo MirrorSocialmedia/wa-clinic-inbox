@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { requireAuth, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { approvedTemplateList } from "@/lib/wa/approved-templates";
+import { approvedTemplateList, isPlainTemplate, plainTemplatePreview } from "@/lib/wa/approved-templates";
 import {
   confirmPreviewText,
   confirmTemplateName,
@@ -72,9 +72,12 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
 
   return NextResponse.json({
     templates: all.map((t) => {
-      const supported = t.name === reminderName || t.name === confirmName;
-      let preview: string | null = null;
-      if (supported && prefill) {
+      const builder = t.name === reminderName || t.name === confirmName;
+      // ★ 擁有人 2026-10-18：冇變數 template 都可以發（唔使預約資料）
+      const plain = !builder && isPlainTemplate(t);
+      const supported = builder || plain;
+      let preview: string | null = plain ? plainTemplatePreview(t) : null;
+      if (builder && prefill) {
         preview =
           t.name === reminderName
             ? reminderPreviewText({
@@ -90,7 +93,7 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
                 clinicName: prefill.clinicName,
               });
       }
-      return { name: t.name, language: t.language, category: t.category, supported, preview };
+      return { name: t.name, language: t.language, category: t.category, supported, needsBooking: builder, preview };
     }),
     prefill,
   });

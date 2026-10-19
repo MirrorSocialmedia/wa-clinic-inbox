@@ -1667,7 +1667,11 @@ export function InboxClient({
       const prevIds = new Set(messagesRef.current.map((m) => m.id));
       const addedCount = data.messages.filter((m) => !prevIds.has(m.id)).length;
       setMessages((prev) => {
-        const map = new Map(prev.map((m) => [m.id, m]));
+        // 附件 POST 未回應前 refetch 已攞到 server row → 同 clientMessageId 嘅 optimistic 氣泡讓位（唔好出兩條）
+        const fetchedCids = new Set(data.messages.map((m) => m.clientMessageId).filter(Boolean));
+        const map = new Map(
+          prev.filter((m) => !(m.id.startsWith("optimistic-") && m.clientMessageId && fetchedCids.has(m.clientMessageId))).map((m) => [m.id, m])
+        );
         for (const m of data.messages) map.set(m.id, m);
         return [...map.values()].sort(msgSortCmp);
       });
@@ -2622,11 +2626,19 @@ export function InboxClient({
           return fail(data?.error ?? `發送失敗（${res.status}）`);
         }
         // 2xx：氣泡 mediaPath 換 server mediaUrl（client 之後經 /api/media/<fileKey> 讀返）+ revoke objectURL
+        // ★ 擁有人 2026-10-18：氣泡 id 換返 server messageId — 以前一直用 optimistic-<uuid>，之後 refetch／reconcile
+        //   按 id merge 會多插一條 server row（同一張圖出兩次，一條永遠「…」）；status 事件亦對唔上 id
         const serverUrl = data?.mediaUrl ?? null;
-        if (serverUrl) {
-          setMessages((prev) => prev.map((m) => (m.id === optimistic.id ? { ...m, mediaPath: serverUrl, status: data?.status ?? m.status } : m)));
-          URL.revokeObjectURL(objectUrl);
-        }
+        const serverId = data?.messageId ?? null;
+        setMessages((prev) => {
+          if (serverId && prev.some((m) => m.id === serverId)) return prev.filter((m) => m.id !== optimistic.id);
+          return prev.map((m) =>
+            m.id === optimistic.id
+              ? { ...m, id: serverId ?? m.id, mediaPath: serverUrl ?? m.mediaPath, status: data?.status ?? m.status }
+              : m
+          );
+        });
+        if (serverUrl) URL.revokeObjectURL(objectUrl);
         setConversations((prev) =>
           prev.map((c) => (c.id === convId ? { ...c, lastMessageAt: optimistic.waTimestamp, preview: "附件", status: c.status === "RESOLVED" ? "OPEN" : c.status } : c))
         );
