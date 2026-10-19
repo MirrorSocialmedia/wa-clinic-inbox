@@ -35,6 +35,7 @@ import {
 import { WLoading } from "@/components/ui/w-loader";
 import { PatientStatusChip } from "./patient-status-chip";
 import { ConsultationHistory, NoteBody } from "./consultation-history";
+import { CONV_FLAGS_EVENT } from "./conversation-status-banners";
 
 // ★ cwi-walkin-20261018（擁有人拍板）：預約同到診合併一個時間線；藥物併入「診症及處方」做子項
 type TabKey = "visits" | "consult" | "bills";
@@ -161,12 +162,36 @@ export function PatientRecordPanel({ conversationId, resetKey = 0, scrollAll = f
             }
           : prev
       );
+      window.dispatchEvent(new CustomEvent(CONV_FLAGS_EVENT, { detail: { conversationId } })); // 對話欄橫額同步
     } catch (e) {
       alert(`跟進通知更新失敗，請稍後再試${e instanceof Error && e.message ? `（${e.message}）` : ""}`);
     } finally {
       setOptOutBusy(false);
     }
-  }, [data, optOutBusy]);
+  }, [data, optOutBusy, conversationId]);
+
+  // ★ 擁有人 2026-10-18：對話欄頂部橫額撳咗「交返 AI／恢復跟進」→ 呢度兩行跟住更新（輕量 GET，唔重拉成個記錄）
+  useEffect(() => {
+    const on = async (e: Event) => {
+      if ((e as CustomEvent<{ conversationId?: string }>).detail?.conversationId !== conversationId) return;
+      const res = await fetch(`/api/conversations/${conversationId}/patient-requested-human`).catch(() => null);
+      if (!res?.ok) return;
+      const f = (await res.json()) as { humanRequest: { active: boolean; at: string | null }; optOut: { active: boolean; at: string | null } };
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              contact: prev.contact ? { ...prev.contact, followupOptOut: f.optOut.active, optOutAt: f.optOut.at } : prev.contact,
+              patientRequestedHuman: prev.patientRequestedHuman
+                ? { ...prev.patientRequestedHuman, active: f.humanRequest.active, at: f.humanRequest.at }
+                : prev.patientRequestedHuman,
+            }
+          : prev
+      );
+    };
+    window.addEventListener(CONV_FLAGS_EVENT, on);
+    return () => window.removeEventListener(CONV_FLAGS_EVENT, on);
+  }, [conversationId]);
 
   // ★ wa-meta-compliance-20261016（C.1）：交返 AI — 清 patientRequestedHuman flag（audit HUMAN_REQUEST_CLEARED）
   const [handBackBusy, setHandBackBusy] = useState(false);
@@ -188,6 +213,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0, scrollAll = f
           ? { ...prev, patientRequestedHuman: { ...prev.patientRequestedHuman, active: false, at: null } }
           : prev
       );
+      window.dispatchEvent(new CustomEvent(CONV_FLAGS_EVENT, { detail: { conversationId } })); // 對話欄橫額同步
     } catch (e) {
       alert(`交返 AI 失敗，請稍後再試${e instanceof Error && e.message ? `（${e.message}）` : ""}`);
     } finally {
