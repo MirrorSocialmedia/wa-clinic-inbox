@@ -195,6 +195,16 @@ const ConversationRow = memo(function ConversationRow(props: ConversationRowProp
                         待跟進
                       </span>
                     )}
+                    {/* ★ cwi-advice-20261024：醫生建議跟進（診症記錄有 advise／suggest…）未處理 */}
+                    {c.followupAdvice && (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-brand-soft text-brand-text font-medium"
+                        title="醫生喺診症記錄建議跟進 — 打開對話睇跟進卡（原因／原文）"
+                        data-e2e="row-advice-chip"
+                      >
+                        醫生建議
+                      </span>
+                    )}
                     {urgentRow && (
                       <>
                         <span className="text-[10px] px-2 py-0.5 rounded-full bg-danger text-panel font-semibold">
@@ -1019,7 +1029,17 @@ export function ConversationList(p: Props) {
                     className="flex-1 min-w-0 text-left rounded-full px-2.5 py-1.5 hover:bg-black/[.04]"
                   >
                     <div className="text-xs text-t1 truncate">{n.title}</div>
-                    <div className="text-[10px] text-t3">{relTime(n.createdAt)}</div>
+                    <div className="text-[10px] text-t3 truncate">
+                      {/* ★ cwi-advice-20261024：醫生建議跟進 → 加對話名（title 零病人資料；名由已載入列表補） */}
+                      {n.kind === "FOLLOWUP_ADVICE" && n.conversationId
+                        ? (() => {
+                            const cv = p.conversations.find((x) => x.id === n.conversationId);
+                            const nm = cv?.contact?.profileName ?? null;
+                            return nm ? `${nm} · ` : "";
+                          })()
+                        : ""}
+                      {relTime(n.createdAt)}
+                    </div>
                   </button>
                   {urgent && (
                     <button

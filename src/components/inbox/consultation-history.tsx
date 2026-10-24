@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronUp, Pill } from "lucide-react";
-import type { NoteText } from "./types";
+import type { NoteText, PatientAdviceInfo } from "./types";
 import { fmtDateShort } from "@/lib/patient-record-state";
 import { WLoading } from "@/components/ui/w-loader";
 
@@ -34,7 +34,46 @@ function firstLine(note: NoteText): string {
   return line.length > 60 ? `${line.slice(0, 60)}…` : line;
 }
 
-export function ConsultationHistory({ conversationId, patientKey }: { conversationId: string; patientKey: string }) {
+/**
+ * ★ cwi-advice-20261024：醫生建議句標黃 — 同 CWM findAdvice 同一口徑（換行／；／。切段；
+ *   排除字成段唔計；觸發字前後唔係英文字母）。純顯示（唔存唔傳）。
+ */
+function adviceRe(kw: string): RegExp {
+  const body = kw.trim().toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`(?<![a-z])${body}(?![a-z])`, "i");
+}
+export function HighlightAdvice({ text, advice }: { text: string; advice: PatientAdviceInfo | null }) {
+  if (!advice || !advice.keywords.length || !text) return <>{text}</>;
+  const res = advice.keywords.map(adviceRe);
+  const exs = advice.excludeKeywords.map((x) => x.toLowerCase().replace(/\s+/g, " ").trim()).filter(Boolean);
+  const parts = text.split(/([\n\r;；。]+)/);
+  return (
+    <>
+      {parts.map((seg, i) => {
+        if (i % 2 === 1 || !seg.trim()) return <span key={i}>{seg}</span>;
+        const low = seg.toLowerCase().replace(/\s+/g, " ");
+        const hit = !exs.some((x) => low.includes(x)) && res.some((r) => r.test(seg));
+        return hit ? (
+          <mark key={i} className="bg-warn-soft text-t1 rounded px-0.5" data-e2e="p2-advice-mark">
+            {seg}
+          </mark>
+        ) : (
+          <span key={i}>{seg}</span>
+        );
+      })}
+    </>
+  );
+}
+
+export function ConsultationHistory({
+  conversationId,
+  patientKey,
+  advice = null,
+}: {
+  conversationId: string;
+  patientKey: string;
+  advice?: PatientAdviceInfo | null;
+}) {
   const [items, setItems] = useState<ConsultationItem[]>([]);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -123,6 +162,20 @@ export function ConsultationHistory({ conversationId, patientKey }: { conversati
                 <span className="text-t3">·</span>
                 <span className="text-t2">{c.providerName ?? c.providerCode ?? "—"}</span>
                 {c.isDraft ? <span className="px-1.5 py-0.5 rounded text-[10px] bg-warn-soft text-warn-text">草稿</span> : null}
+                {(() => {
+                  // ★ cwi-advice-20261024：呢日診症已出醫生建議跟進 → 「已入待跟進」／「已跟進」
+                  const t = advice?.tasks.find((x) => x.visitDate === c.date);
+                  if (!t) return null;
+                  const pending = t.status === "SUGGESTED";
+                  return (
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[10px] ${pending ? "bg-brand-soft text-brand-text" : "bg-panel-2 text-t2"}`}
+                      data-e2e="p2-advice-chip"
+                    >
+                      {pending ? "已入待跟進" : "已跟進"}
+                    </span>
+                  );
+                })()}
                 {c.note.rx && c.note.rx.length > 0 ? (
                   <span className="inline-flex items-center gap-0.5 text-[10px] text-brand-text">
                     <Pill size={10} /> {c.note.rx.length}
@@ -134,7 +187,7 @@ export function ConsultationHistory({ conversationId, patientKey }: { conversati
             </button>
             {open ? (
               <div className="mt-2 border-t border-line pt-2">
-                <NoteBody note={c.note} warn={false} />
+                <NoteBody note={c.note} warn={false} advice={advice} />
               </div>
             ) : null}
           </div>
@@ -160,7 +213,7 @@ export function ConsultationHistory({ conversationId, patientKey }: { conversati
 }
 
 /** 兩種樣板渲染（MD §0.3 — 自訂樣板 Tx 原文保留換行）。 */
-export function NoteBody({ note, warn = true }: { note: NoteText; warn?: boolean }) {
+export function NoteBody({ note, warn = true, advice = null }: { note: NoteText; warn?: boolean; advice?: PatientAdviceInfo | null }) {
   return (
     <div data-e2e="p2-note" data-kind={note.kind}>
       {note.kind === "STANDARD" ? (
@@ -174,7 +227,7 @@ export function NoteBody({ note, warn = true }: { note: NoteText; warn?: boolean
           ].map(([label, text]) => (
             <div key={label} className="text-[12px]">
               <dt className="text-t3">{label}</dt>
-              <dd className={`whitespace-pre-wrap ${text?.trim() ? "text-t1" : "text-t3"}`}>{text?.trim() ? text : "—"}</dd>
+              <dd className={`whitespace-pre-wrap ${text?.trim() ? "text-t1" : "text-t3"}`}>{text?.trim() ? <HighlightAdvice text={text} advice={advice} /> : "—"}</dd>
             </div>
           ))}
         </dl>
@@ -184,7 +237,7 @@ export function NoteBody({ note, warn = true }: { note: NoteText; warn?: boolean
           {note.blocks.map((b, i) => (
             <div key={i} className="text-[12px]">
               <span className="text-t3">{b.label}：</span>
-              <span className="text-t1 whitespace-pre-wrap">{b.text}</span>
+              <span className="text-t1 whitespace-pre-wrap"><HighlightAdvice text={b.text} advice={advice} /></span>
             </div>
           ))}
         </div>

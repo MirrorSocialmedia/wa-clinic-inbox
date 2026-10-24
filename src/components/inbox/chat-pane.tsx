@@ -37,6 +37,7 @@ const FOLLOWUP_TRIGGER_LABEL: Record<string, string> = {
   RECALL_NO_REPEAT: "召回（未回診）",
   QUOTED_NOT_BOOKED: "已報價未預約",
   CONVERSATION_IDLE: "對話空窗",
+  DOCTOR_ADVICE: "醫生建議跟進",
 };
 
 function followupReasonLine(s: FollowupSuggestion): string | null {
@@ -70,6 +71,8 @@ function followupReasonLine(s: FollowupSuggestion): string | null {
     }
     case "CONVERSATION_IDLE":
       return "客戶一陣未回覆";
+    case "DOCTOR_ADVICE": // ★ cwi-advice：原因／原文／來源／狀態喺卡內 AdviceReasonRows（呢度唔重複）
+      return null;
     default:
       return null;
   }
@@ -79,6 +82,7 @@ import { BookingCard } from "./booking-card";
 import { HoldCard } from "./hold-card";
 import { WindowExits } from "./window-exits";
 import { ConversationStatusBanners } from "./conversation-status-banners";
+import { AdviceReasonRows } from "./advice-reason";
 // cwi-setnav NAV-02：對話內彈窗／popover — 系統返回先閂彈窗（WhatsApp 式）
 import { useBackLayer } from "@/lib/back-stack";
 
@@ -1620,6 +1624,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   )}
                   {reason && <span className="text-t3"> · {reason}</span>}
                 </div>
+                {s.trigger === "DOCTOR_ADVICE" && <AdviceReasonRows taskId={s.id} contextJson={s.contextJson} />}
                 {s.templatePreview != null && (
                   <div className="text-[13px] leading-[1.65] text-t1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
                     {s.templatePreview}

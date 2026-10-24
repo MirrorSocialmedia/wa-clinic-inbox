@@ -271,6 +271,27 @@ export const BatchVisitsResponse = z.object({
 export type BatchVisit = z.infer<typeof BatchVisitsResponse>["visits"][number];
 export type BatchVisitsResult = z.infer<typeof BatchVisitsResponse>;
 
+// ── cwi-advice-20261024：醫生建議跟進（CWM /clinical-index/advice — note 命中觸發字嗰句）──────
+export const AdviceMatchSchema = z.object({ field: z.string(), keyword: z.string(), snippet: z.string() });
+export const AdviceVisitsResponse = z.object({
+  v: z.literal(1),
+  visits: z.array(
+    z.object({
+      visitId: z.string(),
+      patientApricotId: z.string(),
+      patientCode: z.string().nullable(),
+      visitDate: z.string(),
+      clinicCode: z.string(),
+      providerCode: z.string().nullable(),
+      syncedAt: z.string(),
+      matches: z.array(AdviceMatchSchema),
+      quotedItems: z.unknown().nullable(),
+    })
+  ),
+});
+export type AdviceMatch = z.infer<typeof AdviceMatchSchema>;
+export type AdviceVisit = z.infer<typeof AdviceVisitsResponse>["visits"][number];
+
 export const QuoteSchema = z.object({
   id: z.string(),
   patientApricotId: z.string(),
@@ -1112,6 +1133,26 @@ function appendAll(params: Record<string, string>, key: string, val: string): vo
   params[key] = params[key] ? `${params[key]},${val}` : val;
 }
 
+/** ★ cwi-advice-20261024：醫生建議句（clinicCode 或 patientApricotId；kw/ex 逗號串 — CWM 端拆）。
+ *  CWM 回 snippet 之前寫 EXTERNAL_ADVICE_VIEWED（staffId = 手動刷新嘅員工；cron = system）。 */
+export async function fetchDoctorAdvice(opts: {
+  clinicCode?: string;
+  patientApricotId?: string;
+  from: string;
+  to: string;
+  keywords: string[];
+  excludes?: string[];
+  staffId?: string;
+}): Promise<z.infer<typeof AdviceVisitsResponse>> {
+  const params: Record<string, string> = { from: opts.from, to: opts.to, kw: opts.keywords.join(",") };
+  if (opts.clinicCode) params.clinicCode = opts.clinicCode;
+  if (opts.patientApricotId) params.patientApricotId = opts.patientApricotId;
+  if (opts.excludes?.length) params.ex = opts.excludes.join(",");
+  return AdviceVisitsResponse.parse(
+    await wfGet(`/api/external/v1/clinical-index/advice`, params, opts.staffId ? { "x-staff-id": opts.staffId } : undefined)
+  );
+}
+
 /** E 類報價查詢（CWM /quotes — per patient 或 batch；零原始電話）。
  *  ★ cwi-final S5-13①：加 clinicIds（cuid）/ clinicCodes（shortName 兼容）— CWM 端 `where.clinicId in` 服務端 filter。 */
 export async function fetchQuotes(opts?: {
@@ -1593,6 +1634,9 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
   if (path === "/api/external/v1/quotes" && !method) {
     return mockQuotes(params);
   }
+  if (path === "/api/external/v1/clinical-index/advice" && !method) {
+    return mockAdvice(params);
+  }
   const qd = path.match(/^\/api\/external\/v1\/quotes\/([^/]+)\/decision$/);
   if (qd && method === "POST") {
     return mockQuoteDecision(decodeURIComponent(qd[1]), body, path);
@@ -1692,6 +1736,8 @@ interface MockClinicalFile {
   quotes?: MockQuoteRow[];
   terms?: MockTermRow[];
   indexStatus?: MockIndexStatus;
+  /** ★ cwi-advice-20261024：醫生建議 fixture — 每行一個 visit + 候選句（mock 按 kw/ex 過濾） */
+  advice?: (Omit<AdviceVisit, "matches"> & { matches: AdviceMatch[] })[];
 }
 function readClinical(): MockClinicalFile {
   try {
@@ -1715,6 +1761,23 @@ function mockClinicVisits(params: Record<string, string>): unknown {
   //   → 科目級 ① 誤殺 B-4① 跨店去重。對齊真端點口徑（mockQuotes 先例：status 過濾）。
   let visits = f.visits ?? [];
   if (params.clinicCode) visits = visits.filter((v) => (v.clinicCode as string | undefined) === params.clinicCode);
+  return { v: 1, visits };
+}
+/** ★ cwi-advice-20261024：醫生建議（對齊真端點：clinicCode/patientApricotId/日期過濾 + 觸發字 ∩ 排除字；只回有命中 visit）。 */
+function mockAdvice(params: Record<string, string>): unknown {
+  const f = readClinical();
+  const split = (v?: string) => (v ?? "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  const kws = split(params.kw);
+  const exs = split(params.ex);
+  if (!kws.length) throw new WorkforceApiError(400, "/api/external/v1/clinical-index/advice", "BAD_REQUEST");
+  const visits = (f.advice ?? [])
+    .filter((v) => (!params.clinicCode || v.clinicCode === params.clinicCode) && (!params.patientApricotId || v.patientApricotId === params.patientApricotId))
+    .filter((v) => v.visitDate >= params.from && v.visitDate <= params.to)
+    .map((v) => ({
+      ...v,
+      matches: v.matches.filter((m) => kws.includes(m.keyword.toLowerCase()) && !exs.some((x) => m.snippet.toLowerCase().includes(x))),
+    }))
+    .filter((v) => v.matches.length > 0);
   return { v: 1, visits };
 }
 /** E 報價查詢（status 過濾做咗 — 對齊真端點口徑）。 */

@@ -50,7 +50,10 @@ import {
   fetchAppointmentsByClinic,
   fetchClinicVisits,
   fetchQuotes,
+  fetchDoctorAdvice,
+  fetchAppointmentsByPatient,
   WorkforceApiError,
+  type AdviceVisit,
   type BatchVisit,
   type ClinicAppointment,
   type WorkforceQuote,
@@ -58,6 +61,7 @@ import {
 import { getWindowState } from "@/lib/wa/window";
 import { approvedTemplateList } from "@/lib/wa/approved-templates";
 import { billingCategoryForTemplate, type BillingCategory } from "@/lib/wa/billing";
+import { ADVICE_EXPIRY_DAYS, DEFAULT_ADVICE_KEYWORDS, adviceSubjectKey, notifyDoctorAdvice } from "@/lib/followup/advice";
 
 // ★ 延遲 import（同 booking/reminder.ts 口徑）：outboundQueue/publishNotify 拉起 Redis 連接 —
 //   unit test（零 Redis）import 呢個 module 時唔連坐。
@@ -505,6 +509,8 @@ interface FollowupRuleRow {
   delayValue: number;
   delayUnit: string;
   reasonCodes: string[]; // C/D 類：visitReason code 集
+  keywords?: string[]; // ★ cwi-advice：DOCTOR_ADVICE 觸發字（空 = 出廠字）
+  excludeKeywords?: string[]; // ★ cwi-advice：DOCTOR_ADVICE 排除字
   templateName: string;
   level: string; // v3：engine 忽略（所有 follow-up 硬性 L1 — 永遠唔 auto-send）
   maxSends: number;
@@ -678,6 +684,7 @@ export interface FollowupScanResult {
  *   D  RECALL_NO_REPEAT   = 建議日 + 14 日
  *   E  QUOTED_NOT_BOOKED  = 建議日 + 14 日
  *   A  CONVERSATION_IDLE  = 建議日 + 7 日
+ *   ★ DOCTOR_ADVICE       = 建議日 + 30 日（cwi-advice-20261024）
  */
 export function suggestionExpiryAt(task: {
   dueAt: Date;
@@ -707,6 +714,8 @@ export function suggestionExpiryAt(task: {
       return new Date(task.dueAt.getTime() + 14 * DAY_MS);
     case "CONVERSATION_IDLE":
       return new Date(task.dueAt.getTime() + 7 * DAY_MS);
+    case "DOCTOR_ADVICE":
+      return new Date(task.dueAt.getTime() + ADVICE_EXPIRY_DAYS * DAY_MS);
     default:
       return new Date(task.dueAt.getTime() + 7 * DAY_MS);
   }
@@ -955,6 +964,15 @@ async function scanQuotedNotBooked(
       if (!prev || q.sourceVisitDate > prev.sourceVisitDate) best.set(q.patientApricotId, q);
     }
     for (const q of best.values()) {
+      // ★ cwi-advice-20261024：同一日診症已出咗「醫生建議跟進」卡 → 報價併入嗰張（唔再出 E 卡）
+      const merged = await prisma.followupTask.findFirst({
+        where: { subjectKey: adviceSubjectKey(q.patientApricotId, q.sourceVisitDate) },
+        select: { id: true },
+      });
+      if (merged) {
+        counters.mergedAdvice = (counters.mergedAdvice ?? 0) + 1;
+        continue;
+      }
       const conv = convByPatient.get(`${clinic.id}|${q.patientApricotId}`);
       if (!conv) {
         counters.noConversation = (counters.noConversation ?? 0) + 1;
@@ -1017,6 +1035,164 @@ async function scanQuotedNotBooked(
   }
 }
 
+// ── ★ cwi-advice-20261024：DOCTOR_ADVICE（醫生建議跟進 — 診症記錄有 advise/suggest/recommend…）──
+// 觸發：CWM 索引 note 任何一欄命中規則觸發字（排除字成段唔計）→ 診症日 + delay（出廠 0 日 = 同步到即刻）。
+// 科目：advice:<病人>:<診症日>（同日報價併入呢張 — E 掃描見到就跳過）。
+// 對話配對：釘咗呢個病人嘅對話 → 「此電話嘅病人」（ContactPatientLink）；同店優先，否則最近活躍。
+// 已約：診症日之後已有有效預約（0/1/4，唔計 102 改期舊單）→ 唔出（建咗之後先約 → recheck BOOKED 自動完成）。
+// 🔴 contextJson 零臨床全文：只入欄名 + 觸發字 + 日期／醫生（原文由卡即時問 CWM）。
+const ADVICE_LOOKBACK_DAYS = 10; // CWM 夜跑重掃前 7 日未有 note 嘅 visit — 多留 3 日緩衝
+
+async function adviceConversationFor(
+  patientApricotId: string,
+  clinicId: string
+): Promise<{ id: string; clinicId: string; contactId: string } | null> {
+  const linked = await prisma.contactPatientLink.findMany({ where: { patientApricotId }, select: { contactId: true }, take: 20 });
+  const convs = await prisma.conversation.findMany({
+    where: {
+      OR: [
+        { pinnedPatientApricotId: patientApricotId },
+        ...(linked.length ? [{ contactId: { in: linked.map((l) => l.contactId) } }] : []),
+      ],
+    },
+    orderBy: { lastMessageAt: "desc" },
+    select: { id: true, clinicId: true, contactId: true },
+    take: 10,
+  });
+  return convs.find((c) => c.clinicId === clinicId) ?? convs[0] ?? null;
+}
+
+async function bookedAfterVisit(patientApricotId: string, visitDate: string): Promise<boolean | null> {
+  const from = hkDateOffset(1, new Date(`${visitDate}T12:00:00+08:00`));
+  const to = hkDateOffset(37, new Date(`${from}T12:00:00+08:00`));
+  try {
+    const res = await fetchAppointmentsByPatient(patientApricotId, from, to);
+    return res.appointments.some((a) => a.bookingStatus >= 0 && a.bookingStatus !== 102 && a.date > visitDate);
+  } catch (e) {
+    if (e instanceof WorkforceApiError && (e.status === 404 || e.status === 503 || e.status === 0)) return null; // 唔知 → 照建（recheck 會補取消）
+    throw e;
+  }
+}
+
+function adviceQuoteItems(quotedItems: unknown): string[] {
+  if (!Array.isArray(quotedItems)) return [];
+  return quotedItems
+    .map((q) => (q && typeof q === "object" && typeof (q as { text?: unknown }).text === "string" ? ((q as { text: string }).text) : ""))
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
+async function scanDoctorAdvice(
+  rule: FollowupRuleRow,
+  clinics: { id: string; code: string }[],
+  now: Date,
+  counters: Record<string, number>,
+  only?: { patientApricotId: string; staffId?: string }
+): Promise<void> {
+  const keywords = rule.keywords?.length ? rule.keywords : DEFAULT_ADVICE_KEYWORDS;
+  const excludes = rule.excludeKeywords ?? [];
+  const delayMs = delayToMs(rule.delayValue, rule.delayUnit);
+  const windowDays = Math.min(30, Math.ceil(delayMs / DAY_MS) + ADVICE_LOOKBACK_DAYS);
+  const from = hkDateOffset(-windowDays, now);
+  const to = hkTodayStr(now);
+  const clinicByCode = new Map(clinics.map((c) => [c.code, c]));
+  // 單一病人（立即更新）→ 一個 call 跨店；否則逐店
+  const lanes: { clinicCode?: string; patientApricotId?: string }[] = only
+    ? [{ patientApricotId: only.patientApricotId }]
+    : clinics.map((c) => ({ clinicCode: c.code }));
+  for (const lane of lanes) {
+    let visits: AdviceVisit[];
+    try {
+      visits = (await fetchDoctorAdvice({ ...lane, from, to, keywords, excludes, staffId: only?.staffId })).visits;
+    } catch (e) {
+      if (e instanceof WorkforceApiError && (e.status === 404 || e.status === 503 || e.status === 0)) {
+        counters.workforceFail = (counters.workforceFail ?? 0) + 1;
+        continue;
+      }
+      throw e;
+    }
+    for (const v of visits) {
+      const clinic = clinicByCode.get(v.clinicCode);
+      if (!clinic) continue; // 規則範圍外嘅店（單一病人模式跨店回）
+      const dueAt = new Date(new Date(`${v.visitDate}T00:00:00+08:00`).getTime() + delayMs);
+      if (dueAt.getTime() > now.getTime()) continue; // 未到期
+      const subjectKey = adviceSubjectKey(v.patientApricotId, v.visitDate);
+      // 已有（任何狀態）→ 唔再問 CWM 預約（慳 call；createTask 科目級去重都會擋）
+      const dup = await prisma.followupTask.findFirst({ where: { ruleId: rule.id, subjectKey }, select: { id: true } });
+      if (dup) {
+        counters["subject-done"] = (counters["subject-done"] ?? 0) + 1;
+        continue;
+      }
+      const conv = await adviceConversationFor(v.patientApricotId, clinic.id);
+      if (!conv) {
+        counters.noConversation = (counters.noConversation ?? 0) + 1;
+        continue;
+      }
+      if (await bookedAfterVisit(v.patientApricotId, v.visitDate)) {
+        counters.booked = (counters.booked ?? 0) + 1;
+        continue;
+      }
+      const doctor = v.providerCode
+        ? await prisma.provider.findUnique({ where: { apricotId: v.providerCode }, select: { name: true } })
+        : null;
+      const matchedKeywords = [...new Set(v.matches.map((m) => m.keyword))];
+      const task = await createTask(
+        rule,
+        {
+          clinicId: conv.clinicId,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          patientApricotId: v.patientApricotId,
+          phoneHashes: [], // advice lane 無 phoneHashes（患者經釘選／此電話嘅病人配對）
+          ruleId: rule.id,
+          subjectKey,
+          dueAt,
+          templateName: rule.templateName,
+          templateVars: { visitDate: v.visitDate },
+          contextJson: {
+            visitId: v.visitId,
+            visitDate: v.visitDate,
+            clinicCode: v.clinicCode,
+            providerCode: v.providerCode,
+            doctorName: doctor?.name ?? null,
+            // 零全文：欄名 + 觸發字（原文由卡即時問 CWM）
+            matches: v.matches.map((m) => ({ field: m.field, keyword: m.keyword })),
+            keywords: matchedKeywords,
+            quoteItems: adviceQuoteItems(v.quotedItems),
+          },
+        },
+        await prisma.followupTemplate.findUnique({ where: { key: rule.templateName } }),
+        now,
+        counters
+      );
+      if (task) {
+        await notifyDoctorAdvice({ taskId: task.id, conversationId: conv.id, visitDate: v.visitDate, clinicCode: v.clinicCode, keywords: matchedKeywords });
+      }
+    }
+  }
+}
+
+/**
+ * ★ cwi-advice-20261024：「立即更新」成功後即刻對呢個病人跑 DOCTOR_ADVICE（唔使等 10 分鐘 scan）。
+ * fail-soft：任何錯誤只 log（立即更新本身已成功）。回新建數。
+ */
+export async function runDoctorAdviceForPatient(patientApricotId: string, staffId: string, now: Date = new Date()): Promise<number> {
+  try {
+    const rules = (await prisma.followupRule.findMany({ where: { enabled: true, trigger: "DOCTOR_ADVICE" } })) as unknown as FollowupRuleRow[];
+    if (!rules.length) return 0;
+    const clinics = await prisma.clinic.findMany({ select: { id: true, code: true } });
+    const counters: Record<string, number> = {};
+    for (const rule of rules) {
+      const scope = rule.clinicId ? clinics.filter((c) => c.id === rule.clinicId) : clinics;
+      await scanDoctorAdvice(rule, scope, now, counters, { patientApricotId, staffId });
+    }
+    return counters.created ?? 0;
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "followup: 立即更新後醫生建議掃描失敗（fail-soft）");
+    return 0;
+  }
+}
+
 export async function runFollowupScan(now: Date = new Date()): Promise<FollowupScanResult> {
   // ① 時效：過期 SUGGESTED → EXPIRED（先於 scan — 新建議唔會建喺已過期病人身上，dedup 計 terminal）
   const expired = await expireStaleSuggestions(now);
@@ -1024,6 +1200,8 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
   //   （opt-out 永遠優先；workforce 依賴失敗 → 保留唔取消）
   const rechecked = await recheckOpenSuggestions(now);
   const rules = (await prisma.followupRule.findMany({ where: { enabled: true } })) as unknown as FollowupRuleRow[];
+  // ★ cwi-advice-20261024：DOCTOR_ADVICE 先跑 — 同日報價要見到醫生建議卡先至併入（E 掃描見到 advice 科目就跳過）
+  rules.sort((a, b) => Number(b.trigger === "DOCTOR_ADVICE") - Number(a.trigger === "DOCTOR_ADVICE"));
   const clinics = await prisma.clinic.findMany({ select: { id: true, code: true } });
   const counters: Record<string, number> = {};
   for (const rule of rules) {
@@ -1049,6 +1227,9 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
           break;
         case "QUOTED_NOT_BOOKED": // E（P4）
           await scanQuotedNotBooked(rule, scope, now, rc);
+          break;
+        case "DOCTOR_ADVICE": // ★ cwi-advice-20261024
+          await scanDoctorAdvice(rule, scope, now, rc);
           break;
         default:
           log.warn({ rule: rule.id, trigger: rule.trigger }, "followup: 未知 trigger — 跳過");

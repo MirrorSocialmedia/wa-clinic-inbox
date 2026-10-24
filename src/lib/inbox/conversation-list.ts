@@ -302,7 +302,7 @@ export async function toConversationDTOs(
   const groupIds = [...new Set(rows.map((r) => r.routedGroupId).filter((x): x is string => !!x))];
   // 裁決 9：bookings 先查（staffIds 要併入 booking.handledByStaffId）
   // ★ cwi-final S1-12：myUnread 一次查全頁（meId 有值先查；SSR/API 都傳）
-  const [contacts, groups, bookings, myUnreadMap] = await Promise.all([
+  const [contacts, groups, bookings, myUnreadMap, adviceRows] = await Promise.all([
     prisma.contact.findMany({
       where: { id: { in: contactIds } },
       select: { id: true, waId: true, profileName: true, labels: true, patientStatus: true, identifiedCount: true },
@@ -315,7 +315,15 @@ export async function toConversationDTOs(
     meId
       ? loadMyUnreadByConv(meId, rows.map((r) => r.id))
       : Promise.resolve(new Map<string, number>()),
+    // ★ cwi-advice-20261024：列表「醫生建議」膠囊 — 有未處理醫生建議跟進（SUGGESTED advice:*）
+    followupDue.size
+      ? prisma.followupTask.findMany({
+          where: { conversationId: { in: rows.filter((r) => followupDue.has(r.id)).map((r) => r.id) }, status: "SUGGESTED", subjectKey: { startsWith: "advice:" } },
+          select: { conversationId: true },
+        })
+      : Promise.resolve([] as { conversationId: string | null }[]),
   ]);
+  const adviceConvIds = new Set(adviceRows.map((r) => r.conversationId));
   // ★ cwi-ux UX-07：預約目標店（bookingClinicId）可能係外店 — 膠囊要店名 → clinic 查併入佢。
   const bookingClinicIds = [...new Set(bookings.map((b) => b.bookingClinicId).filter((x): x is string => !!x))];
   const allClinicIds = [...new Set([...clinicIds, ...bookingClinicIds])];
@@ -392,6 +400,7 @@ export async function toConversationDTOs(
         const ts = followupDue.get(cv.id);
         return ts === undefined ? null : new Date(ts).toISOString();
       })(),
+      followupAdvice: adviceConvIds.has(cv.id),
       routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId)?.name ?? null) : null,
       routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
       contact: contactMap.get(cv.contactId) ?? null,

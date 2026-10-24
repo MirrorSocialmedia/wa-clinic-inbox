@@ -18,10 +18,13 @@ export interface FactoryTemplate {
 
 export interface FactoryRule {
   name: string;
-  trigger: "CONVERSATION_IDLE" | "BEFORE_APPOINTMENT" | "AFTER_NO_SHOW" | "AFTER_TREATMENT" | "RECALL_NO_REPEAT" | "QUOTED_NOT_BOOKED";
+  trigger: "CONVERSATION_IDLE" | "BEFORE_APPOINTMENT" | "AFTER_NO_SHOW" | "AFTER_TREATMENT" | "RECALL_NO_REPEAT" | "QUOTED_NOT_BOOKED" | "DOCTOR_ADVICE";
   delayValue: number;
   delayUnit: "HOUR" | "DAY" | "WEEK" | "MONTH";
   reasonCodes: string[];
+  /** ★ cwi-advice：DOCTOR_ADVICE 觸發字／排除字（其他 trigger 唔用） */
+  keywords?: string[];
+  excludeKeywords?: string[];
   templateName: string;
   /** db:seed／seed-followup-p4 嘅啟用值（UI 一鍵建立唔用 — 一律 false） */
   seedEnabled: boolean;
@@ -89,8 +92,32 @@ export const FOLLOWUP_P4_RULES: FactoryRule[] = [
   { name: "報價未成交（E · P4）", trigger: "QUOTED_NOT_BOOKED", delayValue: 7, delayUnit: "DAY", reasonCodes: [], templateName: "quote_followup", seedEnabled: true },
 ];
 
-export const FOLLOWUP_FACTORY_TEMPLATES: FactoryTemplate[] = [...FOLLOWUP_BASE_TEMPLATES, ...FOLLOWUP_P4_DRAFT_TEMPLATES];
-export const FOLLOWUP_FACTORY_RULES: FactoryRule[] = [...FOLLOWUP_BASE_RULES, ...FOLLOWUP_P4_RULES];
+/** ★ cwi-advice-20261024：醫生建議跟進 — 訊息唔提病情細節同金額（原文只俾員工睇）。 */
+export const FOLLOWUP_ADVICE_TEMPLATES: FactoryTemplate[] = [
+  {
+    key: "doctor_advice_followup",
+    name: "醫生建議跟進",
+    text: "{{salutation}}你好，呢度係{{clinicName}}。{{visitDate}}覆診時醫生建議你跟進治療，想幫你安排時間，請問邊日方便？有任何疑問都可以直接回覆呢條訊息，我哋會即刻為你安排。",
+  },
+];
+
+/** ★ cwi-advice-20261024：出廠觸發字（同 lib/followup/advice.ts DEFAULT_ADVICE_* — 呢度純數據唔 import）。 */
+export const FOLLOWUP_ADVICE_RULES: FactoryRule[] = [
+  {
+    name: "醫生建議跟進",
+    trigger: "DOCTOR_ADVICE",
+    delayValue: 0,
+    delayUnit: "DAY",
+    reasonCodes: [],
+    keywords: ["advise", "advised", "adv", "suggest", "suggested", "sugg", "recommend", "recommended", "rec.", "consider", "quoted", "TCA"],
+    excludeKeywords: ["advised OHI", "advise floss"],
+    templateName: "doctor_advice_followup",
+    seedEnabled: false,
+  },
+];
+
+export const FOLLOWUP_FACTORY_TEMPLATES: FactoryTemplate[] = [...FOLLOWUP_BASE_TEMPLATES, ...FOLLOWUP_P4_DRAFT_TEMPLATES, ...FOLLOWUP_ADVICE_TEMPLATES];
+export const FOLLOWUP_FACTORY_RULES: FactoryRule[] = [...FOLLOWUP_BASE_RULES, ...FOLLOWUP_P4_RULES, ...FOLLOWUP_ADVICE_RULES];
 
 /** UI 中文 trigger 名（新增表單 + 規則表）。 */
 export const FOLLOWUP_TRIGGER_LABELS: Record<FactoryRule["trigger"], string> = {
@@ -100,4 +127,5 @@ export const FOLLOWUP_TRIGGER_LABELS: Record<FactoryRule["trigger"], string> = {
   AFTER_TREATMENT: "C 術後關懷（指定治療後）",
   RECALL_NO_REPEAT: "D 定期召回（N 個月冇再做）",
   QUOTED_NOT_BOOKED: "E 報價未成交",
+  DOCTOR_ADVICE: "醫生建議跟進（診症記錄有 advise／suggest…）",
 };

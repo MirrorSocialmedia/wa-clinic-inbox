@@ -69,6 +69,8 @@ function whenText(r: { trigger: string; delayValue: number; delayUnit: string; r
       return `上次${r.reasonLabels[0] ?? "同類治療"}後滿 ${r.delayValue} ${u}`;
     case "QUOTED_NOT_BOOKED":
       return `報價後 ${r.delayValue} ${u}未成交`;
+    case "DOCTOR_ADVICE": // ★ cwi-advice-20261024
+      return r.delayValue === 0 ? "診症記錄有醫生建議（同步到即刻）" : `診症記錄有醫生建議後 ${r.delayValue} ${u}`;
     default:
       return `${r.delayValue} ${u}`;
   }
