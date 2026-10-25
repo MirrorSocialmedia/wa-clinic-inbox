@@ -919,7 +919,7 @@ async function scanQuotedNotBooked(
     }
     throw e;
   }
-  // patient → 對話（pinned 配對 — 本地）
+  // patient → 對話（釘選 → 電話認到／此電話嘅病人 — 本地）
   const clinicIds = clinics.map((c) => c.id);
   const convs = await prisma.conversation.findMany({
     where: { clinicId: { in: clinicIds } },
@@ -928,6 +928,26 @@ async function scanQuotedNotBooked(
   const convByPatient = new Map<string, { id: string; clinicId: string; contactId: string }>();
   for (const c of convs) {
     if (c.pinnedPatientApricotId) convByPatient.set(`${c.clinicId}|${c.pinnedPatientApricotId}`, c);
+  }
+  // ★ 冇釘選嘅對話：電話認到（Contact.identifiedPatientApricotId）∪「此電話嘅病人」（ContactPatientLink）—
+  //   同病人記錄口徑（釘選優先 — 已有釘選配對嘅病人唔覆蓋）
+  const unpinned = convs.filter((c) => !c.pinnedPatientApricotId);
+  if (unpinned.length) {
+    const contactIds = [...new Set(unpinned.map((c) => c.contactId))];
+    const [idents, links] = await Promise.all([
+      prisma.contact.findMany({ where: { id: { in: contactIds }, identifiedPatientApricotId: { not: null } }, select: { id: true, identifiedPatientApricotId: true } }),
+      prisma.contactPatientLink.findMany({ where: { contactId: { in: contactIds } }, select: { contactId: true, patientApricotId: true } }),
+    ]);
+    const patientsByContact = new Map<string, Set<string>>();
+    const add = (cid: string, pid: string) => patientsByContact.set(cid, (patientsByContact.get(cid) ?? new Set()).add(pid));
+    for (const ct of idents) add(ct.id, ct.identifiedPatientApricotId as string);
+    for (const l of links) add(l.contactId, l.patientApricotId);
+    for (const c of unpinned) {
+      for (const pid of patientsByContact.get(c.contactId) ?? []) {
+        const key = `${c.clinicId}|${pid}`;
+        if (!convByPatient.has(key)) convByPatient.set(key, c);
+      }
+    }
   }
   // 報價後 booking 主查（本地 Bookings — 一次 query 晒）
   const dueQuotes: WorkforceQuote[] = quotes.filter((q) => {

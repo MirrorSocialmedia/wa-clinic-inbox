@@ -60,6 +60,8 @@ const P = {
   manual: { cp: "cpadv-manual", waId: "85290001005", contact: `${PFX}c-manual`, conv: `${PFX}v-manual` },
   // 冇釘選、只係「電話認到」（Contact.identifiedPatientApricotId）
   ident: { cp: "cpadv-ident", waId: "85290001006", contact: `${PFX}c-ident`, conv: `${PFX}v-ident` },
+  // 報價（E）：冇釘選、只係電話認到；同日冇醫生建議 → 照出報價卡
+  qident: { cp: "cpadv-qident", waId: "85290001007", contact: `${PFX}c-qident`, conv: `${PFX}v-qident` },
 };
 const GROUP_ID = `${PFX}group0000000000001`;
 const RULE_ID = `${PFX}rule00000000000001`;
@@ -129,7 +131,7 @@ before(async () => {
   // 病人 + 對話（釘住病人；mine 有負責人）
   for (const [k, x] of Object.entries(P)) {
     await prisma.contact.create({
-      data: { id: x.contact, clinicId, waId: x.waId, profileName: `ADVT ${k}`, labels: [], identifiedPatientApricotId: k === "ident" ? x.cp : null },
+      data: { id: x.contact, clinicId, waId: x.waId, profileName: `ADVT ${k}`, labels: [], identifiedPatientApricotId: k === "ident" || k === "qident" ? x.cp : null },
     });
     await prisma.conversation.create({
       data: {
@@ -137,7 +139,7 @@ before(async () => {
         clinicId,
         contactId: x.contact,
         status: "OPEN",
-        pinnedPatientApricotId: k === "ident" ? null : x.cp,
+        pinnedPatientApricotId: k === "ident" || k === "qident" ? null : x.cp,
         assigneeId: k === "mine" ? assigneeId : null,
         lastMessageAt: new Date(),
       },
@@ -193,6 +195,23 @@ before(async () => {
         {
           id: `${PFX}-quote-hit`,
           patientApricotId: P.hit.cp,
+          clinicCode: "TKW",
+          sourceVisitDate: VISIT,
+          text: "crown 36",
+          termShorthand: null,
+          nameCn: "牙冠",
+          amountMin: 8000,
+          amountMax: 8000,
+          perUnit: false,
+          fdiTeeth: ["36"],
+          intent: "not_done",
+          certainty: "high",
+          source: "parser",
+          status: "confirmed",
+        },
+        {
+          id: `${PFX}-quote-qident`,
+          patientApricotId: P.qident.cp,
           clinicCode: "TKW",
           sourceVisitDate: VISIT,
           text: "crown 36",
@@ -289,6 +308,11 @@ test("A1–A6：clinic scan — 命中建卡、零原文、定向通知、排除
   // A6 同日報價併卡：冇 E 卡
   const quoteTasks = tasks.filter((t) => t.conversationId === P.hit.conv && t.subjectKey?.startsWith("quote:"));
   assert.equal(quoteTasks.length, 0, "A6 同日報價併入醫生建議卡（唔出 E 卡）");
+  // A6b 報價卡：電話認到（冇釘選）都配到對話
+  assert.ok(
+    tasks.some((t) => t.conversationId === P.qident.conv && t.subjectKey === `quote:${PFX}-quote-qident`),
+    "A6b 電話認到嘅病人都要出報價卡",
+  );
 });
 
 test("A7 冪等：再 scan 零新卡、零新通知", async () => {
