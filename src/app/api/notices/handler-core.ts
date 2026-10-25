@@ -16,6 +16,7 @@ import {
  *   LEFT JOIN "StaffNoticeRead"（本 staff 嘅 readAt）判斷「我未讀」；
  *   StaffNotice.readAt/readByStaffId 保留「全店已處理」語義（只 assignee/ADMIN 可設），
  *   唔再決定呢度嘅可見性（A 標已讀唔代表 B 標咗）。
+ * ★ cwi-advice-20261024：定向通知（targetStaffIds 非空）只俾名單內 staff 見（醫生建議跟進：負責人／顧問組）。
  *
  * PATCH /api/notices — 標已讀：{ ids: string[] }（ids 省 = scope 內全部）。
  *   ① 一律寫 "StaffNoticeRead"（per-staff；本 staff 嘅 bell 即刻清）。
@@ -64,6 +65,7 @@ export async function noticesGet(
      FROM "StaffNotice" n
      LEFT JOIN "StaffNoticeRead" r ON r."noticeId" = n."id" AND r."staffId" = $1
      WHERE r."staffId" IS NULL
+       AND (cardinality(n."targetStaffIds") = 0 OR $1 = ANY(n."targetStaffIds"))
        AND ($2::text[] IS NULL OR n."clinicId" = ANY($2))
        AND ($3::text IS NULL OR n."clinicId" = $3)
      ORDER BY n."createdAt" DESC

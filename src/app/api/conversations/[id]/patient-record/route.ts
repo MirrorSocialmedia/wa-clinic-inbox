@@ -14,6 +14,8 @@ import {
 } from "@/lib/workforce/client";
 import { resolveConversationPatient } from "@/lib/patient-record";
 import { computeVisitStats } from "@/lib/visit-stats";
+import { runDoctorAdviceForPatient } from "@/lib/followup/engine";
+import { DEFAULT_ADVICE_KEYWORDS } from "@/lib/followup/advice";
 
 /**
  * GET /api/conversations/[id]/patient-record — 病人記錄面板數據（followup-v2 P2）
@@ -21,6 +23,7 @@ import { computeVisitStats } from "@/lib/visit-stats";
  * Query:
  *   summary=1  輕量（header chip 用）— 配對 + visits(limit 1) + balance；唔拉預約
  *   refresh=1  先跑 #8 手動刷新（§2.8）再拉數據；429/503 唔扮成功（refresh 欄回狀態）
+ *              ★ cwi-advice-20261024：刷新成功 → 即刻對呢個病人跑「醫生建議跟進」（refresh.adviceCreated）
  *
  * RBAC：requireAuth + assertConversationAccess（SUPERVISOR 全店唯讀 / STAFF 只可讀
  *   自己範圍 — 現行慣例；本路由 GET-only = 結構性唯讀）。
@@ -43,7 +46,7 @@ const MANUAL_REFRESH_DEPTH = 10;
 const is404 = (e: unknown) => e instanceof WorkforceApiError && e.status === 404;
 
 type RefreshOut =
-  | { state: "ok"; syncedAt: string }
+  | { state: "ok"; syncedAt: string; adviceCreated: number }
   | { state: "rate_limited"; retryAfterSec: number }
   | { state: "failed" };
 
@@ -77,7 +80,9 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
       // ★ cwi-walkin-20261018：立即更新都補最近 N 個到診日 — 舊版只刷最新一日（例如今日到診冇 note），
       //   更早嘅診症記錄（walk-in）永遠入唔到索引。CWM 帳單用 overview → 補幾多日都係 3 個 Apricot call。
       const r = await refreshPatient(resolved.patientApricotId, auth.staff.id, MANUAL_REFRESH_DEPTH);
-      refresh = { state: "ok", syncedAt: r.syncedAt };
+      // ★ cwi-advice-20261024：「立即更新」都觸發醫生建議跟進（唔使等 10 分鐘 scan；fail-soft 回 0）
+      const adviceCreated = await runDoctorAdviceForPatient(resolved.patientApricotId, auth.staff.id);
+      refresh = { state: "ok", syncedAt: r.syncedAt, adviceCreated };
     } catch (e) {
       if (e instanceof WorkforceApiError && e.status === 404) {
         // ★ cwi-flow-quick：workforce 404 = Apricot 冇「已到診」記錄可索引（只有未到診預約／walk-in 冇預約）—
@@ -201,5 +206,30 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
     syncedAt: balance?.syncedAt ?? apptsAll?.syncedAt ?? null,
     degraded,
     refresh,
+    // ★ cwi-advice-20261024：診症卡標示 — 觸發字（前端標黃嗰句）+ 呢個病人已入待跟進嘅診症日
+    advice: resolved && !summary ? await adviceInfo(resolved.patientApricotId) : null,
   });
 });
+
+/** ★ cwi-advice-20261024：啟用中 DOCTOR_ADVICE 規則嘅觸發字／排除字（合併）+ 該病人醫生建議 task（診症日 → 狀態）。 */
+async function adviceInfo(patientApricotId: string): Promise<{
+  keywords: string[];
+  excludeKeywords: string[];
+  tasks: { visitDate: string; status: string }[];
+} | null> {
+  const rules = await prisma.followupRule.findMany({
+    where: { enabled: true, trigger: "DOCTOR_ADVICE" },
+    select: { id: true, keywords: true, excludeKeywords: true },
+  });
+  if (!rules.length) return null;
+  const keywords = [...new Set(rules.flatMap((r) => (r.keywords.length ? r.keywords : DEFAULT_ADVICE_KEYWORDS)))];
+  const excludeKeywords = [...new Set(rules.flatMap((r) => r.excludeKeywords))];
+  const rows = await prisma.followupTask.findMany({
+    where: { patientApricotId, ruleId: { in: rules.map((r) => r.id) }, subjectKey: { startsWith: "advice:" } },
+    orderBy: { createdAt: "desc" },
+    select: { subjectKey: true, status: true },
+    take: 50,
+  });
+  const tasks = rows.map((t) => ({ visitDate: (t.subjectKey ?? "").split(":").pop() ?? "", status: t.status }));
+  return { keywords, excludeKeywords, tasks };
+}

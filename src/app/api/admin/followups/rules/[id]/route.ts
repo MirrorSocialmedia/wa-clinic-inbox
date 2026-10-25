@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { requireAdmin, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
+import { normalizeAdviceTerms } from "@/lib/followup/advice";
 
 /**
  * ★ cwi-followup-p3-20260916 → cwi-followup-v3-20260916：規則編輯（ADMIN-only）。
@@ -15,6 +16,7 @@ import { handle } from "@/lib/api-error";
  *   firstUseConfirmedAt = B1 首啟用確認（ISO 串；BEFORE_APPOINTMENT 規則啟用時 UI 彈確認後帶上）；
  *   ★ cwi-final S0-8（N-11）：firstUseConfirmed（boolean）= 同一確認嘅簡化口徑（server 寫 firstUseConfirmedAt=now）。
  *   BEFORE_APPOINTMENT 規則首啟用（firstUseConfirmedAt 為 null）未帶確認 → 409 FIRST_USE_CONFIRM_REQUIRED。
+ *   ★ cwi-advice-20261024：DOCTOR_ADVICE 准 delayValue 0；keywords / excludeKeywords（string[]，觸發字最少 1 個）。
  *   改動即時生效（下一次掃描用新值）。（v3 已剔 minAmount/cancelOnPaid — F 類整類剷走。）
  *
  * ★ cwi-setfix F-1：DELETE /api/admin/followups/rules/:id — 刪規則。
@@ -52,7 +54,8 @@ export const PATCH = handle(async (req, { params }) => {
   if (typeof body.enabled === "boolean") data.enabled = body.enabled;
   if (body.delayValue !== undefined) {
     const v = Number(body.delayValue);
-    if (!Number.isInteger(v) || v < 1 || v > 365) return NextResponse.json({ error: "delayValue 1-365" }, { status: 400 });
+    const minDelay = rule.trigger === "DOCTOR_ADVICE" ? 0 : 1;
+    if (!Number.isInteger(v) || v < minDelay || v > 365) return NextResponse.json({ error: `delayValue ${minDelay}-365` }, { status: 400 });
     data.delayValue = v;
   }
   if (body.delayUnit !== undefined) {
@@ -85,6 +88,14 @@ export const PATCH = handle(async (req, { params }) => {
   }
   // ★ cwi-final S0-8（N-11）：boolean 口徑 — server 用自己時鐘寫（唔信 client 時鐘）
   if (body.firstUseConfirmed === true) data.firstUseConfirmedAt = new Date();
+  if (rule.trigger === "DOCTOR_ADVICE") {
+    if (body.keywords !== undefined) {
+      const kw = normalizeAdviceTerms(body.keywords);
+      if (kw.length === 0) return NextResponse.json({ error: "最少要一個觸發字" }, { status: 400 });
+      data.keywords = kw;
+    }
+    if (body.excludeKeywords !== undefined) data.excludeKeywords = normalizeAdviceTerms(body.excludeKeywords);
+  }
   for (const k of ["cancelOnReply", "cancelOnBooking", "cancelOnArrival", "cancelOnResolved"] as const) {
     if (typeof body[k] === "boolean") data[k] = body[k];
   }

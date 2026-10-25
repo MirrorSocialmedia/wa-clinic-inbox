@@ -37,6 +37,9 @@ interface RuleRow {
   cancelOnBooking: boolean;
   cancelOnArrival: boolean;
   cancelOnResolved: boolean;
+  /** ★ cwi-advice-20261024：DOCTOR_ADVICE 觸發字／排除字 */
+  keywords?: string[];
+  excludeKeywords?: string[];
 }
 
 /** cwi-setnav SET-01：抽屜草稿（delayValue/delayUnit/maxSends/dedupWindowDays/cancelOn*4/enabled） */
@@ -50,6 +53,8 @@ interface RuleDraft {
   cancelOnBooking: boolean;
   cancelOnArrival: boolean;
   cancelOnResolved: boolean;
+  keywords: string[];
+  excludeKeywords: string[];
 }
 /** cwi-setfix F-1：新增規則表單 */
 interface NewRuleDraft {
@@ -75,7 +80,68 @@ const TRIGGER_LABEL: Record<string, string> = {
   AFTER_TREATMENT: "術後關懷",
   RECALL_NO_REPEAT: "定期召回",
   QUOTED_NOT_BOOKED: "報價未成交",
+  DOCTOR_ADVICE: "醫生建議跟進",
 };
+
+/**
+ * ★ cwi-advice-20261024：觸發字／排除字膠囊編輯（撳 ✕ 刪；輸入框 Enter／逗號加；唔分大細楷去重）。
+ */
+function TermChips({
+  terms,
+  onChange,
+  placeholder,
+  tone,
+  testId,
+}: {
+  terms: string[];
+  onChange: (next: string[]) => void;
+  placeholder: string;
+  tone: "brand" | "muted";
+  testId: string;
+}) {
+  const [input, setInput] = useState("");
+  const add = () => {
+    const parts = input.split(/[,，\n]/).map((x) => x.replace(/\s+/g, " ").trim()).filter((x) => x && x.length <= 40);
+    if (!parts.length) return;
+    const seen = new Set(terms.map((t) => t.toLowerCase()));
+    const fresh: string[] = [];
+    for (const x of parts) {
+      if (seen.has(x.toLowerCase())) continue;
+      seen.add(x.toLowerCase());
+      fresh.push(x);
+    }
+    onChange([...terms, ...fresh].slice(0, 50));
+    setInput("");
+  };
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-1" data-e2e={testId}>
+      {terms.map((t) => (
+        <span
+          key={t}
+          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${tone === "brand" ? "bg-brand-soft text-brand-text" : "bg-panel-2 text-t2"}`}
+        >
+          {t}
+          <button type="button" onClick={() => onChange(terms.filter((x) => x !== t))} className="opacity-60 hover:opacity-100" aria-label={`刪除 ${t}`}>
+            ✕
+          </button>
+        </span>
+      ))}
+      <input
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === ",") {
+            e.preventDefault();
+            add();
+          }
+        }}
+        onBlur={add}
+        placeholder={placeholder}
+        className="min-w-[96px] flex-1 rounded-full border border-dashed border-line px-2 py-0.5 text-xs"
+      />
+    </div>
+  );
+}
 
 function fmtTs(s: string | null): string {
   if (!s) return "—";
@@ -173,6 +239,8 @@ export default function FollowupsClient() {
       cancelOnBooking: r.cancelOnBooking,
       cancelOnArrival: r.cancelOnArrival,
       cancelOnResolved: r.cancelOnResolved,
+      keywords: r.keywords ?? [],
+      excludeKeywords: r.excludeKeywords ?? [],
     });
   };
   const closeDrawer = () => {
@@ -186,8 +254,17 @@ export default function FollowupsClient() {
     if (!editing || !draft) return;
     setBusy(editing.id);
     setMsg(null);
+    const { keywords, excludeKeywords, ...rest } = draft;
+    const isAdvice = editing.trigger === "DOCTOR_ADVICE";
+    if (isAdvice && keywords.length === 0) {
+      setMsg("醫生建議跟進最少要一個觸發字");
+      setBusy(null);
+      return;
+    }
     const body: Record<string, unknown> = {
-      ...draft,
+      ...rest,
+      // ★ cwi-advice：只 DOCTOR_ADVICE 送觸發字／排除字
+      ...(isAdvice ? { keywords, excludeKeywords } : {}),
       firstUseConfirmed: withConfirm || undefined, // undefined = 唔送 key
     };
     try {
@@ -214,7 +291,7 @@ export default function FollowupsClient() {
 
   // ── cwi-setfix F-1：建立出廠規則／新增／刪除 ──
   const installFactory = () => {
-    if (!confirm("建立出廠規則？\n會補返缺少嘅 6 條常用規則同訊息 template（全部預設停用 — 檢查完先逐條開）。已有嘅唔會改。")) return;
+    if (!confirm("建立出廠規則？\n會補返缺少嘅 7 條常用規則同訊息 template（全部預設停用 — 檢查完先逐條開）。已有嘅唔會改。")) return;
     void act("factory", async () => {
       const res = await fetch("/api/admin/followups/rules/factory", { method: "POST" });
       if (!res.ok) throw new Error(`factory ${res.status}`);
@@ -502,7 +579,24 @@ export default function FollowupsClient() {
               幾時出建議
               <select
                 value={creating.trigger}
-                onChange={(e) => setCreating({ ...creating, trigger: e.target.value as NewRuleDraft["trigger"] })}
+                onChange={(e) => {
+                  const trigger = e.target.value as NewRuleDraft["trigger"];
+                  // ★ cwi-advice：醫生建議跟進預設 0 日（同步到即刻提醒）+ 配對 template
+                  const advice = trigger === "DOCTOR_ADVICE";
+                  setCreating({
+                    ...creating,
+                    trigger,
+                    ...(advice
+                      ? {
+                          delayValue: 0,
+                          delayUnit: "DAY" as const,
+                          templateName: templates.some((t) => t.key === "doctor_advice_followup") ? "doctor_advice_followup" : creating.templateName,
+                        }
+                      : creating.delayValue < 1
+                        ? { delayValue: 1 }
+                        : {}),
+                  });
+                }}
                 className="mt-1 w-full rounded border border-line bg-panel px-2 py-1.5 text-sm text-t1"
               >
                 {(Object.keys(FOLLOWUP_TRIGGER_LABELS) as NewRuleDraft["trigger"][]).map((k) => (
@@ -517,7 +611,7 @@ export default function FollowupsClient() {
                 延遲
                 <input
                   type="number"
-                  min={1}
+                  min={creating.trigger === "DOCTOR_ADVICE" ? 0 : 1}
                   max={365}
                   value={creating.delayValue}
                   onChange={(e) => setCreating({ ...creating, delayValue: Number(e.target.value) })}
@@ -538,6 +632,9 @@ export default function FollowupsClient() {
                 </select>
               </label>
             </div>
+            {creating.trigger === "DOCTOR_ADVICE" && (
+              <div className="text-[11px] text-t3">觸發字用出廠設定（advise／suggest／recommend…）— 新增後撳「編輯」改；0 日 = 同步到即刻提醒</div>
+            )}
             {(creating.trigger === "AFTER_TREATMENT" || creating.trigger === "RECALL_NO_REPEAT") && (
               <label className="block text-xs text-t2">
                 治療代碼（求診原因 code，逗號分隔 — 例：0017, 0013）
@@ -607,7 +704,7 @@ export default function FollowupsClient() {
                   <div className="flex gap-1.5 mt-1">
                     <input
                       type="number"
-                      min={1}
+                      min={editing.trigger === "DOCTOR_ADVICE" ? 0 : 1}
                       max={365}
                       value={draft.delayValue}
                       onChange={(e) => setDraft({ ...draft, delayValue: Number(e.target.value) })}
@@ -624,7 +721,9 @@ export default function FollowupsClient() {
                       <option value="MONTH">月</option>
                     </select>
                   </div>
-                  <span className="block text-[11px] text-t3 mt-0.5">1–365</span>
+                  <span className="block text-[11px] text-t3 mt-0.5">
+                    {editing.trigger === "DOCTOR_ADVICE" ? "0–365（0 = 同步到即刻提醒；30 日未處理自動過期）" : "1–365"}
+                  </span>
                 </label>
                 <label className="block">
                   <span className="text-xs text-t2">最多跟進次數（maxSends）</span>
@@ -639,6 +738,35 @@ export default function FollowupsClient() {
                   <span className="block text-[11px] text-t3 mt-0.5">1–10</span>
                 </label>
               </div>
+              {editing.trigger === "DOCTOR_ADVICE" && (
+                <div className="space-y-3 rounded-xl border border-line p-3" data-e2e="fu-advice-editor">
+                  <div>
+                    <div className="text-xs text-t2">觸發字（診症記錄任何一欄，唔分大細楷）</div>
+                    <TermChips
+                      terms={draft.keywords}
+                      onChange={(keywords) => setDraft({ ...draft, keywords })}
+                      placeholder="＋ 加字"
+                      tone="brand"
+                      testId="fu-advice-keywords"
+                    />
+                    <div className="text-[11px] text-t3 mt-1">「adv」唔會中「advance」（前後要唔係英文字母）</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-t2">唔觸發（排除 — 句入面有就成句唔計）</div>
+                    <TermChips
+                      terms={draft.excludeKeywords}
+                      onChange={(excludeKeywords) => setDraft({ ...draft, excludeKeywords })}
+                      placeholder="＋ 加排除"
+                      tone="muted"
+                      testId="fu-advice-excludes"
+                    />
+                  </div>
+                  <div className="text-[11px] text-t3 leading-relaxed">
+                    通知邊個：對話負責人 → 冇負責人就通知該分店「顧問」技能組 → 冇顧問組就全分店。
+                    同一日報價會併入同一張卡；病人之後約咗／回覆／退訂就自動完成。
+                  </div>
+                </div>
+              )}
               <label className="block">
                 <span className="text-xs text-t2">去重窗（dedupWindowDays — 同病人同 trigger 終態後 N 日內唔再出）</span>
                 <input

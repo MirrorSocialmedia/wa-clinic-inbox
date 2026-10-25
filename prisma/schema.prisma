@@ -85,6 +85,7 @@ enum NoticeKind {
   // ★ cwi-routing-20260906：規則式指派通知軌（§2.4 / §3）
   ROUTING_ASSIGNED  // 路由命中 → 組/單人標記 + 通知（title「新個案 · {組} · {店}」零 PII）
   ROUTING_ESCALATION // 投訴 N 分鐘未接手 → 升級第二級組（title「升級 · {原組} 未處理 · {店}」）
+  FOLLOWUP_ADVICE    // ★ cwi-advice-20261024：醫生建議跟進（定向：負責人 → 顧問組 → 全店）
 }
 
 // Phase 2b：逐舖 AI 模式（指揮大神 2026-08-18 決定，覆蓋 MD D5「AI 永不發送」）
@@ -1026,6 +1027,8 @@ model StaffNotice {
   createdAt      DateTime       @db.Timestamptz @default(now())
   readByStaffId  String?
   readAt         DateTime?      @db.Timestamptz
+  // ★ cwi-advice-20261024：定向通知 — 空 = 全店（舊行為）；有值 = 只呢幾個 staff 嘅 bell 見到
+  targetStaffIds String[]       @default([])
   @@index([clinicId, readAt, createdAt])
 }
 
@@ -1232,6 +1235,7 @@ enum FollowupTrigger {
   AFTER_TREATMENT     // C 術後關懷（P4）
   RECALL_NO_REPEAT    // D 定期召回（P4）
   QUOTED_NOT_BOOKED   // E 報價未成交（P4）
+  DOCTOR_ADVICE       // ★ cwi-advice-20261024：醫生建議跟進（診症記錄有 advise/suggest/recommend…）
 }
 enum FollowupLevel {
   L1 // 入「待跟進」隊列等人撳（AI_ADOPTED）— v3 恒此級
@@ -1268,6 +1272,9 @@ model FollowupRule {
   delayValue  Int
   delayUnit   FollowupUnit
   reasonCodes String[]         // visitReason code（C/D 類）
+  // ★ cwi-advice-20261024：DOCTOR_ADVICE 觸發字／排除字（唔分大細楷；排除字 = 段內含就成段唔計）
+  keywords        String[]     @default([])
+  excludeKeywords String[]     @default([])
   templateName String          // → FollowupTemplate.key
   level       FollowupLevel   @default(L1)   // ★ cwi-final S2-8：v3 恒 L1（L2 直接發已取消；enum 保留避免 migration；PATCH 只收 L1）
   maxSends    Int             @default(1)
@@ -1300,7 +1307,7 @@ model FollowupTask {
   templateName   String?        // → FollowupTemplate.key
   templateVars   Json?          // 渲染變數（顯示用：日期/金額/醫生名 — 零 PII 原文）
   contextJson    Json?          // ★ 顯示用結構化數據（到診日期/預約 apptId）— 零臨床全文（欠款已隨 F 類剷走）
-  // ★ cwi-final S2-1：業務科目（appt:<id> / noshow:<id> / tx:<visitId> / recall:<patient>:<lastVisit> / quote:<quoteId> / idle:<conv>:<lastInboundAtISO>）— 科目級終態去重
+  // ★ cwi-final S2-1：業務科目（appt:<id> / noshow:<id> / tx:<visitId> / recall:<patient>:<lastVisit> / quote:<quoteId> / idle:<conv>:<lastInboundAtISO> / advice:<patient>:<visitDate>）— 科目級終態去重
   subjectKey     String?
   note           String?
   createdBy      String?

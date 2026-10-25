@@ -45,6 +45,8 @@ export const POST = handle(async (req: NextRequest) => {
         delayValue: r.delayValue,
         delayUnit: r.delayUnit as never,
         reasonCodes: r.reasonCodes,
+        keywords: r.keywords ?? [],
+        excludeKeywords: r.excludeKeywords ?? [],
         templateName: r.templateName,
         level: "L1",
         maxSends: 1,

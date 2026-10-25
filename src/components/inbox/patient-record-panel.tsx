@@ -593,7 +593,7 @@ export function PatientRecordPanel({ conversationId, resetKey = 0, scrollAll = f
             {tab === "consult" ? (
               /* ★ cwi-consult-history-20261018：診症及處方 = Apricot 全部記錄（逐頁；最新 2 筆展開） */
               data.patient ? (
-                <ConsultationHistory conversationId={conversationId} patientKey={data.patient.patientApricotId} />
+                <ConsultationHistory conversationId={conversationId} patientKey={data.patient.patientApricotId} advice={data.advice ?? null} />
               ) : (
                 <div className="text-center py-10 text-[12px] text-t3" data-e2e="p2-consult-empty">未配對到病人 — 喺右欄「病人」卡加入／釘住病人</div>
               )

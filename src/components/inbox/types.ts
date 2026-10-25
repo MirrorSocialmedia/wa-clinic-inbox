@@ -110,6 +110,8 @@ export interface ConversationItem {
   reopenedAt?: Date | string | null;
   /** ★ cwi-followup-v3：最舊未處理跟進建議（SUGGESTED）dueAt — 「待跟進」膠囊 client filter + 最舊先排序；null = 冇 */
   followupDueAt?: string | null;
+  /** ★ cwi-advice-20261024：有未處理「醫生建議跟進」— 列表藍色「醫生建議」膠囊 */
+  followupAdvice?: boolean;
   /** ★ cwi-followup-p3（鐵律 5）：badge「跟進回覆」— 24h 內由 client derive */
   followupRepliedAt?: string | null;
   contact: ContactInfo | null;
@@ -725,10 +727,18 @@ export interface PatientRecordData {
   syncedAt: string | null;
   degraded: boolean;
   refresh:
-    | { state: "ok"; syncedAt: string }
+    | { state: "ok"; syncedAt: string; adviceCreated?: number }
     | { state: "rate_limited"; retryAfterSec: number }
     | { state: "failed" }
     | null;
+  /** ★ cwi-advice-20261024：診症卡標示 — 觸發字（標黃嗰句）+ 已入待跟進嘅診症日；null = 冇啟用醫生建議規則 */
+  advice?: PatientAdviceInfo | null;
+}
+
+export interface PatientAdviceInfo {
+  keywords: string[];
+  excludeKeywords: string[];
+  tasks: { visitDate: string; status: string }[];
 }
 
 /** 兩種樣板（MD §0.3 — 對齊 workforce NoteText；zod 已 strip 多餘欄）。 */

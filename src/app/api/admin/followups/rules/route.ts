@@ -3,6 +3,7 @@ import prisma from "@/lib/prisma";
 import { requireAdmin, configReadWhere, assertConfigScope } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { FOLLOWUP_TRIGGER_LABELS } from "@/lib/followup/factory-defaults";
+import { DEFAULT_ADVICE_EXCLUDES, DEFAULT_ADVICE_KEYWORDS, normalizeAdviceTerms } from "@/lib/followup/advice";
 
 /**
  * ★ cwi-followup-p3-20260916（followup-v2 MD §4.7 驗收 #6：規則管理）：follow-up 規則（ADMIN-only）。
@@ -13,7 +14,8 @@ import { FOLLOWUP_TRIGGER_LABELS } from "@/lib/followup/factory-defaults";
  *   templateApproved = 該規則引用 template 嘅審批狀態（UI 提示：未審批 + 窗口過 → SKIPPED(NO_TEMPLATE)）。
  *
  * ★ cwi-setfix F-1：POST /api/admin/followups/rules — 新增規則（以前冇入口 — 生產 DB 唔行 seed → 規則表永遠空）。
- *   body { name, trigger, delayValue, delayUnit, templateName, reasonCodes?, clinicId? }
+ *   body { name, trigger, delayValue, delayUnit, templateName, reasonCodes?, clinicId?, keywords?, excludeKeywords? }
+ *   ★ cwi-advice-20261024：DOCTOR_ADVICE 准 delayValue 0（同步到即刻）；keywords 冇帶 = 出廠觸發字
  *   - clinicId 缺／null = 全局（global admin）；有值 = 店規則（scope 內）
  *   - 新規則一律 enabled=false（管理員檢查完先喺表度開 — BEFORE_APPOINTMENT 開時照行首啟用確認）
  *   - level 恒 L1（v3 建議層）；templateName 必須存在（FollowupTemplate.key）
@@ -47,13 +49,18 @@ export const POST = handle(async (req: NextRequest) => {
   const trigger = String(body.trigger ?? "");
   if (!TRIGGERS.has(trigger)) return NextResponse.json({ error: "bad trigger" }, { status: 400 });
   const delayValue = Number(body.delayValue);
-  if (!Number.isInteger(delayValue) || delayValue < 1 || delayValue > 365) return NextResponse.json({ error: "delayValue 1-365" }, { status: 400 });
+  const minDelay = trigger === "DOCTOR_ADVICE" ? 0 : 1;
+  if (!Number.isInteger(delayValue) || delayValue < minDelay || delayValue > 365) return NextResponse.json({ error: `delayValue ${minDelay}-365` }, { status: 400 });
   const delayUnit = String(body.delayUnit ?? "");
   if (!UNITS.has(delayUnit)) return NextResponse.json({ error: "bad delayUnit" }, { status: 400 });
   const reasonCodes = Array.isArray(body.reasonCodes)
     ? body.reasonCodes.map((x) => String(x).trim()).filter((x) => x.length > 0 && x.length <= 20)
     : [];
   if (reasonCodes.length > 20) return NextResponse.json({ error: "reasonCodes 最多 20 個" }, { status: 400 });
+  const isAdvice = trigger === "DOCTOR_ADVICE";
+  const keywords = isAdvice ? (body.keywords === undefined ? DEFAULT_ADVICE_KEYWORDS : normalizeAdviceTerms(body.keywords)) : [];
+  const excludeKeywords = isAdvice ? (body.excludeKeywords === undefined ? DEFAULT_ADVICE_EXCLUDES : normalizeAdviceTerms(body.excludeKeywords)) : [];
+  if (isAdvice && keywords.length === 0) return NextResponse.json({ error: "最少要一個觸發字" }, { status: 400 });
   const templateName = String(body.templateName ?? "");
   const tpl = templateName ? await prisma.followupTemplate.findUnique({ where: { key: templateName }, select: { key: true } }) : null;
   if (!tpl) return NextResponse.json({ error: "template not found" }, { status: 400 });
@@ -67,6 +74,8 @@ export const POST = handle(async (req: NextRequest) => {
       delayValue,
       delayUnit: delayUnit as never,
       reasonCodes,
+      keywords,
+      excludeKeywords,
       templateName,
       level: "L1",
       maxSends: 1,

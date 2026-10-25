@@ -919,6 +919,10 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/followups/tasks/nope", method: "POST", body: JSON.stringify({ action: "skip" }) }), // action=send|skip 必填 → 404 喺 task lookup
     expect: { UNAUTH: 401, STAFF_TY: 404 }, // 快照：S3-3（SUPERVISOR skip 已 S0-5 擋）
   },
+  "GET /api/followups/tasks/[id]/advice": {
+    fixture: () => ({ url: "/api/followups/tasks/nope/advice" }), // ★ cwi-advice：唔存在 task → 404（auth 之後）
+    expect: { UNAUTH: 401, STAFF_TY: 404, ADMIN_ALL: 404 },
+  },
   "GET /api/followups/tasks": {
     fixture: () => ({ url: "/api/followups/tasks" }),
     expect: { UNAUTH: 401, STAFF_TY: 200, ADMIN_ALL: 200 },
