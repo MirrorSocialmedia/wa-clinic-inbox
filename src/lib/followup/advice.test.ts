@@ -58,6 +58,8 @@ const P = {
   excl: { cp: "cpadv-excl", waId: "85290001003", contact: `${PFX}c-excl`, conv: `${PFX}v-excl` },
   booked: { cp: "cpadv-booked", waId: "85290001004", contact: `${PFX}c-booked`, conv: `${PFX}v-booked` },
   manual: { cp: "cpadv-manual", waId: "85290001005", contact: `${PFX}c-manual`, conv: `${PFX}v-manual` },
+  // 冇釘選、只係「電話認到」（Contact.identifiedPatientApricotId）
+  ident: { cp: "cpadv-ident", waId: "85290001006", contact: `${PFX}c-ident`, conv: `${PFX}v-ident` },
 };
 const GROUP_ID = `${PFX}group0000000000001`;
 const RULE_ID = `${PFX}rule00000000000001`;
@@ -126,14 +128,16 @@ before(async () => {
   await prisma.skillGroupMember.create({ data: { groupId: GROUP_ID, staffId: consultantId } });
   // 病人 + 對話（釘住病人；mine 有負責人）
   for (const [k, x] of Object.entries(P)) {
-    await prisma.contact.create({ data: { id: x.contact, clinicId, waId: x.waId, profileName: `ADVT ${k}`, labels: [] } });
+    await prisma.contact.create({
+      data: { id: x.contact, clinicId, waId: x.waId, profileName: `ADVT ${k}`, labels: [], identifiedPatientApricotId: k === "ident" ? x.cp : null },
+    });
     await prisma.conversation.create({
       data: {
         id: x.conv,
         clinicId,
         contactId: x.contact,
         status: "OPEN",
-        pinnedPatientApricotId: x.cp,
+        pinnedPatientApricotId: k === "ident" ? null : x.cp,
         assigneeId: k === "mine" ? assigneeId : null,
         lastMessageAt: new Date(),
       },
@@ -182,6 +186,7 @@ before(async () => {
         advice(P.mine.cp, VISIT, [{ field: "診斷", keyword: "suggest", snippet: "suggest implant 46" }]),
         advice(P.excl.cp, VISIT, [{ field: "治療處理", keyword: "advised", snippet: "advised OHI" }]),
         advice(P.booked.cp, VISIT, [{ field: "治療處理", keyword: "recommend", snippet: "recommend scaling" }]),
+        advice(P.ident.cp, VISIT, [{ field: "主訴", keyword: "recommend", snippet: "recommend testing" }]),
         advice(P.manual.cp, VISIT_MANUAL, [{ field: "治療處理", keyword: "advise", snippet: "advise filling 26" }]),
       ],
       quotes: [
@@ -270,6 +275,12 @@ test("A1–A6：clinic scan — 命中建卡、零原文、定向通知、排除
   const nMine = await prisma.staffNotice.findFirst({ where: { conversationId: P.mine.conv, kind: "FOLLOWUP_ADVICE" } });
   assert.ok(nMine, "A3 有負責人都要通知");
   assert.deepEqual(nMine.targetStaffIds, [assigneeId]);
+
+  // A3b 冇釘選、只係電話認到 → 照樣配到對話
+  assert.ok(
+    tasks.some((t) => t.conversationId === P.ident.conv && t.ruleId === RULE_ID),
+    "A3b 電話認到（冇釘選）都要建卡",
+  );
 
   // A4 排除字 / A5 已約 → 唔建
   assert.equal(tasks.filter((t) => t.conversationId === P.excl.conv).length, 0, "A4 排除字唔建");

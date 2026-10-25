@@ -1038,7 +1038,7 @@ async function scanQuotedNotBooked(
 // ── ★ cwi-advice-20261024：DOCTOR_ADVICE（醫生建議跟進 — 診症記錄有 advise/suggest/recommend…）──
 // 觸發：CWM 索引 note 任何一欄命中規則觸發字（排除字成段唔計）→ 診症日 + delay（出廠 0 日 = 同步到即刻）。
 // 科目：advice:<病人>:<診症日>（同日報價併入呢張 — E 掃描見到就跳過）。
-// 對話配對：釘咗呢個病人嘅對話 → 「此電話嘅病人」（ContactPatientLink）；同店優先，否則最近活躍。
+// 對話配對：釘咗呢個病人嘅對話 → 「此電話嘅病人」（ContactPatientLink）→ 電話認到（冇釘選）；同店優先，否則最近活躍。
 // 已約：診症日之後已有有效預約（0/1/4，唔計 102 改期舊單）→ 唔出（建咗之後先約 → recheck BOOKED 自動完成）。
 // 🔴 contextJson 零臨床全文：只入欄名 + 觸發字 + 日期／醫生（原文由卡即時問 CWM）。
 const ADVICE_LOOKBACK_DAYS = 10; // CWM 夜跑重掃前 7 日未有 note 嘅 visit — 多留 3 日緩衝
@@ -1047,12 +1047,18 @@ async function adviceConversationFor(
   patientApricotId: string,
   clinicId: string
 ): Promise<{ id: string; clinicId: string; contactId: string } | null> {
-  const linked = await prisma.contactPatientLink.findMany({ where: { patientApricotId }, select: { contactId: true }, take: 20 });
+  const [linked, identified] = await Promise.all([
+    prisma.contactPatientLink.findMany({ where: { patientApricotId }, select: { contactId: true }, take: 20 }),
+    // ★ 電話認到（Contact.identifiedPatientApricotId）— 同病人記錄口徑（resolveConversationPatient：釘選 > 電話認到）
+    prisma.contact.findMany({ where: { identifiedPatientApricotId: patientApricotId }, select: { id: true }, take: 20 }),
+  ]);
   const convs = await prisma.conversation.findMany({
     where: {
       OR: [
         { pinnedPatientApricotId: patientApricotId },
         ...(linked.length ? [{ contactId: { in: linked.map((l) => l.contactId) } }] : []),
+        // 釘咗第二個病人嘅對話唔算（釘選優先）
+        ...(identified.length ? [{ contactId: { in: identified.map((c) => c.id) }, pinnedPatientApricotId: null }] : []),
       ],
     },
     orderBy: { lastMessageAt: "desc" },
