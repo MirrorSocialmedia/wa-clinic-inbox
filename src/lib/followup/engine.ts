@@ -83,7 +83,7 @@ async function lazyNotifyMessageNew(
 // ★ cwi-final S2-4：followup:changed 事件（實時建議計數）單一出口。
 //   commit-then-emit：caller 必須喺 task 狀態落 DB 之後先調；best-effort —
 //   事件失敗（Redis/對話已刪）log 後吞掉，唔准阻塞 scan/發送主流程（realtime 通知鐵律）。
-async function emitFollowupChanged(
+export async function emitFollowupChanged(
   conversationId: string | null | undefined,
   clinicId: string | null | undefined,
   taskId: string,
@@ -1225,6 +1225,13 @@ export async function runFollowupScan(now: Date = new Date()): Promise<FollowupS
   // ★ cwi-final S2-2（N-8）：重跑取消檢查 — 已出嘅 SUGGESTED 之後客戶 opt-out/覆咗/約咗 → 即時 CANCELLED
   //   （opt-out 永遠優先；workforce 依賴失敗 → 保留唔取消）
   const rechecked = await recheckOpenSuggestions(now);
+  // ★ cwi-reminder-20261025：員工自設「⏰ 待跟進」提醒到期 → 🔔（定向；notifiedAt 防重發）
+  try {
+    const { notifyDueReminders } = await import("@/lib/followup/reminder");
+    await notifyDueReminders(now);
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "followup: 跟進提醒到期掃描失敗（fail-soft）");
+  }
   const rules = (await prisma.followupRule.findMany({ where: { enabled: true } })) as unknown as FollowupRuleRow[];
   // ★ cwi-advice-20261024：DOCTOR_ADVICE 先跑 — 同日報價要見到醫生建議卡先至併入（E 掃描見到 advice 科目就跳過）
   rules.sort((a, b) => Number(b.trigger === "DOCTOR_ADVICE") - Number(a.trigger === "DOCTOR_ADVICE"));

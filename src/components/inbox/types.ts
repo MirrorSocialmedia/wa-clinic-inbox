@@ -44,8 +44,20 @@ export type ConvStatus = "OPEN" | "PENDING" | "RESOLVED";
  * ★ cwi-followup-v3：對話內跟進建議卡數據（GET /api/followups/tasks?conversationId=）。
  * 系統只指出邊個對話要跟＋點解；發唔發、改唔改字 = 員工決定（cron 零 outbound）。
  */
+/** ★ cwi-reminder-20261025：員工自設跟進提醒 */
+export interface ConversationReminder {
+  id: string;
+  dueAt: string;
+  reason: string | null;
+  remindStaffId: string;
+  remindStaffName: string | null;
+  due: boolean;
+}
+
 export interface FollowupSuggestion {
   id: string;
+  /** ★ cwi-reminder-20261025：RULE（規則建議）｜ MANUAL（員工自設提醒） */
+  source?: "RULE" | "MANUAL" | "INTERNAL_REMINDER";
   conversationId: string | null;
   ruleName: string | null;
   /** FollowupTrigger（B1/B2/C/D/E/A 六類；F 已剷） */
@@ -112,6 +124,8 @@ export interface ConversationItem {
   followupDueAt?: string | null;
   /** ★ cwi-advice-20261024：有未處理「醫生建議跟進」— 列表藍色「醫生建議」膠囊 */
   followupAdvice?: boolean;
+  /** ★ cwi-reminder-20261025：未處理「⏰ 待跟進」提醒（null = 冇） */
+  reminder?: ConversationReminder | null;
   /** ★ cwi-followup-p3（鐵律 5）：badge「跟進回覆」— 24h 內由 client derive */
   followupRepliedAt?: string | null;
   contact: ContactInfo | null;

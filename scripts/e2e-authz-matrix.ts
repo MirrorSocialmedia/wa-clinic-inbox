@@ -761,6 +761,16 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: `/api/conversations/${F.convLock}/flag`, method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 400, STAFF_YMT: 403, SUPERVISOR: 403 },
   },
+  "POST /api/conversations/[id]/reminder": {
+    // ★ cwi-reminder-20261025：「⏰ 待跟進」提醒 — body {} 冇日子 → 400（4xx 無寫入）；外店 403；SUPERVISOR 唯讀 403
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/reminder`, method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 400, STAFF_YMT: 403, SUPERVISOR: 403 },
+  },
+  "PATCH /api/conversations/[id]/reminder": {
+    // 冇未處理提醒 → 404（零寫入）；外店 403；SUPERVISOR 403
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/reminder`, method: "PATCH", body: JSON.stringify({ action: "cancel" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, STAFF_YMT: 403, SUPERVISOR: 403 },
+  },
   "POST /api/conversations/[id]/flows": {
     // ★ S3-3（D-11）：ADMIN 豁免刪 — 非負責人（包 ADMIN）→ 423；
     //   STAFF_TY = 負責人 → 過 send lock → G2 閘（409）或 24h 窗（422，lastInboundAt = 2026-01-01）

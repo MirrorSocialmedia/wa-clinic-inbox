@@ -86,6 +86,7 @@ enum NoticeKind {
   ROUTING_ASSIGNED  // 路由命中 → 組/單人標記 + 通知（title「新個案 · {組} · {店}」零 PII）
   ROUTING_ESCALATION // 投訴 N 分鐘未接手 → 升級第二級組（title「升級 · {原組} 未處理 · {店}」）
   FOLLOWUP_ADVICE    // ★ cwi-advice-20261024：醫生建議跟進（定向：負責人 → 顧問組 → 全店）
+  FOLLOWUP_REMINDER  // ★ cwi-reminder-20261025：員工自設「⏰ 待跟進」提醒到期（定向：設提醒嗰個人／負責人）
 }
 
 // Phase 2b：逐舖 AI 模式（指揮大神 2026-08-18 決定，覆蓋 MD D5「AI 永不發送」）

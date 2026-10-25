@@ -413,11 +413,11 @@ async function t240Ui(adminCookie: string): Promise<void> {
       const has = await capsuleRow.locator("button", { hasText: re }).count();
       check(`膠囊存在：${re}`, has === 1, has);
     }
-    // 處理中/等回覆 pill 膠囊剷除
-    check("處理中 pill 膠囊唔存在", (await page.locator("button.rounded-full", { hasText: "處理中" }).count()) === 0);
+    // 處理中只喺狀態分段掣（唔係膠囊）；等回覆 剷除
+    check("處理中唔喺膠囊行", (await capsuleRow.locator("button", { hasText: "處理中" }).count()) === 0);
     check("等回覆 pill 膠囊唔存在", (await page.locator("button.rounded-full", { hasText: "等回覆" }).count()) === 0);
-    // 「睇已解決 →」細字連結
-    check("「睇已解決 →」細字連結存在", (await page.locator('[data-e2e="status-toggle"]', { hasText: "睇已解決 →" }).count()) === 1);
+    // ★ cwi-reminder-20261025：狀態分段掣（處理中 N｜已解決 N）取代細字「睇已解決 →」
+    check("狀態分段掣有「已解決」", (await page.locator('[data-e2e="status-toggle"] button', { hasText: /^已解決/ }).count()) === 1);
     // 公海橙 / 派俾我 brand 邊框
     const poolCls = (await capsuleRow.locator("button", { hasText: /^公海/ }).getAttribute("class")) ?? "";
     check("公海 = 橙色（bg-warn）", poolCls.includes("bg-warn"), poolCls);
@@ -434,9 +434,9 @@ async function t240Ui(adminCookie: string): Promise<void> {
 
     // 已解決連結展開：撳一次 = RESOLVED 視圖（再撳一次會返 ALL — attempt-2 根治：
     // 舊版連撳兩下令 filter ALL→RESOLVED→ALL，斷言時已返 ALL → 公海線顯示假紅）
-    await page.locator('button', { hasText: /^睇已解決/ }).click();
+    await page.locator('[data-e2e="status-toggle"] button', { hasText: /^已解決/ }).click();
     await page.waitForTimeout(800);
-    check("撳「睇已解決 →」後顯示 RESOLVED 線", (await page.getByText("SR2T1 ResPool").count()) >= 1);
+    check("撳「已解決」後顯示 RESOLVED 線", (await page.getByText("SR2T1 ResPool").count()) >= 1);
     const poolMatches = page.getByText("SR2T1 Pool");
     const poolN = await poolMatches.count();
     if (!process.env.E2E_NO_DEBUG_DOM && poolN > 0) {
@@ -453,10 +453,10 @@ async function t240Ui(adminCookie: string): Promise<void> {
         console.log(`    [debug] SR2T1 Pool match#${i}: ${JSON.stringify(info)}`);
       }
     }
-    check("撳「睇已解決 →」後公海線唔顯示", poolN === 0, poolN);
+    check("撳「已解決」後公海線唔顯示", poolN === 0, poolN);
     await page.screenshot({ path: "/tmp/kairo-statusrole2-t1-2-resolved.png" });
     ok("screenshot 2: /tmp/kairo-statusrole2-t1-2-resolved.png");
-    await page.locator('button', { hasText: /^睇已解決/ }).click(); // 返轉去
+    await page.locator('[data-e2e="status-toggle"] button', { hasText: /^處理中/ }).click(); // 返轉去
     await page.waitForTimeout(300);
     await ctxPw.close();
 

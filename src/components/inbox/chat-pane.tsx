@@ -83,6 +83,7 @@ import { HoldCard } from "./hold-card";
 import { WindowExits } from "./window-exits";
 import { ConversationStatusBanners } from "./conversation-status-banners";
 import { AdviceReasonRows } from "./advice-reason";
+import { ReminderCard } from "./reminder-card";
 // cwi-setnav NAV-02：對話內彈窗／popover — 系統返回先閂彈窗（WhatsApp 式）
 import { useBackLayer } from "@/lib/back-stack";
 
@@ -1549,7 +1550,12 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             窗口內 = 「採用並編輯」填 composer（free-form 可改）→ 發送帶 followupTaskId（sentVia=AI_ADOPTED 無 cooldown）；
             過窗 = 只可發 template（預覽已填變數）；template 未審批 = 等審批 + 唔俾發；
             跳過 = SKIPPED(MANUAL) + dedupWindowDays(7) 內唔再出。 */}
+        {/* ★ cwi-reminder-20261025：員工自設「⏰ 待跟進」提醒到期 → 提醒卡（唔係規則建議卡） */}
+        {p.suggestion?.source === "MANUAL" && p.conversation && (
+          <ReminderCard key={p.suggestion.id} conversationId={p.conversation.id} suggestion={p.suggestion} readOnly={readOnly} />
+        )}
         {p.suggestion &&
+          p.suggestion.source !== "MANUAL" &&
           // ★ cwi-final S2-2（N-8）：病人 opt-out → 唔顯示建議卡（server 已即時取消 SUGGESTED；
           //   呢度 = UI 雙保險 — 事件/刷新 race 間隙卡唔會閃現）
           p.suggestion.optOut !== true &&
