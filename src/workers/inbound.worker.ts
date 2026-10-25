@@ -6,6 +6,7 @@ import { urgentIntake } from "@/lib/sessions/urgent-intake";
 import { buildMessageNewPayload } from "@/lib/realtime-payload";
 import { pushEvent } from "@/lib/push";
 import prisma from "@/lib/prisma";
+import { mediaIdOf } from "@/lib/wa/media-id";
 import log, { redactDeep } from "@/lib/log";
 import { notifyAlert } from "@/lib/health/notify";
 import { upsertAlert } from "@/lib/health/alerts";
@@ -107,7 +108,6 @@ interface WaPayload {
   entry?: { id?: string; changes?: WaChange[] }[];
 }
 
-const MEDIA_TYPES = new Set(["image", "video", "audio", "document"]);
 
 // ★ cwi-final S6-4：lastWebhookEventAt 熱行保護 — 同店 60 秒內唔重寫（webhook 暴風保護；健康檢查粒度 5 分鐘）
 const WEBHOOK_EVENT_REFRESH_MS = 60_000;
@@ -219,12 +219,7 @@ function messageBody(m: WaTimestampedMessage): string | null {
   return null;
 }
 
-function mediaIdOf(m: WaTimestampedMessage): string | undefined {
-  if (m.type && MEDIA_TYPES.has(m.type)) {
-    return (m as unknown as Record<string, { media_id?: string } | undefined>)[m.type]?.media_id;
-  }
-  return undefined;
-}
+// ★ 2026-10-25：mediaIdOf 搬去 @/lib/wa/media-id（純函數 — 可 unit test；讀 `id` 先，`media_id` 兼容）
 
 function msgTypeOf(m: WaTimestampedMessage): string {
   return m.type ?? "unknown";

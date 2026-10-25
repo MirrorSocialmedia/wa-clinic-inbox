@@ -19,7 +19,7 @@ import log from "@/lib/log";
  *   production 拒 legacy 明文 — 必須先跑 scripts/migrate-media-encrypt.ts）
  * - ★ S6-3②：streaming serve（唔入 heap）+ 讀時計 size（>50MB → abort）
  * - ★ AS-4 下載安全：X-Content-Type-Options: nosniff（防 MIME sniffing）；
- *   Content-Disposition — image/* + application/pdf → inline（對話內預覽）；
+ *   Content-Disposition — image/* + audio/* + video/* + application/pdf → inline（對話內預覽／播放）；
  *   其餘（doc/xls/bin 等二進制）→ attachment（唔畀瀏覽器直接渲染/執行）
  */
 export const dynamic = "force-dynamic";
@@ -30,7 +30,12 @@ const MIME: Record<string, string> = {
   png: "image/png",
   webp: "image/webp",
   mp4: "video/mp4",
+  "3gp": "video/3gpp",
   ogg: "audio/ogg",
+  mp3: "audio/mpeg",
+  m4a: "audio/mp4",
+  aac: "audio/aac",
+  amr: "audio/amr",
   pdf: "application/pdf",
   xls: "application/vnd.ms-excel",
   doc: "application/msword",
@@ -97,7 +102,8 @@ export const GET = handle(
     //   + filename*=UTF-8''<pct-encoded>（非 ASCII 檔名正確形式）。
     //   舊寫法（單一 filename="<encodeURIComponent>"）CJK 檔名喺部分 client 會爛/亂碼。
     //   ASCII fallback = 顯示名本身係純可印 ASCII 就用佢；否則用 fileKey（結構保證 ASCII）。
-    const isInline = mime.startsWith("image/") || mime === "application/pdf";
+    // ★ 2026-10-25：audio/video 都 inline（對話內 <audio>/<video> 直接播）
+    const isInline = mime.startsWith("image/") || mime.startsWith("audio/") || mime.startsWith("video/") || mime === "application/pdf";
     const dispName = msg.mediaName ?? file;
     const asciiFallback = /^[\x21-\x7e]*$/.test(dispName) ? dispName : file;
     const res = new NextResponse(body, {

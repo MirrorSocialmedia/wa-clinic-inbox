@@ -38,14 +38,28 @@ const MIME_EXT: Record<string, string> = {
   "image/png": "png",
   "image/webp": "webp",
   "video/mp4": "mp4",
-  "audio/ogg": "ogg",
-  "audio/ogq": "ogg", // WhatsApp voice notes = ogg/opus
+  "video/3gpp": "3gp",
+  "audio/ogg": "ogg", // WhatsApp 語音 = "audio/ogg; codecs=opus"（參數喺 mediaExt 剝走）
+  "audio/opus": "ogg",
+  "audio/mpeg": "mp3",
+  "audio/mp4": "m4a",
+  "audio/aac": "aac",
+  "audio/amr": "amr",
   "application/pdf": "pdf",
   "application/vnd.ms-excel": "xls",
   "application/msword": "doc",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
 };
+
+/**
+ * MIME → 副檔名。★ 2026-10-25 修：剝走參數再查（WhatsApp 語音 mime_type = "audio/ogg; codecs=opus" —
+ *   舊版整串查 → 唔中 → .bin → media route 當 octet-stream 下載，<audio> 播唔到）。
+ */
+export function mediaExt(mimeType: string | null | undefined): string {
+  const base = (mimeType ?? "").split(";")[0].trim().toLowerCase();
+  return MIME_EXT[base] ?? "bin";
+}
 
 // ── 錯誤類型（call site 可辨認 fail-fast 原因） ────────────────────────────
 
@@ -518,7 +532,7 @@ export async function downloadWaMedia(opts: {
 
   try {
     const info = await getMediaInfo(mediaId);
-    const ext = MIME_EXT[info.mimeType] ?? "bin";
+    const ext = mediaExt(info.mimeType);
 
     const res = await fetch(info.url);
     if (!res.ok) {
