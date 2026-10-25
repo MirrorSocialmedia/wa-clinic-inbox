@@ -355,3 +355,33 @@ test("A9 純函數：觸發字正規化 + 30 日時效", async () => {
     new Date(due.getTime() + 30 * 86400_000).toISOString(),
   );
 });
+
+test("A10 同一病人：上次醫生建議已跟進（SENT），之後新一次診症再 recommend → 照出新卡", async () => {
+  const { runFollowupScan } = await import("./engine");
+  const { adviceSubjectKey } = await import("./advice");
+  const first = await prisma.followupTask.findFirst({ where: { conversationId: P.hit.conv, ruleId: RULE_ID } });
+  assert.ok(first);
+  await prisma.followupTask.update({ where: { id: first.id }, data: { status: "SENT", handledAt: new Date() } });
+  const VISIT2 = hkDay(-2);
+  const f = JSON.parse(readFileSync(CLINICAL, "utf8")) as { advice: Record<string, unknown>[] };
+  f.advice.push({
+    visitId: `${PFX}-visit2-${P.hit.cp}`,
+    patientApricotId: P.hit.cp,
+    patientCode: null,
+    visitDate: VISIT2,
+    clinicCode: "TKW",
+    providerCode: null,
+    syncedAt: new Date().toISOString(),
+    matches: [{ field: "治療處理", keyword: "recommend", snippet: "recommend crown 36" }],
+    quotedItems: null,
+  });
+  writeFileSync(CLINICAL, JSON.stringify(f));
+  await runFollowupScan();
+  const second = await prisma.followupTask.findFirst({ where: { ruleId: RULE_ID, subjectKey: adviceSubjectKey(P.hit.cp, VISIT2) } });
+  assert.ok(second, "新一次診症要出新卡（唔受 maxSends／7 日冷卻影響）");
+  assert.equal(second.status, "SUGGESTED");
+  // 同一次診症再掃 → 唔會再出
+  await runFollowupScan();
+  assert.equal(await prisma.followupTask.count({ where: { ruleId: RULE_ID, subjectKey: adviceSubjectKey(P.hit.cp, VISIT) } }), 1);
+});
+

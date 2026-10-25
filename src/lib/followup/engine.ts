@@ -230,6 +230,9 @@ export async function shouldSkipCreation(
     const open = await prisma.followupTask.findFirst({ where: { ruleId: rule.id, conversationId: key.conversationId, status: "SUGGESTED" }, select: { id: true } });
     if (open) return "in-flight";
   }
+  // ★ cwi-advice-20261025：醫生建議 = 每次診症一個科目（advice:<病人>:<診症日>）— 科目級 ① 已夠；
+  //   唔再按病人計 maxSends／冷卻窗（否則第一張卡發咗，之後新一次診症再 recommend 都永遠唔出）
+  if (rule.trigger === "DOCTOR_ADVICE") return null;
   // ③ maxSends：SENT + COMPLETED 都計（病人覆咗 = 發咗）
   const sentOr: Prisma.FollowupTaskWhereInput[] = [];
   if (key.patientApricotId) sentOr.push({ patientApricotId: key.patientApricotId });
