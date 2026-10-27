@@ -95,6 +95,14 @@ async function main(): Promise<void> {
   ]);
   const P = await ctx.newPage();
 
+  // 診斷：未完成嘅 /api 請求（fail 時 dump — 分得清「server 慢」定「請求排隊卡住」）
+  const pending = new Map<unknown, { url: string; at: number }>();
+  P.on("request", (r) => {
+    if (r.url().includes("/api/")) pending.set(r, { url: r.url().replace(base, ""), at: Date.now() });
+  });
+  P.on("requestfinished", (r) => pending.delete(r));
+  P.on("requestfailed", (r) => pending.delete(r));
+
   let flowsCalls = 0;
   P.on("response", (r) => {
     // ★ cwi-paintriage-20260903 fix（D.4 對齊）：側欄改 MiniSchedule 自拉 /api/conversations/:id/flows（含 duty 欄）— 舊 /api/duty-roster 計數 stale
@@ -120,7 +128,8 @@ async function main(): Promise<void> {
   try {
     await P.waitForFunction(
       () => document.body.innerText.includes("陳志強") && !document.body.innerText.includes("林小曼"),
-      { timeout: 30000 }
+      // 30s → 60s：CI runner 慢嗰陣（同一 commit authz 步 6–8 分鐘）右欄 /flows 會排喺其他請求後面
+      { timeout: 60000 }
     );
   } catch {
     // 診斷：dump 當下 url + body 尾（定係 cookie 失効 307 / click 未中 / fetch 未發）
@@ -128,7 +137,9 @@ async function main(): Promise<void> {
       url: location.href,
       tail: document.body.innerText.slice(-600),
     }))) as { url: string; tail: string };
-    throw new Error(`卡未翻 B（url=${dbg.url}）tail: ${JSON.stringify(dbg.tail.slice(-300))}`);
+    const now = Date.now();
+    const stuck = [...pending.values()].map((x) => `${Math.round((now - x.at) / 1000)}s ${x.url.slice(0, 100)}`);
+    throw new Error(`卡未翻 B（url=${dbg.url}）pending=${JSON.stringify(stuck)} tail: ${JSON.stringify(dbg.tail.slice(-300))}`);
   }
   if (flowsCalls <= callsAfterLoad) {
     throw new Error(`client 端刷新未發 /flows（calls=${flowsCalls}, afterLoad=${callsAfterLoad}）`);

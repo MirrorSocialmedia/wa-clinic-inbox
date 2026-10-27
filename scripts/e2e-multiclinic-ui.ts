@@ -295,7 +295,11 @@ async function main(): Promise<void> {
       // 跨店 confirm 文案（MD A.6.2 指定字）
       const confirmBox = P.locator('[data-e2e="assign-cross-confirm"]');
       await confirmBox.getByText("對方將可查閱呢個對話嘅完整記錄", { exact: true }).waitFor({ state: "visible", timeout: 5_000 });
+      const asgResp = waitResp(P, "/assign", 45_000); // 監聽喺 click 之前掛（同 release）
       await confirmBox.getByRole("button", { name: "確認指派", exact: true }).click();
+      const asgStatus = await asgResp;
+      if (asgStatus === null) fail("跨店指派請求 45s 內冇回應（未發出或 server 卡住）");
+      if (asgStatus < 200 || asgStatus >= 300) fail(`跨店指派請求失敗 status=${asgStatus}`);
       // 指派後：select 掣顯示 staff-wtc 名
       await P.getByRole("button", { name: new RegExp(staffWtcName) }).first().waitFor({ state: "visible", timeout: 15_000 });
       console.log("MCUI-OK menu");
