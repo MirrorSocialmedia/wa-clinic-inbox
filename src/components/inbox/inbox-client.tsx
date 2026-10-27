@@ -2493,7 +2493,9 @@ export function InboxClient({
           waTimestamp: new Date().toISOString(),
           createdAt: new Date().toISOString(),
         };
-        setMessages((prev) => [...prev, optimistic]);
+        // ★ 2026-10-27：message:new（socket）有時比 HTTP 回應先到 — 已有同 id／clientMessageId 嘅氣泡就唔再加
+        //   （舊版照 append → 同一 id 兩個氣泡 → React「two children with the same key」+ 畫面重複）
+        setMessages((prev) => (prev.some((m) => m.id === optimistic.id || (m.clientMessageId != null && m.clientMessageId === clientMessageId)) ? prev : [...prev, optimistic]));
         setConversations((prev) =>
           prev.map((c) =>
             c.id === convId
@@ -2703,7 +2705,9 @@ export function InboxClient({
           waTimestamp: new Date().toISOString(),
           createdAt: new Date().toISOString(),
         };
-        setMessages((prev) => [...prev, optimistic]);
+        // ★ 2026-10-27：message:new（socket）有時比 HTTP 回應先到 — 已有同 id／clientMessageId 嘅氣泡就唔再加
+        //   （舊版照 append → 同一 id 兩個氣泡 → React「two children with the same key」+ 畫面重複）
+        setMessages((prev) => (prev.some((m) => m.id === optimistic.id || (m.clientMessageId != null && m.clientMessageId === clientMessageId)) ? prev : [...prev, optimistic]));
         setConversations((prev) =>
           prev.map((c) =>
             c.id === convId
