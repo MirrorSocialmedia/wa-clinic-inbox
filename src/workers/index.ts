@@ -99,6 +99,11 @@ async function registerSchedulers() {
     name: "routing-escalate",
     data: {},
   });
+  // ★ cwi-sales-20261028：銷售保護期到期（先睇之後有冇預約 → 延期 / 出公海）+ 綁定對話冇人覆通知主管
+  await cronQueue.upsertJobScheduler("sched-sales-sweep", { pattern: "*/5 * * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-sweep",
+    data: {},
+  });
   // cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA — 未指派超過 N 分鐘 → push 全店 active STAFF（冪等：slaNotifiedAt）
   await cronQueue.upsertJobScheduler("sched-unassigned-sla", { pattern: "*/5 * * * *", tz: "Asia/Hong_Kong" }, {
     name: "unassigned-sla",

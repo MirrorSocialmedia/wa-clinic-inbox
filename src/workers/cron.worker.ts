@@ -26,6 +26,8 @@
  * - auto-resolve       每日 03:00 → cwi-statusrole2-20260910（MD §4）：OPEN 對話三守門（靜音 N 日 /
  *                                       病人最後一句已覆 / 無待跟進+無 active 銷售 session — 後兩條喺 model 落地前恒真）
  *                                       → RESOLVED + resolvedBy=AUTO + INTERNAL 備註 + 唔 push
+ * - sales-sweep        每 5 分鐘 → cwi-sales-20261028：銷售保護期到期（之後有預約 → 延期；冇 → 銷售公海 + 通知）
+ *                                       + 綁定／保護中對話 N 分鐘冇人覆 → 通知主管（每條 inbound 只通知一次）
  * - unassigned-sla     每 5 分鐘 → cwi-inboxfix-20260905（MD §1.4 I-5）：公海未指派超過 N 分鐘
  *                                       → 該店全部 active STAFF push「{店簡稱} 有病人未有人跟」+ StaffNotice
  *                                       （N = triage.unassignedSlaMinutes default 10；slaNotifiedAt 防重複洗版；接手清返）
@@ -128,6 +130,13 @@ async function handleCronJob(job: Job): Promise<unknown> {
             { checked: r.checked, resolved: r.resolved, failed: r.failed },
             "cron: auto-resolve done"
           );
+          return { ok: true, ...r };
+        }
+        case "sales-sweep": {
+          // cwi-sales-20261028：保護期到期 sweep + 綁定對話冇人覆通知主管（冪等可空跑）
+          const { runSalesSweep } = await import("@/lib/sales/sweep");
+          const r = await runSalesSweep();
+          log.info(r, "cron: sales-sweep done");
           return { ok: true, ...r };
         }
         case "unassigned-sla": {

@@ -663,6 +663,12 @@ async function handleReschedule(p: {
     })
     .catch(() => undefined);
 
+  // ★ cwi-sales-20261028：舊預約有計銷售保護 → 新預約承接（保護期跟新日子；best-effort）
+  {
+    const { rescheduleSalesBooking } = await import("@/lib/sales/core");
+    await rescheduleSalesBooking({ oldApptId, newApptId, newDate: date });
+  }
+
   // ★ Phase B（cwi-tmpl-20260824-b1）：改期成功 → BookingRequest 同步新時間 + remindedAt reset。
   // 語義：reminder scan 用 requestedDate/Time + apricotApptId — 不同步會按舊時間提醒（錯）；
   // remindedAt=null → 新時間落入 23–25h 窗口時會照提醒（正確）。

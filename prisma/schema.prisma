@@ -87,6 +87,10 @@ enum NoticeKind {
   ROUTING_ESCALATION // 投訴 N 分鐘未接手 → 升級第二級組（title「升級 · {原組} 未處理 · {店}」）
   FOLLOWUP_ADVICE    // ★ cwi-advice-20261024：醫生建議跟進（定向：負責人 → 顧問組 → 全店）
   FOLLOWUP_REMINDER  // ★ cwi-reminder-20261025：員工自設「⏰ 待跟進」提醒到期（定向：設提醒嗰個人／負責人）
+  // ★ cwi-sales-20261028：銷售系統（定向通知）
+  SALES_PROTECTION   // 保護期開始／到期出公海（定向：個銷售）
+  SALES_HANDOVER     // 請銷售轉交／銷售已轉交／主管強制接手（定向：銷售 or 接手人）
+  SALES_UNANSWERED   // 綁定病人 N 分鐘冇人覆（定向：主管 + ADMIN）
 }
 
 // Phase 2b：逐舖 AI 模式（指揮大神 2026-08-18 決定，覆蓋 MD D5「AI 永不發送」）
@@ -277,6 +281,14 @@ model StaffUser {
   // ★ cwi-final S6-9（③）：per-staff UI 偏好 — Json: { enterSends?: boolean }（預設 true = 現行為）
   uiPrefs           Json?
   pushSubscriptions PushSubscription[]
+  // ★ cwi-sales-20261028：「☑ 銷售人員」— 勾咗先套用銷售系統（保護期、綁定、對話鎖、開單、傭金）。
+  //   salesApricotUserId = Apricot vita-users id（invoice sales 欄；一個 Apricot 帳號只可以綁一個 inbox 帳號）。
+  //   workforceEmployeeId = workforce Employee.id（打卡核實、糧單）。Name 欄只係顯示快照。
+  isSales               Boolean @default(false)
+  salesApricotUserId    String? @unique
+  salesApricotUserName  String?
+  workforceEmployeeId   String? @unique
+  workforceEmployeeName String?
 }
 
 model StaffClinic {
@@ -468,6 +480,12 @@ model Conversation {
   //   對話轉 RESOLVED 或 staff 手動清；置 true 後唔會自動清（避免新訊息蓋過未處理急症）。
   urgency          String?                    // LOW / MED / HIGH（最近一次分類）
   urgent           Boolean  @default(false)
+  // ★ cwi-sales-20261028：銷售意向分級（HIGH / MEDIUM / LOW；null = 未分級）— 只限銷售人員設
+  salesIntent          String?   @db.VarChar(8)
+  salesIntentByStaffId String?
+  salesIntentAt        DateTime? @db.Timestamptz
+  // ★ cwi-sales-20261028：綁定／保護中對話冇人覆已通知主管嘅時間（< lastInboundAt = 新 inbound 未通知）
+  salesUnansweredNotifiedAt DateTime? @db.Timestamptz
   aiSummary        String?                    // ≤50 字摘要（側欄顯示；語言跟病人）
   // ★ booking-ui（2026-08-23, cwi-bkui-20260823-a1）：patient-context 釘住舊客（lookup match 後落 DB）
   pinnedPatientApricotId String?               // Apricot 病人 id（proxy 落單 patient.patientApricotId 來源）
@@ -1340,3 +1358,81 @@ model FollowupTemplate {
   paramOrder   String[]  @default([])
   updatedAt    DateTime  @updatedAt
 }
+
+// ★ cwi-sales-20261028：銷售系統第 1 期（保護期／綁定／對話鎖）。計錢（invoice、付款、傭金）喺 workforce。
+// PII：只存 Apricot 病人 id、員工 id、預約 id — 零姓名電話。
+
+// 銷售規則設定（單行 id = "global"；老闆喺 /admin/sales 改）
+model SalesSettings {
+  id                      String   @id @default("global")
+  protectionDays          Int      @default(7)   // 保護到「預約日後 N 日」
+  highValueProtectionDays Int      @default(14)  // 高價項目（第 2 期開單時按傭金項目類別套用）
+  maxDaysAhead            Int      @default(30)  // 預約日最遠幾多日內先有保護
+  cycleCap                Int      @default(3)   // 循環邀約上限（同一銷售連續續期輪數）
+  noShowCap               Int      @default(2)   // 連續 no-show 次數 → 出公海（第 3 期接 Apricot 到診狀態）
+  concurrentCap           Int      @default(30)  // 每個銷售同時保護中病人上限
+  boundAutoReleaseMonths  Int      @default(24)  // 綁定病人幾多個月冇付款自動解除（第 3 期）
+  unansweredNotifyMinutes Int      @default(30)  // 綁定／保護中對話 N 分鐘冇人覆 → 通知主管
+  notifyWindowStart       String   @default("09:00") @db.VarChar(5) // 冇人覆通知只喺呢段時間（香港時間）
+  notifyWindowEnd         String   @default("21:00") @db.VarChar(5)
+  intentLabels            String[] @default(["高", "中", "低"]) // HIGH / MEDIUM / LOW 顯示名
+  updatedAt               DateTime @updatedAt @db.Timestamptz
+  updatedByStaffId        String?
+}
+
+enum SalesOwnershipState {
+  PROTECTED // 保護中：銷售經 inbox 落預約／發 Flow
+  BOUND     // 綁定：開咗傭金項目 invoice 兼收過錢（第 2–3 期）／老闆手動指派
+  POOL      // 銷售公海：保護到期冇成交
+}
+
+// 病人歸屬（一個 Apricot 病人一行）
+model SalesOwnership {
+  id               String              @id @default(cuid())
+  patientApricotId String              @unique
+  state            SalesOwnershipState
+  salesStaffId     String?             // PROTECTED / BOUND = 負責銷售；POOL = null
+  lastSalesStaffId String?             // 最近一個負責銷售（POOL 後保留，報表用）
+  protectedUntil   DateTime?           @db.Timestamptz // PROTECTED 到幾時（預約日後 N 日 23:59:59 香港時間）
+  rounds           Int                 @default(0)     // 同一銷售連續保護輪數（循環邀約上限）
+  noShowStreak     Int                 @default(0)
+  lastApptId       String?             // 最近一張計數嘅 Apricot 預約
+  lastApptDate     String?             @db.VarChar(10) // YYYY-MM-DD（香港日界）
+  clinicId         String?             // 最近預約所屬店（通知／報表）
+  since            DateTime            @default(now()) @db.Timestamptz // 進入而家狀態嘅時間
+  updatedAt        DateTime            @updatedAt @db.Timestamptz
+  @@index([salesStaffId, state])
+  @@index([state, protectedUntil])
+}
+
+// 經 inbox 落嘅預約 ↔ 銷售（取代 Apricot createdBy；outcome = 對保護期嘅影響）
+model SalesBooking {
+  id               String   @id @default(cuid())
+  apricotApptId    String   @unique
+  patientApricotId String
+  salesStaffId     String?  // 歸屬銷售（Flow 發送人優先，其次落單人；都唔係銷售 = null）
+  conversationId   String?
+  clinicId         String?
+  apptDate         String   @db.VarChar(10)
+  source           String   @db.VarChar(16) // BOOKING（落單）/ HOLD（Flow 佔位後入單）
+  outcome          String   @db.VarChar(24) // PROTECTED / RENEWED / BOUND_KEEP / OWNED_BY_OTHER / CAP_REACHED / TOO_FAR / CYCLE_CAP / NOT_SALES
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  @@index([patientApricotId, createdAt])
+  @@index([salesStaffId, createdAt])
+}
+
+// 綁定／保護中對話轉交（銷售轉交 ONCE 24 小時 / PERMANENT；主管強制接手 FORCE）
+model SalesDelegation {
+  id             String    @id @default(cuid())
+  conversationId String
+  toStaffId      String
+  byStaffId      String
+  kind           String    @db.VarChar(12) // ONCE / PERMANENT / FORCE
+  reason         String?   @db.VarChar(200)
+  expiresAt      DateTime? @db.Timestamptz
+  revokedAt      DateTime? @db.Timestamptz
+  createdAt      DateTime  @default(now()) @db.Timestamptz
+  @@index([conversationId, revokedAt])
+  @@index([toStaffId, revokedAt])
+}
+

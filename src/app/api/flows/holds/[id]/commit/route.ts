@@ -69,10 +69,12 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
 
   // ★ cwi-final S5-11（F4）：fetchAppointments 核對單號存在 + 日期/時間一致（hold.date/startMin 為準）。
   //   唔一致 → 409 拒絕 + 提示（hold 留 HELD — staff 可重新核對）；workforce 離線 → 502（唔准未核對先 COMMITTED）。
+  let committedPatientApricotId: string | null = null; // ★ cwi-sales-20261028：核對單號時拎埋病人 id（保護期用）
   const hhmm = (min: number) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
   try {
     const data = await fetchAppointments(phoneHash(hold.patientPhone), hold.date, hold.date);
     const appt = data.appointments.find((a) => a.apricotApptId === apricotRef);
+    committedPatientApricotId = appt?.patientApricotId ?? null;
     if (!appt) {
       return NextResponse.json({ error: `單號 ${apricotRef} 喺 Apricot 搵唔到 — 請核對單號（病人：${hold.patientName ?? hold.patientPhone}）` }, { status: 409 });
     }
@@ -126,6 +128,24 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
     }),
   ]);
   log.info({ id, wfStatus: wf.status, apricotRef }, "hold commit: COMMITTED");
+
+  // ★ cwi-sales-20261028：Flow 佔位入單 → 銷售保護期（Flow 發送人 > 撳完成嘅人；唔係銷售 = no-op；best-effort）
+  if (committedPatientApricotId) {
+    const { recordSalesBooking, rescheduleSalesBooking } = await import("@/lib/sales/core");
+    const carried = hold.rescheduleOfApptId
+      ? await rescheduleSalesBooking({ oldApptId: hold.rescheduleOfApptId, newApptId: apricotRef, newDate: hold.date })
+      : false;
+    if (!carried) await recordSalesBooking({
+      apricotApptId: apricotRef,
+      patientApricotId: committedPatientApricotId,
+      apptDate: hold.date,
+      clinicId: hold.clinicId,
+      conversationId: hold.conversationId,
+      flowToken: hold.flowToken,
+      actorStaffId: ctx.staff.id,
+      source: "HOLD",
+    });
+  }
 
   // ★ cwi-final S5-8②（F2）：T4 改期唔取消舊單 — commit 成功 + 有改期 context → 102 舊單。
   //   冪等：idempotencyKey = resched-${hold.id}（重試同 key）；舊單已 102/-7/搵唔到 = no-op 當成功。
