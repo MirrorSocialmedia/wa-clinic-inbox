@@ -19,3 +19,18 @@ export async function salesLockResponse(conversationId: string, staffId: string)
     { status: 423 }
   );
 }
+
+/**
+ * 指派守門（assign route + PATCH /api/conversations/[id] 共用）：鎖住嘅對話只可以派畀負責銷售或者被轉交嘅同事。
+ * 放返隊列（null）照准 — 新訊息會自動派返負責銷售。其他人要經右欄「轉交」／「主管強制接手」（留紀錄）。
+ */
+export async function salesAssignBlocked(conversationId: string, toStaffId: string | null): Promise<NextResponse | null> {
+  if (!toStaffId) return null;
+  const lock = await conversationSalesLock(conversationId);
+  if (canReplyUnderLock(lock, toStaffId)) return null;
+  const names = [...new Set(lock.owners.map((o) => o.name))].join("／");
+  return NextResponse.json(
+    { error: "SALES_LOCKED", message: `${names} 負責呢個病人（銷售）— 請用右欄「轉交」或者「主管強制接手」` },
+    { status: 423 }
+  );
+}

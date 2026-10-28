@@ -9,7 +9,7 @@
  * S4 同一銷售再約 → RENEWED（輪數 +1）；到上限 → CYCLE_CAP
  * S5 其他銷售保護中 → OWNED_BY_OTHER + 定向通知；上限 → CAP_REACHED；太遠 → TOO_FAR
  * S6 改期承接：新預約跟舊預約，保護期跟新日子，唔加輪數
- * S7 到期：之後有預約 → 延期；冇 → POOL + 通知；workforce 唔得 → 跳過
+ * S7 到期：之後有預約 → 延期（計一輪）；冇 → POOL + 通知；workforce 唔得 → 跳過
  * S8 對話鎖：負責銷售可覆、其他人唔可以、轉交後可以、停用銷售唔鎖
  * S9 冇人覆：N 分鐘後通知負責銷售 + 主管，同一條 inbound 只通知一次
  */
@@ -168,12 +168,14 @@ test("S6 改期承接", async () => {
 test("S7 到期 sweep", async () => {
   const { expireProtections } = await import("./core");
   const later = new Date("2026-11-20T04:00:00Z");
-  // P1（銷售A）：之後有預約 → 延期；P3（銷售B）：冇 → POOL
+  // P1（銷售A）：之後有預約 → 延期（計一輪 — S2–S4 已經 3 輪，先調返 2 輪模擬未到上限）；P3（銷售B）：冇 → POOL
+  await prisma.salesOwnership.update({ where: { patientApricotId: P1 }, data: { rounds: 2 } });
   const r = await expireProtections(later, async (pid) => (pid === P1 ? [{ apricotApptId: "salt-a9", date: "2026-11-25" }] : []));
   assert.deepEqual({ extended: r.extended, pooled: r.pooled }, { extended: 1, pooled: 1 });
   const p1 = await prisma.salesOwnership.findUnique({ where: { patientApricotId: P1 } });
   assert.equal(p1?.state, "PROTECTED");
   assert.equal(p1?.protectedUntil?.toISOString(), "2026-12-02T15:59:59.999Z");
+  assert.equal(p1?.rounds, 3, "延期計一輪");
   const p3 = await prisma.salesOwnership.findUnique({ where: { patientApricotId: P3 } });
   assert.equal(p3?.state, "POOL");
   assert.equal(p3?.salesStaffId, null);

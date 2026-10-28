@@ -9,7 +9,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation, isGlobalAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { INTENT_LEVELS } from "@/lib/sales/core";
 import { SalesActionError, salesView, setSalesIntent } from "@/lib/sales/handover";
@@ -26,7 +26,7 @@ export const GET = handle(async (req: NextRequest, ctxP: Ctx) => {
   const conv = await prisma.conversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   await assertConversationAccess(auth, conv);
-  return NextResponse.json({ sales: await salesView(conv.id, { id: auth.staff.id, role: auth.staff.role }) });
+  return NextResponse.json({ sales: await salesView(conv.id, { id: auth.staff.id, role: auth.staff.role, globalAdmin: isGlobalAdmin(auth) }) });
 });
 
 export const PATCH = handle(async (req: NextRequest, ctxP: Ctx) => {
@@ -44,5 +44,5 @@ export const PATCH = handle(async (req: NextRequest, ctxP: Ctx) => {
     if (err instanceof SalesActionError) return NextResponse.json({ error: err.code, message: err.message }, { status: err.status });
     throw err;
   }
-  return NextResponse.json({ sales: await salesView(conv.id, { id: auth.staff.id, role: auth.staff.role }) });
+  return NextResponse.json({ sales: await salesView(conv.id, { id: auth.staff.id, role: auth.staff.role, globalAdmin: isGlobalAdmin(auth) }) });
 });

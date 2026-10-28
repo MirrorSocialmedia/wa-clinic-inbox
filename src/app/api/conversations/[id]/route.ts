@@ -67,6 +67,13 @@ export const PATCH = handle(async (req: NextRequest, ctx: Ctx) => {
     }
   }
 
+  // ★ cwi-sales-20261028：銷售鎖 — 同 /assign 共用守門（唔可以經 PATCH 繞過）
+  if (assigneeId) {
+    const { salesAssignBlocked } = await import("@/lib/sales/guard");
+    const blocked = await salesAssignBlocked(conv.id, assigneeId);
+    if (blocked) return blocked;
+  }
+
   // ★ cwi-final S1-12（audit3 P1-09）：markRead 兩層 —
   //   ① 所有角色（連 SUPERVISOR）：upsert ConversationRead（個人讀進度 → 後端 myUnread）
   //   ② Conversation.unreadCount（全店「未處理」/公海 SLA）：只有 assignee、

@@ -336,7 +336,7 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
   },
   "GET /api/admin/sales/options": {
     fixture: () => ({ url: "/api/admin/sales/options" }),
-    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 },
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 403 },
   },
   "GET /api/admin/sales/settings": {
     fixture: () => ({ url: "/api/admin/sales/settings" }),

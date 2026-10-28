@@ -75,6 +75,8 @@ async function notifyNewOwner(toStaffId: string, patientApricotId: string, title
 export async function assignOwnership(input: { byStaffId: string; patientApricotId: string; toStaffId: string; state: "BOUND" | "PROTECTED" }): Promise<void> {
   const to = await activeSales(input.toStaffId);
   if (!to) throw new SalesActionError(400, "NOT_SALES", "揀嘅同事唔係有效銷售人員");
+  // 只可以指派連住對話嘅病人（防亂打 id 造垃圾歸屬）
+  if ((await patientConversationIds(input.patientApricotId)).length === 0) throw new SalesActionError(404, "PATIENT_NOT_FOUND", "搵唔到呢個病人嘅對話");
   const own = await prisma.salesOwnership.findUnique({ where: { patientApricotId: input.patientApricotId } });
   if (own && own.state !== "POOL" && own.salesStaffId && own.salesStaffId !== to.id) {
     throw new SalesActionError(409, "OWNED", "呢個病人已經有銷售負責 — 請用「轉移」");

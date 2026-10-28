@@ -6,7 +6,7 @@
  * - 保護期：由落預約開始，到「預約日後 protectionDays 日」23:59:59（香港時間）。
  *   公海／冇歸屬 → PROTECTED；同一銷售再約 → 續期（rounds+1，上限 cycleCap）；
  *   其他銷售保護中／綁定 → 唔改（OWNED_BY_OTHER）。
- * - 到期 sweep：到期前先問 workforce 病人有冇之後嘅預約（前台改期／直接 book 都計）→ 有就跟新日子延期；
+ * - 到期 sweep：到期前先問 workforce 病人有冇之後嘅預約（前台改期／直接 book 都計）→ 有就跟新日子延期（計一輪，到上限唔再延）；
  *   冇 → POOL（銷售公海）+ 通知原銷售。
  * - 對話鎖：對話連結嘅病人（釘住／此電話嘅病人／電話認到）有任何一個 PROTECTED / BOUND →
  *   只有負責銷售同被轉交嘅同事可以覆。
@@ -112,8 +112,19 @@ export async function recordSalesBooking(input: RecordSalesBookingInput): Promis
   }
 }
 
+/** YYYY-MM-DD 而且係真日子（2026-13-45 / 亂字 → false） */
+export function isValidDateStr(d: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  const t = new Date(`${d}T00:00:00Z`);
+  return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d;
+}
+
 async function recordSalesBookingInner(input: RecordSalesBookingInput): Promise<{ outcome: SalesBookingOutcome; salesStaffId: string } | null> {
   const now = input.now ?? new Date();
+  if (!input.apricotApptId.trim() || !input.patientApricotId.trim() || !isValidDateStr(input.apptDate)) {
+    log.warn({ apricotApptId: input.apricotApptId, apptDate: input.apptDate }, "sales: 預約資料唔完整 — 唔計保護期");
+    return null;
+  }
   const existing = await prisma.salesBooking.findUnique({ where: { apricotApptId: input.apricotApptId } });
   if (existing) return existing.salesStaffId ? { outcome: existing.outcome as SalesBookingOutcome, salesStaffId: existing.salesStaffId } : null;
   const salesStaffId = await resolveBookingSales(input);
@@ -131,6 +142,8 @@ async function recordSalesBookingInner(input: RecordSalesBookingInput): Promise<
     if (input.apptDate > hkDateOffset(settings.maxDaysAhead, now)) {
       outcome = "TOO_FAR";
     } else if (!own || own.state === "POOL" || !own.salesStaffId) {
+      // 同一銷售並發開保護（唔同病人）→ 上限計數要串行，否則兩個交易都睇到「未夠上限」
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`sales-cap:${salesStaffId}`}))`;
       const held = await tx.salesOwnership.count({ where: { salesStaffId, state: "PROTECTED" } });
       if (held >= settings.concurrentCap) {
         outcome = "CAP_REACHED";
@@ -236,7 +249,7 @@ export const workforceFutureAppts: FutureApptLookup = async (patientApricotId, f
 };
 
 /**
- * PROTECTED 到期 → 先睇病人之後有冇預約（前台改期／Apricot 直接 book 都計）→ 有就跟新日子延期（唔加輪數）；
+ * PROTECTED 到期 → 先睇病人之後有冇預約（前台改期／Apricot 直接 book 都計）→ 有就跟新日子延期（計一輪；到循環上限唔再延）；
  * 冇 → POOL + 通知原銷售。workforce 唔得 → 跳過（下次再試）。
  */
 export async function expireProtections(now: Date = new Date(), lookup: FutureApptLookup = workforceFutureAppts): Promise<{ extended: number; pooled: number; skipped: number }> {
@@ -255,10 +268,11 @@ export async function expireProtections(now: Date = new Date(), lookup: FutureAp
       continue;
     }
     const next = future.filter((a) => a.date >= today).sort((a, b) => a.date.localeCompare(b.date))[0];
-    if (next && protectedUntilFor(next.date, settings.protectionDays) > now) {
+    // 延期都計一輪：銷售自己喺 Apricot 直接 book（inbox 唔知）唔可以無限延長保護期 — 到循環上限就出公海
+    if (next && own.rounds < settings.cycleCap && protectedUntilFor(next.date, settings.protectionDays) > now) {
       await prisma.salesOwnership.updateMany({
         where: { id: own.id, state: "PROTECTED", updatedAt: own.updatedAt },
-        data: { protectedUntil: protectedUntilFor(next.date, settings.protectionDays), lastApptId: next.apricotApptId, lastApptDate: next.date },
+        data: { protectedUntil: protectedUntilFor(next.date, settings.protectionDays), lastApptId: next.apricotApptId, lastApptDate: next.date, rounds: own.rounds + 1 },
       });
       out.extended++;
       continue;

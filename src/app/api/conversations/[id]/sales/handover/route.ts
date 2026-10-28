@@ -13,7 +13,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation, isGlobalAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { SalesActionError, delegateConversation, forceTakeover, requestHandover, revokeDelegation, salesView } from "@/lib/sales/handover";
 
@@ -38,7 +38,7 @@ export const POST = handle(async (req: NextRequest, ctxP: Ctx) => {
   if (!parsed.success) return NextResponse.json({ error: "bad_request" }, { status: 400 });
   const body = parsed.data;
   if (body.action !== "force") assertCanWriteConversation(auth); // SUPERVISOR 只可以強制接手（揀同事）
-  const viewer = { id: auth.staff.id, role: auth.staff.role };
+  const viewer = { id: auth.staff.id, role: auth.staff.role, globalAdmin: isGlobalAdmin(auth) };
   try {
     if (body.action === "delegate") await delegateConversation({ conversationId: conv.id, viewer, toStaffId: body.toStaffId, kind: body.kind });
     else if (body.action === "request") await requestHandover({ conversationId: conv.id, viewer });

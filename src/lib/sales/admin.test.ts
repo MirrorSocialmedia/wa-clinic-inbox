@@ -6,6 +6,7 @@
  * A1 指派：唔係銷售 → 400；BOUND 成功 + 審計 + 列表
  * A2 已有其他銷售 → 指派 409；轉移 → 新銷售
  * A3 放返公海 → POOL，lastSalesStaffId 保留
+ * A4 冇對話嘅病人 id → 404（防亂打 id 造垃圾歸屬）
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -33,6 +34,8 @@ process.env.WORKFORCE_MOCK = "1";
 
 const prisma = new PrismaClient();
 const PID = "sala-pat-1";
+const CONTACT = "sala-contact-1";
+const CONV = "sala-conv-1";
 const EMAILS = ["sala-a@sala.local", "sala-b@sala.local", "sala-desk@sala.local", "sala-adm@sala.local"];
 let a: string;
 let b: string;
@@ -42,6 +45,9 @@ let adm: string;
 async function cleanup(): Promise<void> {
   await prisma.salesOwnership.deleteMany({ where: { patientApricotId: PID } });
   await prisma.auditLog.deleteMany({ where: { entity: "SalesOwnership", entityId: PID } });
+  await prisma.staffNotice.deleteMany({ where: { conversationId: CONV } });
+  await prisma.conversation.deleteMany({ where: { id: CONV } });
+  await prisma.contact.deleteMany({ where: { id: CONTACT } });
   await prisma.staffUser.deleteMany({ where: { email: { in: EMAILS } } });
 }
 
@@ -55,6 +61,8 @@ before(async () => {
   b = await mk(EMAILS[1], "SALA 銷售B", { isSales: true });
   desk = await mk(EMAILS[2], "SALA 前台");
   adm = await mk(EMAILS[3], "SALA 老闆", { role: "ADMIN" });
+  await prisma.contact.create({ data: { id: CONTACT, clinicId: tkw.id, waId: "85290003201", profileName: "SALA 病人", labels: [] } });
+  await prisma.conversation.create({ data: { id: CONV, clinicId: tkw.id, contactId: CONTACT, lastMessageAt: new Date(), pinnedPatientApricotId: PID } });
 });
 
 after(async () => {
@@ -96,4 +104,14 @@ test("A3 放返公海", async () => {
   assert.equal(own?.state, "POOL");
   assert.equal(own?.salesStaffId, null);
   assert.equal(own?.lastSalesStaffId, b);
+});
+
+test("A4 冇對話嘅病人 → 404", async () => {
+  const { assignOwnership } = await import("./admin");
+  const { SalesActionError } = await import("./handover");
+  await assert.rejects(
+    assignOwnership({ byStaffId: adm, patientApricotId: "sala-nobody", toStaffId: a, state: "BOUND" }),
+    (e) => e instanceof SalesActionError && e.status === 404
+  );
+  assert.equal(await prisma.salesOwnership.count({ where: { patientApricotId: "sala-nobody" } }), 0);
 });

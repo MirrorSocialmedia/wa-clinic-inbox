@@ -18,7 +18,7 @@ export class SalesActionError extends Error {
   }
 }
 
-type Viewer = { id: string; role: string };
+type Viewer = { id: string; role: string; /** 集團管理員（scope ALL）— 先睇到指派／轉移病人歸屬 */ globalAdmin?: boolean };
 
 export interface SalesView {
   viewerIsSales: boolean;
@@ -29,7 +29,7 @@ export interface SalesView {
   canForce: boolean;
   intent: { level: SalesIntent; byName: string | null; at: string } | null;
   intentLabels: string[];
-  /** ADMIN 先有：對話連結嘅病人 + 歸屬（老闆指派／轉移用）+ 有效銷售名單 */
+  /** 集團管理員先有（同 /api/admin/sales/owners 寫權一致）：對話連結嘅病人 + 歸屬（老闆指派／轉移用）+ 有效銷售名單 */
   admin: {
     patients: { patientApricotId: string; code: string | null; name: string | null; state: "PROTECTED" | "BOUND" | "POOL" | null; ownerName: string | null }[];
     sales: { id: string; name: string }[];
@@ -63,7 +63,7 @@ export async function salesView(conversationId: string, viewer: Viewer, now: Dat
     canForce: lock.owners.length > 0 && (viewer.role === "ADMIN" || viewer.role === "SUPERVISOR") && !lock.owners.some((o) => o.staffId === viewer.id),
     intent: level && conv?.salesIntentAt ? { level, byName: conv.salesIntentByStaffId ? (names.get(conv.salesIntentByStaffId) ?? null) : null, at: conv.salesIntentAt.toISOString() } : null,
     intentLabels: settings.intentLabels.length === 3 ? settings.intentLabels : ["高", "中", "低"],
-    admin: viewer.role === "ADMIN" ? await adminPatients(conversationId) : null,
+    admin: viewer.role === "ADMIN" && viewer.globalAdmin ? await adminPatients(conversationId) : null,
   };
 }
 
@@ -193,6 +193,8 @@ export async function revokeDelegation(input: { conversationId: string; viewer: 
   const lock = await conversationSalesLock(input.conversationId);
   const isOwner = lock.owners.some((o) => o.staffId === input.viewer.id);
   if (!isOwner && input.viewer.role !== "ADMIN") throw new SalesActionError(403, "NOT_OWNER", "只有負責銷售或者 ADMIN 可以收回");
+  // 主管強制接手（例如銷售放假唔覆）唔可以俾負責銷售自己收回 — 只限 ADMIN
+  if (del.kind === "FORCE" && input.viewer.role !== "ADMIN") throw new SalesActionError(403, "FORCE_ADMIN_ONLY", "主管強制接手只可以由 ADMIN 收回");
   await prisma.salesDelegation.update({ where: { id: del.id }, data: { revokedAt: new Date() } });
   const conv = await prisma.conversation.findUnique({ where: { id: input.conversationId }, select: { assigneeId: true } });
   const owner = lock.owners[0];
