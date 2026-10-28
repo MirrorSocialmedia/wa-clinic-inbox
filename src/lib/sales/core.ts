@@ -312,6 +312,9 @@ export interface ConversationSalesLock {
 }
 
 export async function conversationSalesLock(conversationId: string, now: Date = new Date(), db: Db = prisma): Promise<ConversationSalesLock> {
+  // 快路：未用銷售系統（冇任何保護中／綁定病人）→ 一個 index 查詢就收工（每條 inbound／每次發送都會行）
+  const any = await db.salesOwnership.findFirst({ where: { state: { in: ["PROTECTED", "BOUND"] } }, select: { id: true } });
+  if (!any) return { owners: [], delegates: [] };
   const patientIds = await conversationPatientIds(conversationId, db);
   if (patientIds.length === 0) return { owners: [], delegates: [] };
   const owns = await db.salesOwnership.findMany({

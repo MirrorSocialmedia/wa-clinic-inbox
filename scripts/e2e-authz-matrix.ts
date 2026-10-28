@@ -329,6 +329,48 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 }, // 見 setup：dispo 係 TY 店
   },
 
+  "PUT /api/admin/staff/[id]/sales": {
+    // ★ cwi-sales-20261028：銷售人員設定 — 只限集團管理員（CB 403）；isSales:false → false = 零狀態改動
+    fixture: () => ({ url: `/api/admin/staff/${F.staffDispo2}/sales`, method: "PUT", body: JSON.stringify({ isSales: false }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
+  "GET /api/admin/sales/options": {
+    fixture: () => ({ url: "/api/admin/sales/options" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 },
+  },
+  "GET /api/admin/sales/settings": {
+    fixture: () => ({ url: "/api/admin/sales/settings" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 },
+  },
+  "PUT /api/admin/sales/settings": {
+    // body {} = 冇改欄位（只記 updatedBy）；CB 非集團管理員 403
+    fixture: () => ({ url: "/api/admin/sales/settings", method: "PUT", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
+  "GET /api/admin/sales/catalog": {
+    fixture: () => ({ url: "/api/admin/sales/catalog?clinicId=t630-nope" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 404, ADMIN_COMPANY_B: 404 },
+  },
+  "POST /api/admin/sales/catalog/refresh": {
+    fixture: () => ({ url: "/api/admin/sales/catalog/refresh", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
+  "GET /api/admin/sales/commission-items": {
+    fixture: () => ({ url: "/api/admin/sales/commission-items?clinicId=t630-nope" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 404, ADMIN_COMPANY_B: 404 },
+  },
+  "PUT /api/admin/sales/commission-items": {
+    fixture: () => ({ url: "/api/admin/sales/commission-items", method: "PUT", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
+  },
+  "GET /api/admin/sales/owners": {
+    fixture: () => ({ url: "/api/admin/sales/owners" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 },
+  },
+  "POST /api/admin/sales/owners": {
+    fixture: () => ({ url: "/api/admin/sales/owners", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
+  },
   "GET /api/admin/clinics": {
     fixture: () => ({ url: "/api/admin/clinics" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 }, // T631 斷言 CB 可見集合
@@ -770,6 +812,21 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     // 冇未處理提醒 → 404（零寫入）；外店 403；SUPERVISOR 403
     fixture: () => ({ url: `/api/conversations/${F.convLock}/reminder`, method: "PATCH", body: JSON.stringify({ action: "cancel" }) }),
     expect: { UNAUTH: 401, STAFF_TY: 404, STAFF_YMT: 403, SUPERVISOR: 403 },
+  },
+  "GET /api/conversations/[id]/sales": {
+    // ★ cwi-sales-20261028：右欄「銷售」— 讀（SUPERVISOR 全店唯讀可睇）；外店 403
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/sales` }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, STAFF_YMT: 403, SUPERVISOR: 200, ADMIN_ALL: 200 },
+  },
+  "PATCH /api/conversations/[id]/sales": {
+    // 意向只限銷售人員 → STAFF_TY（非銷售）403 NOT_SALES（零寫入）；外店 403；SUPERVISOR 唯讀 403
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/sales`, method: "PATCH", body: JSON.stringify({ intent: "HIGH" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403 },
+  },
+  "POST /api/conversations/[id]/sales/handover": {
+    // 請求轉交 — 冇銷售鎖 → 409 NOT_LOCKED（零寫入）；外店 403；SUPERVISOR 非 force 403
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/sales/handover`, method: "POST", body: JSON.stringify({ action: "request" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 409, STAFF_YMT: 403, SUPERVISOR: 403 },
   },
   "POST /api/conversations/[id]/flows": {
     // ★ S3-3（D-11）：ADMIN 豁免刪 — 非負責人（包 ADMIN）→ 423；

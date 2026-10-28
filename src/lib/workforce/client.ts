@@ -49,7 +49,7 @@
  */
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { readFileSync, appendFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import log from "@/lib/log";
 import { invalidateAvailabilityDay } from "@/lib/availability";
@@ -1153,6 +1153,71 @@ export async function fetchDoctorAdvice(opts: {
   );
 }
 
+// ── ★ cwi-sales-20261028：銷售系統（CWM scope sales — 每晚同步嘅 Apricot 名單 + 傭金項目）──────────
+
+export const SalesApricotUsersResponse = z.object({
+  v: z.literal(1),
+  users: z.array(z.object({ extId: z.string(), name: z.string(), login: z.string().nullable(), account: z.string() })),
+});
+export const SalesEmployeesResponse = z.object({
+  v: z.literal(1),
+  employees: z.array(z.object({ id: z.string(), name: z.string(), clinicCodes: z.array(z.string()) })),
+});
+export const SalesCatalogResponse = z.object({
+  v: z.literal(1),
+  clinicCode: z.string(),
+  feeItems: z.array(z.object({ extId: z.string(), code: z.string(), des: z.string(), fee: z.number() })),
+  practitioners: z.array(z.object({ extId: z.string(), code: z.string(), name: z.string(), nameChi: z.string().nullable() })),
+  commission: z.array(z.object({ feeItemExtId: z.string(), ratePct: z.number(), category: z.string().nullable(), highValue: z.boolean() })),
+  lastRun: z.object({ status: z.string(), finishedAt: z.string().nullable(), error: z.string().nullable() }).nullable(),
+});
+export type SalesCatalog = z.infer<typeof SalesCatalogResponse>;
+export const CommissionItemsResponse = z.object({
+  v: z.literal(1),
+  clinicCode: z.string(),
+  items: z.array(
+    z.object({
+      feeItemExtId: z.string(),
+      code: z.string(),
+      des: z.string(),
+      ratePct: z.number(),
+      category: z.string().nullable(),
+      highValue: z.boolean(),
+      active: z.boolean(),
+      updatedAt: z.string(),
+    })
+  ),
+});
+export type CommissionItemInput = { feeItemExtId: string; ratePct: number; category?: string | null; highValue?: boolean; active?: boolean };
+
+/** Apricot 用戶（員工帳號「☑ 銷售人員」揀 invoice 銷售員） */
+export async function fetchSalesApricotUsers(): Promise<z.infer<typeof SalesApricotUsersResponse>> {
+  return SalesApricotUsersResponse.parse(await wfGet("/api/external/v1/sales/apricot-users", {}));
+}
+/** workforce 在職員工（打卡核實、糧單） */
+export async function fetchSalesEmployees(): Promise<z.infer<typeof SalesEmployeesResponse>> {
+  return SalesEmployeesResponse.parse(await wfGet("/api/external/v1/sales/employees", {}));
+}
+/** 分店收費項目 + 醫生 + 傭金項目（每晚同步名單） */
+export async function fetchSalesCatalog(clinicCode: string): Promise<SalesCatalog> {
+  return SalesCatalogResponse.parse(await wfGet("/api/external/v1/sales/catalog", { clinicCode }));
+}
+/** 老闆「立即更新名單」 */
+export async function refreshSalesCatalog(staffId: string): Promise<{ status: string; counts: Record<string, number>; errors: string[] }> {
+  const r = (await wfSend("POST", "/api/external/v1/sales/catalog/refresh", {}, {}, { "x-staff-id": staffId }, { timeoutMs: 120_000 })) as {
+    status?: string;
+    counts?: Record<string, number>;
+    errors?: string[];
+  };
+  return { status: r.status ?? "UNKNOWN", counts: r.counts ?? {}, errors: r.errors ?? [] };
+}
+export async function fetchCommissionItems(clinicCode: string): Promise<z.infer<typeof CommissionItemsResponse>> {
+  return CommissionItemsResponse.parse(await wfGet("/api/external/v1/sales/commission-items", { clinicCode }));
+}
+export async function putCommissionItems(clinicCode: string, items: CommissionItemInput[], staffId: string): Promise<void> {
+  await wfSend("PUT", "/api/external/v1/sales/commission-items", {}, { clinicCode, items }, { "x-staff-id": staffId });
+}
+
 /** E 類報價查詢（CWM /quotes — per patient 或 batch；零原始電話）。
  *  ★ cwi-final S5-13①：加 clinicIds（cuid）/ clinicCodes（shortName 兼容）— CWM 端 `where.clinicId in` 服務端 filter。 */
 export async function fetchQuotes(opts?: {
@@ -1637,6 +1702,36 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
   if (path === "/api/external/v1/clinical-index/advice" && !method) {
     return mockAdvice(params);
   }
+  // ── cwi-sales-20261028：銷售系統 mock（決定性名單；傭金項目 file-backed .dev/workforce-mock-commission.json）──
+  if (path === "/api/external/v1/sales/apricot-users" && !method) {
+    return {
+      v: 1,
+      users: [
+        { extId: "mock-apu-1", name: "Kathleen", login: "kathleen", account: "MAIN" },
+        { extId: "mock-apu-2", name: "Amy Chan", login: "amy", account: "MAIN" },
+        { extId: "mock-apu-3", name: "Ben Wong", login: null, account: "TY" },
+      ],
+    };
+  }
+  if (path === "/api/external/v1/sales/employees" && !method) {
+    return {
+      v: 1,
+      employees: [
+        { id: "mock-emp-1", name: "Kathleen", clinicCodes: ["TKW"] },
+        { id: "mock-emp-2", name: "Amy Chan", clinicCodes: ["MF", "TKW"] },
+        { id: "mock-emp-3", name: "Ben Wong", clinicCodes: ["TY"] },
+      ],
+    };
+  }
+  if (path === "/api/external/v1/sales/catalog" && !method) return mockSalesCatalog(params.clinicCode ?? "");
+  if (path === "/api/external/v1/sales/catalog/refresh" && method === "POST") {
+    return { v: 1, status: "OK", counts: { feeItems: 3, practitioners: 2, users: 3, clinics: 1, errors: 0 }, errors: [] };
+  }
+  if (path === "/api/external/v1/sales/commission-items" && !method) {
+    const code = params.clinicCode ?? "";
+    return { v: 1, clinicCode: code, items: mockCommissionStore()[code] ?? [] };
+  }
+  if (path === "/api/external/v1/sales/commission-items" && method === "PUT") return mockPutCommission(body, path);
   const qd = path.match(/^\/api\/external\/v1\/quotes\/([^/]+)\/decision$/);
   if (qd && method === "POST") {
     return mockQuoteDecision(decodeURIComponent(qd[1]), body, path);
@@ -1754,6 +1849,55 @@ function writeClinical(f: MockClinicalFile): void {
   }
 }
 /** #1 batch visits（C/D 觸發源；mock 唔做 server-side reasonCodes 過濾 — 引擎口徑唔依賴佢）。 */
+const MOCK_COMMISSION_PATH = path.resolve(process.cwd(), ".dev/workforce-mock-commission.json");
+type MockCommission = { feeItemExtId: string; code: string; des: string; ratePct: number; category: string | null; highValue: boolean; active: boolean; updatedAt: string };
+function mockFeeItems(code: string) {
+  return [
+    { extId: `mock-fee-${code}-1`, code: "00002", des: "BLEACHING", fee: 4000 },
+    { extId: `mock-fee-${code}-2`, code: "00003", des: "CHECK-UP", fee: 300 },
+    { extId: `mock-fee-${code}-3`, code: "00021", des: "IMPLANT", fee: 39000 },
+  ];
+}
+function mockCommissionStore(): Record<string, MockCommission[]> {
+  try {
+    return JSON.parse(readFileSync(MOCK_COMMISSION_PATH, "utf8")) as Record<string, MockCommission[]>;
+  } catch {
+    return {};
+  }
+}
+function mockSalesCatalog(code: string): unknown {
+  if (!code) throw new WorkforceApiError(400, "/api/external/v1/sales/catalog", "BAD_REQUEST");
+  return {
+    v: 1,
+    clinicCode: code,
+    feeItems: mockFeeItems(code),
+    practitioners: [
+      { extId: `mock-pract-${code}-1`, code: "YUEN", name: "Dr. Yuen Ki Hin", nameChi: "袁麒軒 牙科醫生" },
+      { extId: `mock-pract-${code}-2`, code: "YIU", name: "Dr. Yiu Tsz Ching", nameChi: "姚子晴 牙科醫生" },
+    ],
+    commission: (mockCommissionStore()[code] ?? []).filter((c) => c.active).map((c) => ({ feeItemExtId: c.feeItemExtId, ratePct: c.ratePct, category: c.category, highValue: c.highValue })),
+    lastRun: { status: "OK", finishedAt: "2026-10-28T18:41:00.000Z", error: null },
+  };
+}
+function mockPutCommission(body: unknown, reqPath: string): unknown {
+  const b = body as { clinicCode?: string; items?: CommissionItemInput[] } | undefined;
+  const code = b?.clinicCode ?? "";
+  if (!code || !Array.isArray(b?.items)) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  const fees = new Map(mockFeeItems(code).map((f) => [f.extId, f]));
+  const bad = b.items.find((i) => !fees.has(i.feeItemExtId) || !(i.ratePct >= 0 && i.ratePct <= 100));
+  if (bad) throw new WorkforceApiError(400, reqPath, "FEE_ITEM_NOT_FOUND");
+  const store = mockCommissionStore();
+  const cur = new Map((store[code] ?? []).map((c) => [c.feeItemExtId, c]));
+  for (const i of b.items) {
+    const f = fees.get(i.feeItemExtId)!;
+    cur.set(i.feeItemExtId, { feeItemExtId: i.feeItemExtId, code: f.code, des: f.des, ratePct: i.ratePct, category: i.category ?? null, highValue: i.highValue ?? false, active: i.active ?? true, updatedAt: new Date().toISOString() });
+  }
+  store[code] = [...cur.values()];
+  mkdirSync(path.dirname(MOCK_COMMISSION_PATH), { recursive: true });
+  writeFileSync(MOCK_COMMISSION_PATH, JSON.stringify(store));
+  return { v: 1, ok: true, count: b.items.length };
+}
+
 function mockClinicVisits(params: Record<string, string>): unknown {
   const f = readClinical();
   // ★ cwi-final S2-1（T427 回歸修復）：真端點按 clinicCode 過濾（fetchClinicVisits 必傳）—

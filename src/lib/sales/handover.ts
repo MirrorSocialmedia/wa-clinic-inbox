@@ -29,6 +29,11 @@ export interface SalesView {
   canForce: boolean;
   intent: { level: SalesIntent; byName: string | null; at: string } | null;
   intentLabels: string[];
+  /** ADMIN 先有：對話連結嘅病人 + 歸屬（老闆指派／轉移用）+ 有效銷售名單 */
+  admin: {
+    patients: { patientApricotId: string; code: string | null; name: string | null; state: "PROTECTED" | "BOUND" | "POOL" | null; ownerName: string | null }[];
+    sales: { id: string; name: string }[];
+  } | null;
 }
 
 export async function salesView(conversationId: string, viewer: Viewer, now: Date = new Date()): Promise<SalesView> {
@@ -58,6 +63,33 @@ export async function salesView(conversationId: string, viewer: Viewer, now: Dat
     canForce: lock.owners.length > 0 && (viewer.role === "ADMIN" || viewer.role === "SUPERVISOR") && !lock.owners.some((o) => o.staffId === viewer.id),
     intent: level && conv?.salesIntentAt ? { level, byName: conv.salesIntentByStaffId ? (names.get(conv.salesIntentByStaffId) ?? null) : null, at: conv.salesIntentAt.toISOString() } : null,
     intentLabels: settings.intentLabels.length === 3 ? settings.intentLabels : ["高", "中", "低"],
+    admin: viewer.role === "ADMIN" ? await adminPatients(conversationId) : null,
+  };
+}
+
+async function adminPatients(conversationId: string): Promise<SalesView["admin"]> {
+  const { conversationPatientIds } = await import("@/lib/sales/core");
+  const pids = await conversationPatientIds(conversationId);
+  const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { contactId: true, pinnedPatientApricotId: true, pinnedPatientName: true } });
+  const [owns, links, contact, sales] = await Promise.all([
+    prisma.salesOwnership.findMany({ where: { patientApricotId: { in: pids } } }),
+    conv ? prisma.contactPatientLink.findMany({ where: { contactId: conv.contactId }, select: { patientApricotId: true, patientCode: true, patientName: true } }) : Promise.resolve([]),
+    conv ? prisma.contact.findUnique({ where: { id: conv.contactId }, select: { identifiedPatientApricotId: true, identifiedPatientCode: true } }) : Promise.resolve(null),
+    prisma.staffUser.findMany({ where: { isSales: true, active: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
+  ]);
+  const ownerIds = [...new Set(owns.map((o) => o.salesStaffId).filter((x): x is string => !!x))];
+  const names = new Map((await prisma.staffUser.findMany({ where: { id: { in: ownerIds } }, select: { id: true, name: true } })).map((x) => [x.id, x.name]));
+  const ownOf = new Map(owns.map((o) => [o.patientApricotId, o]));
+  const linkOf = new Map(links.map((l) => [l.patientApricotId, l]));
+  return {
+    patients: pids.map((pid) => {
+      const o = ownOf.get(pid);
+      const l = linkOf.get(pid);
+      const code = l?.patientCode ?? (pid === contact?.identifiedPatientApricotId ? contact.identifiedPatientCode : null) ?? null;
+      const name = l?.patientName ?? (pid === conv?.pinnedPatientApricotId ? conv.pinnedPatientName : null) ?? null;
+      return { patientApricotId: pid, code, name, state: o?.state ?? null, ownerName: o?.salesStaffId ? (names.get(o.salesStaffId) ?? null) : null };
+    }),
+    sales,
   };
 }
 

@@ -25,6 +25,10 @@ export interface SalesView {
   canForce: boolean;
   intent: { level: SalesIntentLevel; byName: string | null; at: string } | null;
   intentLabels: string[];
+  admin: {
+    patients: { patientApricotId: string; code: string | null; name: string | null; state: "PROTECTED" | "BOUND" | "POOL" | null; ownerName: string | null }[];
+    sales: { id: string; name: string }[];
+  } | null;
 }
 
 const LEVELS: SalesIntentLevel[] = ["HIGH", "MEDIUM", "LOW"];
@@ -44,18 +48,28 @@ export function notifySalesChanged(conversationId: string): void {
   window.dispatchEvent(new CustomEvent(SALES_CHANGED_EVENT, { detail: { conversationId } }));
 }
 
+// 右欄卡同對話頂部橫額同時掛 → 同一刻兩個 hook 共用一個請求（1.5 秒內）
+const inflight = new Map<string, { at: number; p: Promise<SalesView | null> }>();
+function fetchSalesView(conversationId: string, force: boolean): Promise<SalesView | null> {
+  const hit = inflight.get(conversationId);
+  if (!force && hit && Date.now() - hit.at < 1500) return hit.p;
+  const p = fetch(`/api/conversations/${conversationId}/sales`, { cache: "no-store" })
+    .then(async (res) => (res.ok ? ((await res.json()) as { sales: SalesView }).sales : null))
+    .catch(() => null);
+  inflight.set(conversationId, { at: Date.now(), p });
+  return p;
+}
+
 export function useSalesView(conversationId: string | null, refreshKey?: string | number | null) {
   const [view, setView] = useState<SalesView | null>(null);
-  const load = useCallback(async () => {
-    if (!conversationId) return;
-    try {
-      const res = await fetch(`/api/conversations/${conversationId}/sales`, { cache: "no-store" });
-      if (!res.ok) return;
-      setView(((await res.json()) as { sales: SalesView }).sales);
-    } catch {
-      /* 網絡錯 — 保留上次 */
-    }
-  }, [conversationId]);
+  const load = useCallback(
+    async (force = false) => {
+      if (!conversationId) return;
+      const v = await fetchSalesView(conversationId, force);
+      if (v) setView(v); // 網絡錯 — 保留上次
+    },
+    [conversationId]
+  );
   useEffect(() => {
     setView(null);
   }, [conversationId]);
@@ -65,7 +79,7 @@ export function useSalesView(conversationId: string | null, refreshKey?: string 
   useEffect(() => {
     const on = (e: Event) => {
       const id = (e as CustomEvent<{ conversationId?: string }>).detail?.conversationId;
-      if (!id || id === conversationId) void load();
+      if (!id || id === conversationId) void load(true);
     };
     window.addEventListener(SALES_CHANGED_EVENT, on);
     return () => window.removeEventListener(SALES_CHANGED_EVENT, on);
@@ -117,7 +131,7 @@ export function SalesCard({
     setToStaffId("");
   }, [conversationId]);
 
-  if (!view || (!view.viewerIsSales && view.owners.length === 0)) return null;
+  if (!view || (!view.viewerIsSales && view.owners.length === 0 && !(view.admin && view.admin.patients.length && view.admin.sales.length))) return null;
   const locked = view.owners.length > 0;
   const ownerIds = new Set(view.owners.map((o) => o.staffId));
   const pickable = staffOptions.filter((s) => !ownerIds.has(s.id) && s.role !== "SUPERVISOR");
@@ -288,8 +302,86 @@ export function SalesCard({
         )}
 
         {locked && !view.canReply && <SalesLockActions conversationId={conversationId} view={view} staffOptions={pickable} userRole={userRole} onDone={setView} compact />}
+        {view.admin && view.admin.patients.length > 0 && view.admin.sales.length > 0 && (
+          <AdminAssign conversationId={conversationId} admin={view.admin} />
+        )}
         {err && <div className="text-[11px] text-danger-text">{err}</div>}
       </div>
+    </div>
+  );
+}
+
+const STATE_TEXT = { PROTECTED: "保護中", BOUND: "綁定", POOL: "公海" } as const;
+
+/** 老闆指派／轉移（上線前已有嘅病人；集團管理員先寫到 — server 403 會顯示） */
+function AdminAssign({ conversationId, admin }: { conversationId: string; admin: NonNullable<SalesView["admin"]> }) {
+  const [open, setOpen] = useState(false);
+  const [pid, setPid] = useState(admin.patients[0]?.patientApricotId ?? "");
+  const [to, setTo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const p = admin.patients.find((x) => x.patientApricotId === pid) ?? admin.patients[0];
+  const owned = p?.state === "PROTECTED" || p?.state === "BOUND";
+
+  async function go() {
+    if (!p || !to || busy) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/admin/sales/owners", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(owned ? { action: "transfer", patientApricotId: p.patientApricotId, toStaffId: to } : { action: "assign", patientApricotId: p.patientApricotId, toStaffId: to, state: "BOUND" }),
+      });
+      const data = (await res.json().catch(() => null)) as { message?: string } | null;
+      if (!res.ok) setMsg(data?.message ?? "做唔到");
+      else {
+        setOpen(false);
+        notifySalesChanged(conversationId);
+      }
+    } catch {
+      setMsg("網絡錯誤");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button type="button" data-e2e="sales-admin-assign-open" onClick={() => setOpen(true)} className="text-[11px] text-brand-text hover:underline self-start">
+        老闆：指派／轉移銷售
+      </button>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-line pt-2">
+      {admin.patients.length > 1 && (
+        <select id="sales-admin-patient" value={pid} onChange={(e) => setPid(e.target.value)} className="text-xs rounded-full bg-panel border border-line px-3 py-1.5 text-t1">
+          {admin.patients.map((x) => (
+            <option key={x.patientApricotId} value={x.patientApricotId}>
+              {x.code ?? x.patientApricotId.slice(-8)} {x.name ?? ""}
+              {x.state ? ` · ${STATE_TEXT[x.state]}${x.ownerName ? ` ${x.ownerName}` : ""}` : ""}
+            </option>
+          ))}
+        </select>
+      )}
+      <select id="sales-admin-to" value={to} onChange={(e) => setTo(e.target.value)} className="text-xs rounded-full bg-panel border border-line px-3 py-1.5 text-t1">
+        <option value="">{owned ? "轉畀邊個銷售…" : "綁定畀邊個銷售…"}</option>
+        {admin.sales.map((x) => (
+          <option key={x.id} value={x.id}>
+            {x.name}
+          </option>
+        ))}
+      </select>
+      <div className="flex gap-1.5">
+        <button type="button" disabled={!to || busy} onClick={() => void go()} className="flex-1 text-xs py-1.5 rounded-full bg-brand text-panel font-medium disabled:opacity-50">
+          {owned ? "確認轉移" : "確認綁定"}
+        </button>
+        <button type="button" onClick={() => setOpen(false)} className="flex-1 text-xs py-1.5 rounded-full bg-panel border border-line text-t2">
+          取消
+        </button>
+      </div>
+      {msg && <div className="text-[11px] text-danger-text">{msg}</div>}
     </div>
   );
 }

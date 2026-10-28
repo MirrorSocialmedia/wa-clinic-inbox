@@ -82,3 +82,4 @@ next-env.d.ts
 # Part F（cwi-raggolden-20260904）：eval 產出（runtime output，非資產）
 /evals/golden/
 /evals/reports/
+/.dev/workforce-mock-commission.json
