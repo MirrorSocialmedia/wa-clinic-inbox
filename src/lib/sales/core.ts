@@ -392,3 +392,32 @@ export async function notifyStaff(
     log.warn({ conversationId, kind, err: err instanceof Error ? err.message : String(err) }, "sales: 通知失敗（best-effort）");
   }
 }
+
+// ── 新訊息派返負責銷售 ──────────────────────────────────────────────────────
+
+/**
+ * 綁定／保護中病人嘅對話有新 inbound：負責人唔係負責銷售／被轉交同事 → 派返負責銷售（SALES 轉交；assign 自帶通知）。
+ * best-effort：失敗只 log（下一條 inbound 再試）。
+ */
+export async function routeLockedConversation(conversationId: string): Promise<string | null> {
+  try {
+    const lock = await conversationSalesLock(conversationId);
+    if (lock.owners.length === 0) return null;
+    const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { assigneeId: true, pinnedPatientApricotId: true } });
+    if (!conv) return null;
+    if (conv.assigneeId && canReplyUnderLock(lock, conv.assigneeId)) return null;
+    const owner = lock.owners.find((o) => o.patientApricotId === conv.pinnedPatientApricotId) ?? lock.owners[0];
+    const { assignConversation } = await import("@/lib/assign");
+    // assignConversation 本身會通知被派者（新指派 bell + push）— 唔再另發
+    await assignConversation({
+      conversationId,
+      toStaffId: owner.staffId,
+      by: "SALES",
+      note: `銷售${owner.state === "BOUND" ? "綁定" : "保護中"}病人 — 新訊息自動派返 ${owner.name}`,
+    });
+    return owner.staffId;
+  } catch (err) {
+    log.warn({ conversationId, err: err instanceof Error ? err.message : String(err) }, "sales: 新訊息派返負責銷售失敗（best-effort）");
+    return null;
+  }
+}

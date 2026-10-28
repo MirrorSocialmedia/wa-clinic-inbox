@@ -3,6 +3,7 @@ import prisma from "@/lib/prisma";
 import { requireAuth, scopedClinicSet, assertCanWriteConversation, assertConversationAccess } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { sendFollowupTask, skipFollowupTask } from "@/lib/followup/engine";
+import { salesLockResponse } from "@/lib/sales/guard";
 
 /**
  * ★ cwi-followup-v3-20260916：follow-up 建議卡操作（staff+，clinic scope）。
@@ -47,6 +48,11 @@ export const POST = handle(async (req, { params }) => {
     await assertConversationAccess(ctx, conv);
     if (action === "send" && conv.assigneeId && conv.assigneeId !== ctx.staff.id) {
       return NextResponse.json({ error: "SEND_LOCKED" }, { status: 423 });
+    }
+    if (action === "send" && task.conversationId) {
+      // ★ cwi-sales-20261028：綁定／保護中病人 → 只有負責銷售／被轉交嘅同事可以發跟進
+      const salesLocked = await salesLockResponse(task.conversationId, ctx.staff.id);
+      if (salesLocked) return salesLocked;
     }
   }
 

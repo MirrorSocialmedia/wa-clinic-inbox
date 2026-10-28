@@ -11,6 +11,7 @@ import { PatientRecordPanel } from "./patient-record-panel";
 import { NoteComposer, renderNoteBody } from "./note-mentions";
 import { WLoading } from "@/components/ui/w-loader";
 import { StatusReminderControl } from "./reminder-control";
+import { SalesCard } from "./sales-panel";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -724,6 +725,9 @@ export function DetailPane({
           </>
         )}
       </div>
+
+      {/* ★ cwi-sales-20261028：銷售（歸屬／意向／轉交）— 銷售人員或者有銷售負責先出 */}
+      <SalesCard conversationId={c.id} staffOptions={allStaff.length ? allStaff : staff} userRole={userRole} refreshKey={c.lastInboundAt} />
 
       {/* status：segmented control（Organic 圓形分段） */}
       <div>

@@ -82,6 +82,7 @@ import { BookingCard } from "./booking-card";
 import { HoldCard } from "./hold-card";
 import { WindowExits } from "./window-exits";
 import { ConversationStatusBanners } from "./conversation-status-banners";
+import { SalesLockBanner } from "./sales-panel";
 import { AdviceReasonRows } from "./advice-reason";
 import { ReminderCard } from "./reminder-card";
 // cwi-setnav NAV-02：對話內彈窗／popover — 系統返回先閂彈窗（WhatsApp 式）
@@ -1384,6 +1385,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
 
       {/* ★ 擁有人 2026-10-18：🙋 要求真人／🔕 已退訂 橫額（對話欄頂部 — 唔使開右欄都見到） */}
       <ConversationStatusBanners conversationId={c.id} lastInboundId={lastInboundId} compact={isMobile} />
+      {/* ★ cwi-sales-20261028：綁定／保護中病人 — 唔係負責銷售 → 顯示邊個負責 + 請求轉交／強制接手 */}
+      <SalesLockBanner conversationId={c.id} staffOptions={p.allStaff ?? p.staff} userRole={p.userRole} refreshKey={lastInboundId} compact={isMobile} />
 
       {/* messages — ★ cwi-final S6-7：virtualization（react-virtuoso normal mode — 只有 viewport 內 row 掛 DOM）
           startReached = 載舊（prepend 用 scrollHeight delta 補償錨點）；followOutput = 貼最新（atBottom 先跟）

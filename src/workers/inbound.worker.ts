@@ -302,6 +302,12 @@ async function notifyNewMessage(
     }
   }
 
+  // ★ cwi-sales-20261028：綁定／保護中病人嘅新訊息 → 派返負責銷售（best-effort；先派後推，推送跟新負責人）
+  if (msg.direction === "IN") {
+    const { routeLockedConversation } = await import("@/lib/sales/core");
+    await routeLockedConversation(conv.id);
+  }
+
   // ★ cwi-final S1-4/S1-7：完整 payload 單一來源（realtime-payload）+ publishConvEvent
   //   （跨店 targeting：assignee/路由單人/路由組 active 成員 + eventId 去重 — 取代舊 assignee 補推）
   const payload = await buildMessageNewPayload(msg.id);

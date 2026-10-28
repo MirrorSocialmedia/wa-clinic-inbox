@@ -5,6 +5,7 @@ import { sendLockResponse } from "@/lib/send-lock";
 import { getWindowState } from "@/lib/wa/window";
 import { enqueueOutboundSend } from "@/lib/queue";
 import { handle } from "@/lib/api-error";
+import { salesLockResponse } from "@/lib/sales/guard";
 
 /**
  * POST /api/messages/[id]/retry — FAILED 訊息人手重試（cwi-final S6-9 ①，P2-02）。
@@ -40,6 +41,11 @@ export const POST = handle(async (req: NextRequest, { params }: Ctx) => {
   await assertConversationAccess(ctx, conv);
   const locked = sendLockResponse(ctx, conv);
   if (locked) return locked; // S3-3
+  // ★ cwi-sales-20261028：綁定／保護中病人 → 只有負責銷售／被轉交嘅同事可以覆
+  {
+    const salesLocked = await salesLockResponse(conv.id, ctx.staff.id);
+    if (salesLocked) return salesLocked;
+  }
   // ★ cwi-qa FX-27（QA-27）：訊息 age 硬頂 24h — 過咗 24h 嘅 FAILED 訊息唔准 retry
   //   （template 變數/媒體引用已過時；UI 收到 TOO_OLD → 提示重新輸入）。
   if (msg.createdAt.getTime() < Date.now() - RETRY_MAX_AGE_MS) {

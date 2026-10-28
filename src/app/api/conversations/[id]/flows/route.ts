@@ -27,6 +27,7 @@ import { handle } from "@/lib/api-error";
 import { getWindowState } from "@/lib/wa/window";
 import { assignConversation } from "@/lib/assign";
 import { sendBookingFlow, WindowClosedError, FlowsDisabledError } from "@/lib/flows/send";
+import { salesLockResponse } from "@/lib/sales/guard";
 
 export const dynamic = "force-dynamic";
 
@@ -101,6 +102,11 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
       "flows: 423 SEND_LOCKED（assignee 係其他 staff）"
     );
     return locked;
+  }
+  // ★ cwi-sales-20261028：綁定／保護中病人 → 只有負責銷售／被轉交嘅同事可以覆
+  {
+    const salesLocked = await salesLockResponse(conv.id, ctx.staff.id);
+    if (salesLocked) return salesLocked;
   }
 
   // ★ H1：unassigned + 窗口開緊 → auto-claim（窗口過咗嘅 422 唔會 claim，同 send route 一致）
