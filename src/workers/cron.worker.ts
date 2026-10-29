@@ -187,6 +187,13 @@ async function handleCronJob(job: Job): Promise<unknown> {
           const m = await runMining(s.weekStart);
           return { ok: true, weekStart: s.weekStart, statRows: s.rows, miningCards: m.cards };
         }
+        case "sales-bound-release": {
+          // cwi-sales 第 3 期：綁定病人 N 個月冇付款 → 放返公海（冪等可空跑）
+          const { runBoundAutoRelease } = await import("@/lib/sales/sweep");
+          const r = await runBoundAutoRelease();
+          log.info(r, "cron: sales-bound-release done");
+          return { ok: !r.skipped, ...r };
+        }
         case "retention-purge": {
           // P0（§6.0）：每日 04:00 HK；E2E 可手動 enqueue（pnpm e2e:cron retention-purge）
           const r = await runRetentionPurge();

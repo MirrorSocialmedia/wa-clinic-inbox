@@ -3,6 +3,7 @@ import { getServerSession } from "@/lib/session-server";
 import { redirect } from "next/navigation";
 import { AccountCard } from "@/components/inbox/account-card";
 import { LegalLinks } from "@/components/legal-links";
+import Link from "next/link";
 
 /**
  * /account — 帳戶頁（cwi-notify-v2-20260903 MD §5）。
@@ -29,11 +30,19 @@ export default async function AccountPage() {
     orderBy: { code: "asc" },
   });
 
+  const isSales = !!(await prisma.staffUser.findUnique({ where: { id: session.staffId }, select: { isSales: true } }))?.isSales;
+
   return (
     <div className="flex-1 min-w-0 h-full overflow-y-auto">
       <div className="max-w-md mx-auto px-4 py-6 space-y-4">
         <h1 className="text-lg font-semibold text-t1">帳戶</h1>
         <AccountCard name={session.name} email={session.email} role={session.role} clinics={clinics} />
+        {/* ★ cwi-sales 第 3 期：手機冇左邊欄 → 銷售人員喺「我的」入「我的銷售」 */}
+        {isSales && (
+          <Link href="/sales" className="block rounded-2xl bg-panel border border-line px-4 py-3 text-sm font-medium text-t1 hover:bg-panel-2" data-e2e="account-sales-link">
+            我的銷售 · 傭金、保護中／綁定病人、我開嘅單 →
+          </Link>
+        )}
         {/* ★ cwi-ux UX-06：法律頁入口（同 login/admin 同一組 link） */}
         <div className="text-[11px] text-t3 text-center">
           <LegalLinks />

@@ -7,7 +7,8 @@
  */
 import prisma from "@/lib/prisma";
 import { patientConversationIds } from "@/lib/sales/core";
-import { fetchSalesReviews, type SalesReviewRow } from "@/lib/workforce/client";
+import { decideSalesReview, fetchSalesReviews, type SalesReviewRow } from "@/lib/workforce/client";
+import { SalesActionError } from "@/lib/sales/handover";
 
 export interface ReviewView extends SalesReviewRow {
   salesStaffName: string | null;
@@ -38,4 +39,27 @@ export async function listSalesReviews(status: string | null): Promise<ReviewVie
       conversationId: r.patientApricotId ? (convOf.get(r.patientApricotId) ?? null) : null,
     };
   });
+}
+
+/**
+ * 老闆決定：RECONCILE_DIRECT 批 → 由 Apricot 銷售員 id 對返 inbox 銷售帳號（收養張單入傭金追蹤）；
+ * 對唔返（未綁）→ 409，唔會批咗之後冇人收傭金。
+ */
+export async function decideReviewFromInbox(
+  id: string,
+  body: { decision: "APPROVED" | "REJECTED"; approvedPct?: number | null; note?: string | null },
+  byStaffId: string
+): Promise<void> {
+  let adopt: { inboxStaffId: string; employeeId: string | null } | null = null;
+  if (body.decision === "APPROVED") {
+    const r = (await fetchSalesReviews("OPEN")).find((x) => x.id === id);
+    if (r?.kind === "RECONCILE_DIRECT") {
+      const staff = r.salesApricotUserId
+        ? await prisma.staffUser.findUnique({ where: { salesApricotUserId: r.salesApricotUserId }, select: { id: true, isSales: true, active: true, workforceEmployeeId: true } })
+        : null;
+      if (!staff?.isSales || !staff.active) throw new SalesActionError(409, "SALES_NOT_BOUND", "呢張單嘅 Apricot 銷售員未綁 inbox 銷售帳號 — 請先喺員工帳號綁定，或者拒絕");
+      adopt = { inboxStaffId: staff.id, employeeId: staff.workforceEmployeeId };
+    }
+  }
+  await decideSalesReview(id, { ...body, adopt }, byStaffId);
 }

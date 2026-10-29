@@ -7,7 +7,7 @@
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { conversationSalesLock, expireProtections, getSalesSettings, notifyStaff } from "@/lib/sales/core";
+import { conversationSalesLock, expireProtections, getSalesSettings, notifyStaff, patientConversationIds } from "@/lib/sales/core";
 
 /** "HH:mm" 香港時間係咪喺 [start, end) */
 export function inHkWindow(now: Date, start: string, end: string): boolean {
@@ -90,4 +90,47 @@ export async function runSalesSweep(now: Date = new Date()): Promise<Record<stri
     log.warn({ err: err instanceof Error ? err.message : String(err) }, "sales-sweep: 冇人覆通知失敗");
   }
   return r;
+}
+
+/**
+ * ★ cwi-sales 第 3 期：綁定病人 N 個月（設定，預設 24）冇付款 → 自動放返公海（每日一次，heavy cron）。
+ * - 只睇綁定咗超過 N 個月嘅（since 早過 cutoff）；最後付款由 workforce 分類帳拎（每張單一次 bills/{id} 嘅結果）
+ * - workforce 連唔到 → 成批跳過（唔肯定就唔放）
+ * - 條件 update（since + 狀態冇變先放）— 並發／老闆啱啱轉移都唔會錯放；通知原本銷售；審計只記 id
+ */
+export async function runBoundAutoRelease(
+  now: Date = new Date(),
+  activity: (ids: string[]) => Promise<{ patientApricotId: string; lastPaymentAt: string | null }[]> = async (ids) => (await import("@/lib/workforce/client")).fetchPatientActivity(ids)
+): Promise<{ checked: number; released: number; skipped: string | null }> {
+  const settings = await getSalesSettings();
+  const months = Math.max(1, settings.boundAutoReleaseMonths);
+  const cutoff = new Date(now);
+  cutoff.setUTCMonth(cutoff.getUTCMonth() - months);
+  const rows = await prisma.salesOwnership.findMany({ where: { state: "BOUND", since: { lt: cutoff } }, orderBy: { since: "asc" }, take: 200 });
+  if (rows.length === 0) return { checked: 0, released: 0, skipped: null };
+  let acts: { patientApricotId: string; lastPaymentAt: string | null }[];
+  try {
+    acts = await activity(rows.map((r) => r.patientApricotId));
+  } catch {
+    return { checked: rows.length, released: 0, skipped: "WORKFORCE_UNAVAILABLE" };
+  }
+  const lastOf = new Map(acts.map((a) => [a.patientApricotId, a.lastPaymentAt]));
+  let released = 0;
+  for (const r of rows) {
+    if (!lastOf.has(r.patientApricotId)) continue; // workforce 冇回呢個 → 唔肯定，唔放
+    const last = lastOf.get(r.patientApricotId);
+    if (last && new Date(last) >= cutoff) continue;
+    const done = await prisma.salesOwnership.updateMany({
+      where: { id: r.id, state: "BOUND", salesStaffId: r.salesStaffId, since: r.since },
+      data: { state: "POOL", salesStaffId: null, lastSalesStaffId: r.salesStaffId, protectedUntil: null, rounds: 0, since: now },
+    });
+    if (done.count !== 1) continue;
+    released++;
+    await prisma.auditLog.create({
+      data: { staffId: null, action: "SALES_OWNER_AUTO_RELEASED", entity: "SalesOwnership", entityId: r.patientApricotId, meta: { fromStaffId: r.salesStaffId, months } },
+    });
+    const convId = (await patientConversationIds(r.patientApricotId))[0];
+    if (convId && r.salesStaffId) await notifyStaff([r.salesStaffId], convId, "SALES_PROTECTION", `銷售 · 綁定病人 ${months} 個月冇付款，已放返銷售公海`, { reason: "BOUND_AUTO_RELEASE" });
+  }
+  return { checked: rows.length, released, skipped: null };
 }

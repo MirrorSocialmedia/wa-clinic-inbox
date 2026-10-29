@@ -154,6 +154,11 @@ async function registerSchedulers() {
     name: "stats-weekly",
     data: {},
   });
+  // ★ cwi-sales 第 3 期：綁定病人 N 個月冇付款 → 放返公海（每日 05:17 HK；workforce 連唔到成批跳過）
+  await cronHeavyQueue.upsertJobScheduler("sched-sales-bound-release", { pattern: "17 5 * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-bound-release",
+    data: {},
+  });
   // AI Workflow T1（cwi-ai-20260824-t1）：P0 retention purge — 每日 04:00 HK（顯式 tz — 同其他 job 一致）
   await cronHeavyQueue.upsertJobScheduler("sched-retention-purge", { pattern: "0 4 * * *", tz: "Asia/Hong_Kong" }, {
     name: "retention-purge",

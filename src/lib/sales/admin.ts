@@ -2,7 +2,7 @@
  * ★ cwi-sales-20261028：老闆管理病人歸屬（/admin/sales「病人歸屬」+ 對話右欄「指派銷售」）。
  *
  * - assign：上線前已有嘅病人 → 直接指派（預設 BOUND；可選 PROTECTED 7 日）
- * - transfer：轉畀另一個銷售（之後嘅付款歸新銷售 — 第 3 期按轉移日計）
+ * - transfer：轉畀另一個銷售（之後嘅付款歸新銷售 — 先通知 workforce 記低轉移時間，失敗就唔轉）
  * - release：放返銷售公海
  * 全部留 AuditLog（只 id）+ 定向通知新銷售。
  */
@@ -11,6 +11,7 @@ import prisma from "@/lib/prisma";
 import { hkDateOffset } from "@/lib/availability";
 import { activeSales, getSalesSettings, notifyStaff, patientConversationIds, protectedUntilFor } from "@/lib/sales/core";
 import { SalesActionError } from "@/lib/sales/handover";
+import { postSalesOwnerChange } from "@/lib/workforce/client";
 
 export interface OwnershipRow {
   patientApricotId: string;
@@ -89,14 +90,39 @@ export async function assignOwnership(input: { byStaffId: string; patientApricot
   await notifyNewOwner(to.id, input.patientApricotId, input.state === "BOUND" ? "銷售 · 老闆將一個病人綁定畀你" : "銷售 · 老闆將一個病人交畀你跟（保護中）");
 }
 
-/** 轉移畀另一個銷售（保留狀態；PROTECTED 嘅到期日唔變） */
+/** 轉移畀另一個銷售（保留狀態；PROTECTED 嘅到期日唔變）— 轉移時間之後嘅付款歸新銷售 */
 export async function transferOwnership(input: { byStaffId: string; patientApricotId: string; toStaffId: string }): Promise<void> {
   const to = await activeSales(input.toStaffId);
   if (!to) throw new SalesActionError(400, "NOT_SALES", "揀嘅同事唔係有效銷售人員");
-  const own = await prisma.salesOwnership.findUnique({ where: { patientApricotId: input.patientApricotId } });
-  if (!own || own.state === "POOL" || !own.salesStaffId) throw new SalesActionError(409, "NOT_OWNED", "呢個病人冇銷售負責 — 請用「指派」");
-  if (own.salesStaffId === to.id) return;
-  await prisma.salesOwnership.update({ where: { id: own.id }, data: { salesStaffId: to.id, lastSalesStaffId: to.id, rounds: own.state === "PROTECTED" ? 1 : 0, since: new Date() } });
+  const binding = await prisma.staffUser.findUnique({ where: { id: to.id }, select: { salesApricotUserId: true, workforceEmployeeId: true } });
+  if (!binding?.salesApricotUserId) throw new SalesActionError(409, "NO_APRICOT_BINDING", "新銷售未綁 Apricot 銷售員帳號 — 請先喺員工帳號設定");
+  // 鎖住呢行（FOR UPDATE）→ 通知 workforce（之後嘅付款歸新銷售）→ 先改；workforce 唔得成個 rollback。
+  // 並發兩個老闆轉：第二個等第一個 commit 先讀到新狀態 → workforce 唔會記咗一個冇生效嘅轉移
+  const own = await prisma.$transaction(
+    async (tx) => {
+      const locked = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM "SalesOwnership" WHERE "patientApricotId" = ${input.patientApricotId} FOR UPDATE`;
+      if (locked.length === 0) throw new SalesActionError(409, "NOT_OWNED", "呢個病人冇銷售負責 — 請用「指派」");
+      const cur = await tx.salesOwnership.findUniqueOrThrow({ where: { patientApricotId: input.patientApricotId } });
+      if (cur.state === "POOL" || !cur.salesStaffId) throw new SalesActionError(409, "NOT_OWNED", "呢個病人冇銷售負責 — 請用「指派」");
+      if (cur.salesStaffId === to.id) return null;
+      const effectiveAt = new Date();
+      try {
+        await postSalesOwnerChange(
+          { patientApricotId: input.patientApricotId, toInboxStaffId: to.id, toEmployeeId: binding.workforceEmployeeId, toSalesApricotUserId: binding.salesApricotUserId!, effectiveAt: effectiveAt.toISOString() },
+          input.byStaffId
+        );
+      } catch {
+        throw new SalesActionError(503, "WORKFORCE_UNAVAILABLE", "暫時連唔到 workforce — 轉移未做，請稍後再試");
+      }
+      await tx.salesOwnership.update({
+        where: { id: cur.id },
+        data: { salesStaffId: to.id, lastSalesStaffId: to.id, rounds: cur.state === "PROTECTED" ? 1 : 0, since: effectiveAt },
+      });
+      return cur;
+    },
+    { timeout: 20_000, maxWait: 10_000 }
+  );
+  if (!own) return;
   await audit(input.byStaffId, "SALES_OWNER_TRANSFERRED", input.patientApricotId, { fromStaffId: own.salesStaffId, toStaffId: to.id, state: own.state });
   await notifyNewOwner(to.id, input.patientApricotId, "銷售 · 老闆將一個病人轉咗畀你");
 }

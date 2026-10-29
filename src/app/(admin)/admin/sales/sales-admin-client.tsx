@@ -1,15 +1,15 @@
 "use client";
 
 /**
- * ★ cwi-sales-20261028：/admin/sales client — 規則設定｜傭金項目｜病人歸屬｜對單（第 2 期）。
+ * ★ cwi-sales-20261028：/admin/sales client — 規則設定｜傭金項目｜病人歸屬｜對單（第 2 期）｜傭金（第 3 期）。
  * 數據：/api/admin/sales/settings、/catalog、/catalog/refresh、/commission-items、/owners、/reviews。
  * 寫入只限集團管理員（server 403 會顯示原因）。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { WLoading } from "@/components/ui/w-loader";
 
-type Tab = "settings" | "items" | "owners" | "reviews";
+type Tab = "settings" | "items" | "owners" | "reviews" | "commission";
 
 interface Settings {
   protectionDays: number;
@@ -109,6 +109,7 @@ export default function SalesAdminClient() {
               ["items", "傭金項目"],
               ["owners", "病人歸屬"],
               ["reviews", "對單"],
+              ["commission", "傭金"],
             ] as [Tab, string][]
           ).map(([k, l]) => (
             <button
@@ -127,6 +128,7 @@ export default function SalesAdminClient() {
       {tab === "items" && <ItemsTab />}
       {tab === "owners" && <OwnersTab />}
       {tab === "reviews" && <ReviewsTab />}
+      {tab === "commission" && <CommissionTab />}
     </div>
   );
 }
@@ -688,6 +690,160 @@ function ReviewsTab() {
                 <tr>
                   <td colSpan={6} className="px-4 py-6 text-center text-t3 text-sm">
                     冇需要對嘅單
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface CommissionRow {
+  staffId: string;
+  name: string;
+  active: boolean;
+  counted: number;
+  held: number;
+  excluded: number;
+  rejected: number;
+  lines: number;
+}
+interface LedgerLine {
+  id: string;
+  kind: string;
+  status: string;
+  billCode: string | null;
+  paidAt: string;
+  paymentAmt: number;
+  ratePct: number;
+  commissionAmt: number;
+  approvedPct: number | null;
+  countedAmt: number;
+  patientCode: string | null;
+  patientName: string | null;
+  conversationId: string | null;
+}
+const LEDGER_STATUS: Record<string, string> = { COUNTED: "已計", HELD: "等批", EXCLUDED: "離職後", REJECTED: "已拒" };
+const hkNowMonth = () => new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 7);
+const hkd = (n: number) => `${n < 0 ? "−" : ""}$${Math.abs(n).toLocaleString("en-HK", { maximumFractionDigits: 2 })}`;
+
+/** 老闆：當月每個銷售傭金合計；撳一行睇明細（每筆付款） */
+function CommissionTab() {
+  const [month, setMonth] = useState(hkNowMonth());
+  const [rows, setRows] = useState<CommissionRow[] | null>(null);
+  const [closed, setClosed] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [lines, setLines] = useState<LedgerLine[] | null>(null);
+
+  const load = useCallback(async () => {
+    setRows(null);
+    setMsg(null);
+    setOpen(null);
+    const r = await api<{ rows: CommissionRow[]; closed: boolean; error?: string }>(`/api/admin/sales/commission?month=${month}`);
+    if (r.ok) {
+      setRows(r.data.rows);
+      setClosed(r.data.closed);
+      if (r.data.error) setMsg(r.data.error);
+    } else setMsg(r.error);
+  }, [month]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function toggle(staffId: string) {
+    if (open === staffId) return setOpen(null);
+    setOpen(staffId);
+    setLines(null);
+    const r = await api<{ ledger: { rows: LedgerLine[] } }>(`/api/admin/sales/commission/${encodeURIComponent(staffId)}?month=${month}`);
+    if (r.ok) setLines(r.data.ledger.rows);
+    else setMsg(r.error);
+  }
+
+  const total = (rows ?? []).reduce((n, r) => n + r.counted, 0);
+  return (
+    <div className="space-y-4">
+      <div className={`${card} flex flex-wrap items-center gap-3`}>
+        <input type="month" aria-label="月份" className={inputCls} value={month} max={hkNowMonth()} onChange={(e) => e.target.value && setMonth(e.target.value)} />
+        <span className="text-sm text-t1 font-semibold tabular-nums">合計 {hkd(total)}</span>
+        {closed && <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-panel-2 text-t2">已月結</span>}
+        <span className="text-xs text-t3">傭金跟每筆付款計（每晚同步，每張單一次）；「等批」= 對單／冇打卡申訴未批；付款作廢會扣回。</span>
+      </div>
+      {msg && <p className="text-sm text-danger-text">{msg}</p>}
+      {!rows ? (
+        <WLoading />
+      ) : (
+        <div className="overflow-x-auto bg-panel rounded-[22px] border border-line">
+          <table className="w-full text-sm">
+            <thead className="bg-panel-2 text-left text-t2">
+              <tr>
+                <th className="px-4 py-2.5 text-[11px] font-semibold">銷售</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">已計</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">等批</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">離職後</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">已拒</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">筆數</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <Fragment key={r.staffId}>
+                  <tr className="border-b border-line last:border-0 cursor-pointer hover:bg-panel-2" onClick={() => void toggle(r.staffId)} data-e2e="sales-commission-row">
+                    <td className="px-4 py-2">
+                      {r.name}
+                      {!r.active && <span className="ml-1.5 text-[11px] text-t3">（已停用）</span>}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums font-semibold">{hkd(r.counted)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{r.held ? hkd(r.held) : "—"}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{r.excluded ? hkd(r.excluded) : "—"}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{r.rejected ? hkd(r.rejected) : "—"}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{r.lines}</td>
+                  </tr>
+                  {open === r.staffId && (
+                    <tr className="border-b border-line bg-panel-2/50">
+                      <td colSpan={6} className="px-4 py-2">
+                        {!lines ? (
+                          <WLoading />
+                        ) : lines.length === 0 ? (
+                          <div className="text-xs text-t3 py-2">呢個月冇付款</div>
+                        ) : (
+                          <table className="w-full text-xs">
+                            <tbody>
+                              {lines.map((l) => (
+                                <tr key={l.id} className="border-b border-line last:border-0">
+                                  <td className="py-1.5 tabular-nums">{md(l.paidAt)}</td>
+                                  <td className="py-1.5">
+                                    {l.conversationId ? (
+                                      <a className="text-brand-text hover:underline" href={`/inbox?conv=${encodeURIComponent(l.conversationId)}`}>
+                                        {l.patientCode ?? "病人"}
+                                      </a>
+                                    ) : (
+                                      (l.patientCode ?? "病人")
+                                    )}
+                                    {l.patientName && <span className="ml-1 text-t3">{l.patientName}</span>}
+                                  </td>
+                                  <td className="py-1.5 tabular-nums">{l.billCode ?? "—"}</td>
+                                  <td className="py-1.5 tabular-nums text-right">{l.kind === "CLAWBACK" ? "作廢扣回" : hkd(l.paymentAmt)}</td>
+                                  <td className="py-1.5 tabular-nums text-right">{l.ratePct}%{l.approvedPct != null && l.approvedPct !== 100 ? ` × ${l.approvedPct}%` : ""}</td>
+                                  <td className="py-1.5 tabular-nums text-right font-medium">{hkd(l.status === "COUNTED" ? l.countedAmt : l.commissionAmt)}</td>
+                                  <td className="py-1.5 text-right text-t3">{LEDGER_STATUS[l.status] ?? l.status}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-4 py-6 text-center text-t3 text-sm">
+                    未有銷售人員
                   </td>
                 </tr>
               )}

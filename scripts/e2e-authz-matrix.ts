@@ -380,6 +380,20 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/admin/sales/reviews/authz-none", method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
   },
+  "GET /api/admin/sales/commission": {
+    // ★ cwi-sales 第 3 期：老闆傭金總覽 — 集團管理員
+    fixture: () => ({ url: "/api/admin/sales/commission?month=2026-10" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
+  "GET /api/admin/sales/commission/[staffId]": {
+    fixture: () => ({ url: "/api/admin/sales/commission/authz-none?month=2026-10" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
+  "GET /api/sales/mine": {
+    // ★ cwi-sales 第 3 期：我的銷售 — 只限銷售人員（matrix 角色都唔係銷售 → 403）
+    fixture: () => ({ url: "/api/sales/mine?month=2026-10" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 403 },
+  },
   "GET /api/admin/clinics": {
     fixture: () => ({ url: "/api/admin/clinics" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 }, // T631 斷言 CB 可見集合

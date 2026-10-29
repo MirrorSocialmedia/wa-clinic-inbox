@@ -1287,6 +1287,7 @@ export async function fetchInvoiceOptions(clinicCode: string): Promise<InvoiceOp
 }
 /** 開 invoice（workforce 寫 Apricot；同 requestKey 重放安全）— Apricot 慢 → 長 timeout */
 export async function createSalesInvoice(body: CreateInvoiceBody, staffId: string): Promise<CreatedInvoice> {
+  if (process.env.WORKFORCE_MOCK === "1") mockStaffHeader = staffId; // mock 記低邊個開（真 workforce 由 X-Staff-Id 攞）
   return CreateInvoiceResponse.parse(await wfSend("POST", "/api/external/v1/sales/invoices", {}, body, { "x-staff-id": staffId }, { timeoutMs: 75_000 }));
 }
 export async function fetchSalesReviews(status: string | null): Promise<SalesReviewRow[]> {
@@ -1294,7 +1295,7 @@ export async function fetchSalesReviews(status: string | null): Promise<SalesRev
 }
 export async function decideSalesReview(
   id: string,
-  body: { decision: "APPROVED" | "REJECTED"; approvedPct?: number | null; note?: string | null },
+  body: { decision: "APPROVED" | "REJECTED"; approvedPct?: number | null; note?: string | null; adopt?: { inboxStaffId: string; employeeId: string | null } | null },
   staffId: string
 ): Promise<void> {
   await wfSend("POST", `/api/external/v1/sales/reviews/${encodeURIComponent(id)}/decision`, {}, body, { "x-staff-id": staffId });
@@ -1814,10 +1815,26 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
     return { v: 1, clinicCode: code, items: mockCommissionStore()[code] ?? [] };
   }
   if (path === "/api/external/v1/sales/commission-items" && method === "PUT") return mockPutCommission(body, path);
+  if (path.startsWith("/api/external/v1/sales/") && path !== "/api/external/v1/sales/invoice-options") mockLoad();
   if (path === "/api/external/v1/sales/invoice-options" && !method) return mockInvoiceOptions(params.clinicCode ?? "");
   if (path === "/api/external/v1/sales/invoices" && method === "POST") return mockCreateInvoice(body, path);
   if (path === "/api/external/v1/sales/reviews" && !method) {
     return { v: 1, reviews: [...mockInvoiceStore.reviews.values()].filter((r) => !params.status || r.status === params.status) };
+  }
+  if (path === "/api/external/v1/sales/ledger" && !method) return mockLedger(params.inboxStaffId ?? "", params.month ?? "");
+  if (path === "/api/external/v1/sales/ledger/summary" && !method) return mockLedgerSummary(params.month ?? "");
+  if (path === "/api/external/v1/sales/my-invoices" && !method) return { v: 1, invoices: mockMyInvoices(params.inboxStaffId ?? "") };
+  if (path === "/api/external/v1/sales/owner-changes" && method === "POST") {
+    const b = body as { patientApricotId?: string; toInboxStaffId?: string; toSalesApricotUserId?: string; effectiveAt?: string } | undefined;
+    if (!b?.patientApricotId || !b.toInboxStaffId || !b.toSalesApricotUserId || !b.effectiveAt) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+    if (process.env.WORKFORCE_MOCK_OWNER_CHANGE_FAIL === "1") throw new WorkforceApiError(503, path, "UNAVAILABLE");
+    mockInvoiceStore.ownerChanges.push({ ...(b as Required<typeof b>) });
+    mockSave();
+    return { v: 1, ok: true, id: `mock-oc-${mockInvoiceStore.ownerChanges.length}` };
+  }
+  if (path === "/api/external/v1/sales/patient-activity" && !method) {
+    const ids = (params.ids ?? "").split(",").filter(Boolean);
+    return { v: 1, patients: ids.map((id) => ({ patientApricotId: id, lastPaymentAt: mockInvoiceStore.lastPayment.get(id) ?? null })) };
   }
   const srd = path.match(/^\/api\/external\/v1\/sales\/reviews\/([^/]+)\/decision$/);
   if (srd && method === "POST") return mockDecideReview(decodeURIComponent(srd[1]), body, path);
@@ -1968,18 +1985,193 @@ function mockSalesCatalog(code: string): unknown {
     lastRun: { status: "OK", finishedAt: "2026-10-28T18:41:00.000Z", error: null },
   };
 }
+// ── ★ 第 3 期 傭金：分類帳 / 合計 / 我的單 / 歸屬轉移 / 病人最後付款 ─────────────────────────
+const LedgerTotals = z.object({ counted: z.number(), held: z.number(), excluded: z.number(), rejected: z.number(), lines: z.number() });
+export const SalesLedgerResponse = z.object({
+  v: z.literal(1),
+  month: z.string(),
+  closed: z.boolean(),
+  totals: LedgerTotals,
+  rows: z.array(
+    z.object({
+      id: z.string(),
+      kind: z.string(),
+      status: z.string(),
+      billCode: z.string().nullable(),
+      patientApricotId: z.string().nullable(),
+      paymentCode: z.string().nullable(),
+      paidAt: z.string(),
+      paymentAmt: z.number(),
+      ratePct: z.number(),
+      commissionAmt: z.number(),
+      approvedPct: z.number().nullable(),
+      countedAmt: z.number(),
+      note: z.string().nullable(),
+    })
+  ),
+});
+export type SalesLedger = z.infer<typeof SalesLedgerResponse>;
+export const SalesLedgerSummaryResponse = z.object({
+  v: z.literal(1),
+  month: z.string(),
+  closed: z.boolean(),
+  sales: z.array(LedgerTotals.extend({ inboxStaffId: z.string() })),
+});
+export const MySalesInvoicesResponse = z.object({
+  v: z.literal(1),
+  invoices: z.array(
+    z.object({
+      invoiceId: z.string(),
+      billCode: z.string().nullable(),
+      patientApricotId: z.string(),
+      clinicExtId: z.string(),
+      origin: z.string(),
+      createdAt: z.string(),
+      totalAmt: z.number(),
+      paidAmt: z.number(),
+      osAmt: z.number().nullable(),
+      isVoid: z.boolean(),
+      lastCheckedAt: z.string().nullable(),
+      commission: z.number(),
+      held: z.number(),
+    })
+  ),
+});
+export type MySalesInvoice = z.infer<typeof MySalesInvoicesResponse>["invoices"][number];
+
+export async function fetchSalesLedger(inboxStaffId: string, month: string): Promise<SalesLedger> {
+  return SalesLedgerResponse.parse(await wfGet("/api/external/v1/sales/ledger", { inboxStaffId, month }));
+}
+export async function fetchSalesLedgerSummary(month: string): Promise<z.infer<typeof SalesLedgerSummaryResponse>> {
+  return SalesLedgerSummaryResponse.parse(await wfGet("/api/external/v1/sales/ledger/summary", { month }));
+}
+export async function fetchMySalesInvoices(inboxStaffId: string): Promise<MySalesInvoice[]> {
+  return MySalesInvoicesResponse.parse(await wfGet("/api/external/v1/sales/my-invoices", { inboxStaffId })).invoices;
+}
+/** 歸屬轉移 → workforce：之後嘅付款歸新銷售（失敗就唔好轉 — 呼叫者 throw） */
+export async function postSalesOwnerChange(
+  body: { patientApricotId: string; toInboxStaffId: string; toEmployeeId: string | null; toSalesApricotUserId: string; effectiveAt: string },
+  byStaffId: string
+): Promise<void> {
+  await wfSend("POST", "/api/external/v1/sales/owner-changes", {}, body, { "x-staff-id": byStaffId });
+}
+export async function fetchPatientActivity(ids: string[]): Promise<{ patientApricotId: string; lastPaymentAt: string | null }[]> {
+  const r = (await wfGet("/api/external/v1/sales/patient-activity", { ids: ids.join(",") })) as { patients?: { patientApricotId: string; lastPaymentAt: string | null }[] };
+  return r.patients ?? [];
+}
+
 // ── 開單 mock（in-memory；同 workforce 一樣：requestKey 冪等、內容唔同 409、保護外 → 對單隊列）──
 // env：WORKFORCE_MOCK_INVOICE_WRITE=0 → 503 WRITE_DISABLED；WORKFORCE_MOCK_INVOICE_UNCONFIRMED=1 → 504 UNCONFIRMED
 type MockReview = SalesReviewRow;
+let mockStaffHeader: string | null = null;
 const mockInvoiceStore = {
-  invoices: new Map<string, { hash: string; result: Record<string, unknown> }>(),
+  invoices: new Map<string, { hash: string; result: Record<string, unknown>; staffId: string; patientApricotId: string; createdAt: string }>(),
   reviews: new Map<string, MockReview>(),
+  ownerChanges: [] as { patientApricotId: string; toInboxStaffId: string; toSalesApricotUserId: string; effectiveAt: string }[],
+  /** 病人最後付款（test 可以 set） */
+  lastPayment: new Map<string, string>(),
   seq: 0,
 };
+/**
+ * dev／CI e2e server（next dev / start）每條 route 可能有自己一份 module → in-memory store 唔共享
+ * → 存落 .dev/workforce-mock-invoices.json（同傭金項目 mock 一樣）。單元測試（tsx，NODE_ENV 未設）淨係 in-memory。
+ */
+const MOCK_INVOICES_PATH = path.resolve(process.cwd(), ".dev/workforce-mock-invoices.json");
+const mockPersist = () => process.env.NODE_ENV === "development" || process.env.NODE_ENV === "production";
+function mockLoad(): void {
+  if (!mockPersist()) return;
+  try {
+    const j = JSON.parse(readFileSync(MOCK_INVOICES_PATH, "utf8")) as {
+      invoices: [string, { hash: string; result: Record<string, unknown>; staffId: string; patientApricotId: string; createdAt: string }][];
+      reviews: [string, MockReview][];
+      ownerChanges: typeof mockInvoiceStore.ownerChanges;
+      lastPayment: [string, string][];
+      seq: number;
+    };
+    mockInvoiceStore.invoices = new Map(j.invoices);
+    mockInvoiceStore.reviews = new Map(j.reviews);
+    mockInvoiceStore.ownerChanges = j.ownerChanges;
+    mockInvoiceStore.lastPayment = new Map(j.lastPayment);
+    mockInvoiceStore.seq = j.seq;
+  } catch {
+    /* 未有檔 = 空 store */
+  }
+}
+function mockSave(): void {
+  if (!mockPersist()) return;
+  mkdirSync(path.dirname(MOCK_INVOICES_PATH), { recursive: true });
+  writeFileSync(
+    MOCK_INVOICES_PATH,
+    JSON.stringify({
+      invoices: [...mockInvoiceStore.invoices],
+      reviews: [...mockInvoiceStore.reviews],
+      ownerChanges: mockInvoiceStore.ownerChanges,
+      lastPayment: [...mockInvoiceStore.lastPayment],
+      seq: mockInvoiceStore.seq,
+    })
+  );
+}
 /** test-only：清 mock 開單 store */
 export function _resetMockInvoicesForTest(): void {
   mockInvoiceStore.invoices.clear();
   mockInvoiceStore.reviews.clear();
+  mockInvoiceStore.ownerChanges.length = 0;
+  mockInvoiceStore.lastPayment.clear();
+  mockSave();
+}
+/** test-only：mock store（睇歸屬轉移、設病人最後付款） */
+export function _mockInvoiceStoreForTest() {
+  mockLoad();
+  return mockInvoiceStore;
+}
+const mockMonth = (iso: string) => new Date(new Date(iso).getTime() + 8 * 3600_000).toISOString().slice(0, 7);
+/** mock 分類帳：每張 mock 單嘅即場收款 = 一筆 EARN（傭金 = 收款 × 傭金項目 ÷ 總額 × 3%）；保護外 = HELD */
+function mockLedgerRows(staffId: string | null, month: string) {
+  const rows = [];
+  for (const [, inv] of mockInvoiceStore.invoices) {
+    const r = inv.result as { invoiceId: string; billCode: string; totalAmt: number; paymentAmt: number; commissionableAmt: number; review: boolean };
+    if (staffId && inv.staffId !== staffId) continue;
+    if (r.paymentAmt <= 0 || mockMonth(inv.createdAt) !== month) continue;
+    const rate = r.totalAmt > 0 ? (r.commissionableAmt / r.totalAmt) * 0.03 : 0;
+    const comm = Math.round(r.paymentAmt * rate * 100) / 100;
+    const held = r.review && mockInvoiceStore.reviews.get(`mock-rev-${r.invoiceId.split("-").pop()}`)?.status !== "APPROVED";
+    rows.push({
+      staffId: inv.staffId,
+      row: {
+        id: `mock-led-${r.invoiceId}`, kind: "EARN", status: held ? "HELD" : "COUNTED", billCode: r.billCode, patientApricotId: inv.patientApricotId,
+        paymentCode: `P${r.billCode}`, paidAt: inv.createdAt, paymentAmt: r.paymentAmt, ratePct: Math.round(rate * 1e6) / 1e4, commissionAmt: comm,
+        approvedPct: held ? null : 100, countedAmt: held ? 0 : comm, note: null,
+      },
+    });
+  }
+  return rows;
+}
+function mockTotals(rows: { status: string; commissionAmt: number; countedAmt: number }[]) {
+  const sum = (st: string) => Math.round(rows.filter((x) => x.status === st).reduce((n, x) => n + x.commissionAmt, 0) * 100) / 100;
+  return { counted: Math.round(rows.reduce((n, x) => n + x.countedAmt, 0) * 100) / 100, held: sum("HELD"), excluded: sum("EXCLUDED"), rejected: sum("REJECTED"), lines: rows.length };
+}
+function mockLedger(staffId: string, month: string): unknown {
+  if (!staffId || !/^\d{4}-\d{2}$/.test(month)) throw new WorkforceApiError(400, "/api/external/v1/sales/ledger", "BAD_REQUEST");
+  const rows = mockLedgerRows(staffId, month).map((x) => x.row);
+  return { v: 1, month, closed: false, totals: mockTotals(rows), rows };
+}
+function mockLedgerSummary(month: string): unknown {
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new WorkforceApiError(400, "/api/external/v1/sales/ledger/summary", "BAD_REQUEST");
+  const by = new Map<string, ReturnType<typeof mockLedgerRows>[number]["row"][]>();
+  for (const x of mockLedgerRows(null, month)) by.set(x.staffId, [...(by.get(x.staffId) ?? []), x.row]);
+  return { v: 1, month, closed: false, sales: [...by.entries()].map(([inboxStaffId, rows]) => ({ inboxStaffId, ...mockTotals(rows) })) };
+}
+function mockMyInvoices(staffId: string) {
+  return [...mockInvoiceStore.invoices.values()]
+    .filter((x) => x.staffId === staffId)
+    .map((x) => {
+      const r = x.result as { invoiceId: string; billCode: string; totalAmt: number; paymentAmt: number; commissionableAmt: number };
+      const comm = r.totalAmt > 0 ? Math.round(r.paymentAmt * (r.commissionableAmt / r.totalAmt) * 0.03 * 100) / 100 : 0;
+      return {
+        invoiceId: r.invoiceId, billCode: r.billCode, patientApricotId: x.patientApricotId, clinicExtId: "mock-ext", origin: "INBOX", createdAt: x.createdAt,
+        totalAmt: r.totalAmt, paidAmt: r.paymentAmt, osAmt: Math.round((r.totalAmt - r.paymentAmt) * 100) / 100, isVoid: false, lastCheckedAt: null, commission: comm, held: 0,
+      };
+    });
 }
 function mockInvoiceOptions(code: string): unknown {
   if (!code) throw new WorkforceApiError(400, "/api/external/v1/sales/invoice-options", "BAD_REQUEST");
@@ -2035,7 +2227,7 @@ function mockCreateInvoice(body: unknown, reqPath: string): unknown {
     replayed: false,
     recovered: false,
   };
-  mockInvoiceStore.invoices.set(b.requestKey, { hash, result });
+  mockInvoiceStore.invoices.set(b.requestKey, { hash, result, staffId: mockStaffHeader ?? "", patientApricotId: b.patientApricotId, createdAt: new Date().toISOString() });
   if (b.ownership === "NONE") {
     const id = `mock-rev-${n}`;
     mockInvoiceStore.reviews.set(id, {
@@ -2044,6 +2236,7 @@ function mockCreateInvoice(body: unknown, reqPath: string): unknown {
       approvedPct: null, decidedBy: null, decidedAt: null, note: null, createdAt: new Date().toISOString(),
     });
   }
+  mockSave();
   return result;
 }
 function mockDecideReview(id: string, body: unknown, reqPath: string): unknown {
@@ -2057,6 +2250,7 @@ function mockDecideReview(id: string, body: unknown, reqPath: string): unknown {
     throw new WorkforceApiError(409, reqPath, "ALREADY_DECIDED");
   }
   Object.assign(r, { status: b.decision, approvedPct: b.decision === "APPROVED" ? (b.approvedPct ?? 100) : 0, note: b.note ?? null, decidedAt: new Date().toISOString() });
+  mockSave();
   return { v: 1, ok: true };
 }
 

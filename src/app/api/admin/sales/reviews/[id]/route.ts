@@ -8,7 +8,9 @@ import { z } from "zod";
 import prisma from "@/lib/prisma";
 import { requireAdmin, isGlobalAdmin } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
-import { decideSalesReview, WorkforceApiError } from "@/lib/workforce/client";
+import { WorkforceApiError } from "@/lib/workforce/client";
+import { SalesActionError } from "@/lib/sales/handover";
+import { decideReviewFromInbox } from "@/lib/sales/reviews";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +28,7 @@ const MESSAGES: Record<string, string> = {
   NOTE_REQUIRED: "拒絕要寫原因",
   BAD_PCT: "批核 % 要喺 0–100",
   ALREADY_DECIDED: "呢項已經決定咗",
+  ADOPT_STAFF_REQUIRED: "呢張單嘅銷售員未綁 inbox 帳號",
   NOT_FOUND: "搵唔到呢項",
 };
 
@@ -39,8 +42,9 @@ export const POST = handle(async (req: NextRequest, ctxP: Ctx) => {
   const b = parsed.data;
   if (b.decision === "REJECTED" && !(b.note ?? "").trim()) return NextResponse.json({ error: "NOTE_REQUIRED", message: MESSAGES.NOTE_REQUIRED }, { status: 400 });
   try {
-    await decideSalesReview(id, { decision: b.decision, approvedPct: b.approvedPct ?? null, note: b.note ?? null }, admin.staff.id);
+    await decideReviewFromInbox(id, { decision: b.decision, approvedPct: b.approvedPct ?? null, note: b.note ?? null }, admin.staff.id);
   } catch (err) {
+    if (err instanceof SalesActionError) return NextResponse.json({ error: err.code, message: err.message }, { status: err.status });
     if (err instanceof WorkforceApiError) {
       const code = err.code ?? "WORKFORCE_ERROR";
       const status = err.status >= 400 && err.status < 600 ? err.status : 502;

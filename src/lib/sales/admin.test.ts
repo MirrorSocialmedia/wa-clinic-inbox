@@ -7,6 +7,7 @@
  * A2 已有其他銷售 → 指派 409；轉移 → 新銷售
  * A3 放返公海 → POOL，lastSalesStaffId 保留
  * A4 冇對話嘅病人 id → 404（防亂打 id 造垃圾歸屬）
+ * A5 轉移：先通知 workforce（之後付款歸新銷售）；workforce 連唔到 → 唔轉；新銷售未綁 Apricot → 409
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -58,7 +59,7 @@ before(async () => {
   const mk = async (email: string, name: string, extra: Record<string, unknown> = {}) =>
     (await prisma.staffUser.create({ data: { email, name, role: "STAFF", passwordHash: "x", active: true, clinics: { create: { clinicId: tkw.id } }, ...extra } })).id;
   a = await mk(EMAILS[0], "SALA 銷售A", { isSales: true });
-  b = await mk(EMAILS[1], "SALA 銷售B", { isSales: true });
+  b = await mk(EMAILS[1], "SALA 銷售B", { isSales: true, salesApricotUserId: "sala-apu-b" });
   desk = await mk(EMAILS[2], "SALA 前台");
   adm = await mk(EMAILS[3], "SALA 老闆", { role: "ADMIN" });
   await prisma.contact.create({ data: { id: CONTACT, clinicId: tkw.id, waId: "85290003201", profileName: "SALA 病人", labels: [] } });
@@ -114,4 +115,51 @@ test("A4 冇對話嘅病人 → 404", async () => {
     (e) => e instanceof SalesActionError && e.status === 404
   );
   assert.equal(await prisma.salesOwnership.count({ where: { patientApricotId: "sala-nobody" } }), 0);
+});
+
+test("A5 轉移：先記 workforce；連唔到唔轉；未綁 Apricot 409", async () => {
+  const { assignOwnership, transferOwnership } = await import("./admin");
+  const { SalesActionError } = await import("./handover");
+  const { _mockInvoiceStoreForTest } = await import("@/lib/workforce/client");
+  await assignOwnership({ byStaffId: adm, patientApricotId: PID, toStaffId: a, state: "BOUND" });
+  // a 未綁 Apricot → 轉返畀 a 唔得
+  await prisma.salesOwnership.update({ where: { patientApricotId: PID }, data: { salesStaffId: b } });
+  await assert.rejects(transferOwnership({ byStaffId: adm, patientApricotId: PID, toStaffId: a }), (e) => e instanceof SalesActionError && e.status === 409);
+  await prisma.staffUser.update({ where: { id: a }, data: { salesApricotUserId: "sala-apu-a" } });
+  process.env.WORKFORCE_MOCK_OWNER_CHANGE_FAIL = "1";
+  try {
+    await assert.rejects(transferOwnership({ byStaffId: adm, patientApricotId: PID, toStaffId: a }), (e) => e instanceof SalesActionError && e.status === 503);
+  } finally {
+    delete process.env.WORKFORCE_MOCK_OWNER_CHANGE_FAIL;
+  }
+  assert.equal((await prisma.salesOwnership.findUnique({ where: { patientApricotId: PID } }))?.salesStaffId, b, "workforce 連唔到 → 唔轉");
+  const before = _mockInvoiceStoreForTest().ownerChanges.length;
+  await transferOwnership({ byStaffId: adm, patientApricotId: PID, toStaffId: a });
+  assert.equal((await prisma.salesOwnership.findUnique({ where: { patientApricotId: PID } }))?.salesStaffId, a);
+  const oc = _mockInvoiceStoreForTest().ownerChanges.slice(before);
+  assert.equal(oc.length, 1);
+  assert.equal(oc[0].toInboxStaffId, a);
+  assert.equal(oc[0].toSalesApricotUserId, "sala-apu-a");
+});
+
+test("A6 對抗：兩個老闆同時轉畀唔同銷售 → workforce 嘅轉移紀錄同最後歸屬一致", async () => {
+  const { transferOwnership } = await import("./admin");
+  const { _mockInvoiceStoreForTest } = await import("@/lib/workforce/client");
+  // 而家歸 a（A5）；同時轉畀 b 同轉返 a 都唔得 — 用 b 同第三個銷售 c
+  const c = (await prisma.staffUser.create({ data: { email: "sala-c@sala.local", name: "SALA 銷售C", role: "STAFF", passwordHash: "x", active: true, isSales: true, salesApricotUserId: "sala-apu-c" } })).id;
+  try {
+    const before = _mockInvoiceStoreForTest().ownerChanges.length;
+    const rs = await Promise.allSettled([
+      transferOwnership({ byStaffId: adm, patientApricotId: PID, toStaffId: b }),
+      transferOwnership({ byStaffId: adm, patientApricotId: PID, toStaffId: c }),
+    ]);
+    assert.ok(rs.every((r) => r.status === "fulfilled"), JSON.stringify(rs.map((r) => r.status)));
+    const final = (await prisma.salesOwnership.findUnique({ where: { patientApricotId: PID } }))?.salesStaffId;
+    const oc = _mockInvoiceStoreForTest().ownerChanges.slice(before);
+    assert.ok(oc.length >= 1 && oc.length <= 2);
+    assert.equal(oc[oc.length - 1].toInboxStaffId, final, "workforce 最後一個轉移 = inbox 最後歸屬");
+  } finally {
+    await prisma.salesOwnership.updateMany({ where: { patientApricotId: PID, salesStaffId: c }, data: { salesStaffId: b } });
+    await prisma.staffUser.delete({ where: { id: c } });
+  }
 });
