@@ -1218,6 +1218,88 @@ export async function putCommissionItems(clinicCode: string, items: CommissionIt
   await wfSend("PUT", "/api/external/v1/sales/commission-items", {}, { clinicCode, items }, { "x-staff-id": staffId });
 }
 
+// ── ★ cwi-sales 第 2 期：開 invoice + 老闆對單隊列 ──────────────────────────────────────────
+
+export const InvoiceOptionsResponse = z.object({
+  v: z.literal(1),
+  clinicCode: z.string(),
+  writeEnabled: z.boolean(),
+  templateReady: z.boolean(),
+  practitioners: z.array(z.object({ extId: z.string(), name: z.string(), nameChi: z.string().nullable() })),
+  feeItems: z.array(z.object({ extId: z.string(), code: z.string(), des: z.string(), fee: z.number(), ratePct: z.number().nullable() })),
+  paymentMethods: z.array(z.object({ extId: z.string(), code: z.string(), des: z.string() })),
+});
+export type InvoiceOptions = z.infer<typeof InvoiceOptionsResponse>;
+export const CreateInvoiceResponse = z.object({
+  v: z.literal(1),
+  invoiceId: z.string(),
+  status: z.literal("CREATED"),
+  billId: z.string(),
+  billCode: z.string().nullable(),
+  totalAmt: z.number(),
+  paymentAmt: z.number(),
+  commissionableAmt: z.number(),
+  review: z.boolean(),
+  replayed: z.boolean(),
+  recovered: z.boolean(),
+});
+export type CreatedInvoice = z.infer<typeof CreateInvoiceResponse>;
+export interface CreateInvoiceBody {
+  requestKey: string;
+  clinicCode: string;
+  patientApricotId: string;
+  patientCode: string;
+  conversationId: string | null;
+  employeeId: string | null;
+  salesApricotUserId: string;
+  practitionerExtId: string;
+  ownership: "PROTECTED" | "BOUND" | "NONE";
+  lines: { feeItemExtId: string; qty: number; up: number; discAmt: number; remarks?: string | null }[];
+  payment: { amt: number; methodExtId: string } | null;
+}
+export const SalesReviewsResponse = z.object({
+  v: z.literal(1),
+  reviews: z.array(
+    z.object({
+      id: z.string(),
+      kind: z.string(),
+      status: z.string(),
+      apricotBillId: z.string(),
+      apricotBillCode: z.string().nullable(),
+      clinicExtId: z.string(),
+      salesApricotUserId: z.string().nullable(),
+      salesInvoiceId: z.string().nullable(),
+      patientApricotId: z.string().nullable(),
+      amount: z.number().nullable(),
+      approvedPct: z.number().nullable(),
+      decidedBy: z.string().nullable(),
+      decidedAt: z.string().nullable(),
+      note: z.string().nullable(),
+      createdAt: z.string(),
+    })
+  ),
+});
+export type SalesReviewRow = z.infer<typeof SalesReviewsResponse>["reviews"][number];
+
+/** 開單對話框選項（醫生、收費項目 + 傭金 %、付款方式）— workforce 本地名單，唔問 Apricot */
+export async function fetchInvoiceOptions(clinicCode: string): Promise<InvoiceOptions> {
+  return InvoiceOptionsResponse.parse(await wfGet("/api/external/v1/sales/invoice-options", { clinicCode }));
+}
+/** 開 invoice（workforce 寫 Apricot；同 requestKey 重放安全）— Apricot 慢 → 長 timeout */
+export async function createSalesInvoice(body: CreateInvoiceBody, staffId: string): Promise<CreatedInvoice> {
+  return CreateInvoiceResponse.parse(await wfSend("POST", "/api/external/v1/sales/invoices", {}, body, { "x-staff-id": staffId }, { timeoutMs: 75_000 }));
+}
+export async function fetchSalesReviews(status: string | null): Promise<SalesReviewRow[]> {
+  return SalesReviewsResponse.parse(await wfGet("/api/external/v1/sales/reviews", status ? { status } : {})).reviews;
+}
+export async function decideSalesReview(
+  id: string,
+  body: { decision: "APPROVED" | "REJECTED"; approvedPct?: number | null; note?: string | null },
+  staffId: string
+): Promise<void> {
+  await wfSend("POST", `/api/external/v1/sales/reviews/${encodeURIComponent(id)}/decision`, {}, body, { "x-staff-id": staffId });
+}
+
 /** E 類報價查詢（CWM /quotes — per patient 或 batch；零原始電話）。
  *  ★ cwi-final S5-13①：加 clinicIds（cuid）/ clinicCodes（shortName 兼容）— CWM 端 `where.clinicId in` 服務端 filter。 */
 export async function fetchQuotes(opts?: {
@@ -1732,6 +1814,13 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
     return { v: 1, clinicCode: code, items: mockCommissionStore()[code] ?? [] };
   }
   if (path === "/api/external/v1/sales/commission-items" && method === "PUT") return mockPutCommission(body, path);
+  if (path === "/api/external/v1/sales/invoice-options" && !method) return mockInvoiceOptions(params.clinicCode ?? "");
+  if (path === "/api/external/v1/sales/invoices" && method === "POST") return mockCreateInvoice(body, path);
+  if (path === "/api/external/v1/sales/reviews" && !method) {
+    return { v: 1, reviews: [...mockInvoiceStore.reviews.values()].filter((r) => !params.status || r.status === params.status) };
+  }
+  const srd = path.match(/^\/api\/external\/v1\/sales\/reviews\/([^/]+)\/decision$/);
+  if (srd && method === "POST") return mockDecideReview(decodeURIComponent(srd[1]), body, path);
   const qd = path.match(/^\/api\/external\/v1\/quotes\/([^/]+)\/decision$/);
   if (qd && method === "POST") {
     return mockQuoteDecision(decodeURIComponent(qd[1]), body, path);
@@ -1879,6 +1968,98 @@ function mockSalesCatalog(code: string): unknown {
     lastRun: { status: "OK", finishedAt: "2026-10-28T18:41:00.000Z", error: null },
   };
 }
+// ── 開單 mock（in-memory；同 workforce 一樣：requestKey 冪等、內容唔同 409、保護外 → 對單隊列）──
+// env：WORKFORCE_MOCK_INVOICE_WRITE=0 → 503 WRITE_DISABLED；WORKFORCE_MOCK_INVOICE_UNCONFIRMED=1 → 504 UNCONFIRMED
+type MockReview = SalesReviewRow;
+const mockInvoiceStore = {
+  invoices: new Map<string, { hash: string; result: Record<string, unknown> }>(),
+  reviews: new Map<string, MockReview>(),
+  seq: 0,
+};
+/** test-only：清 mock 開單 store */
+export function _resetMockInvoicesForTest(): void {
+  mockInvoiceStore.invoices.clear();
+  mockInvoiceStore.reviews.clear();
+}
+function mockInvoiceOptions(code: string): unknown {
+  if (!code) throw new WorkforceApiError(400, "/api/external/v1/sales/invoice-options", "BAD_REQUEST");
+  const rate = new Map((mockCommissionStore()[code] ?? []).filter((c) => c.active).map((c) => [c.feeItemExtId, c.ratePct]));
+  return {
+    v: 1,
+    clinicCode: code,
+    writeEnabled: process.env.WORKFORCE_MOCK_INVOICE_WRITE !== "0",
+    templateReady: true,
+    practitioners: [
+      { extId: `mock-pract-${code}-1`, name: "Dr. Yuen Ki Hin", nameChi: "袁麒軒 牙科醫生" },
+      { extId: `mock-pract-${code}-2`, name: "Dr. Yiu Tsz Ching", nameChi: "姚子晴 牙科醫生" },
+    ],
+    feeItems: mockFeeItems(code).map((f) => ({ ...f, ratePct: rate.get(f.extId) ?? null })),
+    paymentMethods: [
+      { extId: "mock-pm-cash", code: "002", des: "CASH" },
+      { extId: "mock-pm-visa", code: "005", des: "VISA" },
+    ],
+  };
+}
+function mockCreateInvoice(body: unknown, reqPath: string): unknown {
+  const b = body as CreateInvoiceBody | undefined;
+  if (!b?.requestKey || !b.clinicCode || !b.patientApricotId || !Array.isArray(b.lines) || b.lines.length === 0) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  if (process.env.WORKFORCE_MOCK_INVOICE_WRITE === "0") throw new WorkforceApiError(503, reqPath, "WRITE_DISABLED");
+  const hash = JSON.stringify([b.clinicCode, b.patientApricotId, b.salesApricotUserId, b.practitionerExtId, b.lines, b.payment]);
+  const prior = mockInvoiceStore.invoices.get(b.requestKey);
+  if (prior) {
+    if (prior.hash !== hash) throw new WorkforceApiError(409, reqPath, "KEY_REUSED");
+    return { ...prior.result, replayed: true };
+  }
+  if (process.env.WORKFORCE_MOCK_INVOICE_UNCONFIRMED === "1") throw new WorkforceApiError(504, reqPath, "UNCONFIRMED", 60);
+  const fees = new Map(mockFeeItems(b.clinicCode).map((f) => [f.extId, f]));
+  if (b.lines.some((l) => !fees.has(l.feeItemExtId))) throw new WorkforceApiError(400, reqPath, "FEE_ITEM_INVALID");
+  const rate = new Map((mockCommissionStore()[b.clinicCode] ?? []).filter((c) => c.active).map((c) => [c.feeItemExtId, c.ratePct]));
+  const cents = (n: number) => Math.round(n * 100);
+  const lineTotal = (l: CreateInvoiceBody["lines"][number]) => cents(l.up) * l.qty - cents(l.discAmt);
+  if (b.lines.some((l) => lineTotal(l) < 0)) throw new WorkforceApiError(400, reqPath, "BAD_DISCOUNT");
+  const totalC = b.lines.reduce((n, l) => n + lineTotal(l), 0);
+  const payC = b.payment ? cents(b.payment.amt) : 0;
+  if (payC > totalC) throw new WorkforceApiError(400, reqPath, "OVERPAY");
+  const commC = b.lines.reduce((n, l) => n + ((rate.get(l.feeItemExtId) ?? 0) > 0 ? lineTotal(l) : 0), 0);
+  const n = ++mockInvoiceStore.seq;
+  const result = {
+    v: 1,
+    invoiceId: `mock-inv-${n}`,
+    status: "CREATED",
+    billId: `mock-bill-${n}`,
+    billCode: `20261029${String(n).padStart(4, "0")}`,
+    totalAmt: totalC / 100,
+    paymentAmt: payC / 100,
+    commissionableAmt: commC / 100,
+    review: b.ownership === "NONE",
+    replayed: false,
+    recovered: false,
+  };
+  mockInvoiceStore.invoices.set(b.requestKey, { hash, result });
+  if (b.ownership === "NONE") {
+    const id = `mock-rev-${n}`;
+    mockInvoiceStore.reviews.set(id, {
+      id, kind: "RECONCILE_UNPROTECTED", status: "OPEN", apricotBillId: result.billId, apricotBillCode: result.billCode, clinicExtId: `mock-ext-${b.clinicCode}`,
+      salesApricotUserId: b.salesApricotUserId, salesInvoiceId: result.invoiceId, patientApricotId: b.patientApricotId, amount: commC / 100,
+      approvedPct: null, decidedBy: null, decidedAt: null, note: null, createdAt: new Date().toISOString(),
+    });
+  }
+  return result;
+}
+function mockDecideReview(id: string, body: unknown, reqPath: string): unknown {
+  const b = body as { decision?: string; approvedPct?: number | null; note?: string | null } | undefined;
+  const r = mockInvoiceStore.reviews.get(id);
+  if (!r) throw new WorkforceApiError(404, reqPath, "NOT_FOUND");
+  if (b?.decision !== "APPROVED" && b?.decision !== "REJECTED") throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  if (b.decision === "REJECTED" && !(b.note ?? "").trim()) throw new WorkforceApiError(400, reqPath, "NOTE_REQUIRED");
+  if (r.status !== "OPEN") {
+    if (r.status === b.decision) return { v: 1, ok: true };
+    throw new WorkforceApiError(409, reqPath, "ALREADY_DECIDED");
+  }
+  Object.assign(r, { status: b.decision, approvedPct: b.decision === "APPROVED" ? (b.approvedPct ?? 100) : 0, note: b.note ?? null, decidedAt: new Date().toISOString() });
+  return { v: 1, ok: true };
+}
+
 function mockPutCommission(body: unknown, reqPath: string): unknown {
   const b = body as { clinicCode?: string; items?: CommissionItemInput[] } | undefined;
   const code = b?.clinicCode ?? "";

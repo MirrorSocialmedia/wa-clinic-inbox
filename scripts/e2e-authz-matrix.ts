@@ -371,6 +371,15 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/admin/sales/owners", method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
   },
+  "GET /api/admin/sales/reviews": {
+    // ★ cwi-sales 第 2 期：老闆對單隊列 — 集團管理員先睇到（有病人編號）
+    fixture: () => ({ url: "/api/admin/sales/reviews" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
+  "POST /api/admin/sales/reviews/[id]": {
+    fixture: () => ({ url: "/api/admin/sales/reviews/authz-none", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
+  },
   "GET /api/admin/clinics": {
     fixture: () => ({ url: "/api/admin/clinics" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 }, // T631 斷言 CB 可見集合
@@ -827,6 +836,16 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     // 請求轉交 — 冇銷售鎖 → 409 NOT_LOCKED（零寫入）；外店 403；SUPERVISOR 非 force 403
     fixture: () => ({ url: `/api/conversations/${F.convLock}/sales/handover`, method: "POST", body: JSON.stringify({ action: "request" }) }),
     expect: { UNAUTH: 401, STAFF_TY: 409, STAFF_YMT: 403, SUPERVISOR: 403 },
+  },
+  "GET /api/conversations/[id]/sales/invoice": {
+    // ★ cwi-sales 第 2 期：開單對話框資料 — 唔係銷售 → 200 + blocked 原因（零 workforce call）；外店 403
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/sales/invoice` }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, STAFF_YMT: 403, SUPERVISOR: 200, ADMIN_ALL: 200 },
+  },
+  "POST /api/conversations/[id]/sales/invoice": {
+    // 空 body → 400（零寫入）；SUPERVISOR 唯讀 403；外店 403
+    fixture: () => ({ url: `/api/conversations/${F.convLock}/sales/invoice`, method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 400, STAFF_YMT: 403, SUPERVISOR: 403 },
   },
   "POST /api/conversations/[id]/flows": {
     // ★ S3-3（D-11）：ADMIN 豁免刪 — 非負責人（包 ADMIN）→ 423；

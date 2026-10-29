@@ -4,13 +4,14 @@
  * ★ cwi-sales-20261028：銷售系統第 1 期 UI。
  *
  * - useSalesView：GET /api/conversations/:id/sales（換對話／新病人訊息／動作後 window 事件重拉）
- * - SalesCard（右欄）：歸屬（保護中／綁定 · 銷售 · 到期）、意向 高中低、轉交／收回、請求轉交、強制接手
+ * - SalesCard（右欄）：歸屬（保護中／綁定 · 銷售 · 到期）、意向 高中低、開單（第 2 期）、轉交／收回、請求轉交、強制接手
  * - SalesLockBanner（對話頂）：唔係負責人 → 「{名} 負責（銷售）· 可以睇，唔可以覆」+ 請求轉交／強制接手
  *
  * 只喺「我係銷售人員」或者「呢個對話有銷售負責」先顯示 — 其他情況完全唔出（唔干擾冇用銷售系統嘅店）。
  */
 import { useCallback, useEffect, useState } from "react";
-import { Lock, ShieldCheck, UserCheck } from "lucide-react";
+import { Lock, Receipt, ShieldCheck, UserCheck } from "lucide-react";
+import { SalesInvoiceDialog } from "@/components/inbox/sales-invoice-dialog";
 
 export const SALES_CHANGED_EVENT = "wa:sales-changed";
 
@@ -124,8 +125,10 @@ export function SalesCard({
   const [handoverOpen, setHandoverOpen] = useState(false);
   const [toStaffId, setToStaffId] = useState("");
   const [kind, setKind] = useState<"ONCE" | "PERMANENT">("ONCE");
+  const [invoiceOpen, setInvoiceOpen] = useState(false);
 
   useEffect(() => {
+    setInvoiceOpen(false);
     setHandoverOpen(false);
     setErr(null);
     setToStaffId("");
@@ -221,6 +224,25 @@ export function SalesCard({
               </div>
             )}
           </div>
+        )}
+
+        {canIntent && (
+          <button
+            type="button"
+            data-e2e="sales-invoice-open"
+            onClick={() => setInvoiceOpen(true)}
+            className="inline-flex items-center justify-center gap-1.5 text-xs py-1.5 rounded-full bg-brand text-panel font-medium hover:opacity-90"
+          >
+            <Receipt className="w-3.5 h-3.5" aria-hidden />
+            開單
+          </button>
+        )}
+        {invoiceOpen && (
+          <SalesInvoiceDialog
+            conversationId={conversationId}
+            onClose={() => setInvoiceOpen(false)}
+            onCreated={() => notifySalesChanged(conversationId)}
+          />
         )}
 
         {view.delegates.length > 0 && (

@@ -13,7 +13,7 @@ import { INTENT_LEVELS, canReplyUnderLock, conversationSalesLock, getSalesSettin
 export const DELEGATION_HOURS = 24;
 
 export class SalesActionError extends Error {
-  constructor(public status: number, public code: string, message: string) {
+  constructor(public status: number, public code: string, message: string, /** 幾多秒後先好再撳（開單未確認／忙） */ public retryAfterSec?: number) {
     super(message);
   }
 }

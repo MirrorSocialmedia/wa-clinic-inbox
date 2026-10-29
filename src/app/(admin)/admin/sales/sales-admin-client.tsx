@@ -1,15 +1,15 @@
 "use client";
 
 /**
- * ★ cwi-sales-20261028：/admin/sales client — 規則設定｜傭金項目｜病人歸屬。
- * 數據：/api/admin/sales/settings、/catalog、/catalog/refresh、/commission-items、/owners。
+ * ★ cwi-sales-20261028：/admin/sales client — 規則設定｜傭金項目｜病人歸屬｜對單（第 2 期）。
+ * 數據：/api/admin/sales/settings、/catalog、/catalog/refresh、/commission-items、/owners、/reviews。
  * 寫入只限集團管理員（server 403 會顯示原因）。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { WLoading } from "@/components/ui/w-loader";
 
-type Tab = "settings" | "items" | "owners";
+type Tab = "settings" | "items" | "owners" | "reviews";
 
 interface Settings {
   protectionDays: number;
@@ -108,6 +108,7 @@ export default function SalesAdminClient() {
               ["settings", "規則設定"],
               ["items", "傭金項目"],
               ["owners", "病人歸屬"],
+              ["reviews", "對單"],
             ] as [Tab, string][]
           ).map(([k, l]) => (
             <button
@@ -125,6 +126,7 @@ export default function SalesAdminClient() {
       {tab === "settings" && <SettingsTab />}
       {tab === "items" && <ItemsTab />}
       {tab === "owners" && <OwnersTab />}
+      {tab === "reviews" && <ReviewsTab />}
     </div>
   );
 }
@@ -515,6 +517,177 @@ function OwnersTab() {
                 <tr>
                   <td colSpan={6} className="px-4 py-6 text-center text-t3 text-sm">
                     未有病人歸屬 — 銷售經 inbox 落預約之後就會出現
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface Review {
+  id: string;
+  kind: string;
+  status: "OPEN" | "APPROVED" | "REJECTED";
+  apricotBillCode: string | null;
+  salesStaffName: string | null;
+  salesApricotUserId: string | null;
+  patientApricotId: string | null;
+  patientCode: string | null;
+  patientName: string | null;
+  conversationId: string | null;
+  amount: number | null;
+  approvedPct: number | null;
+  note: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+}
+
+const KIND_LABEL: Record<string, string> = {
+  RECONCILE_UNPROTECTED: "保護外病人開單",
+  RECONCILE_DIRECT: "Apricot 直接開單",
+  RECONCILE_MISMATCH: "銷售員被改",
+};
+const REVIEW_STATUS: Record<Review["status"], string> = { OPEN: "待批", APPROVED: "已批", REJECTED: "已拒" };
+
+/** 老闆對單：批（可部分 %）／拒（要原因）— 只限集團管理員（server 403 會顯示） */
+function ReviewsTab() {
+  const [status, setStatus] = useState<"" | Review["status"]>("OPEN");
+  const [rows, setRows] = useState<Review[] | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [pct, setPct] = useState<Record<string, string>>({});
+  const [note, setNote] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const r = await api<{ reviews: Review[]; error?: string }>(`/api/admin/sales/reviews${status ? `?status=${status}` : ""}`);
+    if (r.ok) {
+      setRows(r.data.reviews);
+      if (r.data.error) setMsg(r.data.error);
+    } else setMsg(r.error);
+  }, [status]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function decide(id: string, decision: "APPROVED" | "REJECTED") {
+    const p = pct[id]?.trim();
+    const approvedPct = decision === "APPROVED" && p ? Number(p) : null;
+    if (approvedPct != null && !(approvedPct >= 0 && approvedPct <= 100)) return setMsg("批核 % 要喺 0–100");
+    if (decision === "REJECTED" && !(note[id] ?? "").trim()) return setMsg("拒絕要寫原因");
+    setBusy(id);
+    setMsg(null);
+    const r = await api<{ ok: true }>(`/api/admin/sales/reviews/${encodeURIComponent(id)}`, {
+      method: "POST",
+      body: JSON.stringify({ decision, approvedPct, note: (note[id] ?? "").trim() || null }),
+    });
+    setBusy(null);
+    if (!r.ok) setMsg(r.error);
+    await load();
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className={`${card} flex flex-wrap items-center gap-3`}>
+        <select id="sales-reviews-status" className={inputCls} value={status} onChange={(e) => setStatus(e.target.value as "" | Review["status"])}>
+          <option value="OPEN">待批</option>
+          <option value="APPROVED">已批</option>
+          <option value="REJECTED">已拒</option>
+          <option value="">全部</option>
+        </select>
+        <span className="text-xs text-t3">保護外病人開單、喺 Apricot 直接開兼填咗銷售員、或者銷售員被改嘅單 — 批咗先計傭金（可以批部分 %）。</span>
+      </div>
+      {msg && <p className="text-sm text-danger-text">{msg}</p>}
+      {!rows ? (
+        <WLoading />
+      ) : (
+        <div className="overflow-x-auto bg-panel rounded-[22px] border border-line">
+          <table className="w-full text-sm">
+            <thead className="bg-panel-2 text-left text-t2">
+              <tr>
+                <th className="px-4 py-2.5 text-[11px] font-semibold">單號</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold">原因</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold">銷售</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold">病人</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">金額</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">決定</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} className="border-b border-line last:border-0 align-top" data-e2e="sales-review-row">
+                  <td className="px-4 py-2 tabular-nums">
+                    {r.apricotBillCode ?? "—"}
+                    <div className="text-[11px] text-t3">{mdhm(r.createdAt)}</div>
+                  </td>
+                  <td className="px-4 py-2">{KIND_LABEL[r.kind] ?? r.kind}</td>
+                  <td className="px-4 py-2">{r.salesStaffName ?? (r.salesApricotUserId ? <span className="text-t3">未綁 inbox 帳號</span> : "—")}</td>
+                  <td className="px-4 py-2">
+                    {r.conversationId ? (
+                      <a className="text-brand-text hover:underline" href={`/inbox?conv=${encodeURIComponent(r.conversationId)}`}>
+                        {r.patientCode ?? r.patientApricotId?.slice(-8) ?? "對話"}
+                      </a>
+                    ) : (
+                      <span className="text-xs">{r.patientCode ?? r.patientApricotId?.slice(-8) ?? "—"}</span>
+                    )}
+                    {r.patientName && <span className="ml-1.5 text-t3 text-xs">{r.patientName}</span>}
+                  </td>
+                  <td className="px-4 py-2 text-right tabular-nums">{r.amount == null ? "—" : r.amount.toLocaleString("en-HK")}</td>
+                  <td className="px-4 py-2">
+                    {r.status === "OPEN" ? (
+                      <div className="flex flex-col items-end gap-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            aria-label="批幾多 %"
+                            inputMode="decimal"
+                            placeholder="100"
+                            className={`${inputCls} w-16 text-right text-xs`}
+                            value={pct[r.id] ?? ""}
+                            onChange={(e) => setPct({ ...pct, [r.id]: e.target.value })}
+                          />
+                          <span className="text-xs text-t3">%</span>
+                          <button disabled={busy === r.id} onClick={() => void decide(r.id, "APPROVED")} className="rounded-full bg-brand text-panel text-xs font-semibold px-3 py-1.5 disabled:opacity-40">
+                            批
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            aria-label="拒絕原因"
+                            placeholder="拒絕原因"
+                            maxLength={500}
+                            className={`${inputCls} w-40 text-xs`}
+                            value={note[r.id] ?? ""}
+                            onChange={(e) => setNote({ ...note, [r.id]: e.target.value })}
+                          />
+                          <button
+                            disabled={busy === r.id}
+                            onClick={() => void decide(r.id, "REJECTED")}
+                            className="rounded-full border border-line-strong bg-panel text-t1 text-xs px-3 py-1.5 hover:bg-panel-2 disabled:opacity-40"
+                          >
+                            拒
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-right text-xs">
+                        <span className={`px-2 py-0.5 rounded-full font-semibold ${r.status === "APPROVED" ? "bg-brand-soft text-brand-text" : "bg-panel-2 text-t2"}`}>
+                          {REVIEW_STATUS[r.status]}
+                          {r.status === "APPROVED" && r.approvedPct != null ? ` ${r.approvedPct}%` : ""}
+                        </span>
+                        {r.note && <div className="text-t3 mt-1">{r.note}</div>}
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-4 py-6 text-center text-t3 text-sm">
+                    冇需要對嘅單
                   </td>
                 </tr>
               )}
