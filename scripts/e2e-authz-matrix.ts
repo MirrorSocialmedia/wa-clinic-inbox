@@ -394,6 +394,33 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/sales/mine?month=2026-10" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 403 },
   },
+  "GET /api/admin/sales/month-close": {
+    // ★ cwi-sales 第 4 期：月結預覽 — 集團管理員
+    fixture: () => ({ url: "/api/admin/sales/month-close?month=2026-09" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
+  "POST /api/admin/sales/month-close": {
+    // 空 body → 400（零寫入）
+    fixture: () => ({ url: "/api/admin/sales/month-close", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
+  },
+  "POST /api/admin/sales/month-close/reopen": {
+    fixture: () => ({ url: "/api/admin/sales/month-close/reopen", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
+  },
+  "GET /api/admin/sales/commission-sync": {
+    fixture: () => ({ url: "/api/admin/sales/commission-sync" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
+  "POST /api/admin/sales/commission-sync": {
+    // 開始同步（mock = 記低時間）；分店 admin 403
+    fixture: () => ({ url: "/api/admin/sales/commission-sync", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403 },
+  },
+  "GET /api/admin/sales/report": {
+    fixture: () => ({ url: "/api/admin/sales/report?month=2026-09" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
   "GET /api/admin/clinics": {
     fixture: () => ({ url: "/api/admin/clinics" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, STAFF_YMT: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 }, // T631 斷言 CB 可見集合

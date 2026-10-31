@@ -1836,6 +1836,45 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
     const ids = (params.ids ?? "").split(",").filter(Boolean);
     return { v: 1, patients: ids.map((id) => ({ patientApricotId: id, lastPaymentAt: mockInvoiceStore.lastPayment.get(id) ?? null })) };
   }
+  if (path === "/api/external/v1/sales/month-close" && !method) return mockMonthPreview(params.month ?? "");
+  if (path === "/api/external/v1/sales/month-close" && method === "POST") {
+    const b = body as { month?: string; force?: boolean } | undefined;
+    const pv = mockMonthPreview(b?.month ?? "") as { closed: boolean; blockers: { code: string }[]; preClose: { ok: boolean } };
+    if (pv.closed) return { v: 1, month: b?.month, already: true, payouts: [], heldMoved: 0 };
+    if (pv.blockers.length) throw new WorkforceApiError(409, path, pv.blockers[0].code);
+    if (!pv.preClose.ok && !b?.force) throw new WorkforceApiError(409, path, "NEED_PRE_CLOSE_SYNC");
+    mockInvoiceStore.closedMonths.push(b!.month!);
+    mockSave();
+    return { v: 1, month: b?.month, already: false, payouts: [], heldMoved: 0 };
+  }
+  if (path === "/api/external/v1/sales/month-close/reopen" && method === "POST") {
+    const m = (body as { month?: string } | undefined)?.month ?? "";
+    const was = mockInvoiceStore.closedMonths.includes(m);
+    mockInvoiceStore.closedMonths = mockInvoiceStore.closedMonths.filter((x) => x !== m);
+    mockSave();
+    return { v: 1, reopened: was, adjustmentsRemoved: 0 };
+  }
+  if (path === "/api/external/v1/sales/commission-sync" && !method) {
+    return { v: 1, running: null, last: mockInvoiceStore.preCloseAt ? { id: "mock-run", trigger: "PRE_CLOSE", status: "OK", checked: mockInvoiceStore.invoices.size, requests: mockInvoiceStore.invoices.size, stopReason: null, startedAt: mockInvoiceStore.preCloseAt, finishedAt: mockInvoiceStore.preCloseAt } : null };
+  }
+  if (path === "/api/external/v1/sales/commission-sync" && method === "POST") {
+    mockInvoiceStore.preCloseAt = new Date().toISOString();
+    mockSave();
+    return { v: 1, started: true };
+  }
+  if (path === "/api/external/v1/sales/report" && !method) {
+    const m = params.month ?? "";
+    const pv = mockMonthPreview(m) as { closed: boolean; rows: unknown[] };
+    const rows = mockLedgerRows(null, m);
+    return {
+      v: 1, month: m, closed: pv.closed, bySales: pv.rows,
+      byClinic: rows.length ? [{ clinic: "TKW", counted: Math.round(rows.reduce((n, x) => n + x.row.countedAmt, 0) * 100) / 100, payments: rows.reduce((n, x) => n + x.row.paymentAmt, 0), lines: rows.length }] : [],
+      detail: rows.map((x) => ({
+        paidAt: x.row.paidAt.slice(0, 10), inboxStaffId: x.staffId, clinic: "TKW", billCode: x.row.billCode, patientApricotId: x.row.patientApricotId, items: "00021 IMPLANT 3%",
+        kind: x.row.kind, status: x.row.status, paymentCode: x.row.paymentCode, paymentAmt: x.row.paymentAmt, ratePct: x.row.ratePct, commissionAmt: x.row.commissionAmt, approvedPct: x.row.approvedPct, countedAmt: x.row.countedAmt,
+      })),
+    };
+  }
   const srd = path.match(/^\/api\/external\/v1\/sales\/reviews\/([^/]+)\/decision$/);
   if (srd && method === "POST") return mockDecideReview(decodeURIComponent(srd[1]), body, path);
   const qd = path.match(/^\/api\/external\/v1\/quotes\/([^/]+)\/decision$/);
@@ -2060,6 +2099,84 @@ export async function fetchPatientActivity(ids: string[]): Promise<{ patientApri
   return r.patients ?? [];
 }
 
+// ── ★ 第 4 期 月結／報表 ───────────────────────────────────────────────────────────────
+const PayoutRow = z.object({
+  inboxStaffId: z.string(),
+  employeeId: z.string().nullable(),
+  earned: z.number(),
+  carryIn: z.number(),
+  net: z.number(),
+  payout: z.number(),
+  carryOut: z.number(),
+  lines: z.number(),
+  held: z.number(),
+  payrollStatus: z.string().optional(),
+  payrollMonth: z.string().nullable().optional(),
+});
+export const MonthClosePreviewResponse = z.object({
+  v: z.literal(1),
+  month: z.string(),
+  closed: z.boolean(),
+  closedAt: z.string().nullable(),
+  forced: z.boolean(),
+  blockers: z.array(z.object({ code: z.string(), message: z.string() })),
+  preClose: z.object({ ok: z.boolean(), status: z.string().nullable(), finishedAt: z.string().nullable(), running: z.boolean() }),
+  rows: z.array(PayoutRow),
+  heldLines: z.number(),
+});
+export type MonthClosePreview = z.infer<typeof MonthClosePreviewResponse>;
+const RunInfo = z
+  .object({ id: z.string(), trigger: z.string(), status: z.string(), checked: z.number(), requests: z.number(), stopReason: z.string().nullable(), startedAt: z.string(), finishedAt: z.string().nullable() })
+  .nullable();
+export const CommissionSyncStateResponse = z.object({ v: z.literal(1), running: RunInfo, last: RunInfo });
+export const SalesReportResponse = z.object({
+  v: z.literal(1),
+  month: z.string(),
+  closed: z.boolean(),
+  bySales: z.array(PayoutRow),
+  byClinic: z.array(z.object({ clinic: z.string(), counted: z.number(), payments: z.number(), lines: z.number() })),
+  detail: z.array(
+    z.object({
+      paidAt: z.string(),
+      inboxStaffId: z.string(),
+      clinic: z.string(),
+      billCode: z.string().nullable(),
+      patientApricotId: z.string().nullable(),
+      items: z.string(),
+      kind: z.string(),
+      status: z.string(),
+      paymentCode: z.string().nullable(),
+      paymentAmt: z.number(),
+      ratePct: z.number(),
+      commissionAmt: z.number(),
+      approvedPct: z.number().nullable(),
+      countedAmt: z.number(),
+    })
+  ),
+});
+export type SalesReport = z.infer<typeof SalesReportResponse>;
+
+export async function fetchMonthClosePreview(month: string): Promise<MonthClosePreview> {
+  return MonthClosePreviewResponse.parse(await wfGet("/api/external/v1/sales/month-close", { month }));
+}
+export async function postMonthClose(month: string, force: boolean, staffId: string): Promise<{ already: boolean }> {
+  const r = (await wfSend("POST", "/api/external/v1/sales/month-close", {}, { month, force }, { "x-staff-id": staffId }, { timeoutMs: 60_000 })) as { already?: boolean };
+  return { already: !!r.already };
+}
+export async function postMonthReopen(month: string, staffId: string): Promise<{ reopened: boolean; adjustmentsRemoved: number }> {
+  const r = (await wfSend("POST", "/api/external/v1/sales/month-close/reopen", {}, { month }, { "x-staff-id": staffId }, { timeoutMs: 60_000 })) as { reopened?: boolean; adjustmentsRemoved?: number };
+  return { reopened: !!r.reopened, adjustmentsRemoved: r.adjustmentsRemoved ?? 0 };
+}
+export async function fetchCommissionSyncState(): Promise<z.infer<typeof CommissionSyncStateResponse>> {
+  return CommissionSyncStateResponse.parse(await wfGet("/api/external/v1/sales/commission-sync", {}));
+}
+export async function startPreCloseSync(staffId: string): Promise<void> {
+  await wfSend("POST", "/api/external/v1/sales/commission-sync", {}, {}, { "x-staff-id": staffId });
+}
+export async function fetchSalesReport(month: string): Promise<SalesReport> {
+  return SalesReportResponse.parse(await wfGet("/api/external/v1/sales/report", { month }, undefined, { timeoutMs: 30_000 }));
+}
+
 // ── 開單 mock（in-memory；同 workforce 一樣：requestKey 冪等、內容唔同 409、保護外 → 對單隊列）──
 // env：WORKFORCE_MOCK_INVOICE_WRITE=0 → 503 WRITE_DISABLED；WORKFORCE_MOCK_INVOICE_UNCONFIRMED=1 → 504 UNCONFIRMED
 type MockReview = SalesReviewRow;
@@ -2071,6 +2188,8 @@ const mockInvoiceStore = {
   /** 病人最後付款（test 可以 set） */
   lastPayment: new Map<string, string>(),
   seq: 0,
+  closedMonths: [] as string[],
+  preCloseAt: null as string | null,
 };
 /**
  * dev／CI e2e server（next dev / start）每條 route 可能有自己一份 module → in-memory store 唔共享
@@ -2087,12 +2206,16 @@ function mockLoad(): void {
       ownerChanges: typeof mockInvoiceStore.ownerChanges;
       lastPayment: [string, string][];
       seq: number;
+      closedMonths?: string[];
+      preCloseAt?: string | null;
     };
     mockInvoiceStore.invoices = new Map(j.invoices);
     mockInvoiceStore.reviews = new Map(j.reviews);
     mockInvoiceStore.ownerChanges = j.ownerChanges;
     mockInvoiceStore.lastPayment = new Map(j.lastPayment);
     mockInvoiceStore.seq = j.seq;
+    mockInvoiceStore.closedMonths = j.closedMonths ?? [];
+    mockInvoiceStore.preCloseAt = j.preCloseAt ?? null;
   } catch {
     /* 未有檔 = 空 store */
   }
@@ -2108,6 +2231,8 @@ function mockSave(): void {
       ownerChanges: mockInvoiceStore.ownerChanges,
       lastPayment: [...mockInvoiceStore.lastPayment],
       seq: mockInvoiceStore.seq,
+      closedMonths: mockInvoiceStore.closedMonths,
+      preCloseAt: mockInvoiceStore.preCloseAt,
     })
   );
 }
@@ -2117,6 +2242,8 @@ export function _resetMockInvoicesForTest(): void {
   mockInvoiceStore.reviews.clear();
   mockInvoiceStore.ownerChanges.length = 0;
   mockInvoiceStore.lastPayment.clear();
+  mockInvoiceStore.closedMonths = [];
+  mockInvoiceStore.preCloseAt = null;
   mockSave();
 }
 /** test-only：mock store（睇歸屬轉移、設病人最後付款） */
@@ -2160,6 +2287,31 @@ function mockLedgerSummary(month: string): unknown {
   const by = new Map<string, ReturnType<typeof mockLedgerRows>[number]["row"][]>();
   for (const x of mockLedgerRows(null, month)) by.set(x.staffId, [...(by.get(x.staffId) ?? []), x.row]);
   return { v: 1, month, closed: false, sales: [...by.entries()].map(([inboxStaffId, rows]) => ({ inboxStaffId, ...mockTotals(rows) })) };
+}
+/** mock 月結預覽：每個銷售出糧 = 當月已計（冇結轉）；當月／未來月 = NOT_ENDED */
+function mockMonthPreview(month: string): unknown {
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new WorkforceApiError(400, "/api/external/v1/sales/month-close", "BAD_MONTH");
+  const nowM = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 7);
+  const by = new Map<string, number>();
+  const held = new Map<string, number>();
+  const lines = new Map<string, number>();
+  for (const x of mockLedgerRows(null, month)) {
+    by.set(x.staffId, (by.get(x.staffId) ?? 0) + x.row.countedAmt);
+    if (x.row.status === "HELD") held.set(x.staffId, (held.get(x.staffId) ?? 0) + x.row.commissionAmt);
+    else lines.set(x.staffId, (lines.get(x.staffId) ?? 0) + 1);
+  }
+  const closed = mockInvoiceStore.closedMonths.includes(month);
+  const preOk = !!mockInvoiceStore.preCloseAt && mockMonth(mockInvoiceStore.preCloseAt) > month;
+  return {
+    v: 1, month, closed, closedAt: closed ? new Date().toISOString() : null, forced: false,
+    blockers: closed ? [] : month >= nowM ? [{ code: "NOT_ENDED", message: "呢個月未完 — 下個月先結得" }] : [],
+    preClose: { ok: preOk, status: mockInvoiceStore.preCloseAt ? "OK" : null, finishedAt: mockInvoiceStore.preCloseAt, running: false },
+    heldLines: [...held.values()].length,
+    rows: [...new Set([...by.keys(), ...held.keys()])].map((id) => {
+      const e = Math.round((by.get(id) ?? 0) * 100) / 100;
+      return { inboxStaffId: id, employeeId: null, earned: e, carryIn: 0, net: e, payout: Math.max(0, e), carryOut: Math.min(0, e), lines: lines.get(id) ?? 0, held: held.get(id) ?? 0, ...(closed ? { payrollStatus: e > 0 ? "ADDED" : "NONE", payrollMonth: e > 0 ? month : null } : {}) };
+    }),
+  };
 }
 function mockMyInvoices(staffId: string) {
   return [...mockInvoiceStore.invoices.values()]

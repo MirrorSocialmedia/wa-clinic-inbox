@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * ★ cwi-sales-20261028：/admin/sales client — 規則設定｜傭金項目｜病人歸屬｜對單（第 2 期）｜傭金（第 3 期）。
+ * ★ cwi-sales-20261028：/admin/sales client — 規則設定｜傭金項目｜病人歸屬｜對單（第 2 期）｜傭金（第 3 期）｜月結（第 4 期）。
  * 數據：/api/admin/sales/settings、/catalog、/catalog/refresh、/commission-items、/owners、/reviews。
  * 寫入只限集團管理員（server 403 會顯示原因）。
  */
@@ -9,7 +9,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { WLoading } from "@/components/ui/w-loader";
 
-type Tab = "settings" | "items" | "owners" | "reviews" | "commission";
+type Tab = "settings" | "items" | "owners" | "reviews" | "commission" | "close";
 
 interface Settings {
   protectionDays: number;
@@ -110,6 +110,7 @@ export default function SalesAdminClient() {
               ["owners", "病人歸屬"],
               ["reviews", "對單"],
               ["commission", "傭金"],
+              ["close", "月結"],
             ] as [Tab, string][]
           ).map(([k, l]) => (
             <button
@@ -129,6 +130,7 @@ export default function SalesAdminClient() {
       {tab === "owners" && <OwnersTab />}
       {tab === "reviews" && <ReviewsTab />}
       {tab === "commission" && <CommissionTab />}
+      {tab === "close" && <CloseTab />}
     </div>
   );
 }
@@ -849,6 +851,219 @@ function CommissionTab() {
               )}
             </tbody>
           </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface CloseRow {
+  inboxStaffId: string;
+  name: string;
+  active: boolean;
+  earned: number;
+  carryIn: number;
+  net: number;
+  payout: number;
+  carryOut: number;
+  lines: number;
+  held: number;
+  payrollStatus?: string;
+  payrollMonth?: string | null;
+}
+interface RunInfo {
+  status: string;
+  trigger: string;
+  checked: number;
+  requests: number;
+  stopReason: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+interface CloseView {
+  month: string;
+  closed: boolean;
+  closedAt: string | null;
+  forced: boolean;
+  blockers: { code: string; message: string }[];
+  preClose: { ok: boolean; status: string | null; finishedAt: string | null; running: boolean };
+  sync: { running: RunInfo | null; last: RunInfo | null };
+  rows: CloseRow[];
+  heldLines: number;
+}
+const PAYROLL_TEXT: Record<string, string> = { ADDED: "已入計糧", NONE: "冇出糧", NO_EMPLOYEE: "未綁員工 — 要人手", MANUAL: "已離職 — 離職結算人手處理" };
+const prevMonth = () => {
+  const d = new Date(Date.now() + 8 * 3600_000);
+  d.setUTCDate(1);
+  d.setUTCMonth(d.getUTCMonth() - 1);
+  return d.toISOString().slice(0, 7);
+};
+
+/** 老闆月結：預覽 → 月結前同步 → 確認月結（出糧入 workforce 計糧調整；負數結轉）→ 報表 CSV；可重開 */
+function CloseTab() {
+  const [month, setMonth] = useState(prevMonth());
+  const [view, setView] = useState<CloseView | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setMsg(null);
+    const r = await api<CloseView>(`/api/admin/sales/month-close?month=${month}`);
+    if (r.ok) setView(r.data);
+    else {
+      setView(null);
+      setMsg(r.error);
+    }
+  }, [month]);
+  useEffect(() => {
+    setView(null);
+    void load();
+  }, [load]);
+  // 同步緊 → 每 15 秒睇吓完未
+  useEffect(() => {
+    if (!view?.sync.running && !view?.preClose.running) return;
+    const t = window.setInterval(() => void load(), 15_000);
+    return () => window.clearInterval(t);
+  }, [view?.sync.running, view?.preClose.running, load]);
+
+  async function act(url: string, body: Record<string, unknown>, ok: string) {
+    setBusy(true);
+    setMsg(null);
+    const r = await api<Record<string, unknown>>(url, { method: "POST", body: JSON.stringify(body) });
+    setBusy(false);
+    setMsg(r.ok ? ok : r.error);
+    await load();
+  }
+  async function close() {
+    if (!view) return;
+    const total = view.rows.reduce((n, r) => n + r.payout, 0);
+    let force = false;
+    if (!view.preClose.ok) {
+      if (!window.confirm("未做月結前同步（或者上次未完成）— 可能漏咗最近嘅付款／作廢。確定照結？")) return;
+      force = true;
+    } else if (!window.confirm(`確定結 ${view.month}？出糧合共 ${hkd(total)} 會入 workforce 計糧調整。`)) return;
+    await act("/api/admin/sales/month-close", { month: view.month, force }, `${view.month} 已月結`);
+  }
+  async function reopen() {
+    if (!view || !window.confirm(`重開 ${view.month}？已入嘅計糧調整會刪走（審計睇得返）。`)) return;
+    await act("/api/admin/sales/month-close/reopen", { month: view.month }, `${view.month} 已重開`);
+  }
+
+  const total = (view?.rows ?? []).reduce((n, r) => n + r.payout, 0);
+  const run = view?.sync.running ?? view?.sync.last ?? null;
+  return (
+    <div className="space-y-4">
+      <div className={`${card} flex flex-wrap items-center gap-3`}>
+        <input type="month" aria-label="月份" className={inputCls} value={month} max={hkNowMonth()} onChange={(e) => e.target.value && setMonth(e.target.value)} />
+        {view && (
+          <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${view.closed ? "bg-brand-soft text-brand-text" : "bg-panel-2 text-t2"}`}>
+            {view.closed ? `已月結${view.forced ? "（冇同步照結）" : ""}` : "未月結"}
+          </span>
+        )}
+        <span className="text-sm text-t1 font-semibold tabular-nums">出糧合共 {hkd(total)}</span>
+        <a href={`/api/admin/sales/report?month=${month}`} className="ml-auto rounded-full border border-line-strong bg-panel text-t1 text-xs px-3 py-1.5 hover:bg-panel-2" data-e2e="sales-report-csv">
+          下載報表 CSV
+        </a>
+      </div>
+
+      {view && !view.closed && (
+        <div className={`${card} flex flex-wrap items-center gap-3 text-sm`}>
+          <div className="min-w-0">
+            <div className="font-semibold text-t1">月結前同步</div>
+            <div className="text-xs text-t3">
+              {view.sync.running
+                ? `同步緊…（已查 ${view.sync.running.checked} 張單）`
+                : view.preClose.ok
+                  ? `已完成（${mdhm(view.preClose.finishedAt)}）`
+                  : run
+                    ? `未做（上次：${run.trigger === "PRE_CLOSE" ? "月結前" : "每晚"} ${run.status}${run.stopReason ? ` · ${run.stopReason}` : ""} · ${mdhm(run.finishedAt ?? run.startedAt)}）`
+                    : "未做"}
+              {" "}— 全部追蹤緊嘅單慢慢查一次（每張單一次，唔似攻擊），可能要幾十分鐘
+            </div>
+          </div>
+          <button
+            disabled={busy || !!view.sync.running}
+            onClick={() => void act("/api/admin/sales/commission-sync", {}, "已開始同步 — 完成後會自動更新")}
+            className="ml-auto rounded-full border border-line-strong bg-panel text-t1 text-xs px-3 py-1.5 hover:bg-panel-2 disabled:opacity-40"
+            data-e2e="sales-preclose-sync"
+          >
+            月結前同步
+          </button>
+        </div>
+      )}
+
+      {msg && <p className="text-sm text-danger-text">{msg}</p>}
+      {view?.blockers.map((b) => (
+        <p key={b.code} className="text-sm text-t2">
+          ⚠ {b.message}
+        </p>
+      ))}
+
+      {!view ? (
+        !msg && <WLoading />
+      ) : (
+        <div className="overflow-x-auto bg-panel rounded-[22px] border border-line">
+          <table className="w-full text-sm">
+            <thead className="bg-panel-2 text-left text-t2">
+              <tr>
+                <th className="px-4 py-2.5 text-[11px] font-semibold">銷售</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">當月已計</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">上月結轉</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">出糧</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">結轉下月</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold text-right">等批</th>
+                <th className="px-4 py-2.5 text-[11px] font-semibold">{view.closed ? "糧單" : "筆數"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {view.rows.map((r) => (
+                <tr key={r.inboxStaffId} className="border-b border-line last:border-0" data-e2e="sales-close-row">
+                  <td className="px-4 py-2">
+                    {r.name}
+                    {!r.active && <span className="ml-1.5 text-[11px] text-t3">（已停用）</span>}
+                  </td>
+                  <td className="px-4 py-2 text-right tabular-nums">{hkd(r.earned)}</td>
+                  <td className="px-4 py-2 text-right tabular-nums">{r.carryIn ? hkd(r.carryIn) : "—"}</td>
+                  <td className="px-4 py-2 text-right tabular-nums font-semibold">{hkd(r.payout)}</td>
+                  <td className="px-4 py-2 text-right tabular-nums">{r.carryOut ? hkd(r.carryOut) : "—"}</td>
+                  <td className="px-4 py-2 text-right tabular-nums">{r.held ? `${hkd(r.held)} → 下月` : "—"}</td>
+                  <td className="px-4 py-2 text-xs">
+                    {view.closed ? `${PAYROLL_TEXT[r.payrollStatus ?? ""] ?? r.payrollStatus ?? "—"}${r.payrollMonth && r.payrollMonth !== view.month ? `（${r.payrollMonth} 糧單）` : ""}` : r.lines}
+                  </td>
+                </tr>
+              ))}
+              {view.rows.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-6 text-center text-t3 text-sm">
+                    呢個月冇傭金
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {view && (
+        <div className="flex flex-wrap items-center gap-3">
+          {!view.closed ? (
+            <button
+              disabled={busy || view.blockers.length > 0 || !!view.sync.running}
+              onClick={() => void close()}
+              className="rounded-full bg-brand text-panel text-sm font-semibold px-4 py-2 disabled:opacity-40"
+              data-e2e="sales-close-confirm"
+            >
+              確認月結 {view.month}
+            </button>
+          ) : (
+            <button disabled={busy} onClick={() => void reopen()} className="rounded-full border border-line-strong bg-panel text-t1 text-sm px-4 py-2 hover:bg-panel-2 disabled:opacity-40" data-e2e="sales-close-reopen">
+              重開 {view.month}
+            </button>
+          )}
+          <span className="text-xs text-t3">
+            出糧 &gt; 0 入 workforce 計糧調整（計 MPF）；負數唔扣底薪，結轉落下個月；等批嘅帶落下個月，批咗先計；嗰個月糧單已確認就入下個月。
+            嗰個月嘅計糧草稿如果已經生成，要喺 workforce 重新生成先會見到傭金。
+          </span>
         </div>
       )}
     </div>
