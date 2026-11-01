@@ -140,6 +140,10 @@ test("W3 對單收養：未綁 inbox → 409；綁咗 → adopt", async () => {
   assert.equal(store.reviews.get("salw-rev-1")?.status, "REJECTED");
   await decideReviewFromInbox("salw-rev-2", { decision: "APPROVED", approvedPct: 80 }, adm);
   assert.equal(store.reviews.get("salw-rev-2")?.status, "APPROVED");
+  // ★ 第 5 期（R4）：批咗直接開嘅單 → 冇人負責嘅病人綁定畀嗰個銷售
+  const bound = await prisma.salesOwnership.findUnique({ where: { patientApricotId: PIDS[3] } });
+  assert.equal(bound?.state, "BOUND");
+  assert.equal(bound?.salesStaffId, a);
 });
 
 test("W4 綁定自動解除", async () => {
@@ -147,6 +151,7 @@ test("W4 綁定自動解除", async () => {
   const old = new Date(Date.now() - 800 * 86_400_000);
   const recentPay = new Date(Date.now() - 30 * 86_400_000).toISOString();
   const oldPay = new Date(Date.now() - 760 * 86_400_000).toISOString();
+  await prisma.salesOwnership.deleteMany({ where: { patientApricotId: PIDS[3] } }); // W3 批單綁咗（R4）— 呢度重新砌
   await prisma.salesOwnership.update({ where: { patientApricotId: PIDS[0] }, data: { since: old } }); // A：舊付款 → 放
   await prisma.salesOwnership.create({ data: { patientApricotId: PIDS[1], state: "BOUND", salesStaffId: b, lastSalesStaffId: b, since: old } }); // 近排有付款 → 留
   await prisma.salesOwnership.create({ data: { patientApricotId: PIDS[3], state: "BOUND", salesStaffId: b, lastSalesStaffId: b, since: old } }); // workforce 冇回 → 留

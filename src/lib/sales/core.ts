@@ -40,6 +40,11 @@ export async function getSalesSettings(db: Db = prisma): Promise<SalesSettings> 
   return db.salesSettings.upsert({ where: { id: "global" }, create: { id: "global" }, update: {} });
 }
 
+/** 保護期日數：開過高價傭金項目單（highValue）→ 用「高價項目保護期」（取較長） */
+export function protectionDaysFor(settings: Pick<SalesSettings, "protectionDays" | "highValueProtectionDays">, highValue: boolean | null | undefined): number {
+  return highValue ? Math.max(settings.protectionDays, settings.highValueProtectionDays) : settings.protectionDays;
+}
+
 /** 預約日後 N 日嘅 23:59:59.999（香港時間） */
 export function protectedUntilFor(apptDate: string, days: number): Date {
   const end = hkDateOffset(days, new Date(`${apptDate}T12:00:00+08:00`));
@@ -148,7 +153,8 @@ async function recordSalesBookingInner(input: RecordSalesBookingInput): Promise<
       if (held >= settings.concurrentCap) {
         outcome = "CAP_REACHED";
       } else {
-        const data = { state: "PROTECTED" as const, salesStaffId, lastSalesStaffId: salesStaffId, protectedUntil: until, rounds: 1, noShowStreak: 0, since: now, ...apptFields };
+        // 新一輪保護：高價標記重置（要再開高價單先用長保護期）
+        const data = { state: "PROTECTED" as const, salesStaffId, lastSalesStaffId: salesStaffId, protectedUntil: until, rounds: 1, noShowStreak: 0, highValue: false, expiryRemindedFor: null, since: now, ...apptFields };
         await tx.salesOwnership.upsert({ where: { patientApricotId: input.patientApricotId }, create: { patientApricotId: input.patientApricotId, ...data }, update: data });
         outcome = "PROTECTED";
       }
@@ -160,7 +166,8 @@ async function recordSalesBookingInner(input: RecordSalesBookingInput): Promise<
     } else if (own.rounds >= settings.cycleCap) {
       outcome = "CYCLE_CAP";
     } else {
-      const keep = own.protectedUntil && own.protectedUntil > until ? own.protectedUntil : until;
+      const renewUntil = protectedUntilFor(input.apptDate, protectionDaysFor(settings, own.highValue));
+      const keep = own.protectedUntil && own.protectedUntil > renewUntil ? own.protectedUntil : renewUntil;
       await tx.salesOwnership.update({ where: { id: own.id }, data: { protectedUntil: keep, rounds: own.rounds + 1, ...apptFields } });
       outcome = "RENEWED";
     }
@@ -218,7 +225,7 @@ export async function rescheduleSalesBooking(input: { oldApptId: string; newAppt
       if (own?.state === "PROTECTED" && own.salesStaffId === old.salesStaffId && own.lastApptId === input.oldApptId) {
         await tx.salesOwnership.update({
           where: { id: own.id },
-          data: { lastApptId: input.newApptId, lastApptDate: input.newDate, protectedUntil: protectedUntilFor(input.newDate, settings.protectionDays) },
+          data: { lastApptId: input.newApptId, lastApptDate: input.newDate, protectedUntil: protectedUntilFor(input.newDate, protectionDaysFor(settings, own.highValue)) },
         });
       }
     });
@@ -269,17 +276,18 @@ export async function expireProtections(now: Date = new Date(), lookup: FutureAp
     }
     const next = future.filter((a) => a.date >= today).sort((a, b) => a.date.localeCompare(b.date))[0];
     // 延期都計一輪：銷售自己喺 Apricot 直接 book（inbox 唔知）唔可以無限延長保護期 — 到循環上限就出公海
-    if (next && own.rounds < settings.cycleCap && protectedUntilFor(next.date, settings.protectionDays) > now) {
+    const nextUntil = next ? protectedUntilFor(next.date, protectionDaysFor(settings, own.highValue)) : null;
+    if (next && nextUntil && own.rounds < settings.cycleCap && nextUntil > now) {
       await prisma.salesOwnership.updateMany({
         where: { id: own.id, state: "PROTECTED", updatedAt: own.updatedAt },
-        data: { protectedUntil: protectedUntilFor(next.date, settings.protectionDays), lastApptId: next.apricotApptId, lastApptDate: next.date, rounds: own.rounds + 1 },
+        data: { protectedUntil: nextUntil, lastApptId: next.apricotApptId, lastApptDate: next.date, rounds: own.rounds + 1 },
       });
       out.extended++;
       continue;
     }
     const res = await prisma.salesOwnership.updateMany({
       where: { id: own.id, state: "PROTECTED", updatedAt: own.updatedAt },
-      data: { state: "POOL", salesStaffId: null, lastSalesStaffId: own.salesStaffId, protectedUntil: null, rounds: 0, since: now },
+      data: { state: "POOL", salesStaffId: null, lastSalesStaffId: own.salesStaffId, protectedUntil: null, rounds: 0, highValue: false, expiryRemindedFor: null, since: now },
     });
     if (res.count !== 1) continue;
     out.pooled++;
@@ -373,13 +381,78 @@ export class SalesLockedError extends Error {
   }
 }
 
-/** 發送前守門：鎖住而唔係負責人／被轉交 → throw SalesLockedError（route 轉 423） */
+/** 發送前守門：鎖住而唔係負責人／被轉交 → throw SalesLockedError（route 轉 423）；急症例外（見 allowUrgentOverride） */
 export async function assertCanReplyUnderSalesLock(conversationId: string, staffId: string): Promise<void> {
   const lock = await conversationSalesLock(conversationId);
-  if (!canReplyUnderLock(lock, staffId)) throw new SalesLockedError(lock.owners);
+  if (canReplyUnderLock(lock, staffId)) return;
+  if (await allowUrgentOverride(conversationId, staffId, lock)) return;
+  throw new SalesLockedError(lock.owners);
+}
+
+/** 對話係咪急症（AI 判斷牙痛流血等自動標；同事亦可以手動標） */
+export async function isUrgentConversation(conversationId: string, db: Db = prisma): Promise<boolean> {
+  return !!(await db.conversation.findUnique({ where: { id: conversationId }, select: { urgent: true } }))?.urgent;
+}
+
+const URGENT_NOTIFY_GAP_MS = 30 * 60_000;
+
+/**
+ * ★ 第 5 期（員工審視 R1）：病人安全 — 急症對話任何同事都可以覆，唔使等銷售轉交。
+ * 每次覆都留審計（SALES_LOCK_URGENT_OVERRIDE）；通知負責銷售（同一對話 30 分鐘最多一次）。
+ * 回 true = 照准發送。
+ */
+export async function allowUrgentOverride(conversationId: string, staffId: string, lock: ConversationSalesLock): Promise<boolean> {
+  if (lock.owners.length === 0) return true;
+  if (!(await isUrgentConversation(conversationId))) return false;
+  await prisma.auditLog.create({
+    data: { staffId, action: "SALES_LOCK_URGENT_OVERRIDE", entity: "Conversation", entityId: conversationId, meta: { owners: [...new Set(lock.owners.map((o) => o.staffId))] } },
+  });
+  const recent = await prisma.staffNotice.findFirst({
+    where: { conversationId, kind: "SALES_HANDOVER", title: { contains: "急症" }, createdAt: { gt: new Date(Date.now() - URGENT_NOTIFY_GAP_MS) } },
+    select: { id: true },
+  });
+  if (!recent) {
+    const who = (await prisma.staffUser.findUnique({ where: { id: staffId }, select: { name: true } }))?.name ?? "同事";
+    await notifyStaff(
+      lock.owners.map((o) => o.staffId),
+      conversationId,
+      "SALES_HANDOVER",
+      `銷售 · 急症：${who} 代你覆咗你負責嘅病人`,
+      { reason: "URGENT_OVERRIDE", byStaffId: staffId }
+    );
+  }
+  return true;
 }
 
 // ── 通知 ────────────────────────────────────────────────────────────────────
+
+/**
+ * ★ 第 5 期：冇對話嘅定向通知（對單結果／同步停咗）— 每個人掛喺佢自己嘅主店（bell 按店 scope 讀）；
+ * ADMIN（全店）冇 StaffClinic → 用任何一間店。撳通知 → 前端按 kind 去「我的銷售」／「銷售」管理。
+ */
+export async function notifyStaffDirect(staffIds: string[], kind: "SALES_REVIEW" | "SALES_ADMIN", title: string, meta: Record<string, unknown> = {}): Promise<void> {
+  const targets = [...new Set(staffIds.filter(Boolean))];
+  if (targets.length === 0) return;
+  try {
+    const [links, staff, anyClinic] = await Promise.all([
+      prisma.staffClinic.findMany({ where: { staffId: { in: targets } }, orderBy: { isPrimary: "desc" }, select: { staffId: true, clinicId: true } }),
+      prisma.staffUser.findMany({ where: { id: { in: targets } }, select: { id: true, clinicId: true } }),
+      prisma.clinic.findFirst({ orderBy: { code: "asc" }, select: { id: true } }),
+    ]);
+    const clinicOf = new Map<string, string>();
+    for (const l of links) if (!clinicOf.has(l.staffId)) clinicOf.set(l.staffId, l.clinicId);
+    for (const s of staff) if (!clinicOf.has(s.id) && s.clinicId) clinicOf.set(s.id, s.clinicId);
+    const { publishStaffNotify } = await import("@/lib/notify");
+    for (const sid of targets) {
+      const clinicId = clinicOf.get(sid) ?? anyClinic?.id;
+      if (!clinicId) continue;
+      const notice = await prisma.staffNotice.create({ data: { clinicId, conversationId: null, kind, title, targetStaffIds: [sid], meta: meta as Prisma.InputJsonValue } });
+      publishStaffNotify(sid, clinicId, "notice:new", { conversationId: null, clinicId, kind, noticeId: notice.id });
+    }
+  } catch (err) {
+    log.warn({ kind, err: err instanceof Error ? err.message : String(err) }, "sales: 通知失敗（best-effort）");
+  }
+}
 
 export async function notifyStaff(
   staffIds: string[],

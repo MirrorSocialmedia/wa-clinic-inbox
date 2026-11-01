@@ -19,7 +19,8 @@ const putSchema = z
     highValueProtectionDays: z.number().int().min(1).max(180),
     maxDaysAhead: z.number().int().min(1).max(180),
     cycleCap: z.number().int().min(1).max(20),
-    noShowCap: z.number().int().min(1).max(10),
+    noShowCap: z.number().int().min(0).max(10), // ★ 第 5 期：0 = 唔因爽約放走（只記錄）
+    expiryRemindDays: z.number().int().min(0).max(14), // ★ 第 5 期：保護期到期前 N 日提醒（0 = 唔提）
     concurrentCap: z.number().int().min(1).max(1000),
     boundAutoReleaseMonths: z.number().int().min(1).max(120),
     unansweredNotifyMinutes: z.number().int().min(5).max(24 * 60),

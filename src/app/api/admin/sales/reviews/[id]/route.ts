@@ -1,6 +1,6 @@
 /**
  * ★ cwi-sales 第 2 期：POST /api/admin/sales/reviews/[id] — 老闆對單決定（集團管理員）。
- * body { decision: "APPROVED"|"REJECTED", approvedPct?: 0–100（預設 100）, note?（拒絕必填） }
+ * body { decision: "APPROVED"|"REJECTED"|"ACKNOWLEDGED"（★ 第 5 期：只限「單被修改」）, approvedPct?: 0–100（預設 100）, note?（拒絕必填） }
  * 同一決定重撳 = 冪等；已決定成另一樣 → 409。AuditLog SALES_REVIEW_DECIDED（只 id + 決定）。
  */
 import { type NextRequest, NextResponse } from "next/server";
@@ -18,7 +18,7 @@ type Ctx = { params: Promise<{ id: string }> };
 
 const bodySchema = z
   .object({
-    decision: z.enum(["APPROVED", "REJECTED"]),
+    decision: z.enum(["APPROVED", "REJECTED", "ACKNOWLEDGED"]),
     approvedPct: z.number().min(0).max(100).nullish(),
     note: z.string().max(500).nullish(),
   })
@@ -30,6 +30,7 @@ const MESSAGES: Record<string, string> = {
   ALREADY_DECIDED: "呢項已經決定咗",
   ADOPT_STAFF_REQUIRED: "呢張單嘅銷售員未綁 inbox 帳號",
   NOT_FOUND: "搵唔到呢項",
+  BAD_DECISION: "呢項唔可以咁決定",
 };
 
 export const POST = handle(async (req: NextRequest, ctxP: Ctx) => {
@@ -41,8 +42,9 @@ export const POST = handle(async (req: NextRequest, ctxP: Ctx) => {
   if (!parsed.success) return NextResponse.json({ error: "bad_request", message: "資料唔齊" }, { status: 400 });
   const b = parsed.data;
   if (b.decision === "REJECTED" && !(b.note ?? "").trim()) return NextResponse.json({ error: "NOTE_REQUIRED", message: MESSAGES.NOTE_REQUIRED }, { status: 400 });
+  let bound = false;
   try {
-    await decideReviewFromInbox(id, { decision: b.decision, approvedPct: b.approvedPct ?? null, note: b.note ?? null }, admin.staff.id);
+    ({ bound } = await decideReviewFromInbox(id, { decision: b.decision, approvedPct: b.approvedPct ?? null, note: b.note ?? null }, admin.staff.id));
   } catch (err) {
     if (err instanceof SalesActionError) return NextResponse.json({ error: err.code, message: err.message }, { status: err.status });
     if (err instanceof WorkforceApiError) {
@@ -53,7 +55,7 @@ export const POST = handle(async (req: NextRequest, ctxP: Ctx) => {
     throw err;
   }
   await prisma.auditLog.create({
-    data: { staffId: admin.staff.id, action: "SALES_REVIEW_DECIDED", entity: "SalesReview", entityId: id, meta: { decision: b.decision, pct: b.approvedPct ?? null } },
+    data: { staffId: admin.staff.id, action: "SALES_REVIEW_DECIDED", entity: "SalesReview", entityId: id, meta: { decision: b.decision, pct: b.approvedPct ?? null, bound } },
   });
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, bound });
 });

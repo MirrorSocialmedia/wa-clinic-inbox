@@ -84,7 +84,7 @@ export async function assignOwnership(input: { byStaffId: string; patientApricot
   }
   const settings = await getSalesSettings();
   const until = input.state === "PROTECTED" ? protectedUntilFor(hkDateOffset(0), settings.protectionDays) : null;
-  const data = { state: input.state, salesStaffId: to.id, lastSalesStaffId: to.id, protectedUntil: until, rounds: input.state === "PROTECTED" ? 1 : 0, since: new Date() };
+  const data = { state: input.state, salesStaffId: to.id, lastSalesStaffId: to.id, protectedUntil: until, rounds: input.state === "PROTECTED" ? 1 : 0, noShowStreak: 0, highValue: false, expiryRemindedFor: null, since: new Date() };
   await prisma.salesOwnership.upsert({ where: { patientApricotId: input.patientApricotId }, create: { patientApricotId: input.patientApricotId, ...data }, update: data });
   await audit(input.byStaffId, "SALES_OWNER_ASSIGNED", input.patientApricotId, { toStaffId: to.id, state: input.state });
   await notifyNewOwner(to.id, input.patientApricotId, input.state === "BOUND" ? "銷售 · 老闆將一個病人綁定畀你" : "銷售 · 老闆將一個病人交畀你跟（保護中）");
@@ -133,7 +133,7 @@ export async function releaseOwnership(input: { byStaffId: string; patientAprico
   if (!own || own.state === "POOL") return;
   await prisma.salesOwnership.update({
     where: { id: own.id },
-    data: { state: "POOL", salesStaffId: null, lastSalesStaffId: own.salesStaffId, protectedUntil: null, rounds: 0, since: new Date() },
+    data: { state: "POOL", salesStaffId: null, lastSalesStaffId: own.salesStaffId, protectedUntil: null, rounds: 0, highValue: false, expiryRemindedFor: null, since: new Date() },
   });
   await audit(input.byStaffId, "SALES_OWNER_RELEASED", input.patientApricotId, { fromStaffId: own.salesStaffId, state: own.state });
 }

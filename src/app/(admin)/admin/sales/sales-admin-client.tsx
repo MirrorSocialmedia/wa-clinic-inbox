@@ -17,6 +17,7 @@ interface Settings {
   maxDaysAhead: number;
   cycleCap: number;
   noShowCap: number;
+  expiryRemindDays: number;
   concurrentCap: number;
   boundAutoReleaseMonths: number;
   unansweredNotifyMinutes: number;
@@ -58,12 +59,13 @@ interface Owner {
   conversationId: string | null;
 }
 
-const NUM_FIELDS: { key: keyof Settings; label: string; unit: string }[] = [
+const NUM_FIELDS: { key: keyof Settings; label: string; unit: string; min?: number }[] = [
   { key: "protectionDays", label: "保護期（預約日後）", unit: "日" },
   { key: "highValueProtectionDays", label: "高價項目保護期", unit: "日" },
   { key: "maxDaysAhead", label: "預約日最遠幾耐先有保護", unit: "日內" },
   { key: "cycleCap", label: "循環邀約上限", unit: "輪" },
-  { key: "noShowCap", label: "連續 no-show 出公海", unit: "次" },
+  { key: "noShowCap", label: "連續 no-show 出公海（0 = 唔放）", unit: "次", min: 0 },
+  { key: "expiryRemindDays", label: "保護期到期前提醒銷售（0 = 唔提）", unit: "日前", min: 0 },
   { key: "concurrentCap", label: "每人同時保護中病人上限", unit: "個" },
   { key: "boundAutoReleaseMonths", label: "綁定病人冇付款自動解除", unit: "個月" },
   { key: "unansweredNotifyMinutes", label: "綁定對話冇人覆通知主管", unit: "分鐘" },
@@ -98,6 +100,15 @@ const inputCls = "rounded-full border border-line-strong bg-panel px-3 py-1.5 te
 
 export default function SalesAdminClient() {
   const [tab, setTab] = useState<Tab>("settings");
+  // ★ 第 5 期（U7）：對單待批數 badge（老闆一入嚟就見到有幾多要批；workforce 連唔到 = 唔顯示）
+  const [openReviews, setOpenReviews] = useState<number | null>(null);
+  const refreshOpen = useCallback(async () => {
+    const r = await api<{ reviews: { status: string }[] }>("/api/admin/sales/reviews?status=OPEN");
+    setOpenReviews(r.ok ? r.data.reviews.length : null);
+  }, []);
+  useEffect(() => {
+    void refreshOpen();
+  }, [refreshOpen, tab]);
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -121,6 +132,11 @@ export default function SalesAdminClient() {
               className={`rounded-full px-3.5 py-1.5 text-xs font-semibold border ${tab === k ? "bg-brand text-panel border-brand" : "bg-panel-2 text-t2 border-line-strong hover:bg-black/[.06]"}`}
             >
               {l}
+              {k === "reviews" && (openReviews ?? 0) > 0 && (
+                <span className={`ml-1.5 inline-flex min-w-[18px] justify-center rounded-full px-1 text-[10px] ${tab === k ? "bg-panel text-brand-text" : "bg-brand text-panel"}`} data-e2e="sales-reviews-badge">
+                  {openReviews}
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -166,7 +182,7 @@ function SettingsTab() {
               <input
                 id={`sales-setting-${f.key}`}
                 type="number"
-                min={1}
+                min={f.min ?? 1}
                 className={`${inputCls} w-20 text-right tabular-nums`}
                 value={s[f.key] as number}
                 onChange={(e) => setS({ ...s, [f.key]: Number(e.target.value) })}
@@ -220,8 +236,9 @@ function ItemsTab() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [rows, setRows] = useState<Map<string, ItemRow>>(new Map());
   const [q, setQ] = useState("");
+  const [onlyUnset, setOnlyUnset] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"load" | "save" | "refresh" | null>(null);
+  const [busy, setBusy] = useState<"load" | "save" | "refresh" | "copy" | null>(null);
 
   useEffect(() => {
     void api<ClinicOpt[]>("/api/admin/clinics").then((r) => {
@@ -254,10 +271,30 @@ function ItemsTab() {
     void load(clinicId);
   }, [clinicId, load]);
 
+  // ★ 第 5 期（U6）：未設定 = 從來冇揀過計唔計（新項目由 Apricot 加入）— 提老闆睇吓要唔要計傭金
+  const unsetCount = useMemo(() => (catalog?.feeItems ?? []).filter((f) => !rows.has(f.extId)).length, [catalog, rows]);
   const visible = useMemo(() => {
     const term = q.trim().toLowerCase();
-    return (catalog?.feeItems ?? []).filter((f) => !term || f.code.toLowerCase().includes(term) || f.des.toLowerCase().includes(term));
-  }, [catalog, q]);
+    return (catalog?.feeItems ?? [])
+      .filter((f) => !onlyUnset || !rows.has(f.extId))
+      .filter((f) => !term || f.code.toLowerCase().includes(term) || f.des.toLowerCase().includes(term));
+  }, [catalog, q, onlyUnset, rows]);
+
+  async function copyToAll() {
+    const from = clinics.find((c) => c.id === clinicId)?.code ?? "";
+    if (!window.confirm(`將 ${from} 嘅傭金項目設定（%、類別、高價、計唔計）套用到所有分店？\n用項目代碼對返；其他分店冇呢個代碼就跳過。舊單唔變。`)) return;
+    setBusy("copy");
+    setMsg(null);
+    const r = await api<{ items: number; results: { clinicCode: string; applied: number; missing: number; error: string | null }[] }>("/api/admin/sales/commission-items/copy", {
+      method: "POST",
+      body: JSON.stringify({ fromClinicId: clinicId }),
+    });
+    setBusy(null);
+    if (!r.ok) return setMsg(r.error);
+    setMsg(
+      `已套用：${r.data.results.map((x) => (x.error ? `${x.clinicCode} 失敗（${x.error}）` : `${x.clinicCode} ${x.applied} 項${x.missing ? `（${x.missing} 項冇呢個代碼）` : ""}`)).join("；") || "冇其他分店"}`
+    );
+  }
 
   function update(extId: string, patch: Partial<ItemRow>) {
     setRows((prev) => {
@@ -304,6 +341,18 @@ function ItemsTab() {
           ))}
         </select>
         <input id="sales-items-search" className={`${inputCls} flex-1 min-w-[10rem]`} placeholder="搜項目代碼／名稱" value={q} onChange={(e) => setQ(e.target.value)} />
+        <label className="inline-flex items-center gap-1.5 text-xs text-t2">
+          <input type="checkbox" checked={onlyUnset} onChange={(e) => setOnlyUnset(e.target.checked)} data-e2e="sales-items-only-unset" />
+          只睇未設定
+        </label>
+        <button
+          onClick={() => void copyToAll()}
+          disabled={busy !== null || rows.size === 0}
+          className="rounded-full border border-line-strong bg-panel text-t1 text-xs px-3 py-1.5 hover:bg-panel-2 disabled:opacity-50"
+          data-e2e="sales-items-copy-all"
+        >
+          {busy === "copy" ? "套用緊…" : "套用到所有分店"}
+        </button>
         <span className="text-xs text-t3">
           名單上次更新：{catalog?.lastRun ? `${mdhm(catalog.lastRun.finishedAt)}（${catalog.lastRun.status}）` : "—"} · 醫生 {catalog?.practitioners.length ?? 0} 位
         </span>
@@ -317,6 +366,22 @@ function ItemsTab() {
         </button>
       </div>
       {msg && <p className="text-sm text-t2">{msg}</p>}
+      {catalog && unsetCount > 0 && !onlyUnset && (
+        <p className="text-xs text-t1 rounded-2xl bg-panel-2 border border-line px-3 py-2" data-e2e="sales-items-unset-hint">
+          有 {unsetCount} 個收費項目未設定計唔計傭金（例如 Apricot 新加嘅項目）— 剔「只睇未設定」逐個睇。
+          <button
+            type="button"
+            className="ml-2 text-brand-text hover:underline"
+            onClick={() => {
+              for (const f of catalog.feeItems) if (!rows.has(f.extId)) update(f.extId, { active: false });
+              setMsg("未設定嘅項目已標做「唔計」— 記得撳保存");
+            }}
+            data-e2e="sales-items-mark-unset"
+          >
+            其餘全部標做唔計
+          </button>
+        </p>
+      )}
       {busy === "load" ? (
         <WLoading />
       ) : catalog ? (
@@ -535,7 +600,10 @@ function OwnersTab() {
 interface Review {
   id: string;
   kind: string;
-  status: "OPEN" | "APPROVED" | "REJECTED";
+  kindLabel?: string;
+  status: "OPEN" | "APPROVED" | "REJECTED" | "ACKNOWLEDGED";
+  salesNote?: string | null;
+  evidence?: { staffMessages: number; patientMessages: number; lastStaffMessageAt: string | null } | null;
   apricotBillCode: string | null;
   salesStaffName: string | null;
   salesApricotUserId: string | null;
@@ -550,12 +618,7 @@ interface Review {
   createdAt: string;
 }
 
-const KIND_LABEL: Record<string, string> = {
-  RECONCILE_UNPROTECTED: "保護外病人開單",
-  RECONCILE_DIRECT: "Apricot 直接開單",
-  RECONCILE_MISMATCH: "銷售員被改",
-};
-const REVIEW_STATUS: Record<Review["status"], string> = { OPEN: "待批", APPROVED: "已批", REJECTED: "已拒" };
+const REVIEW_STATUS: Record<Review["status"], string> = { OPEN: "待批", APPROVED: "已批", REJECTED: "已拒", ACKNOWLEDGED: "已知悉" };
 
 /** 老闆對單：批（可部分 %）／拒（要原因）— 只限集團管理員（server 403 會顯示） */
 function ReviewsTab() {
@@ -578,7 +641,7 @@ function ReviewsTab() {
     void load();
   }, [load]);
 
-  async function decide(id: string, decision: "APPROVED" | "REJECTED") {
+  async function decide(id: string, decision: "APPROVED" | "REJECTED" | "ACKNOWLEDGED") {
     const p = pct[id]?.trim();
     const approvedPct = decision === "APPROVED" && p ? Number(p) : null;
     if (approvedPct != null && !(approvedPct >= 0 && approvedPct <= 100)) return setMsg("批核 % 要喺 0–100");
@@ -601,9 +664,12 @@ function ReviewsTab() {
           <option value="OPEN">待批</option>
           <option value="APPROVED">已批</option>
           <option value="REJECTED">已拒</option>
+          <option value="ACKNOWLEDGED">已知悉</option>
           <option value="">全部</option>
         </select>
-        <span className="text-xs text-t3">保護外病人開單、喺 Apricot 直接開兼填咗銷售員、或者銷售員被改嘅單 — 批咗先計傭金（可以批部分 %）。</span>
+        <span className="text-xs text-t3">
+          保護外病人開單、Apricot 直接開／前台幫負責銷售嘅病人開單、銷售員被改、開單日冇打卡申訴 — 批咗先計傭金（可以批部分 %）；批「保護外／直接開／前台幫開」會將冇人負責嘅病人綁定畀嗰個銷售。「單被修改」只係通知，撳已知悉。
+        </span>
       </div>
       {msg && <p className="text-sm text-danger-text">{msg}</p>}
       {!rows ? (
@@ -628,7 +694,16 @@ function ReviewsTab() {
                     {r.apricotBillCode ?? "—"}
                     <div className="text-[11px] text-t3">{mdhm(r.createdAt)}</div>
                   </td>
-                  <td className="px-4 py-2">{KIND_LABEL[r.kind] ?? r.kind}</td>
+                  <td className="px-4 py-2">
+                    {r.kindLabel ?? r.kind}
+                    {r.evidence && (
+                      <div className="text-[11px] text-t3 mt-0.5" data-e2e="sales-review-evidence">
+                        開單前 30 日：銷售覆咗 {r.evidence.staffMessages} 句、病人講咗 {r.evidence.patientMessages} 句
+                        {r.evidence.lastStaffMessageAt ? ` · 最後覆 ${mdhm(r.evidence.lastStaffMessageAt)}` : ""}
+                      </div>
+                    )}
+                    {r.salesNote && <div className="text-[11px] text-t1 mt-0.5">銷售補充：{r.salesNote}</div>}
+                  </td>
                   <td className="px-4 py-2">{r.salesStaffName ?? (r.salesApricotUserId ? <span className="text-t3">未綁 inbox 帳號</span> : "—")}</td>
                   <td className="px-4 py-2">
                     {r.conversationId ? (
@@ -642,7 +717,13 @@ function ReviewsTab() {
                   </td>
                   <td className="px-4 py-2 text-right tabular-nums">{r.amount == null ? "—" : r.amount.toLocaleString("en-HK")}</td>
                   <td className="px-4 py-2">
-                    {r.status === "OPEN" ? (
+                    {r.status === "OPEN" && r.kind === "INVOICE_EDITED" ? (
+                      <div className="flex justify-end">
+                        <button disabled={busy === r.id} onClick={() => void decide(r.id, "ACKNOWLEDGED")} className="rounded-full bg-brand text-panel text-xs font-semibold px-3 py-1.5 disabled:opacity-40" data-e2e="sales-review-ack">
+                          已知悉
+                        </button>
+                      </div>
+                    ) : r.status === "OPEN" ? (
                       <div className="flex flex-col items-end gap-1.5">
                         <div className="flex items-center gap-1.5">
                           <input

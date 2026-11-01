@@ -363,6 +363,11 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/admin/sales/commission-items", method: "PUT", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
   },
+  "POST /api/admin/sales/commission-items/copy": {
+    // ★ cwi-sales 第 5 期：套用到所有分店 — 空 body → 400（零寫入）；分店 admin 403
+    fixture: () => ({ url: "/api/admin/sales/commission-items/copy", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
+  },
   "GET /api/admin/sales/owners": {
     fixture: () => ({ url: "/api/admin/sales/owners" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 200, ADMIN_COMPANY_B: 200 },
@@ -393,6 +398,26 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     // ★ cwi-sales 第 3 期：我的銷售 — 只限銷售人員（matrix 角色都唔係銷售 → 403）
     fixture: () => ({ url: "/api/sales/mine?month=2026-10" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 403 },
+  },
+  "POST /api/sales/reviews/[id]/note": {
+    // ★ cwi-sales 第 5 期：銷售補充對單原因 — 只限銷售本人（matrix 角色都唔係銷售 → 403，零寫入）
+    fixture: () => ({ url: "/api/sales/reviews/authz-none/note", method: "POST", body: JSON.stringify({ note: "authz" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 403 },
+  },
+  "GET /api/sales/patient-search": {
+    // ★ cwi-sales 第 5 期（U9）：銷售冇對話開單搵病人 — 只限銷售（matrix 角色都唔係 → 403，零 workforce call）
+    fixture: () => ({ url: "/api/sales/patient-search?q=authz" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_ALL: 403 },
+  },
+  "GET /api/sales/invoice": {
+    // 冇搜過嘅病人 → 404（零 workforce call）
+    fixture: () => ({ url: "/api/sales/invoice?patientApricotId=authz-none" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "POST /api/sales/invoice": {
+    // 空 body → 400（零寫入）；SUPERVISOR 唯讀 403
+    fixture: () => ({ url: "/api/sales/invoice", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 400, SUPERVISOR: 403, ADMIN_ALL: 400 },
   },
   "GET /api/admin/sales/month-close": {
     // ★ cwi-sales 第 4 期：月結預覽 — 集團管理員

@@ -25,6 +25,8 @@ export interface SalesView {
   owners: { staffId: string; name: string; state: "PROTECTED" | "BOUND"; protectedUntil: string | null }[];
   delegates: { id: string; staffId: string; name: string; kind: string; expiresAt: string | null }[];
   canReply: boolean;
+  /** 急症：唔係負責人都可以覆（會通知負責銷售） */
+  urgentOverride: boolean;
   isOwner: boolean;
   canForce: boolean;
   intent: { level: SalesIntent; byName: string | null; at: string } | null;
@@ -40,7 +42,7 @@ export async function salesView(conversationId: string, viewer: Viewer, now: Dat
   const [lock, me, conv, settings] = await Promise.all([
     conversationSalesLock(conversationId, now),
     prisma.staffUser.findUnique({ where: { id: viewer.id }, select: { isSales: true } }),
-    prisma.conversation.findUnique({ where: { id: conversationId }, select: { salesIntent: true, salesIntentByStaffId: true, salesIntentAt: true } }),
+    prisma.conversation.findUnique({ where: { id: conversationId }, select: { salesIntent: true, salesIntentByStaffId: true, salesIntentAt: true, urgent: true } }),
     getSalesSettings(),
   ]);
   const dels = lock.owners.length
@@ -58,7 +60,8 @@ export async function salesView(conversationId: string, viewer: Viewer, now: Dat
     viewerIsSales: !!me?.isSales,
     owners,
     delegates: dels.map((d) => ({ id: d.id, staffId: d.toStaffId, name: names.get(d.toStaffId) ?? "同事", kind: d.kind, expiresAt: d.expiresAt ? d.expiresAt.toISOString() : null })),
-    canReply: canReplyUnderLock(lock, viewer.id),
+    canReply: canReplyUnderLock(lock, viewer.id) || (lock.owners.length > 0 && !!conv?.urgent),
+    urgentOverride: lock.owners.length > 0 && !!conv?.urgent && !canReplyUnderLock(lock, viewer.id),
     isOwner: lock.owners.some((o) => o.staffId === viewer.id),
     canForce: lock.owners.length > 0 && (viewer.role === "ADMIN" || viewer.role === "SUPERVISOR") && !lock.owners.some((o) => o.staffId === viewer.id),
     intent: level && conv?.salesIntentAt ? { level, byName: conv.salesIntentByStaffId ? (names.get(conv.salesIntentByStaffId) ?? null) : null, at: conv.salesIntentAt.toISOString() } : null,

@@ -2155,6 +2155,9 @@ export function InboxClient({
       //   selectConvRef 模式：onNoticeClick 定義喺 selectConversation 之前（useCallback([])）
       //   → 用 ref 喺 runtime 取最新實例，避 forward-reference / stale closure。
       if (n.conversationId) selectConvRef.current(n.conversationId);
+      // ★ cwi-sales 第 5 期：冇對話嘅銷售通知 → 去「我的銷售」／老闆「銷售」管理
+      else if (n.kind === "SALES_REVIEW") window.location.assign("/sales");
+      else if (n.kind === "SALES_ADMIN") window.location.assign("/admin/sales");
     })();
   }, []);
 

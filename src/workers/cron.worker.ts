@@ -194,6 +194,25 @@ async function handleCronJob(job: Job): Promise<unknown> {
           log.info(r, "cron: sales-bound-release done");
           return { ok: !r.skipped, ...r };
         }
+        case "sales-watch-push": {
+          const { pushSalesPatientWatch } = await import("@/lib/sales/sweep");
+          const r = await pushSalesPatientWatch();
+          log.info(r, "cron: sales-watch-push done");
+          return { ok: !r.skipped, ...r };
+        }
+        case "sales-sync-alert": {
+          const { checkCommissionSyncAlert } = await import("@/lib/sales/sweep");
+          const r = await checkCommissionSyncAlert();
+          log.info(r, "cron: sales-sync-alert done");
+          return { ok: true, ...r };
+        }
+        case "sales-attendance": {
+          // cwi-sales 第 5 期：到診結果 + 連續爽約上限（冪等可空跑；workforce 唔得 → 跳過聽日再試）
+          const { runSalesAttendance } = await import("@/lib/sales/attendance");
+          const r = await runSalesAttendance();
+          log.info(r, "cron: sales-attendance done");
+          return { ok: true, ...r };
+        }
         case "retention-purge": {
           // P0（§6.0）：每日 04:00 HK；E2E 可手動 enqueue（pnpm e2e:cron retention-purge）
           const r = await runRetentionPurge();

@@ -7,7 +7,7 @@
  */
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { conversationSalesLock, expireProtections, getSalesSettings, notifyStaff, patientConversationIds } from "@/lib/sales/core";
+import { conversationSalesLock, expireProtections, getSalesSettings, notifyStaff, notifyStaffDirect, patientConversationIds } from "@/lib/sales/core";
 
 /** "HH:mm" 香港時間係咪喺 [start, end) */
 export function inHkWindow(now: Date, start: string, end: string): boolean {
@@ -89,7 +89,118 @@ export async function runSalesSweep(now: Date = new Date()): Promise<Record<stri
   } catch (err) {
     log.warn({ err: err instanceof Error ? err.message : String(err) }, "sales-sweep: 冇人覆通知失敗");
   }
+  try {
+    r.expiryReminded = (await remindExpiringProtections(now)).reminded;
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "sales-sweep: 到期提醒失敗");
+  }
   return r;
+}
+
+/**
+ * ★ 第 5 期（U1）：保護期 N 日內到期（設定 expiryRemindDays；0 = 唔提）→ 提醒負責銷售約返病人。
+ * 每個 protectedUntil 只提一次（expiryRemindedFor 記低；續期後 protectedUntil 變咗會再提）。只喺通知時段。
+ */
+export async function remindExpiringProtections(now: Date = new Date()): Promise<{ reminded: number }> {
+  const settings = await getSalesSettings();
+  if (settings.expiryRemindDays <= 0 || !inHkWindow(now, settings.notifyWindowStart, settings.notifyWindowEnd)) return { reminded: 0 };
+  const horizon = new Date(now.getTime() + settings.expiryRemindDays * 86_400_000);
+  const due = await prisma.salesOwnership.findMany({
+    where: { state: "PROTECTED", salesStaffId: { not: null }, protectedUntil: { gt: now, lte: horizon } },
+    orderBy: { protectedUntil: "asc" },
+    take: 200,
+  });
+  let reminded = 0;
+  for (const own of due) {
+    if (own.expiryRemindedFor && own.protectedUntil && own.expiryRemindedFor.getTime() === own.protectedUntil.getTime()) continue;
+    // 條件 update：同一個 protectedUntil 只會贏一次（並發 sweep 唔會重複提）
+    const claimed = await prisma.salesOwnership.updateMany({
+      where: { id: own.id, state: "PROTECTED", salesStaffId: own.salesStaffId, protectedUntil: own.protectedUntil, OR: [{ expiryRemindedFor: null }, { expiryRemindedFor: { not: own.protectedUntil! } }] },
+      data: { expiryRemindedFor: own.protectedUntil },
+    });
+    if (claimed.count !== 1) continue;
+    reminded++;
+    const days = Math.max(1, Math.ceil((own.protectedUntil!.getTime() - now.getTime()) / 86_400_000));
+    const convId = (await patientConversationIds(own.patientApricotId))[0] ?? null;
+    const title = `銷售 · 你保護中嘅病人 ${days} 日內到期 — 約返先唔會出公海`;
+    if (convId) await notifyStaff([own.salesStaffId!], convId, "SALES_PROTECTION", title, { reason: "EXPIRING", days });
+    else await notifyStaffDirect([own.salesStaffId!], "SALES_REVIEW", title, { reason: "EXPIRING", days });
+  }
+  return { reminded };
+}
+
+/**
+ * ★ 第 5 期（U8）：每晚推「銷售負責病人」名單去 workforce（整份覆蓋）→ workforce 對單掃描搵到
+ * 前台喺 Apricot 幫呢啲病人開單冇填銷售員 → RECONCILE_OWNED 等老闆決定。冇綁 Apricot 銷售員嘅銷售唔推。
+ */
+export async function pushSalesPatientWatch(): Promise<{ pushed: number; skipped: string | null }> {
+  const rows = await prisma.salesOwnership.findMany({
+    where: { state: { in: ["PROTECTED", "BOUND"] }, salesStaffId: { not: null } },
+    select: { patientApricotId: true, state: true, salesStaffId: true },
+    take: 50_000,
+  });
+  const staff = await prisma.staffUser.findMany({
+    where: { id: { in: [...new Set(rows.map((r) => r.salesStaffId!))] }, active: true, isSales: true, salesApricotUserId: { not: null } },
+    select: { id: true, salesApricotUserId: true, workforceEmployeeId: true },
+  });
+  const staffOf = new Map(staff.map((s) => [s.id, s]));
+  const patients = rows
+    .filter((r) => staffOf.has(r.salesStaffId!))
+    .map((r) => {
+      const s = staffOf.get(r.salesStaffId!)!;
+      return { patientApricotId: r.patientApricotId, inboxStaffId: s.id, salesApricotUserId: s.salesApricotUserId!, employeeId: s.workforceEmployeeId ?? null, state: r.state as "PROTECTED" | "BOUND" };
+    });
+  try {
+    const { putSalesPatientWatch } = await import("@/lib/workforce/client");
+    return { pushed: (await putSalesPatientWatch(patients)).count, skipped: null };
+  } catch {
+    return { pushed: 0, skipped: "WORKFORCE_UNAVAILABLE" };
+  }
+}
+
+/**
+ * ★ 第 5 期（R5）：傭金同步停咗／失敗／太耐冇跑 → 通知集團管理員（每次 run 只通知一次 — lastSyncAlertRunId）。
+ * - 最後一次 status ≠ OK（PARTIAL = 時間到未做完，唔算失敗）→ 通知（附停嘅原因）
+ * - 超過 36 小時冇完成過 → 通知「冇跑」（id = STALE:<最後 run id>）
+ * - workforce 連唔到 → 通知「連唔到」（id = DOWN:<HK 日期> — 每日最多一次）
+ */
+export async function checkCommissionSyncAlert(now: Date = new Date()): Promise<{ alerted: string | null }> {
+  const settings = await getSalesSettings();
+  let key: string | null = null;
+  let title = "";
+  try {
+    const { fetchCommissionSyncState } = await import("@/lib/workforce/client");
+    const st = await fetchCommissionSyncState();
+    const last = st.last;
+    const STOP_TEXT: Record<string, string> = {
+      APRICOT_AUTH_EXPIRED: "Apricot 系統帳號登入過期",
+      APRICOT_RATE_LIMITED: "Apricot 限流",
+      LOCK_BUSY: "Apricot 被其他同步霸住",
+      TOO_MANY_ERRORS: "錯誤太多",
+    };
+    if (!last) {
+      key = null; // 未跑過（新裝）唔通知
+    } else if (last.status === "STOPPED" || last.status === "FAILED") {
+      key = last.id;
+      title = `銷售 · 傭金同步${last.status === "FAILED" ? "失敗" : "中途停咗"}：${STOP_TEXT[last.stopReason ?? ""] ?? last.stopReason ?? "原因不明"} — 傭金數可能未更新`;
+    } else if (!st.running && now.getTime() - new Date(last.finishedAt ?? last.startedAt).getTime() > 36 * 3600_000) {
+      key = `STALE:${last.id}`;
+      title = "銷售 · 傭金同步超過 36 小時冇跑 — 請檢查 workforce 排程";
+    }
+  } catch {
+    key = `DOWN:${new Date(now.getTime() + 8 * 3600_000).toISOString().slice(0, 10)}`;
+    title = "銷售 · 連唔到 workforce 睇傭金同步狀態";
+  }
+  if (!key || key === settings.lastSyncAlertRunId) return { alerted: null };
+  // 先記低（條件 update）再通知 — 並發兩個 worker 只會一個通知
+  const claimed = await prisma.salesSettings.updateMany({
+    where: { id: "global", OR: [{ lastSyncAlertRunId: null }, { lastSyncAlertRunId: { not: key } }] },
+    data: { lastSyncAlertRunId: key },
+  });
+  if (claimed.count !== 1) return { alerted: null };
+  const admins = await prisma.staffUser.findMany({ where: { active: true, role: "ADMIN", scopeType: "ALL" }, select: { id: true } });
+  await notifyStaffDirect(admins.map((a) => a.id), "SALES_ADMIN", title, { key });
+  return { alerted: key };
 }
 
 /**
@@ -122,7 +233,7 @@ export async function runBoundAutoRelease(
     if (last && new Date(last) >= cutoff) continue;
     const done = await prisma.salesOwnership.updateMany({
       where: { id: r.id, state: "BOUND", salesStaffId: r.salesStaffId, since: r.since },
-      data: { state: "POOL", salesStaffId: null, lastSalesStaffId: r.salesStaffId, protectedUntil: null, rounds: 0, since: now },
+      data: { state: "POOL", salesStaffId: null, lastSalesStaffId: r.salesStaffId, protectedUntil: null, rounds: 0, highValue: false, expiryRemindedFor: null, since: now },
     });
     if (done.count !== 1) continue;
     released++;

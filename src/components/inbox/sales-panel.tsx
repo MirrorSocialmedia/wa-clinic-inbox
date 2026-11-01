@@ -22,6 +22,8 @@ export interface SalesView {
   owners: { staffId: string; name: string; state: "PROTECTED" | "BOUND"; protectedUntil: string | null }[];
   delegates: { id: string; staffId: string; name: string; kind: string; expiresAt: string | null }[];
   canReply: boolean;
+  /** 急症：唔係負責人都可以覆 */
+  urgentOverride?: boolean;
   isOwner: boolean;
   canForce: boolean;
   intent: { level: SalesIntentLevel; byName: string | null; at: string } | null;
@@ -515,6 +517,14 @@ export function SalesLockBanner({
   compact: boolean;
 }) {
   const { view, setView } = useSalesView(conversationId, refreshKey);
+  if (view?.urgentOverride) {
+    const who = [...new Set(view.owners.map((o) => o.name))].join("／");
+    return (
+      <div data-e2e="sales-urgent-banner" className="mx-3 mt-2 rounded-2xl border border-danger/40 bg-danger-soft px-4 py-2 text-xs text-danger-text">
+        <b>急症</b>：{who} 負責嘅病人 — 你可以先覆（會通知 {who}，留紀錄）
+      </div>
+    );
+  }
   if (!view || view.owners.length === 0 || view.canReply) return null;
   const names = [...new Set(view.owners.map((o) => o.name))].join("／");
   const bound = view.owners.some((o) => o.state === "BOUND");

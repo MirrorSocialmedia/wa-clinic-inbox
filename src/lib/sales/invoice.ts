@@ -13,7 +13,8 @@
 import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
-import { canReplyUnderLock, conversationPatientIds, conversationSalesLock } from "@/lib/sales/core";
+import { canReplyUnderLock, conversationPatientIds, conversationSalesLock, getSalesSettings, protectedUntilFor, protectionDaysFor } from "@/lib/sales/core";
+import { hkTodayStr } from "@/lib/availability";
 import { SalesActionError } from "@/lib/sales/handover";
 import { createSalesInvoice, fetchInvoiceOptions, WorkforceApiError, type CreatedInvoice, type InvoiceOptions } from "@/lib/workforce/client";
 
@@ -31,7 +32,23 @@ export interface InvoiceContext {
   /** null = 可以開；否則係原因（UI 直接顯示） */
   blocked: string | null;
   clinicCode: string | null;
+  /** ★ 第 5 期（R6）：可以揀嘅開單分店（自己權限範圍內、有 Apricot 連結）；預設 = 對話處理中分店 */
+  clinics: { code: string; name: string }[];
   patients: InvoicePatient[];
+}
+
+/** 開單分店選擇：scope = null（全集團）或者自己嘅 clinic id 集合 */
+export interface InvoiceClinicPick {
+  scope?: string[] | null;
+  clinicCode?: string | null;
+}
+
+async function invoiceClinics(scope: string[] | null | undefined): Promise<{ id: string; code: string; name: string }[]> {
+  return prisma.clinic.findMany({
+    where: { apricotClinicId: { not: null }, ...(scope ? { id: { in: scope } } : {}) },
+    orderBy: { code: "asc" },
+    select: { id: true, code: true, name: true },
+  });
 }
 
 interface Me {
@@ -49,15 +66,22 @@ async function loadMe(staffId: string): Promise<Me | null> {
   });
 }
 
-export async function invoiceContext(conversationId: string, staffId: string): Promise<InvoiceContext> {
+export async function invoiceContext(conversationId: string, staffId: string, pick: InvoiceClinicPick = {}): Promise<InvoiceContext> {
   const me = await loadMe(staffId);
   const conv = await prisma.conversation.findUnique({
     where: { id: conversationId },
     select: { contactId: true, pinnedPatientApricotId: true, pinnedPatientName: true, clinicId: true, handlingClinicId: true },
   });
   if (!conv) throw new SalesActionError(404, "NOT_FOUND", "搵唔到對話");
-  // 開單分店 = 處理中分店（轉店後）否則對話分店
-  const clinic = await prisma.clinic.findUnique({ where: { id: conv.handlingClinicId ?? conv.clinicId }, select: { code: true } });
+  // 開單分店 = 揀咗嘅分店（要喺自己範圍內）；冇揀 = 處理中分店（轉店後）否則對話分店
+  const clinics = await invoiceClinics(pick.scope);
+  let clinic: { code: string } | null;
+  if (pick.clinicCode) {
+    clinic = clinics.find((c) => c.code === pick.clinicCode) ?? null;
+    if (!clinic) throw new SalesActionError(403, "CLINIC_NOT_ALLOWED", "你冇權喺呢間店開單");
+  } else {
+    clinic = await prisma.clinic.findUnique({ where: { id: conv.handlingClinicId ?? conv.clinicId }, select: { code: true } });
+  }
   const pids = await conversationPatientIds(conversationId);
   const [links, contact, owns] = await Promise.all([
     prisma.contactPatientLink.findMany({ where: { contactId: conv.contactId }, select: { patientApricotId: true, patientCode: true, patientName: true } }),
@@ -92,11 +116,60 @@ export async function invoiceContext(conversationId: string, staffId: string): P
     const lock = await conversationSalesLock(conversationId);
     if (lock.owners.length > 0 && !canReplyUnderLock(lock, staffId)) blocked = `${[...new Set(lock.owners.map((o) => o.name))].join("／")} 負責呢個對話（銷售）`;
   }
-  return { blocked, clinicCode: clinic?.code ?? null, patients };
+  return { blocked, clinicCode: clinic?.code ?? null, clinics: clinics.map((c) => ({ code: c.code, name: c.name })), patients };
 }
 
-export async function invoiceOptionsFor(conversationId: string, staffId: string): Promise<{ context: InvoiceContext; options: InvoiceOptions | null; optionsError: string | null }> {
-  const context = await invoiceContext(conversationId, staffId);
+/** ★ 第 5 期（U9）：冇對話開單（walk-in／前台轉介）— 病人由銷售搜尋（server 記低搜尋結果，唔信 client 編號） */
+export const DIRECT_SEARCH_NS = "sales-direct";
+
+export interface DirectPatient {
+  patientApricotId: string;
+  patientCode: string;
+  patientName: string;
+}
+
+export async function invoiceContextForPatient(staffId: string, patient: DirectPatient, pick: InvoiceClinicPick = {}): Promise<InvoiceContext> {
+  const me = await loadMe(staffId);
+  const clinics = await invoiceClinics(pick.scope);
+  const clinic = pick.clinicCode ? (clinics.find((c) => c.code === pick.clinicCode) ?? null) : (clinics[0] ?? null);
+  if (pick.clinicCode && !clinic) throw new SalesActionError(403, "CLINIC_NOT_ALLOWED", "你冇權喺呢間店開單");
+  const o = await prisma.salesOwnership.findUnique({ where: { patientApricotId: patient.patientApricotId } });
+  const owner = o?.salesStaffId ? await prisma.staffUser.findUnique({ where: { id: o.salesStaffId }, select: { name: true, active: true, isSales: true } }) : null;
+  const live = o && (o.state === "PROTECTED" || o.state === "BOUND") && owner?.active && owner.isSales;
+  const ownership: InvoiceOwnership = !live ? "NONE" : o!.salesStaffId === staffId ? (o!.state === "BOUND" ? "MINE_BOUND" : "MINE_PROTECTED") : "OTHER";
+  let blocked: string | null = null;
+  if (!me?.isSales || !me.active) blocked = "只有銷售人員可以開單";
+  else if (!me.salesApricotUserId) blocked = "你未綁定 Apricot 銷售員帳號 — 請老闆喺員工帳號設定";
+  else if (!clinic) blocked = "你冇可以開單嘅分店";
+  return {
+    blocked,
+    clinicCode: clinic?.code ?? null,
+    clinics: clinics.map((c) => ({ code: c.code, name: c.name })),
+    patients: [{ patientApricotId: patient.patientApricotId, code: patient.patientCode, name: patient.patientName, ownership, ownerName: ownership === "OTHER" ? (owner?.name ?? null) : null }],
+  };
+}
+
+export async function invoiceOptionsForPatient(
+  staffId: string,
+  patient: DirectPatient,
+  pick: InvoiceClinicPick = {}
+): Promise<{ context: InvoiceContext; options: InvoiceOptions | null; optionsError: string | null }> {
+  const context = await invoiceContextForPatient(staffId, patient, pick);
+  if (context.blocked || !context.clinicCode) return { context, options: null, optionsError: null };
+  try {
+    return { context, options: await fetchInvoiceOptions(context.clinicCode), optionsError: null };
+  } catch (err) {
+    log.warn({ code: err instanceof WorkforceApiError ? err.code : undefined }, "sales: invoice options failed (direct)");
+    return { context, options: null, optionsError: "暫時拎唔到收費項目同醫生名單 — 請稍後再試" };
+  }
+}
+
+export async function invoiceOptionsFor(
+  conversationId: string,
+  staffId: string,
+  pick: InvoiceClinicPick = {}
+): Promise<{ context: InvoiceContext; options: InvoiceOptions | null; optionsError: string | null }> {
+  const context = await invoiceContext(conversationId, staffId, pick);
   if (context.blocked || !context.clinicCode) return { context, options: null, optionsError: null };
   try {
     return { context, options: await fetchInvoiceOptions(context.clinicCode), optionsError: null };
@@ -109,8 +182,10 @@ export async function invoiceOptionsFor(conversationId: string, staffId: string)
 const RATE_WINDOW_MS = 10 * 60_000;
 const MAX_PER_WINDOW = 10;
 
-export interface OpenInvoiceInput {
-  conversationId: string;
+export interface OpenInvoiceInput extends InvoiceClinicPick {
+  /** null = 冇對話開單（U9）— 要帶 direct（server 記低嘅搜尋結果） */
+  conversationId: string | null;
+  direct?: DirectPatient | null;
   staffId: string;
   requestKey: string;
   patientApricotId: string;
@@ -153,12 +228,16 @@ export function invoiceError(err: WorkforceApiError): SalesActionError {
   return new SalesActionError(status, code, WF_MESSAGES[code] ?? `開單失敗（${code}）`, err.retryAfterSec);
 }
 
-export async function openSalesInvoice(input: OpenInvoiceInput): Promise<CreatedInvoice & { bound: boolean }> {
+export async function openSalesInvoice(input: OpenInvoiceInput): Promise<CreatedInvoice & { bound: boolean; highValueExtended: boolean }> {
   if (!/^[A-Za-z0-9_-]{8,80}$/.test(input.requestKey)) throw new SalesActionError(400, "BAD_REQUEST_KEY", "請重新開對話框");
-  const ctx = await invoiceContext(input.conversationId, input.staffId);
+  const pick = { scope: input.scope, clinicCode: input.clinicCode };
+  let ctx: InvoiceContext;
+  if (input.conversationId) ctx = await invoiceContext(input.conversationId, input.staffId, pick);
+  else if (input.direct && input.direct.patientApricotId === input.patientApricotId) ctx = await invoiceContextForPatient(input.staffId, input.direct, pick);
+  else throw new SalesActionError(400, "PATIENT_NOT_SEARCHED", "請重新搜尋病人先開單");
   if (ctx.blocked) throw new SalesActionError(ctx.blocked.includes("負責呢個對話") ? 423 : 403, "CANNOT_INVOICE", ctx.blocked);
   const p = ctx.patients.find((x) => x.patientApricotId === input.patientApricotId);
-  if (!p) throw new SalesActionError(404, "PATIENT_NOT_LINKED", "呢個病人唔係連住呢個對話");
+  if (!p) throw new SalesActionError(404, "PATIENT_NOT_LINKED", input.conversationId ? "呢個病人唔係連住呢個對話" : "請重新搜尋病人先開單");
   if (!p.code) throw new SalesActionError(409, "PATIENT_CODE_MISSING", "呢個病人冇 Apricot 編號 — 請先喺右欄重新認病人");
   if (p.ownership === "OTHER") throw new SalesActionError(403, "OWNED_BY_OTHER", `${p.ownerName ?? "其他銷售"} 負責呢個病人 — 唔可以幫佢開單`);
   const me = (await loadMe(input.staffId))!;
@@ -194,16 +273,17 @@ export async function openSalesInvoice(input: OpenInvoiceInput): Promise<Created
   // 同一張單並發重放 → advisory lock 串行「查有冇 → 寫」，只會寫一次
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`sales-inv:${created.invoiceId}`}))`;
+    const entityId = input.conversationId ?? p.patientApricotId;
     const audited = await tx.auditLog.count({
-      where: { action: "SALES_INVOICE_CREATED", entityId: input.conversationId, meta: { path: ["invoiceId"], equals: created.invoiceId } },
+      where: { action: "SALES_INVOICE_CREATED", entityId, meta: { path: ["invoiceId"], equals: created.invoiceId } },
     });
     if (audited > 0) return;
     await tx.auditLog.create({
       data: {
         staffId: input.staffId,
         action: "SALES_INVOICE_CREATED",
-        entity: "Conversation",
-        entityId: input.conversationId,
+        entity: input.conversationId ? "Conversation" : "Patient",
+        entityId,
         meta: {
           invoiceId: created.invoiceId,
           billId: created.billId,
@@ -221,7 +301,31 @@ export async function openSalesInvoice(input: OpenInvoiceInput): Promise<Created
   if (p.ownership === "MINE_PROTECTED" && created.paymentAmt > 0 && created.commissionableAmt > 0) {
     bound = await bindAfterFirstPayment(p.patientApricotId, input.staffId, created.invoiceId);
   }
-  return { ...created, bound };
+  // 保護中（未收錢所以未綁定）+ 高價傭金項目 → 保護期改用「高價項目保護期」（只會延長，唔會縮短）
+  let highValueExtended = false;
+  if (!bound && p.ownership === "MINE_PROTECTED" && created.highValue) {
+    highValueExtended = await extendForHighValue(p.patientApricotId, input.staffId, created.invoiceId);
+  }
+  return { ...created, bound, highValueExtended };
+}
+
+/** 自己保護中嘅病人開咗高價單 → highValue = true，保護期 = max(而家, 預約日 + 高價保護期)。冪等（已標 → 唔再改） */
+export async function extendForHighValue(patientApricotId: string, staffId: string, invoiceId: string, now: Date = new Date()): Promise<boolean> {
+  const done = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`sales:${patientApricotId}`}))`;
+    const own = await tx.salesOwnership.findUnique({ where: { patientApricotId } });
+    if (!own || own.state !== "PROTECTED" || own.salesStaffId !== staffId || own.highValue) return null;
+    const settings = await getSalesSettings(tx);
+    const until = protectedUntilFor(own.lastApptDate ?? hkTodayStr(now), protectionDaysFor(settings, true));
+    const keep = own.protectedUntil && own.protectedUntil > until ? own.protectedUntil : until;
+    await tx.salesOwnership.update({ where: { id: own.id }, data: { highValue: true, protectedUntil: keep, expiryRemindedFor: null } });
+    return { from: own.protectedUntil?.toISOString() ?? null, to: keep.toISOString() };
+  });
+  if (!done) return false;
+  await prisma.auditLog
+    .create({ data: { staffId, action: "SALES_PROTECTION_HIGH_VALUE", entity: "SalesOwnership", entityId: patientApricotId, meta: { invoiceId, ...done } } })
+    .catch(() => undefined);
+  return true;
 }
 
 /** PROTECTED（自己）→ BOUND；並發／重放只會轉一次（條件 update） */

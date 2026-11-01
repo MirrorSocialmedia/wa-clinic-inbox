@@ -159,6 +159,21 @@ async function registerSchedulers() {
     name: "sales-bound-release",
     data: {},
   });
+  // ★ cwi-sales 第 5 期：推「銷售負責病人」名單去 workforce（02:23 HK — 早過 workforce 每晚對單掃描 02:41）
+  await cronHeavyQueue.upsertJobScheduler("sched-sales-watch-push", { pattern: "23 2 * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-watch-push",
+    data: {},
+  });
+  // ★ cwi-sales 第 5 期：傭金同步停咗／失敗／冇跑 → 通知老闆（08:07 HK — workforce 04:13 開始、最多 40 分鐘）
+  await cronHeavyQueue.upsertJobScheduler("sched-sales-sync-alert", { pattern: "7 8 * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-sync-alert",
+    data: {},
+  });
+  // ★ cwi-sales 第 5 期：預約日過咗 → 查到診；保護中連續爽約到上限 → 公海（每日 05:47 HK；讀 workforce 預約索引）
+  await cronHeavyQueue.upsertJobScheduler("sched-sales-attendance", { pattern: "47 5 * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-attendance",
+    data: {},
+  });
   // AI Workflow T1（cwi-ai-20260824-t1）：P0 retention purge — 每日 04:00 HK（顯式 tz — 同其他 job 一致）
   await cronHeavyQueue.upsertJobScheduler("sched-retention-purge", { pattern: "0 4 * * *", tz: "Asia/Hong_Kong" }, {
     name: "retention-purge",

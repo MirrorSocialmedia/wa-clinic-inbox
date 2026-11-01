@@ -1,8 +1,9 @@
 /**
  * ★ cwi-sales 第 2 期：/api/conversations/[id]/sales/invoice — 對話右欄「開單」。
  *
- * GET  → { context: { blocked, clinicCode, patients[] }, options: { practitioners, feeItems(+ratePct), paymentMethods, writeEnabled, templateReady } | null, optionsError }
- * POST body { requestKey, patientApricotId, practitionerExtId, lines[{ feeItemExtId, qty, up, discAmt, remarks? }], payment?: { amt, methodExtId } }
+ * GET  ?clinicCode=XXX（★ 第 5 期：揀開單分店；預設對話處理中分店）
+ *      → { context: { blocked, clinicCode, clinics[{code,name}], patients[] }, options: { practitioners, feeItems(+ratePct), paymentMethods, writeEnabled, templateReady } | null, optionsError }
+ * POST body { requestKey, clinicCode?, patientApricotId, practitionerExtId, lines[{ feeItemExtId, qty, up, discAmt, remarks? }], payment?: { amt, methodExtId } }
  *      → { invoice: { billCode, totalAmt, paymentAmt, commissionableAmt, review, replayed, recovered, bound } }
  *      同 requestKey 重撳 = 重放（唔會開兩張）；504 UNCONFIRMED = 1 分鐘後用同一 requestKey 再撳。
  *
@@ -11,7 +12,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/prisma";
-import { requireAuth, assertConversationAccess, assertCanWriteConversation } from "@/lib/rbac";
+import { requireAuth, assertConversationAccess, assertCanWriteConversation, scopedClinicSet } from "@/lib/rbac";
 import { handle } from "@/lib/api-error";
 import { SalesActionError } from "@/lib/sales/handover";
 import { invoiceOptionsFor, openSalesInvoice } from "@/lib/sales/invoice";
@@ -30,6 +31,7 @@ const lineSchema = z.object({
 const postSchema = z
   .object({
     requestKey: z.string().regex(/^[A-Za-z0-9_-]{8,80}$/),
+    clinicCode: z.string().regex(/^[A-Za-z0-9_-]{1,16}$/).nullish(),
     patientApricotId: z.string().min(1).max(64),
     practitionerExtId: z.string().min(1).max(64),
     lines: z.array(lineSchema).min(1).max(30),
@@ -50,7 +52,9 @@ export const GET = handle(async (req: NextRequest, ctxP: Ctx) => {
   const { auth, conv } = await loadConv(req, ctxP);
   if (!conv) return NextResponse.json({ error: "not found" }, { status: 404 });
   try {
-    return NextResponse.json(await invoiceOptionsFor(conv.id, auth.staff.id));
+    const code = req.nextUrl.searchParams.get("clinicCode");
+    if (code !== null && !/^[A-Za-z0-9_-]{1,16}$/.test(code)) return NextResponse.json({ error: "bad_request", message: "分店編號唔啱" }, { status: 400 });
+    return NextResponse.json(await invoiceOptionsFor(conv.id, auth.staff.id, { scope: scopedClinicSet(auth), clinicCode: code }));
   } catch (err) {
     if (err instanceof SalesActionError) return NextResponse.json({ error: err.code, message: err.message }, { status: err.status });
     throw err;
@@ -69,6 +73,8 @@ export const POST = handle(async (req: NextRequest, ctxP: Ctx) => {
       conversationId: conv.id,
       staffId: auth.staff.id,
       requestKey: b.requestKey,
+      scope: scopedClinicSet(auth),
+      clinicCode: b.clinicCode ?? null,
       patientApricotId: b.patientApricotId,
       practitionerExtId: b.practitionerExtId,
       lines: b.lines,
@@ -84,6 +90,7 @@ export const POST = handle(async (req: NextRequest, ctxP: Ctx) => {
         replayed: invoice.replayed,
         recovered: invoice.recovered,
         bound: invoice.bound,
+        highValueExtended: invoice.highValueExtended,
       },
     });
   } catch (err) {

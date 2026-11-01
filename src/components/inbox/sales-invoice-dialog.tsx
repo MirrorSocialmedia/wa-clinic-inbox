@@ -9,6 +9,7 @@
  * - 開到 → 顯示 invoice 編號；保護外病人 → 提示入咗老闆對單
  * - 未確認嘅單記喺 localStorage（每個對話一張）：關咗對話框再開 → 只會提你用返同一張單再試，唔會開多張
  *   （server 都會將同內容未確認嘅單接返 — 呢度係 UX，唔係唯一防線）
+ * - ★ 第 5 期（U9）：冇 conversationId → 先搜病人（walk-in／前台轉介），之後同一張表格，送去 /api/sales/invoice
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Receipt, Trash2, X } from "lucide-react";
@@ -25,11 +26,11 @@ interface Options {
   writeEnabled: boolean;
   templateReady: boolean;
   practitioners: { extId: string; name: string; nameChi: string | null }[];
-  feeItems: { extId: string; code: string; des: string; fee: number; ratePct: number | null }[];
+  feeItems: { extId: string; code: string; des: string; fee: number; ratePct: number | null; highValue?: boolean }[];
   paymentMethods: { extId: string; code: string; des: string }[];
 }
 interface Loaded {
-  context: { blocked: string | null; clinicCode: string | null; patients: InvoicePatient[] };
+  context: { blocked: string | null; clinicCode: string | null; clinics?: { code: string; name: string }[]; patients: InvoicePatient[] };
   options: Options | null;
   optionsError: string | null;
 }
@@ -50,6 +51,7 @@ interface Created {
   replayed: boolean;
   recovered: boolean;
   bound: boolean;
+  highValueExtended?: boolean;
 }
 
 /** 送出後要用同一編號再試嘅錯誤（未知結果／處理中） */
@@ -97,7 +99,21 @@ const num = (s: string) => (s.trim() === "" ? 0 : Number(s));
 const cents = (s: string) => Math.round(num(s) * 100);
 const okMoney = (s: string) => s.trim() === "" || (/^\d+(\.\d{1,2})?$/.test(s.trim()) && Number(s) <= 10_000_000);
 
-export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { conversationId: string; onClose: () => void; onCreated?: () => void }) {
+interface SearchHit {
+  patientApricotId: string;
+  patientCode: string;
+  patientName: string;
+  clinicLabel?: string;
+}
+
+export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { conversationId?: string | null; onClose: () => void; onCreated?: () => void }) {
+  // ★ U9：冇對話 → 揀病人（搜尋）先
+  const [directPid, setDirectPid] = useState<string | null>(null);
+  const [sq, setSq] = useState("");
+  const [hits, setHits] = useState<SearchHit[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState<string | null>(null);
+  const storeKey = conversationId ?? (directPid ? `direct-${directPid}` : null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [pid, setPid] = useState("");
@@ -114,32 +130,63 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
   const lineSeq = useRef(0);
   /** 上次未確認嘅單（localStorage 還原）— 再試一定用返佢嘅編號同內容 */
   const [restored, setRestored] = useState<PendingStored | null>(null);
+  /** ★ 第 5 期（R6）：揀開單分店（"" = 預設：對話處理中分店） */
+  const [clinicPick, setClinicPick] = useState("");
 
   useEffect(() => {
-    const p = readPending(conversationId);
+    if (!storeKey) return;
+    const p = readPending(storeKey);
     if (p) {
       setRestored(p);
       setPendingCode("UNCONFIRMED");
     }
-  }, [conversationId]);
+  }, [storeKey]);
+
+  async function searchPatients() {
+    const q = sq.trim();
+    if (q.length < 2 || searching) return;
+    setSearching(true);
+    setSearchErr(null);
+    try {
+      const res = await fetch(`/api/sales/patient-search?q=${encodeURIComponent(q)}`, { cache: "no-store" });
+      const j = (await res.json().catch(() => null)) as { patients?: SearchHit[]; message?: string } | null;
+      if (!res.ok || !j?.patients) setSearchErr(j?.message ?? "搜唔到");
+      else setHits(j.patients);
+    } catch {
+      setSearchErr("網絡錯誤");
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  const getUrl = conversationId
+    ? `/api/conversations/${conversationId}/sales/invoice${clinicPick ? `?clinicCode=${encodeURIComponent(clinicPick)}` : ""}`
+    : directPid
+      ? `/api/sales/invoice?patientApricotId=${encodeURIComponent(directPid)}${clinicPick ? `&clinicCode=${encodeURIComponent(clinicPick)}` : ""}`
+      : null;
+  const postUrl = conversationId ? `/api/conversations/${conversationId}/sales/invoice` : "/api/sales/invoice";
 
   useEffect(() => {
+    if (!getUrl) return;
     let alive = true;
-    fetch(`/api/conversations/${conversationId}/sales/invoice`, { cache: "no-store" })
+    setLoadErr(null);
+    fetch(getUrl, { cache: "no-store" })
       .then(async (res) => {
         const data = (await res.json().catch(() => null)) as (Loaded & { message?: string }) | null;
         if (!alive) return;
         if (!res.ok || !data) return setLoadErr(data?.message ?? "拎唔到開單資料");
         setLoaded(data);
-        const first = data.context.patients.find((p) => p.ownership !== "OTHER" && p.code);
-        setPid(first?.patientApricotId ?? "");
-        if (data.options?.paymentMethods.length) setPayMethod(data.options.paymentMethods[0].extId);
+        setPid((cur) => cur || (data.context.patients.find((p) => p.ownership !== "OTHER" && p.code)?.patientApricotId ?? ""));
+        // 換店 → 醫生／項目／付款方式係每間店唔同 → 清返
+        setPractId("");
+        setLines([]);
+        setPayMethod(data.options?.paymentMethods[0]?.extId ?? "");
       })
       .catch(() => alive && setLoadErr("網絡錯誤"));
     return () => {
       alive = false;
     };
-  }, [conversationId]);
+  }, [getUrl]);
 
   const locked = !!pendingCode || !!created;
   /** 內容一改 → 換新編號（未送出／上次已確定失敗嘅編號唔再用） */
@@ -201,13 +248,14 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
       ? { ...restored.body, requestKey: restored.requestKey }
       : {
           requestKey: keyRef.current,
+          clinicCode: loaded?.context.clinicCode ?? null,
           patientApricotId: pid,
           practitionerExtId: practId,
           lines: lines.map((l) => ({ feeItemExtId: l.feeItemExtId, qty: Number(l.qty), up: num(l.up), discAmt: num(l.discAmt), remarks: l.remarks.trim() || null })),
           payment: cents(payAmt) > 0 ? { amt: num(payAmt), methodExtId: payMethod } : null,
         };
     try {
-      const res = await fetch(`/api/conversations/${conversationId}/sales/invoice`, {
+      const res = await fetch(postUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -217,7 +265,7 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
         setCreated(data.invoice);
         setPendingCode(null);
         setRestored(null);
-        writePending(conversationId, null);
+        if (storeKey) writePending(storeKey, null);
         onCreated?.();
         return;
       }
@@ -226,9 +274,9 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
       // 未知結果 → 鎖表格，只准同一編號再試；確定失敗 → 解鎖（改內容會換新編號）
       const pending = PENDING_CODES.has(code) || res.status === 504;
       setPendingCode(pending ? code || "UNCONFIRMED" : null);
-      if (pending) writePending(conversationId, { requestKey: String(body.requestKey), body, at: restored?.at ?? Date.now() });
+      if (pending && storeKey) writePending(storeKey, { requestKey: String(body.requestKey), body, at: restored?.at ?? Date.now() });
       else {
-        writePending(conversationId, null);
+        if (storeKey) writePending(storeKey, null);
         if (restored) {
           setRestored(null);
           keyRef.current = newKey();
@@ -238,7 +286,7 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
       // 網絡斷咗 = 唔知 server 有冇收到 → 當未確認
       setErr("網絡斷咗 — 唔知開咗未。請等 1 分鐘再撳「再試（同一張單）」，唔好重新開過");
       setPendingCode("UNCONFIRMED");
-      writePending(conversationId, { requestKey: String(body.requestKey), body, at: restored?.at ?? Date.now() });
+      if (storeKey) writePending(storeKey, { requestKey: String(body.requestKey), body, at: restored?.at ?? Date.now() });
     } finally {
       setBusy(false);
     }
@@ -261,7 +309,42 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
         </div>
 
         <div className="p-4 flex flex-col gap-3 text-sm">
-          {!loaded && !loadErr && <div className="text-t3 text-xs">載入緊…</div>}
+          {!conversationId && !directPid && (
+            <div className="flex flex-col gap-2" data-e2e="sales-invoice-direct-search">
+              <div className="text-xs text-t2">冇 WhatsApp 對話嘅病人（walk-in／前台轉介）— 先搜病人</div>
+              <div className="flex gap-1.5">
+                <input
+                  value={sq}
+                  onChange={(e) => setSq(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void searchPatients();
+                  }}
+                  placeholder="病人編號／姓名／電話"
+                  className="flex-1 min-w-0 rounded-xl bg-panel-2 border border-line px-3 py-2 text-sm"
+                  data-e2e="sales-invoice-direct-q"
+                />
+                <button type="button" disabled={searching || sq.trim().length < 2} onClick={() => void searchPatients()} className="text-xs px-3 rounded-full bg-brand text-panel disabled:opacity-50">
+                  {searching ? "搜緊…" : "搜尋"}
+                </button>
+              </div>
+              {searchErr && <div className="text-xs text-danger-text">{searchErr}</div>}
+              {hits && hits.length === 0 && <div className="text-xs text-t3">搵唔到病人</div>}
+              {hits && hits.length > 0 && (
+                <ul className="rounded-xl border border-line divide-y divide-line max-h-64 overflow-y-auto">
+                  {hits.map((h) => (
+                    <li key={h.patientApricotId}>
+                      <button type="button" onClick={() => setDirectPid(h.patientApricotId)} className="w-full text-left px-3 py-2 text-xs hover:bg-panel-2 flex items-center gap-2" data-e2e="sales-invoice-direct-hit">
+                        <span className="text-t3">{h.patientCode}</span>
+                        <span className="min-w-0 truncate">{h.patientName}</span>
+                        {h.clinicLabel && <span className="ml-auto text-t3 shrink-0">{h.clinicLabel}</span>}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {getUrl && !loaded && !loadErr && <div className="text-t3 text-xs">載入緊…</div>}
           {loadErr && <div className="text-danger-text text-xs">{loadErr}</div>}
           {loaded?.context.blocked && <div className="rounded-xl bg-panel-2 border border-line px-3 py-2 text-xs text-t1" data-e2e="sales-invoice-blocked">{loaded.context.blocked}</div>}
           {loaded && !loaded.context.blocked && loaded.optionsError && <div className="text-danger-text text-xs">{loaded.optionsError}</div>}
@@ -280,6 +363,7 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
               {created.recovered && <div className="text-xs text-t2">上次逾時但其實已經開咗 — 系統搵返呢張，冇開多張</div>}
               {created.replayed && !created.recovered && <div className="text-xs text-t2">呢張單之前已經開咗（冇重複開）</div>}
               {created.bound && <div className="text-xs text-brand-text">病人已轉為你嘅綁定病人</div>}
+              {created.highValueExtended && <div className="text-xs text-brand-text">有高價項目 — 保護期已延長（高價項目保護期）</div>}
               {created.review && <div className="text-xs text-t1">呢個病人唔喺你保護之下 — 已入老闆對單，批咗先計傭金</div>}
               <button type="button" onClick={onClose} className="mt-1 text-xs py-2 rounded-full bg-brand text-panel font-medium">
                 完成
@@ -289,6 +373,23 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
             opts &&
             !loaded?.context.blocked && (
               <fieldset disabled={locked || busy} className="flex flex-col gap-3 min-w-0">
+                {(loaded?.context.clinics?.length ?? 0) > 1 && (
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[11px] text-t3">開單分店（病人喺邊間店做就揀邊間）</span>
+                    <select
+                      value={clinicPick || loaded!.context.clinicCode || ""}
+                      onChange={(e) => { touch(); setClinicPick(e.target.value); }}
+                      className="rounded-xl bg-panel-2 border border-line px-3 py-2 text-sm"
+                      data-e2e="sales-invoice-clinic"
+                    >
+                      {loaded!.context.clinics!.map((c) => (
+                        <option key={c.code} value={c.code}>
+                          {c.code} · {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 <label className="flex flex-col gap-1">
                   <span className="text-[11px] text-t3">病人</span>
                   <select value={pid} onChange={(e) => { touch(); setPid(e.target.value); }} className="rounded-xl bg-panel-2 border border-line px-3 py-2 text-sm" data-e2e="sales-invoice-patient">
@@ -325,6 +426,7 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
                             {f?.code} {f?.des}
                           </span>
                           {(f?.ratePct ?? 0) > 0 && <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-brand-soft text-brand-text">傭金 {f!.ratePct}%</span>}
+                          {f?.highValue && (f.ratePct ?? 0) > 0 && <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-panel border border-line text-t1">高價</span>}
                           <button type="button" onClick={() => { touch(); setLines((ls) => ls.filter((x) => x.key !== l.key)); }} className="ml-auto p-1 rounded-full hover:bg-panel" aria-label="刪除項目">
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -360,7 +462,7 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
                             <span className="text-t3">{f.code}</span>
                             <span className="min-w-0 truncate">{f.des}</span>
                             <span className="ml-auto text-t2">{money(f.fee)}</span>
-                            {(f.ratePct ?? 0) > 0 && <span className="text-[10px] text-brand-text">{f.ratePct}%</span>}
+                            {(f.ratePct ?? 0) > 0 && <span className="text-[10px] text-brand-text">{f.ratePct}%{f.highValue ? " · 高價" : ""}</span>}
                           </button>
                         ))}
                       </div>
@@ -388,6 +490,8 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
                     </select>
                   </div>
                   {payErr && <span className="text-[11px] text-danger-text">{payErr}</span>}
+                  {/* ★ 第 5 期（U5）：唔使即場收 — 之後前台喺 Apricot 收嘅錢（同日或者之後）每晚同步都計傭金 */}
+                  {!payErr && cents(payAmt) === 0 && <span className="text-[11px] text-t3">病人之後喺前台付款（同日或者之後）都計你傭金 — 每晚同步</span>}
                 </div>
               </fieldset>
             )
@@ -413,7 +517,7 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
                     disabled={busy}
                     onClick={() => {
                       if (!window.confirm("確定喺 Apricot 睇過冇開到呢張單？放棄之後可以重新開一張。")) return;
-                      writePending(conversationId, null);
+                      if (storeKey) writePending(storeKey, null);
                       setRestored(null);
                       setPendingCode(null);
                       setErr(null);

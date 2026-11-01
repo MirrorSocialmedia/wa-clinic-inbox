@@ -40,14 +40,83 @@ export async function ledgerView(staffId: string, month: string): Promise<{ ledg
   return { ledger: { month: l.month, closed: l.closed, totals: l.totals, rows: l.rows.map((r) => ({ ...r, ...(refs.get(r.patientApricotId ?? "") ?? empty) })) } };
 }
 
+export interface MyPatientView extends PatientRef {
+  patientApricotId: string;
+  state: "PROTECTED" | "BOUND";
+  protectedUntil: string | null;
+  lastApptDate: string | null;
+  rounds: number;
+  noShowStreak: number;
+  highValue: boolean;
+  /** 保護期仲有幾多日（BOUND = null） */
+  daysLeft: number | null;
+  since: string;
+  /** ★ U3：對話上銷售標嘅意向（HIGH／MEDIUM／LOW；冇 = null） */
+  intent: string | null;
+}
+
+export interface PoolPatientView extends PatientRef {
+  patientApricotId: string;
+  /** 放返公海之前係咪你負責 */
+  wasMine: boolean;
+  since: string;
+}
+
+const POOL_DAYS = 60;
+
+/** ★ U1：我負責嘅病人（保護中排最快到期先；綁定排後） */
+export async function myPatients(staffId: string, now: Date = new Date()): Promise<MyPatientView[]> {
+  const rows = await prisma.salesOwnership.findMany({
+    where: { salesStaffId: staffId, state: { in: ["PROTECTED", "BOUND"] } },
+    orderBy: [{ state: "asc" }, { protectedUntil: "asc" }, { since: "desc" }], // enum 次序：PROTECTED < BOUND
+    take: 300,
+  });
+  const refs = await patientRefs(rows.map((r) => r.patientApricotId));
+  const empty = { patientCode: null, patientName: null, conversationId: null };
+  const convIds = [...refs.values()].map((x) => x.conversationId).filter((x): x is string => !!x);
+  const intentOf = new Map(
+    (await prisma.conversation.findMany({ where: { id: { in: convIds } }, select: { id: true, salesIntent: true } })).map((c) => [c.id, c.salesIntent])
+  );
+  return rows.map((r) => ({
+    intent: intentOf.get(refs.get(r.patientApricotId)?.conversationId ?? "") ?? null,
+    patientApricotId: r.patientApricotId,
+    state: r.state as "PROTECTED" | "BOUND",
+    protectedUntil: r.protectedUntil?.toISOString() ?? null,
+    lastApptDate: r.lastApptDate,
+    rounds: r.rounds,
+    noShowStreak: r.noShowStreak,
+    highValue: r.highValue,
+    daysLeft: r.state === "PROTECTED" && r.protectedUntil ? Math.max(0, Math.ceil((r.protectedUntil.getTime() - now.getTime()) / 86_400_000)) : null,
+    since: r.since.toISOString(),
+    ...(refs.get(r.patientApricotId) ?? empty),
+  }));
+}
+
+/** ★ U2：銷售公海（最近 60 日放返出嚟、冇人負責）— 所有銷售都見到，可以再約 */
+export async function salesPool(staffId: string, now: Date = new Date()): Promise<PoolPatientView[]> {
+  const rows = await prisma.salesOwnership.findMany({
+    where: { state: "POOL", since: { gte: new Date(now.getTime() - POOL_DAYS * 86_400_000) } },
+    orderBy: { since: "desc" },
+    take: 100,
+  });
+  const refs = await patientRefs(rows.map((r) => r.patientApricotId));
+  const empty = { patientCode: null, patientName: null, conversationId: null };
+  return rows.map((r) => ({ patientApricotId: r.patientApricotId, wasMine: r.lastSalesStaffId === staffId, since: r.since.toISOString(), ...(refs.get(r.patientApricotId) ?? empty) }));
+}
+
 export async function mySales(staffId: string, month: string) {
   const me = await prisma.staffUser.findUnique({ where: { id: staffId }, select: { isSales: true, active: true } });
   if (!me?.isSales || !me.active) throw new SalesActionError(403, "NOT_SALES", "只有銷售人員有「我的銷售」");
-  const [{ ledger }, invoices, protectedCount, boundCount] = await Promise.all([
+  const { mySalesReviews } = await import("@/lib/sales/reviews");
+  const [{ ledger }, invoices, protectedCount, boundCount, patients, pool, reviews] = await Promise.all([
     ledgerView(staffId, month),
     fetchMySalesInvoices(staffId),
     prisma.salesOwnership.count({ where: { salesStaffId: staffId, state: "PROTECTED" } }),
     prisma.salesOwnership.count({ where: { salesStaffId: staffId, state: "BOUND" } }),
+    myPatients(staffId),
+    salesPool(staffId),
+    // 對單結果拎唔到唔阻成頁（傭金數仍然顯示）
+    mySalesReviews(staffId).catch(() => null),
   ]);
   const refs = await patientRefs(invoices.map((i) => i.patientApricotId));
   const empty = { patientCode: null, patientName: null, conversationId: null };
@@ -56,6 +125,9 @@ export async function mySales(staffId: string, month: string) {
     counts: { protected: protectedCount, bound: boundCount },
     ledger,
     invoices: invoices.map((i) => ({ ...i, ...(refs.get(i.patientApricotId) ?? empty) })) as InvoiceView[],
+    patients,
+    pool,
+    reviews,
   };
 }
 
