@@ -11,7 +11,7 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
@@ -34,6 +34,9 @@ ensureEnv();
 process.env.WORKFORCE_MOCK = "1";
 
 const prisma = new PrismaClient();
+// 傭金 % 由測試自己設（唔靠本機 .dev 檔 — CI 冇）；收尾還原
+const COMMISSION_FILE = path.resolve(__dirname, "../../../.dev/workforce-mock-commission.json");
+let commissionBackup: string | null = null;
 const PFX = "salw";
 const C1 = `${PFX}contact00000000000000001`;
 const CONV1 = `${PFX}conv0000000000000000001`;
@@ -56,6 +59,7 @@ async function cleanup(): Promise<void> {
 }
 
 before(async () => {
+  commissionBackup = existsSync(COMMISSION_FILE) ? readFileSync(COMMISSION_FILE, "utf8") : null;
   await cleanup();
   const tkw = await prisma.clinic.findUnique({ where: { code: "TKW" } });
   assert.ok(tkw);
@@ -70,13 +74,17 @@ before(async () => {
   await prisma.contactPatientLink.createMany({
     data: PIDS.map((p, i) => ({ contactId: C1, patientApricotId: p, patientCode: `TKW95000${i + 1}`, patientName: `SALW 病人${i + 1}`, source: "SEARCH" })),
   });
-  const { _resetMockInvoicesForTest } = await import("@/lib/workforce/client");
+  const { _resetMockInvoicesForTest, putCommissionItems } = await import("@/lib/workforce/client");
   _resetMockInvoicesForTest();
+  await putCommissionItems("TKW", [{ feeItemExtId: "mock-fee-TKW-3", ratePct: 3 }], adm); // IMPLANT 3%
 });
 
 after(async () => {
   try {
     await cleanup();
+    if (commissionBackup === null) {
+      if (existsSync(COMMISSION_FILE)) unlinkSync(COMMISSION_FILE);
+    } else writeFileSync(COMMISSION_FILE, commissionBackup);
   } finally {
     await closeRedis();
     await prisma.$disconnect();

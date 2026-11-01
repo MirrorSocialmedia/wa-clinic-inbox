@@ -10,7 +10,7 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
@@ -33,6 +33,9 @@ ensureEnv();
 process.env.WORKFORCE_MOCK = "1";
 
 const prisma = new PrismaClient();
+// 傭金 % 由測試自己設（唔靠本機 .dev 檔 — CI 冇）；收尾還原
+const COMMISSION_FILE = path.resolve(__dirname, "../../../.dev/workforce-mock-commission.json");
+let commissionBackup: string | null = null;
 const PFX = "saly";
 const C1 = `${PFX}contact00000000000000001`;
 const PID = `${PFX}-p1`;
@@ -55,6 +58,7 @@ async function cleanup(): Promise<void> {
 }
 
 before(async () => {
+  commissionBackup = existsSync(COMMISSION_FILE) ? readFileSync(COMMISSION_FILE, "utf8") : null;
   await cleanup();
   const tkw = await prisma.clinic.findUnique({ where: { code: "TKW" } });
   assert.ok(tkw);
@@ -62,8 +66,9 @@ before(async () => {
   adm = (await prisma.staffUser.create({ data: { email: EMAILS[1], name: "SALY 老闆", role: "ADMIN", passwordHash: "x", active: true } })).id;
   await prisma.contact.create({ data: { id: C1, clinicId: tkw.id, waId: "85290006101", profileName: "SALY", labels: [] } });
   await prisma.contactPatientLink.create({ data: { contactId: C1, patientApricotId: PID, patientCode: "TKW960001", patientName: "黃秘密SALY", source: "SEARCH" } });
-  const { _resetMockInvoicesForTest, _mockInvoiceStoreForTest, createSalesInvoice } = await import("@/lib/workforce/client");
+  const { _resetMockInvoicesForTest, _mockInvoiceStoreForTest, createSalesInvoice, putCommissionItems } = await import("@/lib/workforce/client");
   _resetMockInvoicesForTest();
+  await putCommissionItems("TKW", [{ feeItemExtId: "mock-fee-TKW-3", ratePct: 3 }], adm); // IMPLANT 3%
   await createSalesInvoice(
     { requestKey: "salykey00001", clinicCode: "TKW", patientApricotId: PID, patientCode: "X", conversationId: null, employeeId: null, salesApricotUserId: `${PFX}-apu`, practitionerExtId: "p", ownership: "PROTECTED", lines: [{ feeItemExtId: "mock-fee-TKW-3", qty: 1, up: 39000, discAmt: 0 }], payment: { amt: 10000, methodExtId: "mock-pm-cash" } },
     a
@@ -75,6 +80,9 @@ before(async () => {
 after(async () => {
   try {
     await cleanup();
+    if (commissionBackup === null) {
+      if (existsSync(COMMISSION_FILE)) unlinkSync(COMMISSION_FILE);
+    } else writeFileSync(COMMISSION_FILE, commissionBackup);
   } finally {
     await closeRedis();
     await prisma.$disconnect();
