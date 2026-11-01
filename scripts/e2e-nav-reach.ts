@@ -298,7 +298,8 @@ async function main(): Promise<void> {
     const pwHash = await argon2.hash(PASS);
     await prisma.$transaction([
       prisma.staffUser.create({
-        data: { id: U_STAFF, email: E_STAFF, name: "E2E Nav STAFF", passwordHash: pwHash, role: "STAFF", active: true },
+        // isSales：「我的銷售」（/sales）只有銷售人員見到入口 → STAFF 測試帳號係銷售，先爬得到
+        data: { id: U_STAFF, email: E_STAFF, name: "E2E Nav STAFF", passwordHash: pwHash, role: "STAFF", active: true, isSales: true },
       }),
       prisma.staffUser.create({
         data: { id: U_SUP, email: E_SUP, name: "E2E Nav SUPERVISOR", passwordHash: pwHash, role: "SUPERVISOR", active: true, scopeType: "ALL" as never },
