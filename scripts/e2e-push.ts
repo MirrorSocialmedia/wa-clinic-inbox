@@ -526,9 +526,20 @@ async function t192(): Promise<void> {
   }
   if (!rowOk) fail("t192: 200 row 應該保留");
   if (!rowOk.lastOkAt) fail("t192: 200 → lastOkAt 未更新");
-  const rowGone = await prisma.pushSubscription.findUnique({ where: { endpoint: gone.endpoint }, select: { id: true } });
+  // 同上：endpoint 先回 410/404，delivery 之後先刪 row → capture 可見 ≠ 已刪（CI 全量負載 2026-11-01 假紅）
+  //   → 輪詢最多 10s（斷言條件零改動：row 一定要刪走）
+  const stillThere = async (endpoint: string) => !!(await prisma.pushSubscription.findUnique({ where: { endpoint }, select: { id: true } }));
+  let rowGone = await stillThere(gone.endpoint);
+  let rowMiss = await stillThere(miss.endpoint);
+  {
+    const tDel = Date.now();
+    while ((rowGone || rowMiss) && Date.now() - tDel < 10000) {
+      await new Promise((r) => setTimeout(r, 500));
+      rowGone = await stillThere(gone.endpoint);
+      rowMiss = await stillThere(miss.endpoint);
+    }
+  }
   if (rowGone) fail("t192: 410 row 應該自動刪");
-  const rowMiss = await prisma.pushSubscription.findUnique({ where: { endpoint: miss.endpoint }, select: { id: true } });
   if (rowMiss) fail("t192: 404 row 應該自動刪");
   delete endpointStatus[ok.path];
   delete endpointStatus[gone.path];
