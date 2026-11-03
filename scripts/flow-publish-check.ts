@@ -7,6 +7,8 @@
  *   pnpm -s flow-publish-check --upload-key         # 將本機公鑰上載 + 簽到 WA_PHONE_NUMBER_ID
  *   pnpm -s flow-publish-check --publish            # 經 API 發佈 — Meta 會回明確錯誤訊息
  *   pnpm -s flow-publish-check --send-test 852XXXXXXXX  # 用 inbox 同一個 payload 發 Flow 去你部手機，印 Meta 完整錯誤
+ *   pnpm -s flow-publish-check --waba <id> --phone <id> --register 123456  # 號碼註冊落 Cloud API（6 位 PIN）
+ *   pnpm -s flow-publish-check --waba <id> --subscribe     # WABA 訂閱 app webhook（新號碼收訊息必做）
  *   pnpm -s flow-publish-check --list               # 列出 token 可達嘅所有 WABA + 號碼 + 公鑰 + Flows
  *   （--waba <id> / --phone <id> / --flow <id> 可指定其他 WABA，例如診所正式 WABA）
  *
@@ -41,6 +43,7 @@ const token = process.env.WA_ACCESS_TOKEN ?? "";
 const flowId = opt("--flow") ?? process.env.FLOW_ID ?? "";
 const phoneId = opt("--phone") ?? process.env.WA_PHONE_NUMBER_ID ?? "";
 let wabaId = opt("--waba") ?? process.env.WA_WABA_ID ?? "";
+let businessId = ""; // health_status 嘅 BUSINESS entity（--list 用嚟列 Business 下所有 WABA）
 
 let problems = 0;
 let isTestWaba = false; // Meta 開 app 時自動建嘅沙盒 WABA（Test WhatsApp Business Account / Test Number）
@@ -144,6 +147,7 @@ async function main() {
         check(overall === "AVAILABLE", `health_status=${overall}`, `health_status=${overall}`);
         for (const e of (hs.entities ?? []) as Array<J>) {
           // ★ health_status 嘅 entity id 係 Meta 內部 id — FLOW 嗰行唔等於 Flow ID（唔好用嚟 --flow）
+          if (e.entity_type === "BUSINESS" && e.id) businessId = String(e.id);
           const line = `${e.entity_type}${e.entity_type === "FLOW" ? "（內部 id）" : ""} ${e.id}: ${e.can_send_message}`;
           if (e.can_send_message === "AVAILABLE") info(line);
           else {
@@ -210,6 +214,34 @@ async function main() {
       "Meta 上嘅公鑰 = 本機 FLOW_KEYS_DIR 公鑰",
       "Meta 上嘅公鑰 ≠ 本機公鑰（server 解唔到呢個號碼嘅請求）→ --upload-key --phone <呢個 id>",
     );
+  }
+
+  // [2a] 註冊號碼落 Cloud API（號碼要先喺 WhatsApp 管理工具驗證咗）— PIN = 6 位兩步驗證碼，自己揀、記住
+  const pin = opt("--register");
+  if (pin !== undefined) {
+    console.log("\n[2a] 註冊號碼落 Cloud API");
+    if (!phoneId) bad("冇 --phone");
+    else if (!/^\d{6}$/.test(pin)) bad("--register 要跟 6 位數字 PIN（例如 --register 246810）");
+    else {
+      const r = await graph(`${phoneId}/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messaging_product: "whatsapp", pin }),
+      });
+      check(r.ok, `已註冊 ${phoneId}（PIN 要記低 — 之後搬機／重新註冊要用）`, `註冊失敗：${graphErr(r)}`);
+    }
+  }
+
+  // [2c] WABA 訂閱 app webhook（唔訂 = 新號碼收唔到病人訊息）
+  if (flag("--subscribe")) {
+    console.log("\n[2c] WABA 訂閱 CLINIC_INBOX webhook");
+    if (!wabaId) bad("冇 --waba");
+    else {
+      const r = await graph(`${wabaId}/subscribed_apps`, { method: "POST" });
+      check(r.ok, `已訂閱：${JSON.stringify(r.body)}`, `訂閱失敗：${graphErr(r)}`);
+      const g = await graph(`${wabaId}/subscribed_apps`);
+      if (g.ok) info(`目前訂閱：${((g.body.data ?? []) as Array<J>).map((a) => (a.whatsapp_business_api_data as J | undefined)?.name ?? a.id ?? "?").join(", ") || "（冇）"}`);
+    }
   }
 
   if (flag("--upload-key")) {
@@ -327,6 +359,12 @@ async function main() {
       for (const id of tokenTargets.get(sc) ?? []) ids.add(id);
     }
     if (wabaId) ids.add(wabaId);
+    if (businessId) {
+      for (const edge of ["owned_whatsapp_business_accounts", "client_whatsapp_business_accounts"]) {
+        const b = await graph(`${businessId}/${edge}?fields=id`);
+        for (const w of ((b.body.data ?? []) as Array<J>)) ids.add(String(w.id));
+      }
+    }
     if (ids.size === 0) bad("token 冇任何 WABA target（debug_token 讀唔到 / 系統用戶未指派 WhatsApp 帳戶）");
     for (const id of ids) {
       const w = await graph(`${id}?fields=id,name,account_review_status,business_verification_status`);
