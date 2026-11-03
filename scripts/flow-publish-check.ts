@@ -6,6 +6,8 @@
  *   pnpm -s flow-publish-check --flow <FLOW_ID>     # 指定 Flow（預設 env FLOW_ID）
  *   pnpm -s flow-publish-check --upload-key         # 將本機公鑰上載 + 簽到 WA_PHONE_NUMBER_ID
  *   pnpm -s flow-publish-check --publish            # 經 API 發佈 — Meta 會回明確錯誤訊息
+ *   pnpm -s flow-publish-check --list               # 列出 token 可達嘅所有 WABA + 號碼 + 公鑰 + Flows
+ *   （--waba <id> / --phone <id> / --flow <id> 可指定其他 WABA，例如診所正式 WABA）
  *
  * 檢查：
  *   1. Flow 本身：status / validation_errors / endpoint_uri / application（Meta app 有冇連）/ health_status
@@ -39,6 +41,7 @@ const phoneId = opt("--phone") ?? process.env.WA_PHONE_NUMBER_ID ?? "";
 let wabaId = opt("--waba") ?? process.env.WA_WABA_ID ?? "";
 
 let problems = 0;
+let isTestWaba = false; // Meta 開 app 時自動建嘅沙盒 WABA（Test WhatsApp Business Account / Test Number）
 const ok = (m: string) => console.log(`  ✅ ${m}`);
 const bad = (m: string) => {
   problems++;
@@ -169,6 +172,7 @@ async function main() {
     const w = await graph(`${wabaId}?fields=id,name,account_review_status,business_verification_status`);
     if (w.ok) {
       const b = w.body as J;
+      if (/^Test WhatsApp Business Account/i.test(String(b.name ?? ""))) isTestWaba = true;
       info(`WABA ${b.name} (${b.id}) account_review_status=${b.account_review_status ?? "?"} business_verification_status=${b.business_verification_status ?? "?"}`);
     } else info(`讀 WABA 欄位失敗（唔影響其他檢查）：${graphErr(w)}`);
     const p = await graph(
@@ -180,6 +184,7 @@ async function main() {
   }
   for (const ph of phones) {
     console.log(`  — 號碼 ${ph.display_phone_number ?? ""} (${ph.id})${ph.id === phoneId ? " ← WA_PHONE_NUMBER_ID" : ""}`);
+    if (ph.verified_name === "Test Number") isTestWaba = true;
     if (ph.status) info(`status=${ph.status} platform=${ph.platform_type} name_status=${ph.name_status} quality=${ph.quality_rating} verified_name=${ph.verified_name}`);
     if (ph.platform_type && ph.platform_type !== "CLOUD_API") bad(`platform_type=${ph.platform_type}（唔係 CLOUD_API — 未 register 落 Cloud API）`);
     const e = await graph(`${ph.id}/whatsapp_business_encryption`);
@@ -287,7 +292,13 @@ async function main() {
       const r = await graph(`${flowId}/publish`, { method: "POST" });
       check(r.ok, `已發佈：${JSON.stringify(r.body)}`, `發佈失敗（呢句就係真正原因）：${graphErr(r)}`);
       const code = ((r.body.error ?? {}) as J).code;
-      if (!r.ok && code === 100) {
+      if (!r.ok && code === 100 && isTestWaba) {
+        console.log("       → 呢個係 Meta 自動建嘅測試 WABA（Test WhatsApp Business Account / Test Number）。");
+        console.log("         權限、公鑰、endpoint 全部通過但 publish 仍回 code=100 = 測試 WABA 唔支援發佈 Flow。");
+        console.log("         • 測試：唔使發佈 — .env 設 FLOW_ID=<呢個草稿 Flow ID> + WA_FLOW_DRAFT=1，真機照開到（draft mode）");
+        console.log("         • 正式：喺有真號碼嘅 WABA 建 Flow（貼 docs/flow-booking-v73.json）→ 連 app + endpoint →");
+        console.log("           pnpm -s flow-publish-check --phone <真號碼 id> --upload-key → 再 --flow <新 id> --publish");
+      } else if (!r.ok && code === 100) {
         console.log("       → code=100 但上面讀 Flow 成功 = token 讀得唔管得（權限問題，唔係 Flow 內容問題）：");
         console.log("         1) business.facebook.com/settings → 用戶 → 系統用戶 → 揀 token 嗰個系統用戶 → 指派資產");
         console.log("            → WhatsApp 帳戶 → 呢個 WABA → 開「完全控制」（唔係只係部分權限）");
@@ -295,6 +306,40 @@ async function main() {
         console.log("         3) 重新產生 token，剔 whatsapp_business_management + whatsapp_business_messaging → 更新 .env WA_ACCESS_TOKEN");
         console.log("         ＊ Flow Builder 個「發佈」同樣要你個人 Facebook 帳戶對呢個 WABA 有「完全控制」— 一併喺「WhatsApp 帳戶 → 人員」檢查");
       }
+    }
+  }
+
+  // ── 5. 列出 token 可達嘅 WABA + 每個 WABA 嘅號碼 / Flows（--list）──
+  // 用途：搵 Flow ID 屬邊個 WABA；確認 token / 系統用戶有冇被指派到診所 WABA
+  if (flag("--list")) {
+    console.log("\n[5] token 可達嘅 WABA");
+    const ids = new Set<string>();
+    for (const sc of ["whatsapp_business_management", "whatsapp_business_messaging"]) {
+      for (const id of tokenTargets.get(sc) ?? []) ids.add(id);
+    }
+    if (wabaId) ids.add(wabaId);
+    if (ids.size === 0) bad("token 冇任何 WABA target（debug_token 讀唔到 / 系統用戶未指派 WhatsApp 帳戶）");
+    for (const id of ids) {
+      const w = await graph(`${id}?fields=id,name,account_review_status,business_verification_status`);
+      if (!w.ok) {
+        info(`${id}：唔係 WABA 或讀唔到（${graphErr(w)}）`);
+        continue;
+      }
+      const b = w.body as J;
+      console.log(`  ■ WABA ${b.name} (${b.id}) review=${b.account_review_status ?? "?"} verification=${b.business_verification_status ?? "?"}`);
+      const p = await graph(`${id}/phone_numbers?fields=id,display_phone_number,verified_name,status,platform_type,name_status`);
+      if (!p.ok) bad(`  讀號碼失敗：${graphErr(p)}`);
+      const nums = ((p.body.data ?? []) as Array<J>);
+      if (p.ok && nums.length === 0) info("    （冇號碼）");
+      for (const n of nums) {
+        const e = await graph(`${n.id}/whatsapp_business_encryption`);
+        const d = ((e.body.data ?? []) as Array<J>)[0];
+        const key = !e.ok ? "公鑰讀唔到" : !d?.business_public_key ? "未上載公鑰" : `公鑰 ${d.business_public_key_signature_status}${sameKey(d.business_public_key, kp.publicPem) ? "（= 本機）" : "（≠ 本機）"}`;
+        info(`  號碼 ${n.display_phone_number} (${n.id}) ${n.verified_name} status=${n.status} platform=${n.platform_type} name=${n.name_status} ${key}`);
+      }
+      const f = await graph(`${id}/flows?fields=id,name,status,categories`);
+      if (!f.ok) bad(`  讀 Flows 失敗：${graphErr(f)}`);
+      for (const fl of ((f.body.data ?? []) as Array<J>)) info(`  Flow ${fl.name} (${fl.id}) ${fl.status}`);
     }
   }
 
