@@ -22,6 +22,7 @@
     "dev:db:stop": "bash -c 'pg_isready -h 127.0.0.1 -p 15432 -q && echo \"embedded postgres running on 15432\" || echo \"not running\"'",
     "mock-inbound": "tsx scripts/mock-inbound.ts",
     "flow-client": "tsx scripts/mock-flow-client.ts",
+    "flow-publish-check": "tsx scripts/flow-publish-check.ts",
     "e2e:cron": "tsx scripts/e2e-cron.ts",
     "e2e:t723": "tsx scripts/e2e-t723-upsert-alert.ts",
     "e2e:t610": "tsx scripts/e2e-t610-dlq-replay.ts",

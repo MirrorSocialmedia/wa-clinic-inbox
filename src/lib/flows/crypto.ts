@@ -187,7 +187,7 @@ export function flowJwtSecret(): string {
  */
 export async function uploadPublicKey(opts: {
   phoneNumberId: string;
-  publicJwk: Record<string, unknown>;
+  publicPem: string;
   accessToken?: string;
 }): Promise<{ mocked: boolean }> {
   if (process.env.WA_MOCK === "1") {
@@ -197,8 +197,9 @@ export async function uploadPublicKey(opts: {
   if (!token) throw new Error("WA_ACCESS_TOKEN missing");
   const res = await fetch(`https://graph.facebook.com/v23.0/${opts.phoneNumberId}/whatsapp_business_encryption`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ public_key: opts.publicJwk }),
+    // Meta spec：form 參數 business_public_key = PEM 字串（唔係 JWK）
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ business_public_key: opts.publicPem }).toString(),
   });
   if (!res.ok) {
     const t = await res.text().catch(() => "");
