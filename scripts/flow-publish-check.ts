@@ -128,7 +128,7 @@ async function main() {
       bad(`讀 Flow 失敗：${graphErr(r)}`);
     } else {
       const f = r.body as J;
-      info(`name=${f.name} status=${f.status} json_version=${f.json_version} data_api_version=${f.data_api_version}`);
+      info(`Flow ID=${f.id ?? flowId} name=${f.name} status=${f.status} json_version=${f.json_version} data_api_version=${f.data_api_version}`);
       endpointUri = f.endpoint_uri ?? "";
       check(!!endpointUri, `endpoint_uri=${endpointUri}`, "Flow 未設 endpoint_uri");
       if (f.application?.id) ok(`已連 Meta app：${f.application.name ?? ""} (${f.application.id})`);
@@ -141,7 +141,8 @@ async function main() {
         const overall = hs.can_send_message;
         check(overall === "AVAILABLE", `health_status=${overall}`, `health_status=${overall}`);
         for (const e of (hs.entities ?? []) as Array<J>) {
-          const line = `${e.entity_type} ${e.id}: ${e.can_send_message}`;
+          // ★ health_status 嘅 entity id 係 Meta 內部 id — FLOW 嗰行唔等於 Flow ID（唔好用嚟 --flow）
+          const line = `${e.entity_type}${e.entity_type === "FLOW" ? "（內部 id）" : ""} ${e.id}: ${e.can_send_message}`;
           if (e.can_send_message === "AVAILABLE") info(line);
           else {
             bad(line);
@@ -292,6 +293,12 @@ async function main() {
       const r = await graph(`${flowId}/publish`, { method: "POST" });
       check(r.ok, `已發佈：${JSON.stringify(r.body)}`, `發佈失敗（呢句就係真正原因）：${graphErr(r)}`);
       const code = ((r.body.error ?? {}) as J).code;
+      if (!r.ok && code === 139000) {
+        console.log("       → 139000 Integrity requirements not met = 帳戶層面（WABA / Business / 號碼）未達 Meta 發佈 Flow 嘅誠信要求，");
+        console.log("         唔係 Flow JSON、endpoint 或公鑰問題（上面全部通過）。");
+        if (isTestWaba) console.log("         呢個係 Meta 測試 WABA（Test Number，顯示名稱未經審核）— 預期過唔到；測試用 WA_FLOW_DRAFT=1 草稿模式。");
+        console.log("         正式：用真號碼 WABA（Business 已驗證 + 顯示名稱已批 + 已加付款方式），再 --flow <嗰邊 Flow ID> --publish");
+      }
       if (!r.ok && code === 100 && isTestWaba) {
         console.log("       → 呢個係 Meta 自動建嘅測試 WABA（Test WhatsApp Business Account / Test Number）。");
         console.log("         權限、公鑰、endpoint 全部通過但 publish 仍回 code=100 = 測試 WABA 唔支援發佈 Flow。");
