@@ -35,6 +35,8 @@ export interface InvoiceContext {
   /** ★ 第 5 期（R6）：可以揀嘅開單分店（自己權限範圍內、有 Apricot 連結）；預設 = 對話處理中分店 */
   clinics: { code: string; name: string }[];
   patients: InvoicePatient[];
+  /** 預設分店開唔到單、自動改用其他分店時嘅提示（UI 顯示） */
+  clinicNote?: string | null;
 }
 
 /** 開單分店選擇：scope = null（全集團）或者自己嘅 clinic id 集合 */
@@ -49,6 +51,18 @@ async function invoiceClinics(scope: string[] | null | undefined): Promise<{ id:
     orderBy: { code: "asc" },
     select: { id: true, code: true, name: true },
   });
+}
+
+/**
+ * 點解呢間店開唔到單（講清楚原因 — 「冇權」一句令人以為係帳號權限，其實多數係分店未連 Apricot）。
+ * 次序：搵唔到 → 帳號範圍外 → 未連 Apricot。
+ */
+async function clinicDenyReason(where: { code: string } | { id: string }, scope: string[] | null | undefined): Promise<string> {
+  const c = await prisma.clinic.findUnique({ where, select: { id: true, code: true, apricotClinicId: true } });
+  if (!c) return "搵唔到呢間分店";
+  if (scope && !scope.includes(c.id)) return `你嘅帳號冇 ${c.code} 分店權限 — 請老闆喺員工帳號加 ${c.code}`;
+  if (!c.apricotClinicId) return `${c.code} 未連 Apricot 分店（診所設定未有 Apricot 分店編號）— 暫時開唔到單`;
+  return "你冇權喺呢間店開單";
 }
 
 interface Me {
@@ -76,11 +90,22 @@ export async function invoiceContext(conversationId: string, staffId: string, pi
   // 開單分店 = 揀咗嘅分店（要喺自己範圍內）；冇揀 = 處理中分店（轉店後）否則對話分店
   const clinics = await invoiceClinics(pick.scope);
   let clinic: { code: string } | null;
+  let clinicDenied: string | null = null;
+  let clinicNote: string | null = null;
   if (pick.clinicCode) {
     clinic = clinics.find((c) => c.code === pick.clinicCode) ?? null;
-    if (!clinic) throw new SalesActionError(403, "CLINIC_NOT_ALLOWED", "你冇權喺呢間店開單");
+    if (!clinic) throw new SalesActionError(403, "CLINIC_NOT_ALLOWED", await clinicDenyReason({ code: pick.clinicCode }, pick.scope));
   } else {
     clinic = await prisma.clinic.findUnique({ where: { id: conv.handlingClinicId ?? conv.clinicId }, select: { code: true } });
+    // ★ 預設分店都要喺可開單分店入面 — 舊版開框正常、撳「開 invoice」先 403「冇權」。
+    //   開唔到 → 有其他可開單分店就自動揀第一間 + 提示（可以喺分店揀返）；一間都冇 → blocked 講原因
+    if (clinic && !clinics.some((c) => c.code === clinic!.code)) {
+      const why = await clinicDenyReason({ code: clinic.code }, pick.scope);
+      if (clinics.length > 0) {
+        clinicNote = `${why}；已改用 ${clinics[0].code} 開單（請確認分店）`;
+        clinic = { code: clinics[0].code };
+      } else clinicDenied = why;
+    }
   }
   const pids = await conversationPatientIds(conversationId);
   const [links, contact, owns] = await Promise.all([
@@ -111,12 +136,13 @@ export async function invoiceContext(conversationId: string, staffId: string, pi
   if (!me?.isSales || !me.active) blocked = "只有銷售人員可以開單";
   else if (!me.salesApricotUserId) blocked = "你未綁定 Apricot 銷售員帳號 — 請老闆喺員工帳號設定";
   else if (!clinic?.code) blocked = "呢個對話冇分店";
+  else if (clinicDenied) blocked = clinicDenied;
   else if (patients.length === 0) blocked = "呢個對話未認病人 — 請先喺右欄搵返病人";
   else {
     const lock = await conversationSalesLock(conversationId);
     if (lock.owners.length > 0 && !canReplyUnderLock(lock, staffId)) blocked = `${[...new Set(lock.owners.map((o) => o.name))].join("／")} 負責呢個對話（銷售）`;
   }
-  return { blocked, clinicCode: clinic?.code ?? null, clinics: clinics.map((c) => ({ code: c.code, name: c.name })), patients };
+  return { blocked, clinicCode: clinic?.code ?? null, clinics: clinics.map((c) => ({ code: c.code, name: c.name })), patients, clinicNote };
 }
 
 /** ★ 第 5 期（U9）：冇對話開單（walk-in／前台轉介）— 病人由銷售搜尋（server 記低搜尋結果，唔信 client 編號） */
@@ -132,7 +158,7 @@ export async function invoiceContextForPatient(staffId: string, patient: DirectP
   const me = await loadMe(staffId);
   const clinics = await invoiceClinics(pick.scope);
   const clinic = pick.clinicCode ? (clinics.find((c) => c.code === pick.clinicCode) ?? null) : (clinics[0] ?? null);
-  if (pick.clinicCode && !clinic) throw new SalesActionError(403, "CLINIC_NOT_ALLOWED", "你冇權喺呢間店開單");
+  if (pick.clinicCode && !clinic) throw new SalesActionError(403, "CLINIC_NOT_ALLOWED", await clinicDenyReason({ code: pick.clinicCode }, pick.scope));
   const o = await prisma.salesOwnership.findUnique({ where: { patientApricotId: patient.patientApricotId } });
   const owner = o?.salesStaffId ? await prisma.staffUser.findUnique({ where: { id: o.salesStaffId }, select: { name: true, active: true, isSales: true } }) : null;
   const live = o && (o.state === "PROTECTED" || o.state === "BOUND") && owner?.active && owner.isSales;

@@ -9,6 +9,7 @@
  * X4  R3／R4 對單：單被修改只可以「已知悉」；批保護外 → 綁定；其他銷售保護中唔搶；前台幫開未綁 → 409；銷售補充只限自己未決定
  * X5  R5 同步停咗：通知老闆一次；同一 run 唔重複；新 run 再通知；太耐冇跑 → 通知
  * X6  R6 揀分店：範圍外 403；範圍內轉店；分店名單跟範圍
+ * X6b 預設分店開唔到單：原因（範圍外／未連 Apricot）+ 自動改用可開單分店；一間都冇 → blocked
  * X7  U1 到期提醒：只喺時段內；每個到期日一次；續期後再提；設 0 唔提
  * X8  U8 負責病人名單：只推保護中／綁定 + 綁咗 Apricot 銷售員
  * X9  U9 冇對話開單：冇搜過 400；其他銷售負責 403；開到（審計 entity Patient）；重放唔重複審計
@@ -336,6 +337,34 @@ test("X6 R6 揀分店：範圍外 403；範圍內轉店", async () => {
   const all = await invoiceContext(CONV1, a, { scope: null, clinicCode: "MF" });
   assert.equal(all.clinicCode, "MF");
   assert.ok(all.clinics.length >= 2);
+});
+
+test("X6b 預設分店開唔到單：講清楚原因 + 自動改用可開單分店；一間都冇 → blocked", async () => {
+  const { invoiceContext } = await import("./invoice");
+  const { SalesActionError } = await import("./handover");
+  const mf = await prisma.clinic.findUnique({ where: { code: "MF" }, select: { id: true } });
+  assert.ok(mf);
+  // 帳號範圍唔包對話分店（TKW）→ 改用 MF + 提示（唔係等撳「開 invoice」先 403）
+  const fb = await invoiceContext(CONV1, a, { scope: [mf.id] });
+  assert.equal(fb.clinicCode, "MF");
+  assert.match(fb.clinicNote ?? "", /冇 TKW 分店權限/);
+  // 範圍內冇任何可開單分店 → blocked 講原因
+  const none = await invoiceContext(CONV1, a, { scope: [] });
+  assert.match(none.blocked ?? "", /冇 TKW 分店權限/);
+  // 明確揀範圍外分店 → 403 帶原因（唔再係含糊「冇權」）
+  await assert.rejects(invoiceContext(CONV1, a, { scope: [tkwId], clinicCode: "MF" }), (e) => e instanceof SalesActionError && e.status === 403 && /冇 MF 分店權限/.test(e.message));
+  // 分店未連 Apricot → 講「未連 Apricot」
+  const orig = await prisma.clinic.findUnique({ where: { id: tkwId }, select: { apricotClinicId: true } });
+  await prisma.clinic.update({ where: { id: tkwId }, data: { apricotClinicId: null } });
+  try {
+    const noApr = await invoiceContext(CONV1, a, { scope: [tkwId] });
+    assert.match(noApr.blocked ?? "", /TKW 未連 Apricot/);
+    await assert.rejects(invoiceContext(CONV1, a, { scope: null, clinicCode: "TKW" }), (e) => e instanceof SalesActionError && /TKW 未連 Apricot/.test(e.message));
+  } finally {
+    await prisma.clinic.update({ where: { id: tkwId }, data: { apricotClinicId: orig?.apricotClinicId ?? null } });
+  }
+  // 迴歸：正常情況冇提示
+  assert.equal((await invoiceContext(CONV1, a, { scope: [tkwId] })).clinicNote ?? null, null);
 });
 
 test("X7 U1 到期提醒：時段內、每個到期日一次、續期再提、設 0 唔提", async () => {
