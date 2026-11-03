@@ -92,6 +92,26 @@ async function main() {
   const kp = ensureKeypair();
   info(`本機公鑰：FLOW_KEYS_DIR=${process.env.FLOW_KEYS_DIR ?? ".dev/flow-keys"} kid=${kp.kid}`);
 
+  // ── 0. Access token 權限 ──
+  // 讀到 Flow 但 POST publish 回 code=100「does not exist / missing permissions」= token 讀得唔管得：
+  // 要 whatsapp_business_management scope，而且 granular target 要包含呢個 WABA
+  console.log("\n[0] Access token 權限");
+  const dbg = await graph(`debug_token?input_token=${encodeURIComponent(token)}`);
+  const td = (dbg.body.data ?? {}) as J;
+  const tokenTargets = new Map<string, string[] | null>(); // scope → target ids（null = 全部）
+  if (!dbg.ok || !td.scopes) {
+    info(`讀唔到 token 資料（唔影響其他檢查）：${dbg.ok ? JSON.stringify(dbg.body).slice(0, 200) : graphErr(dbg)}`);
+  } else {
+    const exp = Number(td.expires_at ?? 0);
+    info(`type=${td.type} app=${td.application ?? ""} (${td.app_id}) user_id=${td.user_id ?? "?"} 到期=${exp ? new Date(exp * 1000).toISOString() : "永不"}`);
+    check(td.is_valid === true, "token 有效", `token 無效：${JSON.stringify(td.error ?? {})}`);
+    for (const g of (td.granular_scopes ?? []) as Array<J>) tokenTargets.set(g.scope, (g.target_ids as string[] | undefined) ?? null);
+    for (const sc of ["whatsapp_business_management", "whatsapp_business_messaging"]) {
+      check((td.scopes as string[]).includes(sc), `scope ${sc}`, `token 冇 ${sc} scope → 重新產生 system user token 時剔埋`);
+    }
+    if (exp && exp * 1000 - Date.now() < 7 * 86400_000) bad("token 7 日內到期（臨時 token？production 要用 system user 永久 token）");
+  }
+
   // ── 1. Flow ──
   console.log("\n[1] Flow");
   let endpointUri = "";
@@ -133,6 +153,14 @@ async function main() {
 
   // ── 2. WABA + 電話號碼 + 公鑰 ──
   console.log("\n[2] WABA / 電話號碼 / 公鑰");
+  if (wabaId && tokenTargets.has("whatsapp_business_management")) {
+    const t = tokenTargets.get("whatsapp_business_management");
+    check(
+      t === null || (t ?? []).includes(wabaId),
+      `token 嘅 whatsapp_business_management 涵蓋 WABA ${wabaId}`,
+      `token 嘅 whatsapp_business_management 只涵蓋 [${(t ?? []).join(", ")}]，唔包 WABA ${wabaId} → 商業設定 → 系統用戶 → 指派資產：WhatsApp 帳戶揀呢個 WABA（完全控制）再重新產生 token`,
+    );
+  }
   const phones: Array<J> = [];
   if (!wabaId) {
     bad("冇 WABA id（WA_WABA_ID / --waba）— 只檢查 WA_PHONE_NUMBER_ID");
@@ -196,40 +224,58 @@ async function main() {
   if (!url) bad("冇 endpoint URL（--endpoint <url>）");
   else if (!appSecret) bad("冇 WA_APP_SECRET — endpoint 會回 432");
   else {
-    const key16 = crypto.randomBytes(16);
-    const iv = crypto.randomBytes(16);
-    const enc = encryptGcm(key16, iv, { version: "3.0", action: "ping" });
-    const body = JSON.stringify({
-      encrypted_flow_data: enc.payload,
-      encrypted_aes_key: wrapAesKey(kp.publicPem, key16),
-      initial_vector: iv.toString("base64"),
-    });
-    const sig = "sha256=" + crypto.createHmac("sha256", appSecret).update(body).digest("hex");
-    const t0 = Date.now();
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Hub-Signature-256": sig },
-        body,
-        signal: AbortSignal.timeout(15_000),
+    // 連續 ping 3 次：第 1 次包 DNS + TLS 握手；之後 keep-alive 重用連線 ≈ server 處理時間
+    const times: number[] = [];
+    let shapeOk = true;
+    for (let i = 0; i < 3; i++) {
+      const key16 = crypto.randomBytes(16);
+      const iv = crypto.randomBytes(16);
+      const enc = encryptGcm(key16, iv, { version: "3.0", action: "ping" });
+      const body = JSON.stringify({
+        encrypted_flow_data: enc.payload,
+        encrypted_aes_key: wrapAesKey(kp.publicPem, key16),
+        initial_vector: iv.toString("base64"),
       });
-      const ms = Date.now() - t0;
-      const text = await res.text();
-      if (res.status !== 200) bad(`HTTP ${res.status} ${text.slice(0, 200)}`);
-      else {
+      const sig = "sha256=" + crypto.createHmac("sha256", appSecret).update(body).digest("hex");
+      const t0 = Date.now();
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Hub-Signature-256": sig },
+          body,
+          signal: AbortSignal.timeout(15_000),
+        });
+        const text = await res.text();
+        times.push(Date.now() - t0);
+        if (res.status !== 200) {
+          bad(`HTTP ${res.status} ${text.slice(0, 200)}`);
+          shapeOk = false;
+          break;
+        }
         let plain = "";
         try {
           plain = decryptGcm(key16, reversedIv(iv.toString("base64")).toString("base64"), text);
         } catch {
           bad("回應解密失敗（IV 取反 / AES-GCM 唔啱）");
+          shapeOk = false;
+          break;
         }
-        if (plain) {
-          check(plain === '{"data":{"status":"active"}}', `回應 = ${plain}`, `回應形狀唔啱 Meta spec：${plain}`);
+        if (plain !== '{"data":{"status":"active"}}') {
+          bad(`回應形狀唔啱 Meta spec：${plain}`);
+          shapeOk = false;
+          break;
         }
+      } catch (e) {
+        bad(`連唔到 endpoint：${(e as Error).message}`);
+        shapeOk = false;
+        break;
       }
-      check(ms < 1000, `延遲 ${ms}ms`, `延遲 ${ms}ms（Meta 要求快速回應，建議 < 1s）`);
-    } catch (e) {
-      bad(`連唔到 endpoint：${(e as Error).message}`);
+    }
+    if (shapeOk) ok('回應 = {"data":{"status":"active"}}（3/3）');
+    if (times.length > 0) {
+      const best = Math.min(...times);
+      info(`延遲：${times.map((t) => `${t}ms`).join(" / ")}（第 1 次含 DNS + TLS 握手）`);
+      check(best < 1000, `最快 ${best}ms（連線重用後）`, `連線重用後仍要 ${best}ms — server 處理慢（Meta 要求快速回應）`);
     }
   }
 
@@ -240,6 +286,15 @@ async function main() {
     else {
       const r = await graph(`${flowId}/publish`, { method: "POST" });
       check(r.ok, `已發佈：${JSON.stringify(r.body)}`, `發佈失敗（呢句就係真正原因）：${graphErr(r)}`);
+      const code = ((r.body.error ?? {}) as J).code;
+      if (!r.ok && code === 100) {
+        console.log("       → code=100 但上面讀 Flow 成功 = token 讀得唔管得（權限問題，唔係 Flow 內容問題）：");
+        console.log("         1) business.facebook.com/settings → 用戶 → 系統用戶 → 揀 token 嗰個系統用戶 → 指派資產");
+        console.log("            → WhatsApp 帳戶 → 呢個 WABA → 開「完全控制」（唔係只係部分權限）");
+        console.log("         2) 同一頁「應用程式」→ 確保 CLINIC_INBOX app 已指派俾佢");
+        console.log("         3) 重新產生 token，剔 whatsapp_business_management + whatsapp_business_messaging → 更新 .env WA_ACCESS_TOKEN");
+        console.log("         ＊ Flow Builder 個「發佈」同樣要你個人 Facebook 帳戶對呢個 WABA 有「完全控制」— 一併喺「WhatsApp 帳戶 → 人員」檢查");
+      }
     }
   }
 
