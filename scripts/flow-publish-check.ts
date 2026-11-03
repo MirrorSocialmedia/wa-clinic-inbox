@@ -6,6 +6,7 @@
  *   pnpm -s flow-publish-check --flow <FLOW_ID>     # 指定 Flow（預設 env FLOW_ID）
  *   pnpm -s flow-publish-check --upload-key         # 將本機公鑰上載 + 簽到 WA_PHONE_NUMBER_ID
  *   pnpm -s flow-publish-check --publish            # 經 API 發佈 — Meta 會回明確錯誤訊息
+ *   pnpm -s flow-publish-check --send-test 852XXXXXXXX  # 用 inbox 同一個 payload 發 Flow 去你部手機，印 Meta 完整錯誤
  *   pnpm -s flow-publish-check --list               # 列出 token 可達嘅所有 WABA + 號碼 + 公鑰 + Flows
  *   （--waba <id> / --phone <id> / --flow <id> 可指定其他 WABA，例如診所正式 WABA）
  *
@@ -26,6 +27,7 @@ try {
 }
 
 import { decryptGcm, encryptGcm, ensureKeypair, reversedIv, wrapAesKey } from "../src/lib/flows/crypto";
+import { buildFlowPayload, defaultFlowConfig } from "../src/lib/wa/graph";
 
 const GRAPH = "https://graph.facebook.com/v23.0";
 const args = process.argv.slice(2);
@@ -219,7 +221,7 @@ async function main() {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ business_public_key: kp.publicPem }).toString(),
       });
-      check(r.ok, `已上載去 ${phoneId}（再行一次本 script 確認 VALID）`, `上載失敗：${graphErr(r)}`);
+      check(r.ok, `已上載去 ${phoneId}（再行一次本 script 確認 VALID）`, `上載去 ${phoneId} 失敗：${graphErr(r)}（號碼未驗證／未 register，或 token 未指派到嗰個 WABA 都會咁）`);
     }
   }
 
@@ -347,6 +349,35 @@ async function main() {
       const f = await graph(`${id}/flows?fields=id,name,status,categories`);
       if (!f.ok) bad(`  讀 Flows 失敗：${graphErr(f)}`);
       for (const fl of ((f.body.data ?? []) as Array<J>)) info(`  Flow ${fl.name} (${fl.id}) ${fl.status}`);
+    }
+  }
+
+  // ── 6. 試發 Flow（--send-test <收件號碼>）— payload 同 inbox 一模一樣（buildFlowPayload）──
+  const sendTo = opt("--send-test");
+  if (sendTo) {
+    console.log("\n[6] 試發 Flow 訊息");
+    const cfg = defaultFlowConfig("flow-publish-check-test");
+    if (flowId) cfg.flow_id = flowId;
+    const payload = buildFlowPayload(sendTo.replace(/\D/g, ""), cfg);
+    const params = ((payload.interactive as J).action as J).parameters as J;
+    info(`由號碼 ${phoneId} 發 Flow ${params.flow_id} mode=${params.mode ?? "published"}（WA_FLOW_DRAFT=${process.env.WA_FLOW_DRAFT ?? "未設"}）`);
+    if (!phoneId) bad("冇 WA_PHONE_NUMBER_ID / --phone");
+    else {
+      const r = await graph(`${phoneId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (r.ok) ok(`已發出：${JSON.stringify(r.body)}（手機會收到「預約」按鈕；撳開會用 endpoint，但 token 係測試用，提交會被拒 = 正常）`);
+      else {
+        const e = (r.body.error ?? {}) as J;
+        bad(`發送失敗 HTTP ${r.status} code=${e.code} subcode=${e.error_subcode ?? "-"}`);
+        console.log(`       message: ${e.message ?? ""}`);
+        if (e.error_user_msg) console.log(`       user_msg: ${e.error_user_title ?? ""} ${e.error_user_msg}`);
+        if (e.error_data) console.log(`       details: ${JSON.stringify(e.error_data)}`);
+        if (e.code === 131030) console.log("       → 測試號碼只可以發去「允許名單」（API Setup → To 欄加你部手機並驗證，最多 5 個）");
+        if (e.code === 139000) console.log("       → 帳戶誠信要求未達（測試 WABA 常見）— 改用真號碼 WABA");
+      }
     }
   }
 
