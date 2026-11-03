@@ -8,6 +8,7 @@
  *   pnpm -s flow-publish-check --publish            # 經 API 發佈 — Meta 會回明確錯誤訊息
  *   pnpm -s flow-publish-check --send-test 852XXXXXXXX  # 用 inbox 同一個 payload 發 Flow 去你部手機，印 Meta 完整錯誤
  *   pnpm -s flow-publish-check --waba <id> --phone <id> --register 123456  # 號碼註冊落 Cloud API（6 位 PIN）
+ *   pnpm -s flow-publish-check --phone <id> --coex-sync    # 共存號碼重試同步聯絡人 + 舊對話（onboarding 後 24 小時內）
  *   pnpm -s flow-publish-check --waba <id> --subscribe     # WABA 訂閱 app webhook（新號碼收訊息必做）
  *   pnpm -s flow-publish-check --list               # 列出 token 可達嘅所有 WABA + 號碼 + 公鑰 + Flows
  *   （--waba <id> / --phone <id> / --flow <id> 可指定其他 WABA，例如診所正式 WABA）
@@ -241,6 +242,22 @@ async function main() {
       check(r.ok, `已訂閱：${JSON.stringify(r.body)}`, `訂閱失敗：${graphErr(r)}`);
       const g = await graph(`${wabaId}/subscribed_apps`);
       if (g.ok) info(`目前訂閱：${((g.body.data ?? []) as Array<J>).map((a) => (a.whatsapp_business_api_data as J | undefined)?.name ?? a.id ?? "?").join(", ") || "（冇）"}`);
+    }
+  }
+
+  // [2d] 共存號碼：重試同步聯絡人 + 舊對話（onboarding 後 24 小時內有效；history 一般只可以做一次）
+  if (flag("--coex-sync")) {
+    console.log("\n[2d] 共存同步（聯絡人 + 舊對話）");
+    if (!phoneId) bad("冇 --phone");
+    else {
+      for (const [label, syncType] of [["聯絡人", "smb_app_state_sync"], ["舊對話", "history"]] as const) {
+        const r = await graph(`${phoneId}/smb_app_data`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messaging_product: "whatsapp", sync_type: syncType }),
+        });
+        check(r.ok, `${label}同步已請求：${JSON.stringify(r.body)}`, `${label}同步失敗：${graphErr(r)}`);
+      }
     }
   }
 

@@ -30,7 +30,7 @@ interface Options {
   paymentMethods: { extId: string; code: string; des: string }[];
 }
 interface Loaded {
-  context: { blocked: string | null; clinicCode: string | null; clinics?: { code: string; name: string }[]; patients: InvoicePatient[] };
+  context: { blocked: string | null; clinicCode: string | null; clinics?: { code: string; name: string }[]; patients: InvoicePatient[]; clinicNote?: string | null };
   options: Options | null;
   optionsError: string | null;
 }
@@ -346,6 +346,9 @@ export function SalesInvoiceDialog({ conversationId, onClose, onCreated }: { con
           )}
           {getUrl && !loaded && !loadErr && <div className="text-t3 text-xs">載入緊…</div>}
           {loadErr && <div className="text-danger-text text-xs">{loadErr}</div>}
+          {loaded?.context.clinicNote && !loaded.context.blocked && (
+            <div className="rounded-xl bg-warn-soft border border-line px-3 py-2 text-xs text-warn-text" data-e2e="sales-invoice-clinic-note">{loaded.context.clinicNote}</div>
+          )}
           {loaded?.context.blocked && <div className="rounded-xl bg-panel-2 border border-line px-3 py-2 text-xs text-t1" data-e2e="sales-invoice-blocked">{loaded.context.blocked}</div>}
           {loaded && !loaded.context.blocked && loaded.optionsError && <div className="text-danger-text text-xs">{loaded.optionsError}</div>}
           {opts && !opts.writeEnabled && <div className="rounded-xl bg-panel-2 border border-line px-3 py-2 text-xs text-t1">開單功能未開通（老闆喺 Apricot 試開核對之後先開）— 而家可以睇，唔可以送出</div>}
