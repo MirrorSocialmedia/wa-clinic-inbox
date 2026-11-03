@@ -2170,6 +2170,21 @@ check "T54C hermetic：waPhoneNumberId 已還原" "$RESTORED" "$T54_ORIG_PHN"
 # (f) 迴歸：cloud 模式（預設）照舊要 pin
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-cloud-nopin-01","clinicId":"'$TKW_CLINIC_ID'","phoneNumberId":"e2e-phn-9"}')
 check "T54C 迴歸：cloud 模式冇 pin → 400" "$CODE" "400"
+
+# ── T54D. 診所 Apricot 分店編號可喺診所管理改（開單分店要有；之前只可以改 DB）──
+echo "[AR-3] T54D: clinic apricotClinicId edit..."
+T54D_ORIG=$(q "SELECT \"apricotClinicId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf apricotClinicId)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"apricotClinicId":"bad value!"}')
+check "T54D 非法 Apricot 編號 → 400" "$CODE" "400"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X PATCH "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"apricotClinicId":"X"}')
+check "T54D STAFF 改 Apricot 編號 → 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"apricotClinicId":""}')
+check "T54D 清空 → 200" "$CODE" "200"
+check "T54D 清空 → DB null" "$(q "SELECT coalesce(\"apricotClinicId\",'NULL') a FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf a)" "NULL"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"apricotClinicId":"'"${T54D_ORIG:-MOCK_APRICOT_TKW}"'"}')
+check "T54D 設返 → 200" "$CODE" "200"
+curl -s -o /dev/null -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"DRAFT"}'
+check "T54D 部分更新（只改 aiMode）唔會清走 Apricot 編號" "$(q "SELECT \"apricotClinicId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf apricotClinicId)" "${T54D_ORIG:-MOCK_APRICOT_TKW}"
 AUD_AFTER=$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
 check "T54 hermetic：ES_ONBOARD 審計已清" "$AUD_AFTER" "0"
 # ★ token/code/PIN 零入 log（grep 自證）

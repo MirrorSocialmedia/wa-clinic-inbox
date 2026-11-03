@@ -9,7 +9,7 @@ import { handle, toResponse } from "@/lib/api-error";
  * /api/admin/clinics/[id] — ADMIN-only（RBAC fail-closed：STAFF 一律 403，E2E T24 實測）。
  *
  * GET   : 單店詳情（含 aiMode）
- * PUT   : 更新（code/name/waPhoneNumberId/waDisplayNumber/greetingConfig/aiMode）
+ * PUT   : 更新（code/name/waPhoneNumberId/waDisplayNumber/greetingConfig/aiMode/apricotClinicId）
  * PATCH : 部分更新（同 PUT — Phase 2b UI 用 PATCH 切 aiMode）
  * DELETE: 刪除 — 有對話/聯絡人/員工掛住 → 409（fail-closed，唔做 cascade 刪病人資料）
  */
@@ -26,6 +26,15 @@ const updateSchema = z.object({
   aiMode: z.enum(["DRAFT", "AUTO"]).optional(),
   // ★ cwi-hub-a-20260914：公司歸屬改動（reassign — 改後 COMPANY 範圍即時跟）
   companyId: z.string().min(1).max(64).optional(),
+  // Apricot 分店編號（「已連 Apricot」標記 — 開單／預覽店用；空字串 = 清除）
+  apricotClinicId: z
+    .string()
+    .trim()
+    .max(64)
+    .regex(/^[A-Za-z0-9_-]*$/, "只可以英文字母、數字、- 或 _")
+    .nullable()
+    .optional()
+    .transform((v) => (v === "" ? null : v)),
 });
 
 type Ctx = { params: Promise<{ id: string }> };

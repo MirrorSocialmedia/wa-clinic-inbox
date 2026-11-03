@@ -43,6 +43,7 @@ interface FormState {
   waPhoneNumberId: string;
   waDisplayNumber: string;
   greetingConfig: string; // JSON 文字（編輯器）
+  apricotClinicId: string; // Apricot 分店編號（空 = 未連 → 開唔到單）
   companyId: string; // ★ cwi-hub-a：公司歸屬（新建必填）
 }
 
@@ -70,6 +71,7 @@ const emptyForm: FormState = {
   waPhoneNumberId: "",
   waDisplayNumber: "",
   greetingConfig: "",
+  apricotClinicId: "",
   companyId: "",
 };
 
@@ -86,6 +88,7 @@ function toForm(c: Clinic): FormState {
     waPhoneNumberId: c.waPhoneNumberId,
     waDisplayNumber: c.waDisplayNumber,
     greetingConfig: c.greetingConfig ? JSON.stringify(c.greetingConfig, null, 2) : "",
+    apricotClinicId: c.apricotClinicId ?? "",
     companyId: c.company?.id ?? "",
   };
 }
@@ -181,6 +184,7 @@ export default function ClinicsAdmin() {
         waPhoneNumberId: form.waPhoneNumberId.trim(),
         waDisplayNumber: form.waDisplayNumber.trim(),
         greetingConfig,
+        apricotClinicId: form.apricotClinicId.trim() || null,
         companyId: form.companyId, // ★ cwi-hub-a：公司歸屬（POST 必填；PUT 改歸屬）
       };
       const res = editing
@@ -353,6 +357,11 @@ export default function ClinicsAdmin() {
                         </span>
                       )}
                       <span className="font-mono">{c.waDisplayNumber || "未接入 WhatsApp 號"}</span>
+                      {!c.apricotClinicId && (
+                        <span className="ml-1.5 inline-block rounded-full bg-warn-soft px-1.5 py-0.5 text-[10px] font-semibold text-warn-text" data-e2e="clinic-no-apricot">
+                          未連 Apricot（開唔到單）
+                        </span>
+                      )}
                       {" · 對話 "}
                       {c.conversationCount}
                       {" · 聯絡人 "}
@@ -467,6 +476,16 @@ export default function ClinicsAdmin() {
                 className={input}
                 value={form.waDisplayNumber}
                 onChange={(e) => setForm({ ...form, waDisplayNumber: e.target.value })}
+              />
+            </label>
+            <label className={label}>
+              Apricot 分店編號（空 = 未連 Apricot，呢間店開唔到 invoice）
+              <input
+                className={`${input} font-mono`}
+                value={form.apricotClinicId}
+                placeholder="例如 YL"
+                onChange={(e) => setForm({ ...form, apricotClinicId: e.target.value })}
+                data-e2e="clinic-apricot-id"
               />
             </label>
             {/* ★ cwi-hub-a：公司歸屬（新建必填；編輯可改歸屬 → COMPANY 範圍即時跟） */}
