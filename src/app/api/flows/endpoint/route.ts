@@ -9,6 +9,12 @@
  *
  * 傳輸層錯誤代碼（S3-8）：432 無/錯簽名；421 decrypt 失敗；427 token 無效/過期。
  *
+ * ★ 2026-11-03 Builder 預覽模式（Meta Flow Builder「預覽」／測試）：Meta 簽咗名（432 已過）但 flow_token
+ *   有帶但唔係我哋簽發嘅 JWT 形狀（Builder 用自己嘅測試 token）→ 唯讀預覽：真實可約日／時段（預覽店），
+ *   submit_confirm → SUCCESS 但零寫入（唔佔位、唔建 FlowHoldEvent／BookingRequest、唔郁 FlowSession）。
+ *   JWT 形狀但驗唔過（過期／唔係我哋）→ 照舊 427（真病人 token 規則唔變）。
+ *   預覽店 = env FLOW_PREVIEW_CLINIC（店 code）否則第一間有 Apricot 連結嘅店；FLOW_PREVIEW_DISABLED=1 → 關。
+ *
  * ══ 雙信封（cwi-r2）══
  * **生產真 spec（Meta 2026 data endpoint）**：
  *   request  = { encrypted_flow_data, encrypted_aes_key, initial_vector }
@@ -256,6 +262,9 @@ export async function POST(req: NextRequest) {
       return err(500, "misconfigured");
     }
     const tokenPayload = plain.flow_token ? verifyFlowToken(plain.flow_token, secret) : null;
+    if (!tokenPayload && envelope === "prod" && isBuilderPreviewToken(plain.flow_token) && process.env.FLOW_PREVIEW_DISABLED !== "1") {
+      return handleBuilderPreview(plain, key16, reqIvB64);
+    }
     if (!tokenPayload) {
       log.warn("flow endpoint: invalid flow_token");
       return err(427, "invalid_flow_token");
@@ -715,6 +724,77 @@ export async function POST(req: NextRequest) {
 
 /** 由該日 bookable slots 砌 SCR_SLOT data（★ S5-14①：「醫生 · 時段」組合 list，每頁 20 + has_more；
  *  舊 providers/times 去重 list 保留作向下兼容；slotKey 唔出屏 — 提交時 server 重查全量）。 */
+// ── ★ Builder 預覽模式（唯讀）────────────────────────────────────────────
+
+/** 我哋簽發嘅 flow_token 一定係 JWT（三段 base64url）；唔係呢個形狀 = Meta Builder／測試自己嘅 token */
+function isBuilderPreviewToken(token: string | undefined): boolean {
+  if (!token) return false; // 冇 token → 照 427（T100：平台層 action 以外一律要 token）
+  return !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token);
+}
+
+async function previewClinic() {
+  const code = process.env.FLOW_PREVIEW_CLINIC?.trim();
+  if (code) return prisma.clinic.findUnique({ where: { code } });
+  return prisma.clinic.findFirst({ where: { apricotClinicId: { not: null } }, orderBy: { code: "asc" } });
+}
+
+/**
+ * Builder 預覽：同真流程一樣嘅屏同數據（預覽店真實可約日／時段），但零寫入。
+ * Meta 已簽名（x-hub-signature-256 喺前面驗咗）— 外人冇 app secret 入唔到呢度。
+ */
+async function handleBuilderPreview(plain: DecryptedRequest, key16: Buffer, reqIvB64: string): Promise<NextResponse> {
+  const action = plain.action ?? "";
+  if (!(NEW_ACTIONS as readonly string[]).includes(action)) return err(400, "bad_action");
+  const clinic = await previewClinic();
+  if (!clinic) return err(500, "misconfigured");
+  const dateMin = hkTodayStr();
+  const dateMax = hkDateOffset(30);
+  let days: BookableDay[] | null = null;
+  try {
+    days = (await getBookableSlots(clinic.code, dateMin, dateMax)).days.map((day) => {
+      const slots = filterBookableSlots(day.slots);
+      return { ...day, slots, offerableCount: slots.length };
+    });
+  } catch (e) {
+    log.warn({ clinic: clinic.code, err: e instanceof Error ? e.name : "?" }, "flow endpoint (preview): bookable-slots fail");
+  }
+  const sysDownMsg = "預約系統暫時唔到，請稍後再試";
+  log.info({ clinic: clinic.code, action, userAction: plain.data?.user_action ?? null }, "flow endpoint: Builder 預覽（唯讀）");
+  if (action === "INIT" || action === "BACK") {
+    return prodResp(key16, reqIvB64, SCREEN_DATE, bookableDateScreenData(days, dateMin, dateMax, days === null ? sysDownMsg : undefined));
+  }
+  const d = plain.data ?? {};
+  const userAction = typeof d.user_action === "string" ? d.user_action : "";
+  if (userAction === "submit_date") {
+    const date = String(d.date ?? "");
+    const rangeErr = dateRangeError(date);
+    if (rangeErr || days === null) return prodResp(key16, reqIvB64, SCREEN_DATE, bookableDateScreenData(days, dateMin, dateMax, days === null ? sysDownMsg : rangeErr!));
+    const day = days.find((x) => x.date === date);
+    if (!day || day.closed || day.slots.length === 0) return prodResp(key16, reqIvB64, SCREEN_DATE, bookableDateScreenData(days, dateMin, dateMax, "呢日冇空檔，請揀其他日期"));
+    const page = Math.max(1, Math.floor(Number(d.page ?? 1)) || 1);
+    return prodResp(key16, reqIvB64, SCREEN_SLOT, bookableSlotData(date, day.slots, page));
+  }
+  if (userAction === "submit_slot") {
+    const date = String(d.date ?? "");
+    let providerId = String(d.provider_id ?? "");
+    let time = String(d.time ?? "");
+    const selected = typeof d.selected === "string" ? d.selected : "";
+    if ((!providerId || !time) && selected) {
+      const [pp, tt] = selected.split("|");
+      if (!providerId && pp) providerId = pp;
+      if (!time && tt) time = tt;
+    }
+    const slot = days?.find((x) => x.date === date)?.slots.find((sl) => sl.providerId === providerId && sl.start === time);
+    if (!slot) return bookableSlotErrorResp(key16, reqIvB64, date, days, dateMin, dateMax, days === null ? sysDownMsg : "資料有誤，請返回重揀");
+    return prodResp(key16, reqIvB64, SCREEN_CONFIRM, confirmScreenData({ date, providerId, providerName: slot.providerName, time, profileName: "預覽" }));
+  }
+  if (userAction === "submit_confirm") {
+    // 預覽唔落單：零寫入，直接完成
+    return prodSuccess(key16, reqIvB64, { flow_token: plain.flow_token ?? "", preview: "1" });
+  }
+  return err(400, "bad_user_action");
+}
+
 function bookableSlotData(date: string, slots: BookableSlot[], page = 1) {
   return slotScreenDataPaged({ date, slots, page });
 }
