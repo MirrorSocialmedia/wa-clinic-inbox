@@ -247,10 +247,14 @@ export async function POST(req: NextRequest) {
     }
 
     // 2a) ping / error_notification：WhatsApp 平台層心跳／錯誤通知 — 無 flow_token 放行
-    //     （靜態 data 回應：零 PII / 零寫入 / 零 DB — by design；screen 欄 = action 名自描述）
+    //     （靜態 data 回應：零 PII / 零寫入 / 零 DB — by design）
+    //     Meta spec 原文：health check 回 {"data":{"status":"active"}}、error notification 回
+    //     {"data":{"acknowledged":true}} — 嚴格只得 data 一個 key（唔加 version/screen；發佈前
+    //     Meta 會 ping endpoint 做健康檢查，多 key 可能被判唔合格）
     if (action === "ping" || action === "error_notification") {
       const data = action === "ping" ? { status: "active" } : { acknowledged: true };
-      return prodResp(key16, reqIvB64, action, data);
+      const { payload } = encryptGcm(key16, reversedIv(reqIvB64), { data });
+      return new NextResponse(payload, { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } });
     }
 
     // 2) flow_token 驗證（簽 conversationId+clinicId 嘅 JWT — 防別店/別對話用）

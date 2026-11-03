@@ -5089,13 +5089,15 @@ T100=0
 OUT=$(pnpm -s flow-client stepx --clinic TKW --no-token --action ping 2>&1 || true)
 if stepx_parse "$OUT" /tmp/e2e-t100-ping.json; then
   check "T100 ping data.status=active" "$(jf status < /tmp/e2e-t100-ping.json)" "active"
+  # Meta spec：回應嚴格 = {"data":{"status":"active"}}（無 version/screen）
+  check "T100 ping 回應形狀 = Meta spec" "$(cat /tmp/e2e-t100-ping.json)" '{"data":{"status":"active"}}'
 else
   echo "    ❌ T100 ping fail（=${OUT%%$'\n'*}）"; T100=1
 fi
 # (b) error_notification（無 token）→ 200 + data.acknowledged=true
 OUT=$(pnpm -s flow-client stepx --clinic TKW --no-token --action error_notification 2>&1 || true)
 if stepx_parse "$OUT" /tmp/e2e-t100-errnoti.json; then
-  grep -qE '"acknowledged":true' /tmp/e2e-t100-errnoti.json && pass "T100 error_notification data.acknowledged=true" \
+  [ "$(cat /tmp/e2e-t100-errnoti.json)" = '{"data":{"acknowledged":true}}' ] && pass "T100 error_notification = {data:{acknowledged:true}}（Meta spec）" \
     || { echo "    ❌ T100 error_notification acknowledged 唔係 true（=$(cat /tmp/e2e-t100-errnoti.json)）"; T100=1; }
 else
   echo "    ❌ T100 error_notification fail（=${OUT%%$'\n'*}）"; T100=1
