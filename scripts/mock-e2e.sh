@@ -4809,7 +4809,20 @@ CONV_T95B=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"=
 if [ "$T95" = 0 ]; then
   warm_conv_routes "$CONV_T95A"
   OUT95=$(pnpm -s e2e:duty-refresh --base "$BASE" --cookie "$COOKIE_TKW" --conv1 "$CONV_T95A" --conv2 "$CONV_T95B" 2>&1)
+  echo "$OUT95" | grep "DUTY-DIAG" || true
   echo "$OUT95" | tail -3
+  if ! echo "$OUT95" | grep -q "DUTY-REFRESH-OK"; then
+    # ★ 2026-11-03 T95 追查：失敗當刻 server 狀態（CI artifact 唔一定攞到 → 直接印入 job log；server log 只有 metadata，T18 已保證零 PII）
+    echo "=== T95-DIAG server log（尾 60，>2s 請求／錯誤）==="
+    grep -E '"durationMs":[0-9]{4,}|"level":(40|50)|ECONN|Timed out|P2024|ready - |compil' /tmp/e2e-server.log 2>/dev/null | tail -60 | cut -c1-300
+    echo "=== T95-DIAG pg_stat_activity ==="
+    q "SELECT state, wait_event_type||':'||coalesce(wait_event,'') w, count(*) n, max(extract(epoch from now()-query_start))::int max_age_s FROM pg_stat_activity WHERE datname=current_database() GROUP BY 1,2 ORDER BY 3 DESC" 2>&1 | head -20
+    q "SELECT extract(epoch from now()-query_start)::int age_s, state, left(regexp_replace(query,'\s+',' ','g'),120) q FROM pg_stat_activity WHERE datname=current_database() AND state <> 'idle' ORDER BY 1 DESC LIMIT 8" 2>&1 | head -12
+    echo "=== T95-DIAG redis ==="
+    redis-cli info clients 2>/dev/null | grep -E "connected_clients|blocked_clients" || true
+    echo "=== T95-DIAG top CPU ==="
+    ps -eo pid,pcpu,pmem,etimes,args --sort=-pcpu 2>/dev/null | head -8 | cut -c1-160
+  fi
   echo "$OUT95" | grep -q "DUTY-REFRESH-OK" && pass "T95 duty 卡 client 端刷新（mock 變更 → 換對話卡更新，零 reload）" \
     || { fail "T95 duty 卡刷新失敗"; T95=1; }
 fi

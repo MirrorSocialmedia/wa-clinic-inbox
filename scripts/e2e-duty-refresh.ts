@@ -50,7 +50,8 @@ interface PageLite {
   waitForSelector: (sel: string, o?: Record<string, unknown>) => Promise<unknown>;
   waitForFunction: (fn: string | ((...a: unknown[]) => unknown), o?: Record<string, unknown>) => Promise<unknown>;
   getByText: (t: string, o?: Record<string, unknown>) => { first: () => { count: () => Promise<number>; click: (o?: Record<string, unknown>) => Promise<void> } };
-  on: (ev: string, cb: (r: { url: () => string; ok: () => boolean }) => void) => void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on: (ev: string, cb: (r: any) => void) => void;
   url: () => string;
   evaluate: (fn: () => unknown) => Promise<unknown>;
   close: () => Promise<void>;
@@ -102,6 +103,24 @@ async function main(): Promise<void> {
   });
   P.on("requestfinished", (r) => pending.delete(r));
   P.on("requestfailed", (r) => pending.delete(r));
+  // ★ 2026-11-03 T95 追查（CI 換對話後 6 條 /api 卡 30s+ — 啱啱係 HTTP/1.1 每 host 6 條連線上限）：
+  //   記 websocket（socket.io 有冇用 websocket／有冇斷）、頁面錯誤、/api 完成時間分佈（慢請求）
+  const sockets: { url: string; at: number; closedAt: number | null; frames: number }[] = [];
+  P.on("websocket", (ws: { url: () => string; on: (e: string, cb: () => void) => void }) => {
+    const rec = { url: ws.url().replace(base, ""), at: Date.now(), closedAt: null as number | null, frames: 0 };
+    sockets.push(rec);
+    ws.on("close", () => (rec.closedAt = Date.now()));
+    ws.on("framereceived", () => rec.frames++);
+  });
+  const pageErrors: string[] = [];
+  P.on("pageerror", (e: Error) => pageErrors.push(String(e?.message ?? e).slice(0, 200)));
+  const slow: string[] = [];
+  P.on("requestfinished", (r: { url: () => string; timing: () => { startTime: number; responseEnd: number; requestStart: number; connectEnd: number } }) => {
+    if (!r.url().includes("/api/") && !r.url().includes("/socket.io/")) return;
+    const t = r.timing();
+    if (t.responseEnd > 3000) slow.push(`${Math.round(t.responseEnd)}ms(wait-socket=${Math.round(t.requestStart)}ms) ${r.url().replace(base, "").slice(0, 90)}`);
+  });
+  const t0 = Date.now();
 
   let flowsCalls = 0;
   P.on("response", (r) => {
@@ -139,6 +158,26 @@ async function main(): Promise<void> {
     }))) as { url: string; tail: string };
     const now = Date.now();
     const stuck = [...pending.values()].map((x) => `${Math.round((now - x.at) / 1000)}s ${x.url.slice(0, 100)}`);
+    // ── 診斷：server 對「新」請求有冇反應？（node fetch，唔經 browser 連線池）──
+    //   快 → server 正常，係 browser 連線被佔（socket.io polling／長請求）；慢 → server 本身卡（event loop／DB／Redis）
+    const probes: string[] = [];
+    for (const u of [...new Set([...pending.values()].map((x) => x.url))].slice(0, 6)) {
+      const st = Date.now();
+      try {
+        const ac = new AbortController();
+        const tm = setTimeout(() => ac.abort(), 20000);
+        const res = await fetch(`${base}${u}`, { headers: { cookie: `wa_inbox_session=${sessionValue}` }, signal: ac.signal });
+        clearTimeout(tm);
+        probes.push(`${res.status} ${Date.now() - st}ms ${u.slice(0, 80)}`);
+      } catch (e) {
+        probes.push(`ERR ${Date.now() - st}ms ${(e as Error).name} ${u.slice(0, 80)}`);
+      }
+    }
+    console.log(`DUTY-DIAG elapsed=${Math.round((now - t0) / 1000)}s`);
+    console.log(`DUTY-DIAG websockets=${JSON.stringify(sockets.map((w) => ({ url: w.url.slice(0, 60), ageS: Math.round((now - w.at) / 1000), closedS: w.closedAt ? Math.round((now - w.closedAt) / 1000) : null, frames: w.frames })))}`);
+    console.log(`DUTY-DIAG pageErrors=${JSON.stringify(pageErrors.slice(0, 5))}`);
+    console.log(`DUTY-DIAG slowFinished=${JSON.stringify(slow.slice(-15))}`);
+    console.log(`DUTY-DIAG probes=${JSON.stringify(probes)}`);
     throw new Error(`卡未翻 B（url=${dbg.url}）pending=${JSON.stringify(stuck)} tail: ${JSON.stringify(dbg.tail.slice(-300))}`);
   }
   if (flowsCalls <= callsAfterLoad) {
