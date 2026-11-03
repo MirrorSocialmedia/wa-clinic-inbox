@@ -4792,7 +4792,10 @@ check "T94 STAFF GET /schedule → 200" "$CODE94" "200"
 grep -qF "醫生時間表" /tmp/e2e-sched-staff.html && pass "T94 頁標題（醫生時間表）" || { fail "T94 頁標題缺失"; T94=1; }
 grep -qF "林小曼" /tmp/e2e-sched-staff.html && pass "T94 當值 entries（fixture）" || { fail "T94 當值 entries 冇（fixture 林小曼）"; T94=1; }
 [ "$(grep -oF "今日" /tmp/e2e-sched-staff.html | wc -l)" -ge 1 ] && pass "T94 今日 badge" || { fail "T94 今日 badge 缺失"; T94=1; }
-check "T94 STAFF 見自己店名" "$(grep -cF "$TKW_NAME" /tmp/e2e-sched-staff.html)" "1"
+# ★ 唔用 grep -c（數「行」— Next streaming 將 HTML / RSC payload 切成幾多行視乎 flush 時機，CI 會 1 或 2）：
+#   直接驗標題「醫生時間表 · <自己店名>」
+grep -qF "· <!-- -->$TKW_NAME" /tmp/e2e-sched-staff.html && pass "T94 STAFF 見自己店名（標題）" \
+  || { fail "T94 STAFF 標題冇自己店名（$TKW_NAME）"; T94=1; }
 # (2) cwi-sched §4（全店唯讀）：STAFF 跨店 param → 200 有 MF 資料（舊版 fail-closed 斷言已反轉）
 CODE94X=$(curl -s -o /tmp/e2e-sched-staff-mf.html -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/schedule?clinic=MF")
 check "T94 STAFF 跨店 ?clinic=MF → 200（全店唯讀）" "$CODE94X" "200"
