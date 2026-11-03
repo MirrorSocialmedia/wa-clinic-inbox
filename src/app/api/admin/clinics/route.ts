@@ -29,6 +29,14 @@ const createSchema = z.object({
   // ★ cwi-hub-a-20260914：公司歸屬（必填 — 維持 migration 不變式 NULL=0）
   companyId: z.string().min(1).max(64),
   greetingConfig: greetingConfigSchema,
+  apricotClinicId: z
+    .string()
+    .trim()
+    .max(64)
+    .regex(/^[A-Za-z0-9_-]*$/, "只可以英文字母、數字、- 或 _")
+    .nullable()
+    .optional()
+    .transform((v) => (v === "" ? null : v)),
 });
 
 export const GET = handle(async (req: NextRequest) => {
