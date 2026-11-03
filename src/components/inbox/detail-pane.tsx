@@ -10,6 +10,8 @@ import { ConsultStatusCard } from "./consult-status-card";
 import { PatientRecordPanel } from "./patient-record-panel";
 import { NoteComposer, renderNoteBody } from "./note-mentions";
 import { WLoading } from "@/components/ui/w-loader";
+import { StatusReminderControl } from "./reminder-control";
+import { SalesCard } from "./sales-panel";
 
 interface Props {
   conversation: ConversationItem | null;
@@ -45,12 +47,6 @@ interface Props {
   /** ★ cwi-inbox-r3 Q3：@ 通知跳轉 → 備註欄展開 + 閃該條 */
   highlightNoteId?: string | null;
 }
-
-const STATUS_SEG: { key: ConvStatus; label: string }[] = [
-  { key: "OPEN", label: "處理中" },
-  { key: "PENDING", label: "等回覆" },
-  { key: "RESOLVED", label: "已解決" },
-];
 
 const INTENT_LABEL: Record<string, string> = {
   BOOKING_REQUEST: "預約",
@@ -730,24 +726,14 @@ export function DetailPane({
         )}
       </div>
 
+      {/* ★ cwi-sales-20261028：銷售（歸屬／意向／轉交）— 銷售人員或者有銷售負責先出 */}
+      <SalesCard conversationId={c.id} staffOptions={allStaff.length ? allStaff : staff} userRole={userRole} refreshKey={c.lastInboundAt} />
+
       {/* status：segmented control（Organic 圓形分段） */}
       <div>
         <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-t2 mb-2">狀態</div>
-        <div className="flex bg-panel-2 rounded-full p-[3px] text-xs text-center">
-          {STATUS_SEG.map((s) => (
-            <button
-              key={s.key}
-              onClick={() => void setStatus(s.key)}
-              className={`flex-1 py-1.5 rounded-full ${
-                c.status === s.key
-                  ? "bg-brand text-panel font-semibold shadow-sm"
-                  : "text-t2 hover:bg-black/[.04]"
-              }`}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
+        {/* ★ cwi-reminder-20261025：「等回覆」→「⏰ 待跟進」（設提醒） */}
+        <StatusReminderControl c={c} readOnly={userRole === "SUPERVISOR"} onSetStatus={(st) => void setStatus(st)} />
       </div>
 
       {/* assignee — cwi-multiclinic-20260903（MD A.6.2）：二級選單（本店 + 其他分店…店→員工） */}

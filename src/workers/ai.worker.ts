@@ -477,6 +477,11 @@ export async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, u
       "ai: AUTO mode — suppressed by AutomationPolicy L1 (draft only)"
     );
   }
+  // ★ cwi-sales-20261028：綁定／保護中病人嘅對話 → AI 只出草稿（唔自動發；負責銷售審批）
+  if (blocks.length === 0 && draft) {
+    const { conversationSalesLock } = await import("@/lib/sales/core");
+    if ((await conversationSalesLock(conv.id)).owners.length > 0) blocks.push("sales-locked");
+  }
   if (blocks.length > 0) {
     // metadata only（唔含 draft/summary 內容）
     log.info(

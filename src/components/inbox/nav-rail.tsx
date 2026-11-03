@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { BadgeDollarSign, CalendarDays, LogOut, MessageCircle, Settings, Stethoscope } from "lucide-react";
+import { BadgeDollarSign, BadgePercent, CalendarDays, LogOut, MessageCircle, Settings, Stethoscope } from "lucide-react";
 import { logoutWithPushCleanup } from "@/lib/notify-client";
 
 /**
@@ -17,10 +17,13 @@ export function NavRail({
   name,
   email,
   role,
+  isSales = false,
 }: {
   name: string;
   email: string;
   role: "ADMIN" | "STAFF" | "SUPERVISOR";
+  /** ★ cwi-sales 第 3 期：銷售人員先見「我的銷售」 */
+  isSales?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -54,12 +57,13 @@ export function NavRail({
     await logoutWithPushCleanup();
   }
 
-  const items: { href: string; label: string; icon: React.ReactNode; adminOnly?: boolean; badge?: number }[] = [
+  const items: { href: string; label: string; icon: React.ReactNode; adminOnly?: boolean; salesOnly?: boolean; badge?: number }[] = [
     { href: "/inbox", label: "收件箱", icon: <MessageCircle size={18} strokeWidth={2.75} /> },
     { href: "/bookings", label: "預約", icon: <CalendarDays size={18} strokeWidth={2.75} /> },
     { href: "/schedule", label: "醫生時間表", icon: <Stethoscope size={18} strokeWidth={2.75} /> },
     // cwi-setnav SET-04：報價入口（前線日常用 — 紅點 = 待確認數）
     { href: "/quotes", label: "報價", icon: <BadgeDollarSign size={18} strokeWidth={2.75} />, badge: quoteCount },
+    { href: "/sales", label: "我的銷售", icon: <BadgePercent size={18} strokeWidth={2.75} />, salesOnly: true },
     { href: "/admin", label: "管理", icon: <Settings size={18} strokeWidth={2.75} />, adminOnly: true },
   ];
 
@@ -76,6 +80,7 @@ export function NavRail({
           側欄入面嘅設定類項已隱藏（admin-shell）；route 層 403 做背墊 */}
       {items
         .filter((it) => !it.adminOnly || role === "ADMIN" || role === "SUPERVISOR")
+        .filter((it) => !it.salesOnly || isSales)
         .map((it) => {
           const active = pathname === it.href || pathname.startsWith(it.href + "/");
           return (

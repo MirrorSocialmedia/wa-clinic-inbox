@@ -26,6 +26,7 @@ import {
   reminderTemplateName,
   type TemplateInput,
 } from "@/lib/wa/templates";
+import { salesLockResponse } from "@/lib/sales/guard";
 
 /**
  * POST /api/messages/send — 員工發訊息（框架 MD §6.3 + Phase B template 覆）。
@@ -143,6 +144,12 @@ export const POST = handle(async (req: NextRequest) => {
       },
       { status: 423 }
     );
+  }
+
+  // ★ cwi-sales-20261028：綁定／保護中病人 → 只有負責銷售／被轉交嘅同事可以覆
+  {
+    const salesLocked = await salesLockResponse(conv.id, ctx.staff.id);
+    if (salesLocked) return salesLocked;
   }
 
   // Phase B：free-form vs template 二分流（template 唔受 24h 窗口限制 — 佢就係過窗嘅合法路徑）

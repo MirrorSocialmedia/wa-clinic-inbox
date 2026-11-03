@@ -2155,6 +2155,9 @@ export function InboxClient({
       //   selectConvRef 模式：onNoticeClick 定義喺 selectConversation 之前（useCallback([])）
       //   → 用 ref 喺 runtime 取最新實例，避 forward-reference / stale closure。
       if (n.conversationId) selectConvRef.current(n.conversationId);
+      // ★ cwi-sales 第 5 期：冇對話嘅銷售通知 → 去「我的銷售」／老闆「銷售」管理
+      else if (n.kind === "SALES_REVIEW") window.location.assign("/sales");
+      else if (n.kind === "SALES_ADMIN") window.location.assign("/admin/sales");
     })();
   }, []);
 
@@ -2493,7 +2496,9 @@ export function InboxClient({
           waTimestamp: new Date().toISOString(),
           createdAt: new Date().toISOString(),
         };
-        setMessages((prev) => [...prev, optimistic]);
+        // ★ 2026-10-27：message:new（socket）有時比 HTTP 回應先到 — 已有同 id／clientMessageId 嘅氣泡就唔再加
+        //   （舊版照 append → 同一 id 兩個氣泡 → React「two children with the same key」+ 畫面重複）
+        setMessages((prev) => (prev.some((m) => m.id === optimistic.id || (m.clientMessageId != null && m.clientMessageId === clientMessageId)) ? prev : [...prev, optimistic]));
         setConversations((prev) =>
           prev.map((c) =>
             c.id === convId
@@ -2703,7 +2708,9 @@ export function InboxClient({
           waTimestamp: new Date().toISOString(),
           createdAt: new Date().toISOString(),
         };
-        setMessages((prev) => [...prev, optimistic]);
+        // ★ 2026-10-27：message:new（socket）有時比 HTTP 回應先到 — 已有同 id／clientMessageId 嘅氣泡就唔再加
+        //   （舊版照 append → 同一 id 兩個氣泡 → React「two children with the same key」+ 畫面重複）
+        setMessages((prev) => (prev.some((m) => m.id === optimistic.id || (m.clientMessageId != null && m.clientMessageId === clientMessageId)) ? prev : [...prev, optimistic]));
         setConversations((prev) =>
           prev.map((c) =>
             c.id === convId

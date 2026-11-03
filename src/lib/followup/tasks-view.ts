@@ -27,6 +27,8 @@ export async function buildFollowupTaskViews(opts: FollowupTaskViewOpts): Promis
       ...(status ? { status: status as FollowupStatus } : { status: "SUGGESTED" }),
       ...(clinicSet ? { clinicId: { in: clinicSet } } : {}),
       ...(conversationId ? { conversationId } : {}),
+      // ★ cwi-reminder-20261025：員工自設提醒未到期唔出卡
+      NOT: { source: "MANUAL", dueAt: { gt: new Date() } },
     },
     orderBy: { dueAt: "asc" },
     take: limit,
@@ -97,6 +99,7 @@ export async function buildFollowupTaskViews(opts: FollowupTaskViewOpts): Promis
     const metaTpl = metaName ? metaForClinic(t.clinicId).find((m) => m.name === metaName) : null;
     return {
       id: t.id,
+      source: t.source,
       clinicId: t.clinicId,
       conversationId: t.conversationId,
       ruleName: rule?.name ?? null,

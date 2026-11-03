@@ -49,7 +49,7 @@
  */
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { readFileSync, appendFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import log from "@/lib/log";
 import { invalidateAvailabilityDay } from "@/lib/availability";
@@ -1153,6 +1153,173 @@ export async function fetchDoctorAdvice(opts: {
   );
 }
 
+// ── ★ cwi-sales-20261028：銷售系統（CWM scope sales — 每晚同步嘅 Apricot 名單 + 傭金項目）──────────
+
+export const SalesApricotUsersResponse = z.object({
+  v: z.literal(1),
+  users: z.array(z.object({ extId: z.string(), name: z.string(), login: z.string().nullable(), account: z.string() })),
+});
+export const SalesEmployeesResponse = z.object({
+  v: z.literal(1),
+  employees: z.array(z.object({ id: z.string(), name: z.string(), clinicCodes: z.array(z.string()) })),
+});
+export const SalesCatalogResponse = z.object({
+  v: z.literal(1),
+  clinicCode: z.string(),
+  feeItems: z.array(z.object({ extId: z.string(), code: z.string(), des: z.string(), fee: z.number() })),
+  practitioners: z.array(z.object({ extId: z.string(), code: z.string(), name: z.string(), nameChi: z.string().nullable() })),
+  commission: z.array(z.object({ feeItemExtId: z.string(), ratePct: z.number(), category: z.string().nullable(), highValue: z.boolean() })),
+  lastRun: z.object({ status: z.string(), finishedAt: z.string().nullable(), error: z.string().nullable() }).nullable(),
+});
+export type SalesCatalog = z.infer<typeof SalesCatalogResponse>;
+export const CommissionItemsResponse = z.object({
+  v: z.literal(1),
+  clinicCode: z.string(),
+  items: z.array(
+    z.object({
+      feeItemExtId: z.string(),
+      code: z.string(),
+      des: z.string(),
+      ratePct: z.number(),
+      category: z.string().nullable(),
+      highValue: z.boolean(),
+      active: z.boolean(),
+      updatedAt: z.string(),
+    })
+  ),
+});
+export type CommissionItemInput = { feeItemExtId: string; ratePct: number; category?: string | null; highValue?: boolean; active?: boolean };
+
+/** Apricot 用戶（員工帳號「☑ 銷售人員」揀 invoice 銷售員） */
+export async function fetchSalesApricotUsers(): Promise<z.infer<typeof SalesApricotUsersResponse>> {
+  return SalesApricotUsersResponse.parse(await wfGet("/api/external/v1/sales/apricot-users", {}));
+}
+/** workforce 在職員工（打卡核實、糧單） */
+export async function fetchSalesEmployees(): Promise<z.infer<typeof SalesEmployeesResponse>> {
+  return SalesEmployeesResponse.parse(await wfGet("/api/external/v1/sales/employees", {}));
+}
+/** 分店收費項目 + 醫生 + 傭金項目（每晚同步名單） */
+export async function fetchSalesCatalog(clinicCode: string): Promise<SalesCatalog> {
+  return SalesCatalogResponse.parse(await wfGet("/api/external/v1/sales/catalog", { clinicCode }));
+}
+/** 老闆「立即更新名單」 */
+export async function refreshSalesCatalog(staffId: string): Promise<{ status: string; counts: Record<string, number>; errors: string[] }> {
+  const r = (await wfSend("POST", "/api/external/v1/sales/catalog/refresh", {}, {}, { "x-staff-id": staffId }, { timeoutMs: 120_000 })) as {
+    status?: string;
+    counts?: Record<string, number>;
+    errors?: string[];
+  };
+  return { status: r.status ?? "UNKNOWN", counts: r.counts ?? {}, errors: r.errors ?? [] };
+}
+export async function fetchCommissionItems(clinicCode: string): Promise<z.infer<typeof CommissionItemsResponse>> {
+  return CommissionItemsResponse.parse(await wfGet("/api/external/v1/sales/commission-items", { clinicCode }));
+}
+export async function putCommissionItems(clinicCode: string, items: CommissionItemInput[], staffId: string): Promise<void> {
+  await wfSend("PUT", "/api/external/v1/sales/commission-items", {}, { clinicCode, items }, { "x-staff-id": staffId });
+}
+
+// ── ★ cwi-sales 第 2 期：開 invoice + 老闆對單隊列 ──────────────────────────────────────────
+
+export const InvoiceOptionsResponse = z.object({
+  v: z.literal(1),
+  clinicCode: z.string(),
+  writeEnabled: z.boolean(),
+  templateReady: z.boolean(),
+  practitioners: z.array(z.object({ extId: z.string(), name: z.string(), nameChi: z.string().nullable() })),
+  // highValue：舊版 workforce 冇呢欄 → 當 false（兩邊唔同步部署都唔會壞）
+  feeItems: z.array(z.object({ extId: z.string(), code: z.string(), des: z.string(), fee: z.number(), ratePct: z.number().nullable(), highValue: z.boolean().default(false) })),
+  paymentMethods: z.array(z.object({ extId: z.string(), code: z.string(), des: z.string() })),
+});
+export type InvoiceOptions = z.infer<typeof InvoiceOptionsResponse>;
+export const CreateInvoiceResponse = z.object({
+  v: z.literal(1),
+  invoiceId: z.string(),
+  status: z.literal("CREATED"),
+  billId: z.string(),
+  billCode: z.string().nullable(),
+  totalAmt: z.number(),
+  paymentAmt: z.number(),
+  commissionableAmt: z.number(),
+  highValue: z.boolean().default(false),
+  review: z.boolean(),
+  replayed: z.boolean(),
+  recovered: z.boolean(),
+});
+export type CreatedInvoice = z.infer<typeof CreateInvoiceResponse>;
+export interface CreateInvoiceBody {
+  requestKey: string;
+  clinicCode: string;
+  patientApricotId: string;
+  patientCode: string;
+  conversationId: string | null;
+  employeeId: string | null;
+  salesApricotUserId: string;
+  practitionerExtId: string;
+  ownership: "PROTECTED" | "BOUND" | "NONE";
+  lines: { feeItemExtId: string; qty: number; up: number; discAmt: number; remarks?: string | null }[];
+  payment: { amt: number; methodExtId: string } | null;
+}
+export const SalesReviewsResponse = z.object({
+  v: z.literal(1),
+  reviews: z.array(
+    z.object({
+      id: z.string(),
+      kind: z.string(),
+      status: z.string(),
+      apricotBillId: z.string(),
+      apricotBillCode: z.string().nullable(),
+      clinicExtId: z.string(),
+      salesApricotUserId: z.string().nullable(),
+      salesInvoiceId: z.string().nullable(),
+      patientApricotId: z.string().nullable(),
+      amount: z.number().nullable(),
+      approvedPct: z.number().nullable(),
+      decidedBy: z.string().nullable(),
+      decidedAt: z.string().nullable(),
+      note: z.string().nullable(),
+      // ★ 第 5 期：銷售補充（舊版 workforce 冇 → null）
+      salesNote: z.string().nullable().default(null),
+      salesNoteAt: z.string().nullable().default(null),
+      createdAt: z.string(),
+    })
+  ),
+});
+export type SalesReviewRow = z.infer<typeof SalesReviewsResponse>["reviews"][number];
+
+/** 開單對話框選項（醫生、收費項目 + 傭金 %、付款方式）— workforce 本地名單，唔問 Apricot */
+export async function fetchInvoiceOptions(clinicCode: string): Promise<InvoiceOptions> {
+  return InvoiceOptionsResponse.parse(await wfGet("/api/external/v1/sales/invoice-options", { clinicCode }));
+}
+/** 開 invoice（workforce 寫 Apricot；同 requestKey 重放安全）— Apricot 慢 → 長 timeout */
+export async function createSalesInvoice(body: CreateInvoiceBody, staffId: string): Promise<CreatedInvoice> {
+  if (process.env.WORKFORCE_MOCK === "1") mockStaffHeader = staffId; // mock 記低邊個開（真 workforce 由 X-Staff-Id 攞）
+  return CreateInvoiceResponse.parse(await wfSend("POST", "/api/external/v1/sales/invoices", {}, body, { "x-staff-id": staffId }, { timeoutMs: 75_000 }));
+}
+export async function fetchSalesReviews(status: string | null, salesApricotUserId?: string | null): Promise<SalesReviewRow[]> {
+  const q: Record<string, string> = {};
+  if (status) q.status = status;
+  if (salesApricotUserId) q.salesApricotUserId = salesApricotUserId;
+  return SalesReviewsResponse.parse(await wfGet("/api/external/v1/sales/reviews", q)).reviews;
+}
+/** ★ 第 5 期：銷售自己補充（申訴原因）— salesApricotUserId 由 inbox 登入帳號攞 */
+export async function postReviewSalesNote(id: string, body: { salesApricotUserId: string; note: string }, staffId: string): Promise<void> {
+  await wfSend("POST", `/api/external/v1/sales/reviews/${encodeURIComponent(id)}/sales-note`, {}, body, { "x-staff-id": staffId });
+}
+/** ★ 第 5 期：推「銷售負責病人」名單（整份覆蓋）— workforce 對單掃描搵前台幫呢啲病人開嘅單 */
+export async function putSalesPatientWatch(
+  patients: { patientApricotId: string; inboxStaffId: string; salesApricotUserId: string; employeeId: string | null; state: "PROTECTED" | "BOUND" }[]
+): Promise<{ count: number }> {
+  const r = (await wfSend("PUT", "/api/external/v1/sales/patient-watch", {}, { patients })) as { count?: number } | undefined;
+  return { count: Number(r?.count ?? patients.length) };
+}
+export async function decideSalesReview(
+  id: string,
+  body: { decision: "APPROVED" | "REJECTED" | "ACKNOWLEDGED"; approvedPct?: number | null; note?: string | null; adopt?: { inboxStaffId: string; employeeId: string | null } | null },
+  staffId: string
+): Promise<void> {
+  await wfSend("POST", `/api/external/v1/sales/reviews/${encodeURIComponent(id)}/decision`, {}, body, { "x-staff-id": staffId });
+}
+
 /** E 類報價查詢（CWM /quotes — per patient 或 batch；零原始電話）。
  *  ★ cwi-final S5-13①：加 clinicIds（cuid）/ clinicCodes（shortName 兼容）— CWM 端 `where.clinicId in` 服務端 filter。 */
 export async function fetchQuotes(opts?: {
@@ -1637,6 +1804,124 @@ function mockFixtureImpl(path: string, params: Record<string, string>, method?: 
   if (path === "/api/external/v1/clinical-index/advice" && !method) {
     return mockAdvice(params);
   }
+  // ── cwi-sales-20261028：銷售系統 mock（決定性名單；傭金項目 file-backed .dev/workforce-mock-commission.json）──
+  if (path === "/api/external/v1/sales/apricot-users" && !method) {
+    return {
+      v: 1,
+      users: [
+        { extId: "mock-apu-1", name: "Kathleen", login: "kathleen", account: "MAIN" },
+        { extId: "mock-apu-2", name: "Amy Chan", login: "amy", account: "MAIN" },
+        { extId: "mock-apu-3", name: "Ben Wong", login: null, account: "TY" },
+      ],
+    };
+  }
+  if (path === "/api/external/v1/sales/employees" && !method) {
+    return {
+      v: 1,
+      employees: [
+        { id: "mock-emp-1", name: "Kathleen", clinicCodes: ["TKW"] },
+        { id: "mock-emp-2", name: "Amy Chan", clinicCodes: ["MF", "TKW"] },
+        { id: "mock-emp-3", name: "Ben Wong", clinicCodes: ["TY"] },
+      ],
+    };
+  }
+  if (path === "/api/external/v1/sales/catalog" && !method) return mockSalesCatalog(params.clinicCode ?? "");
+  if (path === "/api/external/v1/sales/catalog/refresh" && method === "POST") {
+    return { v: 1, status: "OK", counts: { feeItems: 3, practitioners: 2, users: 3, clinics: 1, errors: 0 }, errors: [] };
+  }
+  if (path === "/api/external/v1/sales/commission-items" && !method) {
+    const code = params.clinicCode ?? "";
+    return { v: 1, clinicCode: code, items: mockCommissionStore()[code] ?? [] };
+  }
+  if (path === "/api/external/v1/sales/commission-items" && method === "PUT") return mockPutCommission(body, path);
+  if (path.startsWith("/api/external/v1/sales/") && path !== "/api/external/v1/sales/invoice-options") mockLoad();
+  if (path === "/api/external/v1/sales/invoice-options" && !method) return mockInvoiceOptions(params.clinicCode ?? "");
+  if (path === "/api/external/v1/sales/invoices" && method === "POST") return mockCreateInvoice(body, path);
+  if (path === "/api/external/v1/sales/reviews" && !method) {
+    return {
+      v: 1,
+      reviews: [...mockInvoiceStore.reviews.values()]
+        .filter((r) => !params.status || r.status === params.status)
+        .filter((r) => !params.salesApricotUserId || r.salesApricotUserId === params.salesApricotUserId)
+        .map((r) => ({ ...r, salesNote: r.salesNote ?? null, salesNoteAt: r.salesNoteAt ?? null })),
+    };
+  }
+  if (path === "/api/external/v1/sales/patient-watch" && method === "PUT") {
+    const b = body as { patients?: unknown[] } | undefined;
+    if (!Array.isArray(b?.patients)) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+    mockInvoiceStore.watch = b.patients as typeof mockInvoiceStore.watch;
+    mockSave();
+    return { v: 1, ok: true, count: b.patients.length };
+  }
+  const srn = path.match(/^\/api\/external\/v1\/sales\/reviews\/([^/]+)\/sales-note$/);
+  if (srn && method === "POST") {
+    const b = body as { salesApricotUserId?: string; note?: string } | undefined;
+    const r = mockInvoiceStore.reviews.get(decodeURIComponent(srn[1]));
+    if (!r) throw new WorkforceApiError(404, path, "NOT_FOUND");
+    if (!b?.note?.trim()) throw new WorkforceApiError(400, path, "NOTE_REQUIRED");
+    if (r.salesApricotUserId !== b.salesApricotUserId) throw new WorkforceApiError(403, path, "NOT_YOUR_REVIEW");
+    if (r.status !== "OPEN") throw new WorkforceApiError(409, path, "ALREADY_DECIDED");
+    Object.assign(r, { salesNote: b.note.trim().slice(0, 500), salesNoteAt: new Date().toISOString() });
+    mockSave();
+    return { v: 1, ok: true };
+  }
+  if (path === "/api/external/v1/sales/ledger" && !method) return mockLedger(params.inboxStaffId ?? "", params.month ?? "");
+  if (path === "/api/external/v1/sales/ledger/summary" && !method) return mockLedgerSummary(params.month ?? "");
+  if (path === "/api/external/v1/sales/my-invoices" && !method) return { v: 1, invoices: mockMyInvoices(params.inboxStaffId ?? "") };
+  if (path === "/api/external/v1/sales/owner-changes" && method === "POST") {
+    const b = body as { patientApricotId?: string; toInboxStaffId?: string; toSalesApricotUserId?: string; effectiveAt?: string } | undefined;
+    if (!b?.patientApricotId || !b.toInboxStaffId || !b.toSalesApricotUserId || !b.effectiveAt) throw new WorkforceApiError(400, path, "BAD_REQUEST");
+    if (process.env.WORKFORCE_MOCK_OWNER_CHANGE_FAIL === "1") throw new WorkforceApiError(503, path, "UNAVAILABLE");
+    mockInvoiceStore.ownerChanges.push({ ...(b as Required<typeof b>) });
+    mockSave();
+    return { v: 1, ok: true, id: `mock-oc-${mockInvoiceStore.ownerChanges.length}` };
+  }
+  if (path === "/api/external/v1/sales/patient-activity" && !method) {
+    const ids = (params.ids ?? "").split(",").filter(Boolean);
+    return { v: 1, patients: ids.map((id) => ({ patientApricotId: id, lastPaymentAt: mockInvoiceStore.lastPayment.get(id) ?? null })) };
+  }
+  if (path === "/api/external/v1/sales/month-close" && !method) return mockMonthPreview(params.month ?? "");
+  if (path === "/api/external/v1/sales/month-close" && method === "POST") {
+    const b = body as { month?: string; force?: boolean } | undefined;
+    const pv = mockMonthPreview(b?.month ?? "") as { closed: boolean; blockers: { code: string }[]; preClose: { ok: boolean } };
+    if (pv.closed) return { v: 1, month: b?.month, already: true, payouts: [], heldMoved: 0 };
+    if (pv.blockers.length) throw new WorkforceApiError(409, path, pv.blockers[0].code);
+    if (!pv.preClose.ok && !b?.force) throw new WorkforceApiError(409, path, "NEED_PRE_CLOSE_SYNC");
+    mockInvoiceStore.closedMonths.push(b!.month!);
+    mockSave();
+    return { v: 1, month: b?.month, already: false, payouts: [], heldMoved: 0 };
+  }
+  if (path === "/api/external/v1/sales/month-close/reopen" && method === "POST") {
+    const m = (body as { month?: string } | undefined)?.month ?? "";
+    const was = mockInvoiceStore.closedMonths.includes(m);
+    mockInvoiceStore.closedMonths = mockInvoiceStore.closedMonths.filter((x) => x !== m);
+    mockSave();
+    return { v: 1, reopened: was, adjustmentsRemoved: 0 };
+  }
+  if (path === "/api/external/v1/sales/commission-sync" && !method) {
+    if (mockInvoiceStore.lastRun) return { v: 1, running: null, last: mockInvoiceStore.lastRun };
+    return { v: 1, running: null, last: mockInvoiceStore.preCloseAt ? { id: "mock-run", trigger: "PRE_CLOSE", status: "OK", checked: mockInvoiceStore.invoices.size, requests: mockInvoiceStore.invoices.size, stopReason: null, startedAt: mockInvoiceStore.preCloseAt, finishedAt: mockInvoiceStore.preCloseAt } : null };
+  }
+  if (path === "/api/external/v1/sales/commission-sync" && method === "POST") {
+    mockInvoiceStore.preCloseAt = new Date().toISOString();
+    mockSave();
+    return { v: 1, started: true };
+  }
+  if (path === "/api/external/v1/sales/report" && !method) {
+    const m = params.month ?? "";
+    const pv = mockMonthPreview(m) as { closed: boolean; rows: unknown[] };
+    const rows = mockLedgerRows(null, m);
+    return {
+      v: 1, month: m, closed: pv.closed, bySales: pv.rows,
+      byClinic: rows.length ? [{ clinic: "TKW", counted: Math.round(rows.reduce((n, x) => n + x.row.countedAmt, 0) * 100) / 100, payments: rows.reduce((n, x) => n + x.row.paymentAmt, 0), lines: rows.length }] : [],
+      detail: rows.map((x) => ({
+        paidAt: x.row.paidAt.slice(0, 10), inboxStaffId: x.staffId, clinic: "TKW", billCode: x.row.billCode, patientApricotId: x.row.patientApricotId, items: "00021 IMPLANT 3%",
+        kind: x.row.kind, status: x.row.status, paymentCode: x.row.paymentCode, paymentAmt: x.row.paymentAmt, ratePct: x.row.ratePct, commissionAmt: x.row.commissionAmt, approvedPct: x.row.approvedPct, countedAmt: x.row.countedAmt,
+      })),
+    };
+  }
+  const srd = path.match(/^\/api\/external\/v1\/sales\/reviews\/([^/]+)\/decision$/);
+  if (srd && method === "POST") return mockDecideReview(decodeURIComponent(srd[1]), body, path);
   const qd = path.match(/^\/api\/external\/v1\/quotes\/([^/]+)\/decision$/);
   if (qd && method === "POST") {
     return mockQuoteDecision(decodeURIComponent(qd[1]), body, path);
@@ -1754,6 +2039,454 @@ function writeClinical(f: MockClinicalFile): void {
   }
 }
 /** #1 batch visits（C/D 觸發源；mock 唔做 server-side reasonCodes 過濾 — 引擎口徑唔依賴佢）。 */
+const MOCK_COMMISSION_PATH = path.resolve(process.cwd(), ".dev/workforce-mock-commission.json");
+type MockCommission = { feeItemExtId: string; code: string; des: string; ratePct: number; category: string | null; highValue: boolean; active: boolean; updatedAt: string };
+function mockFeeItems(code: string) {
+  return [
+    { extId: `mock-fee-${code}-1`, code: "00002", des: "BLEACHING", fee: 4000 },
+    { extId: `mock-fee-${code}-2`, code: "00003", des: "CHECK-UP", fee: 300 },
+    { extId: `mock-fee-${code}-3`, code: "00021", des: "IMPLANT", fee: 39000 },
+  ];
+}
+function mockCommissionStore(): Record<string, MockCommission[]> {
+  try {
+    return JSON.parse(readFileSync(MOCK_COMMISSION_PATH, "utf8")) as Record<string, MockCommission[]>;
+  } catch {
+    return {};
+  }
+}
+function mockSalesCatalog(code: string): unknown {
+  if (!code) throw new WorkforceApiError(400, "/api/external/v1/sales/catalog", "BAD_REQUEST");
+  return {
+    v: 1,
+    clinicCode: code,
+    feeItems: mockFeeItems(code),
+    practitioners: [
+      { extId: `mock-pract-${code}-1`, code: "YUEN", name: "Dr. Yuen Ki Hin", nameChi: "袁麒軒 牙科醫生" },
+      { extId: `mock-pract-${code}-2`, code: "YIU", name: "Dr. Yiu Tsz Ching", nameChi: "姚子晴 牙科醫生" },
+    ],
+    commission: (mockCommissionStore()[code] ?? []).filter((c) => c.active).map((c) => ({ feeItemExtId: c.feeItemExtId, ratePct: c.ratePct, category: c.category, highValue: c.highValue })),
+    lastRun: { status: "OK", finishedAt: "2026-10-28T18:41:00.000Z", error: null },
+  };
+}
+// ── ★ 第 3 期 傭金：分類帳 / 合計 / 我的單 / 歸屬轉移 / 病人最後付款 ─────────────────────────
+const LedgerTotals = z.object({ counted: z.number(), held: z.number(), excluded: z.number(), rejected: z.number(), lines: z.number() });
+export const SalesLedgerResponse = z.object({
+  v: z.literal(1),
+  month: z.string(),
+  closed: z.boolean(),
+  totals: LedgerTotals,
+  rows: z.array(
+    z.object({
+      id: z.string(),
+      kind: z.string(),
+      status: z.string(),
+      billCode: z.string().nullable(),
+      patientApricotId: z.string().nullable(),
+      paymentCode: z.string().nullable(),
+      paidAt: z.string(),
+      paymentAmt: z.number(),
+      ratePct: z.number(),
+      commissionAmt: z.number(),
+      approvedPct: z.number().nullable(),
+      countedAmt: z.number(),
+      note: z.string().nullable(),
+    })
+  ),
+});
+export type SalesLedger = z.infer<typeof SalesLedgerResponse>;
+export const SalesLedgerSummaryResponse = z.object({
+  v: z.literal(1),
+  month: z.string(),
+  closed: z.boolean(),
+  sales: z.array(LedgerTotals.extend({ inboxStaffId: z.string() })),
+});
+export const MySalesInvoicesResponse = z.object({
+  v: z.literal(1),
+  invoices: z.array(
+    z.object({
+      invoiceId: z.string(),
+      billCode: z.string().nullable(),
+      patientApricotId: z.string(),
+      clinicExtId: z.string(),
+      origin: z.string(),
+      createdAt: z.string(),
+      totalAmt: z.number(),
+      paidAmt: z.number(),
+      osAmt: z.number().nullable(),
+      isVoid: z.boolean(),
+      lastCheckedAt: z.string().nullable(),
+      commission: z.number(),
+      held: z.number(),
+    })
+  ),
+});
+export type MySalesInvoice = z.infer<typeof MySalesInvoicesResponse>["invoices"][number];
+
+export async function fetchSalesLedger(inboxStaffId: string, month: string): Promise<SalesLedger> {
+  return SalesLedgerResponse.parse(await wfGet("/api/external/v1/sales/ledger", { inboxStaffId, month }));
+}
+export async function fetchSalesLedgerSummary(month: string): Promise<z.infer<typeof SalesLedgerSummaryResponse>> {
+  return SalesLedgerSummaryResponse.parse(await wfGet("/api/external/v1/sales/ledger/summary", { month }));
+}
+export async function fetchMySalesInvoices(inboxStaffId: string): Promise<MySalesInvoice[]> {
+  return MySalesInvoicesResponse.parse(await wfGet("/api/external/v1/sales/my-invoices", { inboxStaffId })).invoices;
+}
+/** 歸屬轉移 → workforce：之後嘅付款歸新銷售（失敗就唔好轉 — 呼叫者 throw） */
+export async function postSalesOwnerChange(
+  body: { patientApricotId: string; toInboxStaffId: string; toEmployeeId: string | null; toSalesApricotUserId: string; effectiveAt: string },
+  byStaffId: string
+): Promise<void> {
+  await wfSend("POST", "/api/external/v1/sales/owner-changes", {}, body, { "x-staff-id": byStaffId });
+}
+export async function fetchPatientActivity(ids: string[]): Promise<{ patientApricotId: string; lastPaymentAt: string | null }[]> {
+  const r = (await wfGet("/api/external/v1/sales/patient-activity", { ids: ids.join(",") })) as { patients?: { patientApricotId: string; lastPaymentAt: string | null }[] };
+  return r.patients ?? [];
+}
+
+// ── ★ 第 4 期 月結／報表 ───────────────────────────────────────────────────────────────
+const PayoutRow = z.object({
+  inboxStaffId: z.string(),
+  employeeId: z.string().nullable(),
+  earned: z.number(),
+  carryIn: z.number(),
+  net: z.number(),
+  payout: z.number(),
+  carryOut: z.number(),
+  lines: z.number(),
+  held: z.number(),
+  payrollStatus: z.string().optional(),
+  payrollMonth: z.string().nullable().optional(),
+});
+export const MonthClosePreviewResponse = z.object({
+  v: z.literal(1),
+  month: z.string(),
+  closed: z.boolean(),
+  closedAt: z.string().nullable(),
+  forced: z.boolean(),
+  blockers: z.array(z.object({ code: z.string(), message: z.string() })),
+  preClose: z.object({ ok: z.boolean(), status: z.string().nullable(), finishedAt: z.string().nullable(), running: z.boolean() }),
+  rows: z.array(PayoutRow),
+  heldLines: z.number(),
+});
+export type MonthClosePreview = z.infer<typeof MonthClosePreviewResponse>;
+const RunInfo = z
+  .object({ id: z.string(), trigger: z.string(), status: z.string(), checked: z.number(), requests: z.number(), stopReason: z.string().nullable(), startedAt: z.string(), finishedAt: z.string().nullable() })
+  .nullable();
+export const CommissionSyncStateResponse = z.object({ v: z.literal(1), running: RunInfo, last: RunInfo });
+export const SalesReportResponse = z.object({
+  v: z.literal(1),
+  month: z.string(),
+  closed: z.boolean(),
+  bySales: z.array(PayoutRow),
+  byClinic: z.array(z.object({ clinic: z.string(), counted: z.number(), payments: z.number(), lines: z.number() })),
+  detail: z.array(
+    z.object({
+      paidAt: z.string(),
+      inboxStaffId: z.string(),
+      clinic: z.string(),
+      billCode: z.string().nullable(),
+      patientApricotId: z.string().nullable(),
+      items: z.string(),
+      kind: z.string(),
+      status: z.string(),
+      paymentCode: z.string().nullable(),
+      paymentAmt: z.number(),
+      ratePct: z.number(),
+      commissionAmt: z.number(),
+      approvedPct: z.number().nullable(),
+      countedAmt: z.number(),
+    })
+  ),
+});
+export type SalesReport = z.infer<typeof SalesReportResponse>;
+
+export async function fetchMonthClosePreview(month: string): Promise<MonthClosePreview> {
+  return MonthClosePreviewResponse.parse(await wfGet("/api/external/v1/sales/month-close", { month }));
+}
+export async function postMonthClose(month: string, force: boolean, staffId: string): Promise<{ already: boolean }> {
+  const r = (await wfSend("POST", "/api/external/v1/sales/month-close", {}, { month, force }, { "x-staff-id": staffId }, { timeoutMs: 60_000 })) as { already?: boolean };
+  return { already: !!r.already };
+}
+export async function postMonthReopen(month: string, staffId: string): Promise<{ reopened: boolean; adjustmentsRemoved: number }> {
+  const r = (await wfSend("POST", "/api/external/v1/sales/month-close/reopen", {}, { month }, { "x-staff-id": staffId }, { timeoutMs: 60_000 })) as { reopened?: boolean; adjustmentsRemoved?: number };
+  return { reopened: !!r.reopened, adjustmentsRemoved: r.adjustmentsRemoved ?? 0 };
+}
+export async function fetchCommissionSyncState(): Promise<z.infer<typeof CommissionSyncStateResponse>> {
+  return CommissionSyncStateResponse.parse(await wfGet("/api/external/v1/sales/commission-sync", {}));
+}
+export async function startPreCloseSync(staffId: string): Promise<void> {
+  await wfSend("POST", "/api/external/v1/sales/commission-sync", {}, {}, { "x-staff-id": staffId });
+}
+export async function fetchSalesReport(month: string): Promise<SalesReport> {
+  return SalesReportResponse.parse(await wfGet("/api/external/v1/sales/report", { month }, undefined, { timeoutMs: 30_000 }));
+}
+
+// ── 開單 mock（in-memory；同 workforce 一樣：requestKey 冪等、內容唔同 409、保護外 → 對單隊列）──
+// env：WORKFORCE_MOCK_INVOICE_WRITE=0 → 503 WRITE_DISABLED；WORKFORCE_MOCK_INVOICE_UNCONFIRMED=1 → 504 UNCONFIRMED
+type MockReview = Omit<SalesReviewRow, "salesNote" | "salesNoteAt"> & Partial<Pick<SalesReviewRow, "salesNote" | "salesNoteAt">>;
+let mockStaffHeader: string | null = null;
+const mockInvoiceStore = {
+  invoices: new Map<string, { hash: string; result: Record<string, unknown>; staffId: string; patientApricotId: string; createdAt: string }>(),
+  reviews: new Map<string, MockReview>(),
+  ownerChanges: [] as { patientApricotId: string; toInboxStaffId: string; toSalesApricotUserId: string; effectiveAt: string }[],
+  /** 病人最後付款（test 可以 set） */
+  lastPayment: new Map<string, string>(),
+  seq: 0,
+  closedMonths: [] as string[],
+  preCloseAt: null as string | null,
+  /** ★ 第 5 期：inbox 推過嚟嘅負責病人名單（test 睇得到） */
+  watch: [] as { patientApricotId: string; inboxStaffId: string; salesApricotUserId: string; employeeId: string | null; state: string }[],
+  /** ★ 第 5 期：test 可以 set 傭金同步最後一次結果（null = 冇） */
+  lastRun: null as { id: string; trigger: string; status: string; checked: number; requests: number; stopReason: string | null; startedAt: string; finishedAt: string | null } | null,
+};
+/** ★ 第 5 期：test 用 — 直接睇／改 mock 狀態 */
+export const __salesMock = mockInvoiceStore;
+/**
+ * dev／CI e2e server（next dev / start）每條 route 可能有自己一份 module → in-memory store 唔共享
+ * → 存落 .dev/workforce-mock-invoices.json（同傭金項目 mock 一樣）。單元測試（tsx，NODE_ENV 未設）淨係 in-memory。
+ */
+const MOCK_INVOICES_PATH = path.resolve(process.cwd(), ".dev/workforce-mock-invoices.json");
+const mockPersist = () => process.env.NODE_ENV === "development" || process.env.NODE_ENV === "production";
+function mockLoad(): void {
+  if (!mockPersist()) return;
+  try {
+    const j = JSON.parse(readFileSync(MOCK_INVOICES_PATH, "utf8")) as {
+      invoices: [string, { hash: string; result: Record<string, unknown>; staffId: string; patientApricotId: string; createdAt: string }][];
+      reviews: [string, MockReview][];
+      ownerChanges: typeof mockInvoiceStore.ownerChanges;
+      lastPayment: [string, string][];
+      seq: number;
+      closedMonths?: string[];
+      preCloseAt?: string | null;
+      watch?: typeof mockInvoiceStore.watch;
+    };
+    mockInvoiceStore.invoices = new Map(j.invoices);
+    mockInvoiceStore.reviews = new Map(j.reviews);
+    mockInvoiceStore.ownerChanges = j.ownerChanges;
+    mockInvoiceStore.lastPayment = new Map(j.lastPayment);
+    mockInvoiceStore.seq = j.seq;
+    mockInvoiceStore.closedMonths = j.closedMonths ?? [];
+    mockInvoiceStore.preCloseAt = j.preCloseAt ?? null;
+    mockInvoiceStore.watch = j.watch ?? [];
+  } catch {
+    /* 未有檔 = 空 store */
+  }
+}
+function mockSave(): void {
+  if (!mockPersist()) return;
+  mkdirSync(path.dirname(MOCK_INVOICES_PATH), { recursive: true });
+  writeFileSync(
+    MOCK_INVOICES_PATH,
+    JSON.stringify({
+      invoices: [...mockInvoiceStore.invoices],
+      reviews: [...mockInvoiceStore.reviews],
+      ownerChanges: mockInvoiceStore.ownerChanges,
+      lastPayment: [...mockInvoiceStore.lastPayment],
+      seq: mockInvoiceStore.seq,
+      closedMonths: mockInvoiceStore.closedMonths,
+      preCloseAt: mockInvoiceStore.preCloseAt,
+      watch: mockInvoiceStore.watch,
+    })
+  );
+}
+/** test-only：清 mock 開單 store */
+export function _resetMockInvoicesForTest(): void {
+  mockInvoiceStore.invoices.clear();
+  mockInvoiceStore.reviews.clear();
+  mockInvoiceStore.ownerChanges.length = 0;
+  mockInvoiceStore.lastPayment.clear();
+  mockInvoiceStore.closedMonths = [];
+  mockInvoiceStore.preCloseAt = null;
+  mockInvoiceStore.watch = [];
+  mockInvoiceStore.lastRun = null;
+  mockSave();
+}
+/** test-only：mock store（睇歸屬轉移、設病人最後付款） */
+export function _mockInvoiceStoreForTest() {
+  mockLoad();
+  return mockInvoiceStore;
+}
+const mockMonth = (iso: string) => new Date(new Date(iso).getTime() + 8 * 3600_000).toISOString().slice(0, 7);
+/** mock 分類帳：每張 mock 單嘅即場收款 = 一筆 EARN（傭金 = 收款 × 傭金項目 ÷ 總額 × 3%）；保護外 = HELD */
+function mockLedgerRows(staffId: string | null, month: string) {
+  const rows = [];
+  for (const [, inv] of mockInvoiceStore.invoices) {
+    const r = inv.result as { invoiceId: string; billCode: string; totalAmt: number; paymentAmt: number; commissionableAmt: number; review: boolean };
+    if (staffId && inv.staffId !== staffId) continue;
+    if (r.paymentAmt <= 0 || mockMonth(inv.createdAt) !== month) continue;
+    const rate = r.totalAmt > 0 ? (r.commissionableAmt / r.totalAmt) * 0.03 : 0;
+    const comm = Math.round(r.paymentAmt * rate * 100) / 100;
+    const held = r.review && mockInvoiceStore.reviews.get(`mock-rev-${r.invoiceId.split("-").pop()}`)?.status !== "APPROVED";
+    rows.push({
+      staffId: inv.staffId,
+      row: {
+        id: `mock-led-${r.invoiceId}`, kind: "EARN", status: held ? "HELD" : "COUNTED", billCode: r.billCode, patientApricotId: inv.patientApricotId,
+        paymentCode: `P${r.billCode}`, paidAt: inv.createdAt, paymentAmt: r.paymentAmt, ratePct: Math.round(rate * 1e6) / 1e4, commissionAmt: comm,
+        approvedPct: held ? null : 100, countedAmt: held ? 0 : comm, note: null,
+      },
+    });
+  }
+  return rows;
+}
+function mockTotals(rows: { status: string; commissionAmt: number; countedAmt: number }[]) {
+  const sum = (st: string) => Math.round(rows.filter((x) => x.status === st).reduce((n, x) => n + x.commissionAmt, 0) * 100) / 100;
+  return { counted: Math.round(rows.reduce((n, x) => n + x.countedAmt, 0) * 100) / 100, held: sum("HELD"), excluded: sum("EXCLUDED"), rejected: sum("REJECTED"), lines: rows.length };
+}
+function mockLedger(staffId: string, month: string): unknown {
+  if (!staffId || !/^\d{4}-\d{2}$/.test(month)) throw new WorkforceApiError(400, "/api/external/v1/sales/ledger", "BAD_REQUEST");
+  const rows = mockLedgerRows(staffId, month).map((x) => x.row);
+  return { v: 1, month, closed: false, totals: mockTotals(rows), rows };
+}
+function mockLedgerSummary(month: string): unknown {
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new WorkforceApiError(400, "/api/external/v1/sales/ledger/summary", "BAD_REQUEST");
+  const by = new Map<string, ReturnType<typeof mockLedgerRows>[number]["row"][]>();
+  for (const x of mockLedgerRows(null, month)) by.set(x.staffId, [...(by.get(x.staffId) ?? []), x.row]);
+  return { v: 1, month, closed: false, sales: [...by.entries()].map(([inboxStaffId, rows]) => ({ inboxStaffId, ...mockTotals(rows) })) };
+}
+/** mock 月結預覽：每個銷售出糧 = 當月已計（冇結轉）；當月／未來月 = NOT_ENDED */
+function mockMonthPreview(month: string): unknown {
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new WorkforceApiError(400, "/api/external/v1/sales/month-close", "BAD_MONTH");
+  const nowM = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 7);
+  const by = new Map<string, number>();
+  const held = new Map<string, number>();
+  const lines = new Map<string, number>();
+  for (const x of mockLedgerRows(null, month)) {
+    by.set(x.staffId, (by.get(x.staffId) ?? 0) + x.row.countedAmt);
+    if (x.row.status === "HELD") held.set(x.staffId, (held.get(x.staffId) ?? 0) + x.row.commissionAmt);
+    else lines.set(x.staffId, (lines.get(x.staffId) ?? 0) + 1);
+  }
+  const closed = mockInvoiceStore.closedMonths.includes(month);
+  const preOk = !!mockInvoiceStore.preCloseAt && mockMonth(mockInvoiceStore.preCloseAt) > month;
+  return {
+    v: 1, month, closed, closedAt: closed ? new Date().toISOString() : null, forced: false,
+    blockers: closed ? [] : month >= nowM ? [{ code: "NOT_ENDED", message: "呢個月未完 — 下個月先結得" }] : [],
+    preClose: { ok: preOk, status: mockInvoiceStore.preCloseAt ? "OK" : null, finishedAt: mockInvoiceStore.preCloseAt, running: false },
+    heldLines: [...held.values()].length,
+    rows: [...new Set([...by.keys(), ...held.keys()])].map((id) => {
+      const e = Math.round((by.get(id) ?? 0) * 100) / 100;
+      return { inboxStaffId: id, employeeId: null, earned: e, carryIn: 0, net: e, payout: Math.max(0, e), carryOut: Math.min(0, e), lines: lines.get(id) ?? 0, held: held.get(id) ?? 0, ...(closed ? { payrollStatus: e > 0 ? "ADDED" : "NONE", payrollMonth: e > 0 ? month : null } : {}) };
+    }),
+  };
+}
+function mockMyInvoices(staffId: string) {
+  return [...mockInvoiceStore.invoices.values()]
+    .filter((x) => x.staffId === staffId)
+    .map((x) => {
+      const r = x.result as { invoiceId: string; billCode: string; totalAmt: number; paymentAmt: number; commissionableAmt: number };
+      const comm = r.totalAmt > 0 ? Math.round(r.paymentAmt * (r.commissionableAmt / r.totalAmt) * 0.03 * 100) / 100 : 0;
+      return {
+        invoiceId: r.invoiceId, billCode: r.billCode, patientApricotId: x.patientApricotId, clinicExtId: "mock-ext", origin: "INBOX", createdAt: x.createdAt,
+        totalAmt: r.totalAmt, paidAmt: r.paymentAmt, osAmt: Math.round((r.totalAmt - r.paymentAmt) * 100) / 100, isVoid: false, lastCheckedAt: null, commission: comm, held: 0,
+      };
+    });
+}
+function mockInvoiceOptions(code: string): unknown {
+  if (!code) throw new WorkforceApiError(400, "/api/external/v1/sales/invoice-options", "BAD_REQUEST");
+  const active = (mockCommissionStore()[code] ?? []).filter((c) => c.active);
+  const rate = new Map(active.map((c) => [c.feeItemExtId, c.ratePct]));
+  const high = new Set(active.filter((c) => c.highValue).map((c) => c.feeItemExtId));
+  return {
+    v: 1,
+    clinicCode: code,
+    writeEnabled: process.env.WORKFORCE_MOCK_INVOICE_WRITE !== "0",
+    templateReady: true,
+    practitioners: [
+      { extId: `mock-pract-${code}-1`, name: "Dr. Yuen Ki Hin", nameChi: "袁麒軒 牙科醫生" },
+      { extId: `mock-pract-${code}-2`, name: "Dr. Yiu Tsz Ching", nameChi: "姚子晴 牙科醫生" },
+    ],
+    feeItems: mockFeeItems(code).map((f) => ({ ...f, ratePct: rate.get(f.extId) ?? null, highValue: high.has(f.extId) })),
+    paymentMethods: [
+      { extId: "mock-pm-cash", code: "002", des: "CASH" },
+      { extId: "mock-pm-visa", code: "005", des: "VISA" },
+    ],
+  };
+}
+function mockCreateInvoice(body: unknown, reqPath: string): unknown {
+  const b = body as CreateInvoiceBody | undefined;
+  if (!b?.requestKey || !b.clinicCode || !b.patientApricotId || !Array.isArray(b.lines) || b.lines.length === 0) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  if (process.env.WORKFORCE_MOCK_INVOICE_WRITE === "0") throw new WorkforceApiError(503, reqPath, "WRITE_DISABLED");
+  const hash = JSON.stringify([b.clinicCode, b.patientApricotId, b.salesApricotUserId, b.practitionerExtId, b.lines, b.payment]);
+  const prior = mockInvoiceStore.invoices.get(b.requestKey);
+  if (prior) {
+    if (prior.hash !== hash) throw new WorkforceApiError(409, reqPath, "KEY_REUSED");
+    return { ...prior.result, replayed: true };
+  }
+  if (process.env.WORKFORCE_MOCK_INVOICE_UNCONFIRMED === "1") throw new WorkforceApiError(504, reqPath, "UNCONFIRMED", 60);
+  const fees = new Map(mockFeeItems(b.clinicCode).map((f) => [f.extId, f]));
+  if (b.lines.some((l) => !fees.has(l.feeItemExtId))) throw new WorkforceApiError(400, reqPath, "FEE_ITEM_INVALID");
+  const activeComm = (mockCommissionStore()[b.clinicCode] ?? []).filter((c) => c.active);
+  const rate = new Map(activeComm.map((c) => [c.feeItemExtId, c.ratePct]));
+  const highIds = new Set(activeComm.filter((c) => c.highValue).map((c) => c.feeItemExtId));
+  const cents = (n: number) => Math.round(n * 100);
+  const lineTotal = (l: CreateInvoiceBody["lines"][number]) => cents(l.up) * l.qty - cents(l.discAmt);
+  if (b.lines.some((l) => lineTotal(l) < 0)) throw new WorkforceApiError(400, reqPath, "BAD_DISCOUNT");
+  const totalC = b.lines.reduce((n, l) => n + lineTotal(l), 0);
+  const payC = b.payment ? cents(b.payment.amt) : 0;
+  if (payC > totalC) throw new WorkforceApiError(400, reqPath, "OVERPAY");
+  const commC = b.lines.reduce((n, l) => n + ((rate.get(l.feeItemExtId) ?? 0) > 0 ? lineTotal(l) : 0), 0);
+  const n = ++mockInvoiceStore.seq;
+  const result = {
+    v: 1,
+    invoiceId: `mock-inv-${n}`,
+    status: "CREATED",
+    billId: `mock-bill-${n}`,
+    billCode: `20261029${String(n).padStart(4, "0")}`,
+    totalAmt: totalC / 100,
+    paymentAmt: payC / 100,
+    commissionableAmt: commC / 100,
+    highValue: b.lines.some((l) => highIds.has(l.feeItemExtId) && (rate.get(l.feeItemExtId) ?? 0) > 0),
+    review: b.ownership === "NONE",
+    replayed: false,
+    recovered: false,
+  };
+  mockInvoiceStore.invoices.set(b.requestKey, { hash, result, staffId: mockStaffHeader ?? "", patientApricotId: b.patientApricotId, createdAt: new Date().toISOString() });
+  if (b.ownership === "NONE") {
+    const id = `mock-rev-${n}`;
+    mockInvoiceStore.reviews.set(id, {
+      id, kind: "RECONCILE_UNPROTECTED", status: "OPEN", apricotBillId: result.billId, apricotBillCode: result.billCode, clinicExtId: `mock-ext-${b.clinicCode}`,
+      salesApricotUserId: b.salesApricotUserId, salesInvoiceId: result.invoiceId, patientApricotId: b.patientApricotId, amount: commC / 100,
+      approvedPct: null, decidedBy: null, decidedAt: null, note: null, createdAt: new Date().toISOString(),
+    });
+  }
+  mockSave();
+  return result;
+}
+function mockDecideReview(id: string, body: unknown, reqPath: string): unknown {
+  const b = body as { decision?: string; approvedPct?: number | null; note?: string | null } | undefined;
+  const r = mockInvoiceStore.reviews.get(id);
+  if (!r) throw new WorkforceApiError(404, reqPath, "NOT_FOUND");
+  if (b?.decision !== "APPROVED" && b?.decision !== "REJECTED" && b?.decision !== "ACKNOWLEDGED") throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  if ((r.kind === "INVOICE_EDITED") !== (b.decision === "ACKNOWLEDGED")) throw new WorkforceApiError(400, reqPath, "BAD_DECISION");
+  if (b.decision === "REJECTED" && !(b.note ?? "").trim()) throw new WorkforceApiError(400, reqPath, "NOTE_REQUIRED");
+  if (r.status !== "OPEN") {
+    if (r.status === b.decision) return { v: 1, ok: true };
+    throw new WorkforceApiError(409, reqPath, "ALREADY_DECIDED");
+  }
+  Object.assign(r, { status: b.decision, approvedPct: b.decision === "APPROVED" ? (b.approvedPct ?? 100) : b.decision === "ACKNOWLEDGED" ? null : 0, note: b.note ?? null, decidedAt: new Date().toISOString() });
+  mockSave();
+  return { v: 1, ok: true };
+}
+
+function mockPutCommission(body: unknown, reqPath: string): unknown {
+  const b = body as { clinicCode?: string; items?: CommissionItemInput[] } | undefined;
+  const code = b?.clinicCode ?? "";
+  if (!code || !Array.isArray(b?.items)) throw new WorkforceApiError(400, reqPath, "BAD_REQUEST");
+  const fees = new Map(mockFeeItems(code).map((f) => [f.extId, f]));
+  const bad = b.items.find((i) => !fees.has(i.feeItemExtId) || !(i.ratePct >= 0 && i.ratePct <= 100));
+  if (bad) throw new WorkforceApiError(400, reqPath, "FEE_ITEM_NOT_FOUND");
+  const store = mockCommissionStore();
+  const cur = new Map((store[code] ?? []).map((c) => [c.feeItemExtId, c]));
+  for (const i of b.items) {
+    const f = fees.get(i.feeItemExtId)!;
+    cur.set(i.feeItemExtId, { feeItemExtId: i.feeItemExtId, code: f.code, des: f.des, ratePct: i.ratePct, category: i.category ?? null, highValue: i.highValue ?? false, active: i.active ?? true, updatedAt: new Date().toISOString() });
+  }
+  store[code] = [...cur.values()];
+  mkdirSync(path.dirname(MOCK_COMMISSION_PATH), { recursive: true });
+  writeFileSync(MOCK_COMMISSION_PATH, JSON.stringify(store));
+  return { v: 1, ok: true, count: b.items.length };
+}
+
 function mockClinicVisits(params: Record<string, string>): unknown {
   const f = readClinical();
   // ★ cwi-final S2-1（T427 回歸修復）：真端點按 clinicCode 過濾（fetchClinicVisits 必傳）—

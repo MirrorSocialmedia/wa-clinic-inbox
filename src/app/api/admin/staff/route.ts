@@ -89,6 +89,12 @@ export const GET = handle(async (req: NextRequest) => {
         active: true,
         scopeType: true,
         scopeCompanyId: true,
+        // ★ cwi-sales-20261028：「☑ 銷售人員」+ Apricot 銷售員 / workforce 員工綁定（顯示快照）
+        isSales: true,
+        salesApricotUserId: true,
+        salesApricotUserName: true,
+        workforceEmployeeId: true,
+        workforceEmployeeName: true,
       },
     }),
     prisma.clinic.findMany({ select: { id: true, code: true, companyId: true } }),

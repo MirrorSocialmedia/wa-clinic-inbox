@@ -58,6 +58,10 @@ const P = {
   excl: { cp: "cpadv-excl", waId: "85290001003", contact: `${PFX}c-excl`, conv: `${PFX}v-excl` },
   booked: { cp: "cpadv-booked", waId: "85290001004", contact: `${PFX}c-booked`, conv: `${PFX}v-booked` },
   manual: { cp: "cpadv-manual", waId: "85290001005", contact: `${PFX}c-manual`, conv: `${PFX}v-manual` },
+  // 冇釘選、只係「電話認到」（Contact.identifiedPatientApricotId）
+  ident: { cp: "cpadv-ident", waId: "85290001006", contact: `${PFX}c-ident`, conv: `${PFX}v-ident` },
+  // 報價（E）：冇釘選、只係電話認到；同日冇醫生建議 → 照出報價卡
+  qident: { cp: "cpadv-qident", waId: "85290001007", contact: `${PFX}c-qident`, conv: `${PFX}v-qident` },
 };
 const GROUP_ID = `${PFX}group0000000000001`;
 const RULE_ID = `${PFX}rule00000000000001`;
@@ -126,14 +130,16 @@ before(async () => {
   await prisma.skillGroupMember.create({ data: { groupId: GROUP_ID, staffId: consultantId } });
   // 病人 + 對話（釘住病人；mine 有負責人）
   for (const [k, x] of Object.entries(P)) {
-    await prisma.contact.create({ data: { id: x.contact, clinicId, waId: x.waId, profileName: `ADVT ${k}`, labels: [] } });
+    await prisma.contact.create({
+      data: { id: x.contact, clinicId, waId: x.waId, profileName: `ADVT ${k}`, labels: [], identifiedPatientApricotId: k === "ident" || k === "qident" ? x.cp : null },
+    });
     await prisma.conversation.create({
       data: {
         id: x.conv,
         clinicId,
         contactId: x.contact,
         status: "OPEN",
-        pinnedPatientApricotId: x.cp,
+        pinnedPatientApricotId: k === "ident" || k === "qident" ? null : x.cp,
         assigneeId: k === "mine" ? assigneeId : null,
         lastMessageAt: new Date(),
       },
@@ -182,12 +188,30 @@ before(async () => {
         advice(P.mine.cp, VISIT, [{ field: "診斷", keyword: "suggest", snippet: "suggest implant 46" }]),
         advice(P.excl.cp, VISIT, [{ field: "治療處理", keyword: "advised", snippet: "advised OHI" }]),
         advice(P.booked.cp, VISIT, [{ field: "治療處理", keyword: "recommend", snippet: "recommend scaling" }]),
+        advice(P.ident.cp, VISIT, [{ field: "主訴", keyword: "recommend", snippet: "recommend testing" }]),
         advice(P.manual.cp, VISIT_MANUAL, [{ field: "治療處理", keyword: "advise", snippet: "advise filling 26" }]),
       ],
       quotes: [
         {
           id: `${PFX}-quote-hit`,
           patientApricotId: P.hit.cp,
+          clinicCode: "TKW",
+          sourceVisitDate: VISIT,
+          text: "crown 36",
+          termShorthand: null,
+          nameCn: "牙冠",
+          amountMin: 8000,
+          amountMax: 8000,
+          perUnit: false,
+          fdiTeeth: ["36"],
+          intent: "not_done",
+          certainty: "high",
+          source: "parser",
+          status: "confirmed",
+        },
+        {
+          id: `${PFX}-quote-qident`,
+          patientApricotId: P.qident.cp,
           clinicCode: "TKW",
           sourceVisitDate: VISIT,
           text: "crown 36",
@@ -271,6 +295,12 @@ test("A1–A6：clinic scan — 命中建卡、零原文、定向通知、排除
   assert.ok(nMine, "A3 有負責人都要通知");
   assert.deepEqual(nMine.targetStaffIds, [assigneeId]);
 
+  // A3b 冇釘選、只係電話認到 → 照樣配到對話
+  assert.ok(
+    tasks.some((t) => t.conversationId === P.ident.conv && t.ruleId === RULE_ID),
+    "A3b 電話認到（冇釘選）都要建卡",
+  );
+
   // A4 排除字 / A5 已約 → 唔建
   assert.equal(tasks.filter((t) => t.conversationId === P.excl.conv).length, 0, "A4 排除字唔建");
   assert.equal(tasks.filter((t) => t.conversationId === P.booked.conv).length, 0, "A5 已約唔建");
@@ -278,6 +308,11 @@ test("A1–A6：clinic scan — 命中建卡、零原文、定向通知、排除
   // A6 同日報價併卡：冇 E 卡
   const quoteTasks = tasks.filter((t) => t.conversationId === P.hit.conv && t.subjectKey?.startsWith("quote:"));
   assert.equal(quoteTasks.length, 0, "A6 同日報價併入醫生建議卡（唔出 E 卡）");
+  // A6b 報價卡：電話認到（冇釘選）都配到對話
+  assert.ok(
+    tasks.some((t) => t.conversationId === P.qident.conv && t.subjectKey === `quote:${PFX}-quote-qident`),
+    "A6b 電話認到嘅病人都要出報價卡",
+  );
 });
 
 test("A7 冪等：再 scan 零新卡、零新通知", async () => {
@@ -320,3 +355,33 @@ test("A9 純函數：觸發字正規化 + 30 日時效", async () => {
     new Date(due.getTime() + 30 * 86400_000).toISOString(),
   );
 });
+
+test("A10 同一病人：上次醫生建議已跟進（SENT），之後新一次診症再 recommend → 照出新卡", async () => {
+  const { runFollowupScan } = await import("./engine");
+  const { adviceSubjectKey } = await import("./advice");
+  const first = await prisma.followupTask.findFirst({ where: { conversationId: P.hit.conv, ruleId: RULE_ID } });
+  assert.ok(first);
+  await prisma.followupTask.update({ where: { id: first.id }, data: { status: "SENT", handledAt: new Date() } });
+  const VISIT2 = hkDay(-2);
+  const f = JSON.parse(readFileSync(CLINICAL, "utf8")) as { advice: Record<string, unknown>[] };
+  f.advice.push({
+    visitId: `${PFX}-visit2-${P.hit.cp}`,
+    patientApricotId: P.hit.cp,
+    patientCode: null,
+    visitDate: VISIT2,
+    clinicCode: "TKW",
+    providerCode: null,
+    syncedAt: new Date().toISOString(),
+    matches: [{ field: "治療處理", keyword: "recommend", snippet: "recommend crown 36" }],
+    quotedItems: null,
+  });
+  writeFileSync(CLINICAL, JSON.stringify(f));
+  await runFollowupScan();
+  const second = await prisma.followupTask.findFirst({ where: { ruleId: RULE_ID, subjectKey: adviceSubjectKey(P.hit.cp, VISIT2) } });
+  assert.ok(second, "新一次診症要出新卡（唔受 maxSends／7 日冷卻影響）");
+  assert.equal(second.status, "SUGGESTED");
+  // 同一次診症再掃 → 唔會再出
+  await runFollowupScan();
+  assert.equal(await prisma.followupTask.count({ where: { ruleId: RULE_ID, subjectKey: adviceSubjectKey(P.hit.cp, VISIT) } }), 1);
+});
+

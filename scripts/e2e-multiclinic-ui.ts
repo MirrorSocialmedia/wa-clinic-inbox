@@ -93,6 +93,7 @@ interface PageLike {
   fill: (sel: string, v: string, o?: Record<string, unknown>) => Promise<void>;
   evaluate: <T>(fn: unknown, arg?: unknown) => Promise<T>;
   on: (event: string, handler: unknown) => void;
+  off?: (event: string, handler: unknown) => void;
   route: (pattern: string, handler: unknown) => Promise<void>;
   unroute: (pattern: string) => Promise<void>;
   screenshot: (o?: Record<string, unknown>) => Promise<unknown>;
@@ -167,6 +168,25 @@ async function waitRow(P: PageLike, name: string, what: string, timeoutMs = 60_0
   }
 }
 
+/** 等某 URL 嘅回應 status（null = 逾時）。⚠️ 一定要喺觸發請求嘅 click 之前 call。 */
+function waitResp(P: PageLike, urlPart: string, timeoutMs: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    const h = (r: { status: () => number; url: () => string }) => {
+      if (r.url().includes(urlPart)) finish(r.status());
+    };
+    const finish = (s: number | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      P.off?.("response", h);
+      resolve(s);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    P.on("response", h);
+  });
+}
+
 /** 等 toast（fixed bottom）含文字 */
 async function waitToast(P: PageLike, text: string, what: string, timeoutMs = 15_000): Promise<void> {
   const t0 = Date.now();
@@ -235,7 +255,12 @@ async function main(): Promise<void> {
       await btn.click();
       // 兩段確認：同一掣變「再撳一次放手？」
       await P.locator('[data-e2e="release-btn"]:has-text("再撳一次放手")').waitFor({ state: "visible", timeout: 5_000 });
+      // 監聽喺 click 之前掛：分得清「請求慢／冇發出」定「toast 冇出」
+      const relResp = waitResp(P, "/assign", 45_000);
       await P.locator('[data-e2e="release-btn"]').click();
+      const relStatus = await relResp;
+      if (relStatus === null) fail("放手請求 45s 內冇回應（未發出或 server 卡住）");
+      if (relStatus < 200 || relStatus >= 300) fail(`放手請求失敗 status=${relStatus}`);
       // 釋放後：負責人 chip 消失 + toast「已放手」
       await waitToast(P, "已放手", "release toast");
       await P.locator("text=負責人：").first().waitFor({ state: "hidden", timeout: 15_000 });
@@ -270,7 +295,11 @@ async function main(): Promise<void> {
       // 跨店 confirm 文案（MD A.6.2 指定字）
       const confirmBox = P.locator('[data-e2e="assign-cross-confirm"]');
       await confirmBox.getByText("對方將可查閱呢個對話嘅完整記錄", { exact: true }).waitFor({ state: "visible", timeout: 5_000 });
+      const asgResp = waitResp(P, "/assign", 45_000); // 監聽喺 click 之前掛（同 release）
       await confirmBox.getByRole("button", { name: "確認指派", exact: true }).click();
+      const asgStatus = await asgResp;
+      if (asgStatus === null) fail("跨店指派請求 45s 內冇回應（未發出或 server 卡住）");
+      if (asgStatus < 200 || asgStatus >= 300) fail(`跨店指派請求失敗 status=${asgStatus}`);
       // 指派後：select 掣顯示 staff-wtc 名
       await P.getByRole("button", { name: new RegExp(staffWtcName) }).first().waitFor({ state: "visible", timeout: 15_000 });
       console.log("MCUI-OK menu");
@@ -359,25 +388,12 @@ async function main(): Promise<void> {
       // ★ cwi-audit2-20260908 T4：send click 可能 dead（SSR/hydration race — run0/r2 實錘：server log 零 request 行，
       //   舊 ③ `div:hasText(REPLY)` 會 match 住字 composer 祖先 div → 假陽性 → ⑤ 假紅）。
       //   修法：response 監聽驗證 202 真到達 server（send423 同款 route 思路）；未中 → dump composer 狀態 + 重填 + 重撳一次。
-      const waitSendResp = (timeoutMs: number): Promise<number | null> =>
-        new Promise((resolve) => {
-          let done = false;
-          const finish = (s: number | null) => {
-            if (done) return;
-            done = true;
-            clearTimeout(timer);
-            resolve(s);
-          };
-          const timer = setTimeout(() => finish(null), timeoutMs);
-          const h = (r: { status: () => number; url: () => string }) => {
-            if (r.url().includes("/api/messages/send")) finish(r.status());
-          };
-          P.on("response", h);
-        });
       let sendStatus: number | null = null;
       for (let attempt = 0; attempt < 2; attempt++) {
+        // 監聽要喺 click 之前掛 — 熱 server 202 可以快過 click() resolve（CI 實錘：氣泡已出但 last=null）
+        const sendResp = waitResp(P, "/api/messages/send", 15_000);
         await sendBtn.click().catch(() => {});
-        sendStatus = await waitSendResp(15_000);
+        sendStatus = await sendResp;
         if (sendStatus === 202) break;
         const dbg = await P.evaluate(() => ({
           url: location.href,

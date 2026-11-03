@@ -99,6 +99,11 @@ async function registerSchedulers() {
     name: "routing-escalate",
     data: {},
   });
+  // ★ cwi-sales-20261028：銷售保護期到期（先睇之後有冇預約 → 延期 / 出公海）+ 綁定對話冇人覆通知主管
+  await cronQueue.upsertJobScheduler("sched-sales-sweep", { pattern: "*/5 * * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-sweep",
+    data: {},
+  });
   // cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA — 未指派超過 N 分鐘 → push 全店 active STAFF（冪等：slaNotifiedAt）
   await cronQueue.upsertJobScheduler("sched-unassigned-sla", { pattern: "*/5 * * * *", tz: "Asia/Hong_Kong" }, {
     name: "unassigned-sla",
@@ -147,6 +152,26 @@ async function registerSchedulers() {
   // 等佢可以引用自動化摘要）
   await cronHeavyQueue.upsertJobScheduler("sched-stats-weekly", { pattern: "0 5 * * 1", tz: "Asia/Hong_Kong" }, {
     name: "stats-weekly",
+    data: {},
+  });
+  // ★ cwi-sales 第 3 期：綁定病人 N 個月冇付款 → 放返公海（每日 05:17 HK；workforce 連唔到成批跳過）
+  await cronHeavyQueue.upsertJobScheduler("sched-sales-bound-release", { pattern: "17 5 * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-bound-release",
+    data: {},
+  });
+  // ★ cwi-sales 第 5 期：推「銷售負責病人」名單去 workforce（02:23 HK — 早過 workforce 每晚對單掃描 02:41）
+  await cronHeavyQueue.upsertJobScheduler("sched-sales-watch-push", { pattern: "23 2 * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-watch-push",
+    data: {},
+  });
+  // ★ cwi-sales 第 5 期：傭金同步停咗／失敗／冇跑 → 通知老闆（08:07 HK — workforce 04:13 開始、最多 40 分鐘）
+  await cronHeavyQueue.upsertJobScheduler("sched-sales-sync-alert", { pattern: "7 8 * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-sync-alert",
+    data: {},
+  });
+  // ★ cwi-sales 第 5 期：預約日過咗 → 查到診；保護中連續爽約到上限 → 公海（每日 05:47 HK；讀 workforce 預約索引）
+  await cronHeavyQueue.upsertJobScheduler("sched-sales-attendance", { pattern: "47 5 * * *", tz: "Asia/Hong_Kong" }, {
+    name: "sales-attendance",
     data: {},
   });
   // AI Workflow T1（cwi-ai-20260824-t1）：P0 retention purge — 每日 04:00 HK（顯式 tz — 同其他 job 一致）

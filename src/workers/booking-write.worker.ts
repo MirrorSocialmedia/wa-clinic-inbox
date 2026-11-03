@@ -76,6 +76,7 @@ type BookRow = {
   writeState: string | null;
   idemAttempt: number;
   chiefComplaint: string | null;
+  flowToken: string; // ★ cwi-sales-20261028：銷售保護期歸屬（Flow 發送人）
   createdAt: Date;
 };
 
@@ -321,6 +322,21 @@ export async function processBookingWriteJob(job: Job<BookingWriteJobData>): Pro
   if (upd.count !== 1) {
     log.info({ bookingId, apricotApptId: created.apricotApptId, ...actorMeta }, "booking-write: conditional CONFIRMED count=0（並發已 CONFIRMED）— skip post-processing");
     return;
+  }
+
+  // ★ cwi-sales-20261028：經 inbox 落嘅預約 → 銷售保護期（Flow 發送人 > 落單人；唔係銷售 = no-op；best-effort）
+  {
+    const { recordSalesBooking } = await import("@/lib/sales/core");
+    await recordSalesBooking({
+      apricotApptId: created.apricotApptId,
+      patientApricotId: created.patientApricotId ?? conv.pinnedPatientApricotId,
+      apptDate: booking.requestedDate,
+      clinicId: bookingClinic.id,
+      conversationId: booking.conversationId,
+      flowToken: booking.flowToken,
+      actorStaffId: isStaff ? actor.staffId : null,
+      source: "BOOKING",
+    });
   }
 
   // ── 審計（零 PII：id + Apricot 單號 + visit reason code）──

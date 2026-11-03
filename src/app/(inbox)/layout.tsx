@@ -31,6 +31,9 @@ export default async function InboxLayout({
     },
   });
 
+  // ★ cwi-sales 第 3 期：銷售人員先有「我的銷售」入口
+  const isSales = !!(await prisma.staffUser.findUnique({ where: { id: session.staffId }, select: { isSales: true } }))?.isSales;
+
   return (
     <div className="fixed inset-0 bg-canvas flex overflow-hidden theme-transition pt-[env(safe-area-inset-top)]">
       {/* ★ cwi-ux UX-04：app-shell 防 body 捲（edge-to-edge 下外框比可視範圍高 → body 可捲 =
@@ -39,7 +42,7 @@ export default async function InboxLayout({
       <style>{`html,body{height:100%;overflow:hidden;overscroll-behavior:none;}`}</style>
       {/* ★ cwi-ux UX-02：manifest link 已移去 root layout（metadata API）— 呢行刪（避免重複） */}
       <SwRegistrar />
-      <NavRail name={session.name} email={session.email} role={session.role} />
+      <NavRail name={session.name} email={session.email} role={session.role} isSales={isSales} />
       <div className="flex-1 min-w-0 min-h-0 flex flex-col">
         {/* ★ cwi-ux UX-03：PWA 安裝提示橫條（Android beforeinstallprompt / iOS 加入主畫面教學；已安裝唔顯示）
             ★ cwi-notify-a9：喺主欄 flow 入面（推低內容）— 唔再疊喺 header 上面遮住掣 */}

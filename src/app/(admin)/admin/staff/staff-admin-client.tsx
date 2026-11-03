@@ -30,6 +30,18 @@ interface Staff {
   companyClinicCount: number | null;
   clinicIds: string[];
   clinicCodes: string[];
+  // ★ cwi-sales-20261028：銷售人員 + 綁定
+  isSales: boolean;
+  salesApricotUserId: string | null;
+  salesApricotUserName: string | null;
+  workforceEmployeeId: string | null;
+  workforceEmployeeName: string | null;
+}
+
+interface SalesOptions {
+  apricotUsers: { extId: string; name: string; login: string | null; account: string }[];
+  employees: { id: string; name: string; clinicCodes: string[] }[];
+  error?: string;
 }
 
 interface ClinicOpt {
@@ -53,6 +65,10 @@ interface FormState {
   clinicIds: string[]; // CLINICS 模式（可跨公司）
   password: string; // 建立時必填；編輯時選填（= reset）
   active: boolean;
+  // ★ cwi-sales-20261028：勾咗先套用銷售系統（保護期、綁定、對話鎖、開單、傭金）
+  isSales: boolean;
+  salesApricotUserId: string;
+  workforceEmployeeId: string;
 }
 
 const defaultScopeFor = (role: Role): ScopeType => (role === "STAFF" ? "CLINICS" : "ALL");
@@ -65,6 +81,9 @@ const emptyForm = (role: Role = "STAFF"): FormState => ({
   clinicIds: [],
   password: "",
   active: true,
+  isSales: false,
+  salesApricotUserId: "",
+  workforceEmployeeId: "",
 });
 
 /** 列表「診所」欄顯示（MD A.3 格式） */
@@ -87,6 +106,7 @@ export default function StaffAdmin() {
   const [form, setForm] = useState<FormState>(emptyForm());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [salesOpts, setSalesOpts] = useState<SalesOptions | null>(null);
 
   const load = useCallback(async () => {
     const [s, c, co] = await Promise.all([
@@ -103,6 +123,15 @@ export default function StaffAdmin() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // ★ cwi-sales-20261028：開表單先拎「銷售人員」選項（workforce 每晚同步嘅 Apricot 用戶 + 在職員工）
+  useEffect(() => {
+    if (!(creating || editing) || salesOpts) return;
+    void fetch("/api/admin/sales/options", { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<SalesOptions>) : null))
+      .then((o) => setSalesOpts(o ?? { apricotUsers: [], employees: [], error: "拎唔到名單" }))
+      .catch(() => setSalesOpts({ apricotUsers: [], employees: [], error: "拎唔到名單" }));
+  }, [creating, editing, salesOpts]);
 
   function openCreate() {
     setForm(emptyForm("STAFF"));
@@ -121,6 +150,9 @@ export default function StaffAdmin() {
       clinicIds: u.clinicIds,
       password: "",
       active: u.active,
+      isSales: u.isSales,
+      salesApricotUserId: u.salesApricotUserId ?? "",
+      workforceEmployeeId: u.workforceEmployeeId ?? "",
     });
     setError(null);
     setEditing(u);
@@ -188,6 +220,34 @@ export default function StaffAdmin() {
       // ★ cwi-final S3-2（⑤）：role/scope 改動或 password reset → 目標員工舊 session 已失效 → 提示要重新登入
       if (editing && body?.sessionsInvalidated) {
         alert(`${editing.email} 嘅舊 session 已失效 — 佢需要重新登入先有到新權限。`);
+      }
+      // ★ cwi-sales-20261028：銷售人員設定（獨立 endpoint；有改先送）
+      const staffId = editing?.id ?? (body as { id?: string } | null)?.id ?? null;
+      const salesChanged = editing
+        ? form.isSales !== editing.isSales ||
+          (form.salesApricotUserId || null) !== editing.salesApricotUserId ||
+          (form.workforceEmployeeId || null) !== editing.workforceEmployeeId
+        : form.isSales;
+      if (staffId && salesChanged) {
+        const apu = salesOpts?.apricotUsers.find((x) => x.extId === form.salesApricotUserId);
+        const emp = salesOpts?.employees.find((x) => x.id === form.workforceEmployeeId);
+        const sr = await fetch(`/api/admin/staff/${staffId}/sales`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            isSales: form.isSales && form.role !== "SUPERVISOR",
+            salesApricotUserId: form.salesApricotUserId || null,
+            salesApricotUserName: apu?.name ?? editing?.salesApricotUserName ?? null,
+            workforceEmployeeId: form.workforceEmployeeId || null,
+            workforceEmployeeName: emp?.name ?? editing?.workforceEmployeeName ?? null,
+          }),
+        });
+        if (!sr.ok) {
+          const sb = (await sr.json().catch(() => null)) as { message?: string; error?: string } | null;
+          setError(`帳號已保存，但銷售人員設定失敗：${sb?.message ?? sb?.error ?? `HTTP ${sr.status}`}`);
+          await load();
+          return;
+        }
       }
       closeForm();
       await load();
@@ -259,7 +319,14 @@ export default function StaffAdmin() {
             {staff.map((u) => (
               <tr key={u.id} className="border-b border-line last:border-0 hover:bg-black/[.04]">
                 <td className="px-4 py-2">{u.email}</td>
-                <td className="px-4 py-2">{u.name}</td>
+                <td className="px-4 py-2">
+                  {u.name}
+                  {u.isSales && (
+                    <span className="ml-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-brand-soft text-brand-text" title={u.salesApricotUserName ? `Apricot 銷售員：${u.salesApricotUserName}` : "未綁 Apricot 銷售員"}>
+                      銷售
+                    </span>
+                  )}
+                </td>
                 <td className="px-4 py-2">
                   <span
                     className={
@@ -423,6 +490,67 @@ export default function StaffAdmin() {
               />
               active（啟用）
             </label>
+            {/* ★ cwi-sales-20261028：銷售人員（勾咗先套用銷售系統；主管唔覆客所以唔可以勾） */}
+            <div className="col-span-2 rounded-2xl border border-line bg-panel-2 p-4 space-y-3" data-e2e="staff-sales-section">
+              <label className="flex items-center gap-2 text-sm text-t1">
+                <input
+                  id="staff-is-sales"
+                  type="checkbox"
+                  checked={form.isSales && !isSupervisorForm}
+                  disabled={isSupervisorForm}
+                  onChange={(e) => setForm({ ...form, isSales: e.target.checked })}
+                />
+                銷售人員
+                <span className="text-xs text-t3">（勾咗先套用保護期、綁定病人、對話鎖、開單同傭金）</span>
+              </label>
+              {form.isSales && !isSupervisorForm && (
+                <div className="grid grid-cols-2 gap-4">
+                  <label className={label}>
+                    Apricot 銷售員（invoice「銷售員」欄）
+                    <select
+                      id="staff-sales-apricot"
+                      className={input}
+                      value={form.salesApricotUserId}
+                      onChange={(e) => setForm({ ...form, salesApricotUserId: e.target.value })}
+                    >
+                      <option value="">— 未綁（開唔到單）—</option>
+                      {editing?.salesApricotUserId && !salesOpts?.apricotUsers.some((x) => x.extId === editing.salesApricotUserId) && (
+                        <option value={editing.salesApricotUserId}>{editing.salesApricotUserName ?? editing.salesApricotUserId}</option>
+                      )}
+                      {(salesOpts?.apricotUsers ?? []).map((x) => (
+                        <option key={x.extId} value={x.extId}>
+                          {x.name}
+                          {x.login ? `（${x.login}）` : ""}
+                          {x.account !== "MAIN" ? ` · ${x.account}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className={label}>
+                    workforce 員工（打卡、糧單）
+                    <select
+                      id="staff-sales-employee"
+                      className={input}
+                      value={form.workforceEmployeeId}
+                      onChange={(e) => setForm({ ...form, workforceEmployeeId: e.target.value })}
+                    >
+                      <option value="">— 未綁 —</option>
+                      {editing?.workforceEmployeeId && !salesOpts?.employees.some((x) => x.id === editing.workforceEmployeeId) && (
+                        <option value={editing.workforceEmployeeId}>{editing.workforceEmployeeName ?? editing.workforceEmployeeId}</option>
+                      )}
+                      {(salesOpts?.employees ?? []).map((x) => (
+                        <option key={x.id} value={x.id}>
+                          {x.name}
+                          {x.clinicCodes.length ? `（${x.clinicCodes.join("、")}）` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {salesOpts?.error && <p className="col-span-2 text-xs text-warn-text">{salesOpts.error}</p>}
+                  <p className="col-span-2 text-xs text-t3">一個 Apricot 銷售員／workforce 員工只可以綁一個帳號。取消勾選前要先轉移佢負責嘅病人。</p>
+                </div>
+              )}
+            </div>
           </div>
           {error && <p className="text-sm text-danger-text">{error}</p>}
           <div className="flex gap-3">

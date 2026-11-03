@@ -46,6 +46,13 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   await assertConversationAccess(auth, conv); // STAFF 別店 → 403（冗餘防護）
   assertCanWriteConversation(auth); // ★ cwi-routing-20260906 §8：SUPERVISOR 覆客 403
 
+  // ★ cwi-sales-20261028：綁定／保護中病人 — 只可以派畀負責銷售或者被轉交嘅同事（同 PATCH /conversations/[id] 共用守門）
+  {
+    const { salesAssignBlocked } = await import("@/lib/sales/guard");
+    const blocked = await salesAssignBlocked(conv.id, parsed.data.toStaffId);
+    if (blocked) return blocked;
+  }
+
   // ★ R5：client 帶 version → 樂觀鎖（陳舊 → ASSIGN_CONFLICT）；唔帶 → 舊 assigneeId lock
   let r;
   try {

@@ -1,5 +1,6 @@
 "use client";
 
+import { fmtMonthDay } from "./reminder-control";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, BellRing, CalendarDays, MessageCircle, Search, Settings, X, BadgeDollarSign } from "lucide-react";
 import type { ClinicInfo, ClinicLite, ConversationItem, ConvStatus, StaffInfo, StaffNoticeItem } from "./types";
@@ -193,6 +194,16 @@ const ConversationRow = memo(function ConversationRow(props: ConversationRowProp
                         title="客人有來訊但無人接手 — 撳〔接手〕或者指派"
                       >
                         待跟進
+                      </span>
+                    )}
+                    {/* ★ cwi-reminder-20261025：員工自設「⏰ 待跟進」提醒 */}
+                    {c.reminder && (
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${c.reminder.due ? "bg-warn-soft text-warn-text" : "bg-brand-soft text-brand-text"}`}
+                        title={`${c.reminder.remindStaffName ?? ""} 跟進提醒${c.reminder.reason ? `：${c.reminder.reason}` : ""}`}
+                        data-e2e="row-reminder-chip"
+                      >
+                        ⏰ {c.reminder.due ? "提醒到期" : `${fmtMonthDay(c.reminder.dueAt)} 提醒`}
                       </span>
                     )}
                     {/* ★ cwi-advice-20261024：醫生建議跟進（診症記錄有 advise／suggest…）未處理 */}
@@ -1031,7 +1042,7 @@ export function ConversationList(p: Props) {
                     <div className="text-xs text-t1 truncate">{n.title}</div>
                     <div className="text-[10px] text-t3 truncate">
                       {/* ★ cwi-advice-20261024：醫生建議跟進 → 加對話名（title 零病人資料；名由已載入列表補） */}
-                      {n.kind === "FOLLOWUP_ADVICE" && n.conversationId
+                      {(n.kind === "FOLLOWUP_ADVICE" || n.kind === "FOLLOWUP_REMINDER") && n.conversationId
                         ? (() => {
                             const cv = p.conversations.find((x) => x.id === n.conversationId);
                             const nm = cv?.contact?.profileName ?? null;
@@ -1095,6 +1106,31 @@ export function ConversationList(p: Props) {
           第二行（已完成）= 右側狀態切換器，只兩選項：
             處理中(OPEN) / 睇已解決 →(RESOLVED) — PENDING 隱藏（MD §1.2；API 仍接受舊 link） */}
       <div className="px-3 py-2 flex flex-col gap-1.5">
+        {/* ★ cwi-reminder-20261025：狀態分段掣（取代細字「處理中／睇已解決 →」）— 上層揀狀態、下層膠囊揀邊個跟 */}
+        <div data-e2e="status-toggle" className="flex bg-panel-2 rounded-full p-[3px] gap-[2px]">
+          {(
+            [
+              { key: "ALL" as const, label: "處理中", n: p.counts?.all, title: "處理中嘅對話（未解決）" },
+              { key: "RESOLVED" as const, label: "已解決", n: p.counts?.resolved, title: "只睇已解決對話" },
+            ]
+          ).map((o) => {
+            const on = o.key === "RESOLVED" ? p.statusFilter === "RESOLVED" : p.statusFilter !== "RESOLVED";
+            return (
+              <button
+                key={o.key}
+                onClick={() => p.onStatusFilter(o.key)}
+                aria-pressed={on}
+                title={o.title}
+                className={`flex-1 rounded-full py-1 text-[12.5px] whitespace-nowrap ${
+                  on ? "bg-panel text-t1 font-semibold shadow-sm" : "text-t2 hover:text-t1"
+                }`}
+              >
+                {o.label}
+                {o.n != null && <span className={`ml-1 font-medium ${on ? "text-brand-text" : "text-t3"}`}>{fmtCap(o.n)}</span>}
+              </button>
+            );
+          })}
+        </div>
         {narrow ? (
           // 窄屏：兩行 fallback（第二行最多兩粒）；唔做 overflow 收合
           <div data-e2e="capsule-row" className="flex flex-col gap-1">
@@ -1178,28 +1214,6 @@ export function ConversationList(p: Props) {
             </div>
           </div>
         )}
-        <div data-e2e="status-toggle" className="flex items-center justify-end gap-2.5">
-          <button
-            onClick={() => p.onStatusFilter(p.statusFilter === "OPEN" ? "ALL" : "OPEN")}
-            aria-pressed={p.statusFilter === "OPEN"}
-            title="只睇處理中（OPEN）對話；再撳一次返轉去"
-            className={`px-1 text-xs ${
-              p.statusFilter === "OPEN" ? "text-t1 font-semibold underline underline-offset-2" : "text-t3 hover:text-t1"
-            }`}
-          >
-            處理中
-          </button>
-          <button
-            onClick={() => p.onStatusFilter(p.statusFilter === "RESOLVED" ? "ALL" : "RESOLVED")}
-            aria-pressed={p.statusFilter === "RESOLVED"}
-            title="只睇已解決對話；再撳一次返轉去"
-            className={`px-1 text-xs ${
-              p.statusFilter === "RESOLVED" ? "text-brand font-semibold underline underline-offset-2" : "text-t3 hover:text-t1"
-            }`}
-          >
-            睇已解決 →
-          </button>
-        </div>
       </div>
 
       {/* list — ★ cwi-final S6-7：virtualization（react-virtuoso；endReached ≈ 舊近底 30px 觸發；行高可變 — 量測式） */}

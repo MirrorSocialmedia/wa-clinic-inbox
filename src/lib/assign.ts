@@ -45,7 +45,8 @@ export class AssignError extends Error {
   }
 }
 
-export type AssignBy = "STAFF" | "AUTO_CLAIM" | "SYSTEM" | "AUTO_RELEASE";
+// ★ cwi-sales-20261028：SALES = 綁定／保護中病人新訊息派返負責銷售（系統動作；可以覆蓋現任負責人 — 唔受 SYSTEM「只准 unassigned」限制）
+export type AssignBy = "STAFF" | "AUTO_CLAIM" | "SYSTEM" | "AUTO_RELEASE" | "SALES";
 
 export interface AssignConversationOptions {
   conversationId: string;
@@ -130,7 +131,7 @@ export async function assignConversation(opts: AssignConversationOptions): Promi
   const { conversationId, toStaffId, by, note } = opts;
   const byStaffId = opts.byStaffId ?? null;
   // STAFF / AUTO_CLAIM 必有人；SYSTEM / AUTO_RELEASE = 系統動作（無 staff 參與）
-  if (by !== "SYSTEM" && by !== "AUTO_RELEASE" && !byStaffId) {
+  if (by !== "SYSTEM" && by !== "AUTO_RELEASE" && by !== "SALES" && !byStaffId) {
     throw new AssignError(400, "ASSIGN_BAD_INPUT", "byStaffId is required for STAFF/AUTO_CLAIM");
   }
 

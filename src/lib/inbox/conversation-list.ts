@@ -15,6 +15,7 @@
  * - ★ cwi-final B6 裁決 9：toConversationDTOs lookups 改 page-scoped（只查本頁 id）—
  *   contact/staff/clinic/group 唔再全表；bookings 先查、staffIds 併入 booking.handledByStaffId。
  */
+import { openRemindersByConv } from "@/lib/followup/reminder";
 import type { Prisma, Conversation } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import log from "@/lib/log";
@@ -94,6 +95,8 @@ export async function loadFollowupDue(s: ListScope): Promise<Map<string, number>
       status: "SUGGESTED",
       conversationId: { not: null },
       ...(s.scopedSet ? { clinicId: { in: s.scopedSet } } : {}),
+      // ★ cwi-reminder-20261025：員工自設提醒未到期 → 唔入「待跟進」（到期先入）
+      NOT: { source: "MANUAL", dueAt: { gt: new Date() } },
     },
     select: { conversationId: true, dueAt: true },
   });
@@ -302,7 +305,7 @@ export async function toConversationDTOs(
   const groupIds = [...new Set(rows.map((r) => r.routedGroupId).filter((x): x is string => !!x))];
   // 裁決 9：bookings 先查（staffIds 要併入 booking.handledByStaffId）
   // ★ cwi-final S1-12：myUnread 一次查全頁（meId 有值先查；SSR/API 都傳）
-  const [contacts, groups, bookings, myUnreadMap, adviceRows] = await Promise.all([
+  const [contacts, groups, bookings, myUnreadMap, adviceRows, reminderMap] = await Promise.all([
     prisma.contact.findMany({
       where: { id: { in: contactIds } },
       select: { id: true, waId: true, profileName: true, labels: true, patientStatus: true, identifiedCount: true },
@@ -322,6 +325,8 @@ export async function toConversationDTOs(
           select: { conversationId: true },
         })
       : Promise.resolve([] as { conversationId: string | null }[]),
+    // ★ cwi-reminder-20261025：未處理「⏰ 待跟進」提醒（列表膠囊 + 右欄狀態）
+    openRemindersByConv(rows.map((r) => r.id)),
   ]);
   const adviceConvIds = new Set(adviceRows.map((r) => r.conversationId));
   // ★ cwi-ux UX-07：預約目標店（bookingClinicId）可能係外店 — 膠囊要店名 → clinic 查併入佢。
@@ -401,6 +406,7 @@ export async function toConversationDTOs(
         return ts === undefined ? null : new Date(ts).toISOString();
       })(),
       followupAdvice: adviceConvIds.has(cv.id),
+      reminder: reminderMap.get(cv.id) ?? null,
       routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId)?.name ?? null) : null,
       routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
       contact: contactMap.get(cv.contactId) ?? null,

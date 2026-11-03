@@ -26,6 +26,8 @@
  * - auto-resolve       每日 03:00 → cwi-statusrole2-20260910（MD §4）：OPEN 對話三守門（靜音 N 日 /
  *                                       病人最後一句已覆 / 無待跟進+無 active 銷售 session — 後兩條喺 model 落地前恒真）
  *                                       → RESOLVED + resolvedBy=AUTO + INTERNAL 備註 + 唔 push
+ * - sales-sweep        每 5 分鐘 → cwi-sales-20261028：銷售保護期到期（之後有預約 → 延期；冇 → 銷售公海 + 通知）
+ *                                       + 綁定／保護中對話 N 分鐘冇人覆 → 通知主管（每條 inbound 只通知一次）
  * - unassigned-sla     每 5 分鐘 → cwi-inboxfix-20260905（MD §1.4 I-5）：公海未指派超過 N 分鐘
  *                                       → 該店全部 active STAFF push「{店簡稱} 有病人未有人跟」+ StaffNotice
  *                                       （N = triage.unassignedSlaMinutes default 10；slaNotifiedAt 防重複洗版；接手清返）
@@ -130,6 +132,13 @@ async function handleCronJob(job: Job): Promise<unknown> {
           );
           return { ok: true, ...r };
         }
+        case "sales-sweep": {
+          // cwi-sales-20261028：保護期到期 sweep + 綁定對話冇人覆通知主管（冪等可空跑）
+          const { runSalesSweep } = await import("@/lib/sales/sweep");
+          const r = await runSalesSweep();
+          log.info(r, "cron: sales-sweep done");
+          return { ok: true, ...r };
+        }
         case "unassigned-sla": {
           // cwi-inboxfix-20260905（MD §1.4 I-5）：公海未指派超過 N 分鐘 → push 全店 active STAFF（冪等：slaNotifiedAt 防重複）
           const r = await runUnassignedSlaSweep();
@@ -177,6 +186,32 @@ async function handleCronJob(job: Job): Promise<unknown> {
           const s = await runWeeklyStats();
           const m = await runMining(s.weekStart);
           return { ok: true, weekStart: s.weekStart, statRows: s.rows, miningCards: m.cards };
+        }
+        case "sales-bound-release": {
+          // cwi-sales 第 3 期：綁定病人 N 個月冇付款 → 放返公海（冪等可空跑）
+          const { runBoundAutoRelease } = await import("@/lib/sales/sweep");
+          const r = await runBoundAutoRelease();
+          log.info(r, "cron: sales-bound-release done");
+          return { ok: !r.skipped, ...r };
+        }
+        case "sales-watch-push": {
+          const { pushSalesPatientWatch } = await import("@/lib/sales/sweep");
+          const r = await pushSalesPatientWatch();
+          log.info(r, "cron: sales-watch-push done");
+          return { ok: !r.skipped, ...r };
+        }
+        case "sales-sync-alert": {
+          const { checkCommissionSyncAlert } = await import("@/lib/sales/sweep");
+          const r = await checkCommissionSyncAlert();
+          log.info(r, "cron: sales-sync-alert done");
+          return { ok: true, ...r };
+        }
+        case "sales-attendance": {
+          // cwi-sales 第 5 期：到診結果 + 連續爽約上限（冪等可空跑；workforce 唔得 → 跳過聽日再試）
+          const { runSalesAttendance } = await import("@/lib/sales/attendance");
+          const r = await runSalesAttendance();
+          log.info(r, "cron: sales-attendance done");
+          return { ok: true, ...r };
         }
         case "retention-purge": {
           // P0（§6.0）：每日 04:00 HK；E2E 可手動 enqueue（pnpm e2e:cron retention-purge）

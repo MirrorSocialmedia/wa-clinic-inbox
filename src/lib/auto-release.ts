@@ -97,6 +97,12 @@ export async function runAutoReleaseSweep(
       paramsByClinic.set(c.clinicId, p);
     }
     if (!shouldAutoRelease(c, p.autoReleaseMinutes, now)) continue;
+    // ★ cwi-sales-20261028：綁定／保護中病人（負責人係負責銷售／被轉交同事）唔自動放手、唔踢返公海
+    {
+      const { conversationSalesLock, canReplyUnderLock } = await import("@/lib/sales/core");
+      const lock = await conversationSalesLock(c.id, now);
+      if (lock.owners.length > 0 && canReplyUnderLock(lock, c.assigneeId)) continue;
+    }
     try {
       await assignConversation({
         conversationId: c.id,

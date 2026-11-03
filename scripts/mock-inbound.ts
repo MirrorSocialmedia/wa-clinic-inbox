@@ -61,7 +61,7 @@ interface WaMsg {
   timestamp: string;
   type: string;
   text?: { body: string };
-  image?: { media_id: string; caption?: string };
+  image?: { id: string; caption?: string }; // ★ 同真 webhook 一樣用 `id`（2026-10-25）
 }
 
 function entry(change: { field: string; value: unknown; phoneId: string }) {
@@ -84,7 +84,7 @@ function buildMessage(clinicPhoneId: string, bizNumber: string, o: {
     timestamp: ts,
     type: o.media ? "image" : "text",
   };
-  if (o.media) msg.image = { media_id: `mockmedia_${o.wamid}`, caption: o.text };
+  if (o.media) msg.image = { id: `mockmedia_${o.wamid}`, caption: o.text };
   else msg.text = { body: o.text };
   return entry({
     field: "messages",

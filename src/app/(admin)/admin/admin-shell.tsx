@@ -8,6 +8,7 @@ import { LegalLinks } from "@/components/legal-links";
 import {
   ArrowLeft,
   BadgeDollarSign,
+  BadgePercent,
   BarChart3,
   BellRing,
   BookOpenText,
@@ -48,6 +49,7 @@ const SECTION_NAMES: Record<string, string> = {
   "/schedule": "醫生時間表",
   "/admin/clinics": "診所設定",
   "/admin/staff": "員工帳號",
+  "/admin/sales": "銷售",
   "/admin/onboarding": "WhatsApp 接入",
   "/admin/templates": "訊息範本",
   "/admin/followups": "跟進規則",
@@ -119,7 +121,11 @@ export function AdminShell({
     },
     {
       title: "團隊",
-      items: [{ href: "/admin/staff", label: "員工帳號", icon: Users }],
+      items: [
+        { href: "/admin/staff", label: "員工帳號", icon: Users },
+        // ★ cwi-sales-20261028：銷售系統（規則／傭金項目／病人歸屬）
+        { href: "/admin/sales", label: "銷售", icon: BadgePercent },
+      ],
     },
     // ★ cwi-hub-b-20260914（Part B B.6）：導航 8→3 — 路由區（技能組/路由規則）併入 hub 第⑤步（側欄唔再獨立顯示；舊 route 全保留）；
     //   AI 區只留「AI 流程（hub）/ AI 建議 / GoldenCase 評測」— 其餘 8 條舊設定頁內容唔改、舊 URL 照行（hub 七步行尾跳轉）。

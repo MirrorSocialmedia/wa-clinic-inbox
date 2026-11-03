@@ -13,6 +13,7 @@ import { BILLING_SERVICE } from "@/lib/wa/billing";
 import { assignConversation } from "@/lib/assign";
 import { sniffOutboundMedia, cleanDocName } from "@/lib/wa/media-sniff";
 import { saveMediaFile } from "@/lib/wa/media";
+import { salesLockResponse } from "@/lib/sales/guard";
 
 /**
  * ★ cwi-final S6-9④（audit3 P2-03）：POST /api/messages/media — 員工發附件（圖片/PDF）。
@@ -106,6 +107,11 @@ export const POST = handle(async (req: NextRequest) => {
       },
       { status: 423 }
     );
+  }
+  // ★ cwi-sales-20261028：綁定／保護中病人 → 只有負責銷售／被轉交嘅同事可以覆
+  {
+    const salesLocked = await salesLockResponse(conv.id, ctx.staff.id);
+    if (salesLocked) return salesLocked;
   }
 
   // ★ 24h 窗口（fail-closed：lastInboundAt = null → 過窗）— 同打字一樣

@@ -368,6 +368,19 @@ HIST_COUNT=10
 
 PASS=0
 FAIL=0
+# ★ dev-mode pre-compile（瀏覽器測試前用）：對話頁開頁會同時打十幾條 GET（bundle／messages／右欄各卡），
+#   Next dev 首訪即編譯 — 本機冷編譯 bundle ~34s、sales ~8s（2026-11-01 實測），CI 慢 2–3 倍 →
+#   browser 一開頁全部排隊等編譯 → 固定等待（T95 60s、H6-MC-UI）超時假紅。先用 curl 逐條順序打（每條等到完）。
+warm_conv_routes() {
+  local conv="$1" _r
+  [ -n "$conv" ] || return 0
+  for _r in bundle "messages?limit=100" sales patient-context patient-links "patient-record?summary=1" patient-requested-human consult-sessions note-read-receipts; do
+    curl -s -o /dev/null --max-time 240 -b "$COOKIE_TKW" "$BASE/api/conversations/$conv/$_r" >/dev/null 2>&1 || true
+  done
+  for _r in "/api/flows/slots?clinicCode=TKW&granularity=day" "/api/admin/quotes?status=pending&countOnly=1" "/api/conversations?limit=1" "/inbox"; do
+    curl -s -o /dev/null --max-time 240 -b "$COOKIE_TKW" "$BASE$_r" >/dev/null 2>&1 || true
+  done
+}
 pass() { echo "  ✅ PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  ❌ FAIL: $1"; FAIL=$((FAIL + 1)); }
 check() { # check <desc> <actual> <expected>
@@ -4794,8 +4807,22 @@ CONV_T95A=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"=
 CONV_T95B=$(q "SELECT \"conversationId\" FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_T95B_${EPOCH}'" | jf conversationId)
 [ -n "$CONV_T95A" ] && [ -n "$CONV_T95B" ] || { fail "T95 conversation 未入庫"; T95=1; }
 if [ "$T95" = 0 ]; then
+  warm_conv_routes "$CONV_T95A"
   OUT95=$(pnpm -s e2e:duty-refresh --base "$BASE" --cookie "$COOKIE_TKW" --conv1 "$CONV_T95A" --conv2 "$CONV_T95B" 2>&1)
+  echo "$OUT95" | grep "DUTY-DIAG" || true
   echo "$OUT95" | tail -3
+  if ! echo "$OUT95" | grep -q "DUTY-REFRESH-OK"; then
+    # ★ 2026-11-03 T95 追查：失敗當刻 server 狀態（CI artifact 唔一定攞到 → 直接印入 job log；server log 只有 metadata，T18 已保證零 PII）
+    echo "=== T95-DIAG server log（尾 60，>2s 請求／錯誤）==="
+    grep -E '"ms":[0-9]{4,}|"level":(40|50)|ECONN|Timed out|P2024|ready - |compil' /tmp/e2e-server.log 2>/dev/null | tail -60 | cut -c1-300
+    echo "=== T95-DIAG pg_stat_activity ==="
+    q "SELECT state, wait_event_type||':'||coalesce(wait_event,'') w, count(*) n, max(extract(epoch from now()-query_start))::int max_age_s FROM pg_stat_activity WHERE datname=current_database() GROUP BY 1,2 ORDER BY 3 DESC" 2>&1 | head -20
+    q "SELECT extract(epoch from now()-query_start)::int age_s, state, left(regexp_replace(query,'\s+',' ','g'),120) q FROM pg_stat_activity WHERE datname=current_database() AND state <> 'idle' ORDER BY 1 DESC LIMIT 8" 2>&1 | head -12
+    echo "=== T95-DIAG redis ==="
+    redis-cli info clients 2>/dev/null | grep -E "connected_clients|blocked_clients" || true
+    echo "=== T95-DIAG top CPU ==="
+    ps -eo pid,pcpu,pmem,etimes,args --sort=-pcpu 2>/dev/null | head -8 | cut -c1-160
+  fi
   echo "$OUT95" | grep -q "DUTY-REFRESH-OK" && pass "T95 duty 卡 client 端刷新（mock 變更 → 換對話卡更新，零 reload）" \
     || { fail "T95 duty 卡刷新失敗"; T95=1; }
 fi
@@ -5845,6 +5872,8 @@ for i in 1 2 3; do
   [ "$PW" = "200" ] && break
   sleep 3
 done
+# 對話頁 GET routes 都預先編譯（開對話時十幾條 request 同時等編譯 → badges／menu 固定等待超時）
+warm_conv_routes "$CV_MC_F"
 sleep 2
 
 # UI-1 badges：跨店線店名 badge（WTC 線有 / 本店線無）+ 待跟進 badge（覆咗消失）

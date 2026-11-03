@@ -22,6 +22,7 @@ import { phoneHash } from "@/lib/phone-hash";
 import { sendBookingFlow, WindowClosedError, FlowsDisabledError } from "@/lib/flows/send";
 import { conversationAllowedBookingClinics } from "@/lib/booking/effective-clinic";
 import { WorkforceApiError, fetchAppointments } from "@/lib/workforce/client";
+import { salesLockResponse } from "@/lib/sales/guard";
 
 export const dynamic = "force-dynamic";
 
@@ -52,6 +53,11 @@ export const POST = handle(async (req: NextRequest, { params }: { params: Promis
       { error: "SEND_LOCKED", message: "只有負責人才可以改期", assigneeId: conv.assigneeId },
       { status: 423 }
     );
+  }
+  // ★ cwi-sales-20261028：綁定／保護中病人 → 只有負責銷售／被轉交嘅同事可以覆
+  {
+    const salesLocked = await salesLockResponse(conv.id, ctx.staff.id);
+    if (salesLocked) return salesLocked;
   }
 
   const body = (await req.json().catch(() => ({}))) as { apricotApptId?: string };
