@@ -2136,6 +2136,40 @@ q "UPDATE \"Clinic\" SET \"waPhoneNumberId\"='$T54_ORIG_PHN' WHERE id='$TKW_CLIN
 q "DELETE FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" >/dev/null 2>&1 || true
 RESTORED=$(q "SELECT \"waPhoneNumberId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf waPhoneNumberId)
 check "T54 hermetic：waPhoneNumberId 已還原" "$RESTORED" "$T54_ORIG_PHN"
+
+# ── T54C. 共存（Coexistence：WhatsApp Business App 號碼）— 唔 register、唔使 pin、同步聯絡人 + 舊對話 ──
+echo "[AR-3] T54C: exchange coexistence mode..."
+# (a) 共存 + 冇 phoneNumberId 冇 wabaId → 400 input
+CODE=$(curl -s -o /tmp/e2e-exc-none.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-coex-none-0123","clinicId":"'$TKW_CLINIC_ID'","mode":"coexistence"}')
+check "T54C 共存冇 phone/waba → 400" "$CODE" "400"
+grep -q '"step":"input"' /tmp/e2e-exc-none.json && pass "T54C 冇 phone/waba step=input" || fail "T54C step 欄位錯（=$(cat /tmp/e2e-exc-none.json)）"
+# (b) mock 共存只得 wabaId → 400 resolve_phone（真機用 waba 查；mock 唔會亂寫假號碼）
+CODE=$(curl -s -o /tmp/e2e-exc-waba.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-coex-waba-0123","clinicId":"'$TKW_CLINIC_ID'","wabaId":"123","mode":"coexistence"}')
+check "T54C mock 共存只得 wabaId → 400" "$CODE" "400"
+grep -q '"step":"resolve_phone"' /tmp/e2e-exc-waba.json && pass "T54C step=resolve_phone" || fail "T54C resolve_phone 欄位錯（=$(cat /tmp/e2e-exc-waba.json)）"
+# (c) 非法 mode → 400（zod）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-coex-bad-01234","clinicId":"'$TKW_CLINIC_ID'","phoneNumberId":"1","mode":"evil"}')
+check "T54C 非法 mode → 400" "$CODE" "400"
+# (d) STAFF 用共存模式 → 403（權限唔因 mode 放寬）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-coex-staff-012","clinicId":"'$TKW_CLINIC_ID'","phoneNumberId":"1","mode":"coexistence"}')
+check "T54C STAFF 共存 → 403" "$CODE" "403"
+# (e) happy path：冇 pin 都得（共存唔 register）+ sync 兩項 + 審計 mode=coexistence；hermetic 還原
+EXC_PHN="e2e-coex-phn-${EPOCH}"
+CODE=$(curl -s -o /tmp/e2e-exc-ok.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-coex-ok-'$EPOCH'","clinicId":"'$TKW_CLINIC_ID'","phoneNumberId":"'$EXC_PHN'","wabaId":"e2e-coex-waba","mode":"coexistence"}')
+check "T54C 共存 mock 完整 flow（冇 pin）→ 200" "$CODE" "200"
+grep -q '"mode":"coexistence"' /tmp/e2e-exc-ok.json && pass "T54C response mode=coexistence" || fail "T54C response 缺 mode（=$(cat /tmp/e2e-exc-ok.json)）"
+grep -q '"sync":{"contacts":"mock","history":"mock"}' /tmp/e2e-exc-ok.json && pass "T54C response sync 聯絡人 + 舊對話" || fail "T54C response sync 錯（=$(cat /tmp/e2e-exc-ok.json)）"
+NOW_PHN=$(q "SELECT \"waPhoneNumberId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf waPhoneNumberId)
+check "T54C DB：TKW.waPhoneNumberId 已寫入" "$NOW_PHN" "$EXC_PHN"
+AUD_MODE=$(q "SELECT meta->>'mode' m FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID' ORDER BY \"createdAt\" DESC LIMIT 1" | jf m)
+check "T54C AuditLog mode=coexistence" "$AUD_MODE" "coexistence"
+q "UPDATE \"Clinic\" SET \"waPhoneNumberId\"='$T54_ORIG_PHN' WHERE id='$TKW_CLINIC_ID'" >/dev/null 2>&1 || true
+q "DELETE FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" >/dev/null 2>&1 || true
+RESTORED=$(q "SELECT \"waPhoneNumberId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf waPhoneNumberId)
+check "T54C hermetic：waPhoneNumberId 已還原" "$RESTORED" "$T54_ORIG_PHN"
+# (f) 迴歸：cloud 模式（預設）照舊要 pin
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/onboarding/exchange" -H 'Content-Type: application/json' -d '{"code":"e2e-code-cloud-nopin-01","clinicId":"'$TKW_CLINIC_ID'","phoneNumberId":"e2e-phn-9"}')
+check "T54C 迴歸：cloud 模式冇 pin → 400" "$CODE" "400"
 AUD_AFTER=$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
 check "T54 hermetic：ES_ONBOARD 審計已清" "$AUD_AFTER" "0"
 # ★ token/code/PIN 零入 log（grep 自證）
