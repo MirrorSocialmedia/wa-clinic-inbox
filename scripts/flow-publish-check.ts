@@ -39,6 +39,7 @@ const phoneId = opt("--phone") ?? process.env.WA_PHONE_NUMBER_ID ?? "";
 let wabaId = opt("--waba") ?? process.env.WA_WABA_ID ?? "";
 
 let problems = 0;
+let isTestWaba = false; // Meta 開 app 時自動建嘅沙盒 WABA（Test WhatsApp Business Account / Test Number）
 const ok = (m: string) => console.log(`  ✅ ${m}`);
 const bad = (m: string) => {
   problems++;
@@ -169,6 +170,7 @@ async function main() {
     const w = await graph(`${wabaId}?fields=id,name,account_review_status,business_verification_status`);
     if (w.ok) {
       const b = w.body as J;
+      if (/^Test WhatsApp Business Account/i.test(String(b.name ?? ""))) isTestWaba = true;
       info(`WABA ${b.name} (${b.id}) account_review_status=${b.account_review_status ?? "?"} business_verification_status=${b.business_verification_status ?? "?"}`);
     } else info(`讀 WABA 欄位失敗（唔影響其他檢查）：${graphErr(w)}`);
     const p = await graph(
@@ -180,6 +182,7 @@ async function main() {
   }
   for (const ph of phones) {
     console.log(`  — 號碼 ${ph.display_phone_number ?? ""} (${ph.id})${ph.id === phoneId ? " ← WA_PHONE_NUMBER_ID" : ""}`);
+    if (ph.verified_name === "Test Number") isTestWaba = true;
     if (ph.status) info(`status=${ph.status} platform=${ph.platform_type} name_status=${ph.name_status} quality=${ph.quality_rating} verified_name=${ph.verified_name}`);
     if (ph.platform_type && ph.platform_type !== "CLOUD_API") bad(`platform_type=${ph.platform_type}（唔係 CLOUD_API — 未 register 落 Cloud API）`);
     const e = await graph(`${ph.id}/whatsapp_business_encryption`);
@@ -287,7 +290,13 @@ async function main() {
       const r = await graph(`${flowId}/publish`, { method: "POST" });
       check(r.ok, `已發佈：${JSON.stringify(r.body)}`, `發佈失敗（呢句就係真正原因）：${graphErr(r)}`);
       const code = ((r.body.error ?? {}) as J).code;
-      if (!r.ok && code === 100) {
+      if (!r.ok && code === 100 && isTestWaba) {
+        console.log("       → 呢個係 Meta 自動建嘅測試 WABA（Test WhatsApp Business Account / Test Number）。");
+        console.log("         權限、公鑰、endpoint 全部通過但 publish 仍回 code=100 = 測試 WABA 唔支援發佈 Flow。");
+        console.log("         • 測試：唔使發佈 — .env 設 FLOW_ID=<呢個草稿 Flow ID> + WA_FLOW_DRAFT=1，真機照開到（draft mode）");
+        console.log("         • 正式：喺有真號碼嘅 WABA 建 Flow（貼 docs/flow-booking-v73.json）→ 連 app + endpoint →");
+        console.log("           pnpm -s flow-publish-check --phone <真號碼 id> --upload-key → 再 --flow <新 id> --publish");
+      } else if (!r.ok && code === 100) {
         console.log("       → code=100 但上面讀 Flow 成功 = token 讀得唔管得（權限問題，唔係 Flow 內容問題）：");
         console.log("         1) business.facebook.com/settings → 用戶 → 系統用戶 → 揀 token 嗰個系統用戶 → 指派資產");
         console.log("            → WhatsApp 帳戶 → 呢個 WABA → 開「完全控制」（唔係只係部分權限）");
