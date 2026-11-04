@@ -333,6 +333,79 @@ export interface ConversationSalesLock {
   delegates: { staffId: string; kind: string; expiresAt: string | null }[];
 }
 
+/** 列表用：每條對話嘅銷售負責摘要（綁定優先；多個保護中揀最早到期） */
+export interface ConversationSalesSummary {
+  state: "PROTECTED" | "BOUND";
+  ownerName: string;
+  ownerId: string;
+  protectedUntil: string | null;
+}
+
+/**
+ * ★ 收件箱列表（意向・排序）：一次過幫成頁對話計銷售負責摘要（唔逐條 conversationSalesLock）。
+ * 口徑同對話鎖一致：只認 PROTECTED／BOUND + 負責人 active 且仍係銷售。未用銷售系統 → 一個查詢就返空。
+ */
+export async function salesSummaryByConversation(
+  rows: { id: string; contactId: string; pinnedPatientApricotId: string | null }[],
+  db: Db = prisma,
+): Promise<Map<string, ConversationSalesSummary>> {
+  const out = new Map<string, ConversationSalesSummary>();
+  if (rows.length === 0) return out;
+  const any = await db.salesOwnership.findFirst({ where: { state: { in: ["PROTECTED", "BOUND"] } }, select: { id: true } });
+  if (!any) return out;
+  const contactIds = [...new Set(rows.map((r) => r.contactId))];
+  const [contacts, links] = await Promise.all([
+    db.contact.findMany({ where: { id: { in: contactIds } }, select: { id: true, identifiedPatientApricotId: true } }),
+    db.contactPatientLink.findMany({ where: { contactId: { in: contactIds } }, select: { contactId: true, patientApricotId: true } }),
+  ]);
+  const idsByContact = new Map<string, Set<string>>();
+  const add = (cid: string, pid: string | null | undefined) => {
+    if (!pid) return;
+    const set = idsByContact.get(cid) ?? new Set<string>();
+    set.add(pid);
+    idsByContact.set(cid, set);
+  };
+  for (const c of contacts) add(c.id, c.identifiedPatientApricotId);
+  for (const l of links) add(l.contactId, l.patientApricotId);
+  const pidsOf = (r: (typeof rows)[number]) => {
+    const set = new Set(idsByContact.get(r.contactId) ?? []);
+    if (r.pinnedPatientApricotId) set.add(r.pinnedPatientApricotId);
+    return set;
+  };
+  const allPids = [...new Set(rows.flatMap((r) => [...pidsOf(r)]))];
+  if (allPids.length === 0) return out;
+  const owns = await db.salesOwnership.findMany({
+    where: { patientApricotId: { in: allPids }, state: { in: ["PROTECTED", "BOUND"] }, salesStaffId: { not: null } },
+    select: { patientApricotId: true, state: true, salesStaffId: true, protectedUntil: true },
+  });
+  if (owns.length === 0) return out;
+  const staff = await db.staffUser.findMany({
+    where: { id: { in: [...new Set(owns.map((o) => o.salesStaffId!))] }, active: true, isSales: true },
+    select: { id: true, name: true },
+  });
+  const nameOf = new Map(staff.map((s) => [s.id, s.name]));
+  const ownByPid = new Map(owns.filter((o) => nameOf.has(o.salesStaffId!)).map((o) => [o.patientApricotId, o]));
+  for (const r of rows) {
+    let best: (typeof owns)[number] | null = null;
+    for (const pid of pidsOf(r)) {
+      const o = ownByPid.get(pid);
+      if (!o) continue;
+      if (!best) best = o;
+      else if (best.state !== "BOUND" && o.state === "BOUND") best = o;
+      else if (best.state === o.state && o.state === "PROTECTED" && (o.protectedUntil?.getTime() ?? Infinity) < (best.protectedUntil?.getTime() ?? Infinity)) best = o;
+    }
+    if (best) {
+      out.set(r.id, {
+        state: best.state as "PROTECTED" | "BOUND",
+        ownerName: nameOf.get(best.salesStaffId!)!,
+        ownerId: best.salesStaffId!,
+        protectedUntil: best.protectedUntil ? best.protectedUntil.toISOString() : null,
+      });
+    }
+  }
+  return out;
+}
+
 export async function conversationSalesLock(conversationId: string, now: Date = new Date(), db: Db = prisma): Promise<ConversationSalesLock> {
   // 快路：未用銷售系統（冇任何保護中／綁定病人）→ 一個 index 查詢就收工（每條 inbound／每次發送都會行）
   const any = await db.salesOwnership.findFirst({ where: { state: { in: ["PROTECTED", "BOUND"] } }, select: { id: true } });

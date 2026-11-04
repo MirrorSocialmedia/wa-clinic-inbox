@@ -164,7 +164,7 @@ async function main(): Promise<void> {
     const fuText = (await page.locator('[data-e2e="capsule-followup"]').textContent())?.trim();
     check("360px：「跟進 3」可見（待跟進永遠喺可見列）", fuText === "跟進 3", fuText);
     check("360px：四粒膠囊（2+2 兩行）", (await row.locator("button").count()) === 4, await row.locator("button").count());
-    for (const re of [/^公海 \d+$/, /^派我 \d+$/, /^我負責 \d+$/, /^跟進 3$/]) {
+    for (const re of [/^未指派 \d+$/, /^派我 \d+$/, /^我負責 \d+$/, /^跟進 3$/]) {
       check(`360px 短字膠囊：${re}`, (await row.locator("button", { hasText: re }).count()) === 1);
     }
     check("360px：冇 ⋯ 溢出按鈕", (await row.locator('button[data-e2e="capsule-more"]').count()) === 0);

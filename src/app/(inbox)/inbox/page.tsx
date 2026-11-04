@@ -58,7 +58,7 @@ export default async function InboxPage({
     // staffMap 唔限 clinic scope（三態 chip 需要全店 staff 名；同 API 對齊）
     prisma.staffUser.findMany({ where: { active: true }, select: { id: true, name: true, role: true, clinicId: true } }),
     // ★ cwi-final S6-9（③）：per-staff UI 偏好（enterSends 等）
-    prisma.staffUser.findUnique({ where: { id: session.staffId }, select: { uiPrefs: true } }),
+    prisma.staffUser.findUnique({ where: { id: session.staffId }, select: { uiPrefs: true, isSales: true } }),
   ]);
   // providerslot-20260830 T3：hold 卡 — STAFF 限本頁 rows 嘅店（fail-closed，同現行行為）
   const initialConversations = await toConversationDTOs(
@@ -83,6 +83,7 @@ export default async function InboxPage({
         myGroupIds: s.myGroupIds,
         // ★ cwi-final S6-9（③）：enterSends 偏好初值（null = 預設 true）
         uiPrefs: me?.uiPrefs as { enterSends?: boolean } | null,
+        isSales: !!me?.isSales,
       }}
       initialClinics={clinics}
       initialConversations={initialConversations}

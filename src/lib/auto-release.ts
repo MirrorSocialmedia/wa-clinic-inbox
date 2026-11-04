@@ -159,7 +159,7 @@ export async function runDisabledAssigneeSweep(): Promise<{ released: number }> 
         await prisma.message.create({
           data: {
             conversationId: h.id, direction: "OUT", channel: "INTERNAL", type: "note",
-            body: "原負責人帳號已停用，對話已放返公海。", status: "SENT",
+            body: "原負責人帳號已停用，對話已放返未指派。", status: "SENT",
             sentByStaffId: null, waTimestamp: new Date(),
           },
         }).catch((err) => log.warn({ conversationId: h.id, err: err instanceof Error ? err.message : String(err) }, "disabled-assignee sweep: INTERNAL 備註寫失敗"));

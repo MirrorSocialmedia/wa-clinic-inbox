@@ -40,6 +40,7 @@ import type {
 // ★ cwi-final S1-2：列表常量（純常量 — client bundle 可 import；
 //   list-constants 獨立檔正係因為 conversation-list.ts（server loader）帶 prisma）
 import { ACTIVE_HARD_CAP } from "@/lib/inbox/list-constants";
+import { SALES_CHANGED_EVENT } from "./sales-panel";
 import {
   DEFAULT_NOTIFY_PREFS,
   dismissNotifyBanner,
@@ -2255,6 +2256,28 @@ export function InboxClient({
     }
   }, []);
 
+  // ── ★ 銷售意向／負責改咗（右欄設意向、交接、開單…）→ 補返嗰一行（列表標籤／意向篩選／排序跟住變）──
+  useEffect(() => {
+    const on = (e: Event) => {
+      const id = (e as CustomEvent<{ conversationId?: string }>).detail?.conversationId;
+      if (!id) return;
+      void (async () => {
+        try {
+          const res = await fetch(`/api/conversations?ids=${encodeURIComponent(id)}`);
+          if (!res.ok) return;
+          const row = ((await res.json()) as { items?: ConversationItem[] }).items?.[0];
+          if (!row) return;
+          // 只更新銷售欄 — 其他欄（preview／未讀）由 realtime 管，唔好喺呢度覆寫
+          setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, salesIntent: row.salesIntent ?? null, sales: row.sales ?? null } : c)));
+        } catch {
+          /* 下次 refetch 會補 */
+        }
+      })();
+    };
+    window.addEventListener(SALES_CHANGED_EVENT, on);
+    return () => window.removeEventListener(SALES_CHANGED_EVENT, on);
+  }, []);
+
   // ── select conversation（markRead + 載入最新訊息） ───────────────────
   // ★ cwi-final S1-3（N-3）：所有入口（列表 / 深連結 ?conv= / push SW open-conversation /
   //   bell notice / search）统一經呢度：先 ensureConversationLoaded 補載 row，失敗 → notice + return（唔設 selectedConvId）。
@@ -3107,6 +3130,7 @@ export function InboxClient({
           setSearchResults(null);
         }}
         myStaffId={user.staffId}
+        isSales={!!user.isSales}
         myGroupIds={myGroupIds}
         scopeClinicIds={scopeClinicIds}
         myClinicIds={user.clinicIds}

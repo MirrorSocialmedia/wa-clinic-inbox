@@ -115,7 +115,7 @@ async function loginSession(email: string, password: string): Promise<string> {
 
 interface PageLike {
   goto: (url: string, o: Record<string, unknown>) => Promise<unknown>;
-  locator: (sel: string) => { count: () => Promise<number> };
+  locator: (sel: string) => { count: () => Promise<number>; first: () => { click: (o?: Record<string, unknown>) => Promise<void> } };
   getByText: (t: string, o?: Record<string, unknown>) => {
     count: () => Promise<number>;
     // playwright-core bundle：locator.first 係 method（返回 locator）— runtime 實測
@@ -151,9 +151,10 @@ async function waitCount(P: PageLike, text: string, timeoutMs = 60_000): Promise
 /** 讀「公海 N」膠囊計數 */
 async function readPoolCount(P: PageLike): Promise<number> {
   const t = await P.evaluate(() => {
-    const btns = Array.from(document.querySelectorAll("button"));
+    // 膠囊「公海」已改名「未指派」— 用 data-e2e 定位（行內都有「⚑ 未指派」chip，唔可以靠文字）
+    const btns = Array.from(document.querySelectorAll('[data-e2e="capsule-unassigned"]'));
     for (const b of btns) {
-      const m = (b.textContent ?? "").match(/公海\s*(\d+)/);
+      const m = (b.textContent ?? "").match(/未指派\s*(\d+)/);
       if (m) return Number(m[1]);
     }
     return -1;
@@ -247,7 +248,7 @@ async function main(): Promise<void> {
     ok("首屏「全部」見到 B（YMT 非主店未指派）");
 
     // 撳「公海」→ B 喺公海 + 計 N0（等首次 connect 嘅 counts fetch 落地 — S0-3 fix）
-    await P.getByText("公海", { exact: false }).first().click({ timeout: 15_000 });
+    await P.locator('[data-e2e="capsule-unassigned"]').first().click({ timeout: 15_000 }); // 「未指派」膠囊（文字同行內 ⚑ 未指派 chip 撞 → 用 data-e2e）
     let n0 = -1;
     const tN0 = Date.now();
     for (;;) {

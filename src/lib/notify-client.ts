@@ -429,7 +429,7 @@ const TITLE_FN: Record<NotifyKind, (clinicShort: string) => string> = {
   // cwi-inboxfix-20260905（MD I-4）：指派 push — title「新指派 · {店簡稱}」+ body「有一條對話指派咗俾你」（零病人資料）
   assigned: (c) => `新指派 · ${c}`,
   // cwi-inboxfix-20260905（MD I-5）：公海 SLA — title「公海 SLA · {店簡稱}」（零 PII：只店 code + 營運元數據）
-  sla: (c) => `公海 SLA · ${c}`,
+  sla: (c) => `未指派 SLA · ${c}`,
 };
 
 export interface FireNotifyArgs {

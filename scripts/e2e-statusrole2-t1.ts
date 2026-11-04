@@ -409,7 +409,7 @@ async function t240Ui(adminCookie: string): Promise<void> {
     // ★ cwi-final S1-8：「全部」膠囊移除（改文字顯示）；四粒膠囊全 toggle
     check("第一行四粒膠囊（S1-8：全部移除）", nCaps === 4, nCaps);
     check("S1-8：「全部 N」文字顯示存在", (await capsuleRow.locator('[data-e2e="capsule-all-count"]').count()) === 1);
-    for (const re of [/^公海 \d+$/, /^派俾我 \d+$/, /^我負責 \d+$/, /^待跟進 \d+$/]) {
+    for (const re of [/^未指派 \d+$/, /^派俾我 \d+$/, /^我負責 \d+$/, /^待跟進 \d+$/]) {
       const has = await capsuleRow.locator("button", { hasText: re }).count();
       check(`膠囊存在：${re}`, has === 1, has);
     }

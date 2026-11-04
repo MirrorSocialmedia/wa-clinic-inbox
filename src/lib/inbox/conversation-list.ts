@@ -21,6 +21,7 @@ import prisma from "@/lib/prisma";
 import log from "@/lib/log";
 import { scopedClinicSet, myGroupIds as loadMyGroupIds, locationIn, type AuthContext } from "@/lib/rbac";
 import { latestHoldsByConversation } from "@/lib/flows/hold-sweep";
+import { salesSummaryByConversation, type ConversationSalesSummary } from "@/lib/sales/core";
 import { LIST_PAGE_SIZE, RESOLVED_TAIL } from "./list-constants";
 import type { CapsuleKey } from "./capsule";
 import type { BookingInfo, ConversationItem, HoldInfo, WindowState } from "@/components/inbox/types";
@@ -328,6 +329,11 @@ export async function toConversationDTOs(
     // ★ cwi-reminder-20261025：未處理「⏰ 待跟進」提醒（列表膠囊 + 右欄狀態）
     openRemindersByConv(rows.map((r) => r.id)),
   ]);
+  // ★ 銷售意向・排序：成頁一次計銷售負責摘要（fail-soft — 計唔到唔阻列表）
+  const salesMap = await salesSummaryByConversation(rows).catch((err) => {
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "inbox list: sales summary failed");
+    return new Map<string, ConversationSalesSummary>();
+  });
   const adviceConvIds = new Set(adviceRows.map((r) => r.conversationId));
   // ★ cwi-ux UX-07：預約目標店（bookingClinicId）可能係外店 — 膠囊要店名 → clinic 查併入佢。
   const bookingClinicIds = [...new Set(bookings.map((b) => b.bookingClinicId).filter((x): x is string => !!x))];
@@ -407,6 +413,12 @@ export async function toConversationDTOs(
       })(),
       followupAdvice: adviceConvIds.has(cv.id),
       reminder: reminderMap.get(cv.id) ?? null,
+      // ★ 銷售意向（高／中／低）+ 銷售負責摘要 — 列表標籤／篩選／排序（只係銷售帳號先顯示）
+      salesIntent: cv.salesIntent === "HIGH" || cv.salesIntent === "MEDIUM" || cv.salesIntent === "LOW" ? cv.salesIntent : null,
+      sales: (() => {
+        const x = salesMap.get(cv.id);
+        return x ? { state: x.state, ownerName: x.ownerName, mine: !!meId && x.ownerId === meId, protectedUntil: x.protectedUntil } : null;
+      })(),
       routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId)?.name ?? null) : null,
       routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
       contact: contactMap.get(cv.contactId) ?? null,

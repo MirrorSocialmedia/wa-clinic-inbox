@@ -448,3 +448,44 @@ test("X10 我的銷售：病人（就到期排先）、公海、對單結果（�
   assert.ok(!m.reviews!.some((r) => r.salesApricotUserId !== `${PFX}-apu-a`), "唔見其他銷售嘅");
   await prisma.conversation.update({ where: { id: CONV1 }, data: { salesIntent: null } });
 });
+
+test("X11 收件箱列表：銷售負責摘要 + 意向入 DTO（綁定優先、最早到期、停用唔計、mine 跟睇嘅人）", async () => {
+  const { salesSummaryByConversation } = await import("./core");
+  const { toConversationDTOs } = await import("@/lib/inbox/conversation-list");
+  const conv = await prisma.conversation.findUniqueOrThrow({ where: { id: CONV1 } });
+  await prisma.salesOwnership.deleteMany({ where: { patientApricotId: { in: PIDS } } });
+  // 冇人負責 → 冇摘要
+  assert.equal((await salesSummaryByConversation([conv])).has(CONV1), false);
+  // 兩個保護中 → 揀最早到期
+  const soon = new Date(Date.now() + 2 * 86_400_000);
+  await protect(PIDS[2], a, { protectedUntil: new Date(Date.now() + 9 * 86_400_000) });
+  await protect(PIDS[3], b, { protectedUntil: soon });
+  let s = (await salesSummaryByConversation([conv])).get(CONV1);
+  assert.equal(s?.state, "PROTECTED");
+  assert.equal(s?.ownerId, b, "最早到期嗰個");
+  // 有綁定 → 綁定優先
+  await prisma.salesOwnership.create({ data: { patientApricotId: PIDS[4], state: "BOUND", salesStaffId: a, lastSalesStaffId: a } });
+  s = (await salesSummaryByConversation([conv])).get(CONV1);
+  assert.equal(s?.state, "BOUND");
+  assert.equal(s?.ownerId, a);
+  // 負責人停用 → 唔計（同對話鎖口徑）
+  await prisma.staffUser.update({ where: { id: a }, data: { active: false } });
+  try {
+    s = (await salesSummaryByConversation([conv])).get(CONV1);
+    assert.equal(s?.ownerId, b, "停用嘅銷售唔計 → 剩返 b 保護中");
+  } finally {
+    await prisma.staffUser.update({ where: { id: a }, data: { active: true } });
+  }
+  // DTO：意向 + mine 跟睇嘅人；怪意向值當冇
+  await prisma.conversation.update({ where: { id: CONV1 }, data: { salesIntent: "HIGH" } });
+  const [asA] = await toConversationDTOs([await prisma.conversation.findUniqueOrThrow({ where: { id: CONV1 } })], new Map(), undefined, a);
+  assert.equal(asA.salesIntent, "HIGH");
+  assert.deepEqual({ state: asA.sales?.state, mine: asA.sales?.mine }, { state: "BOUND", mine: true });
+  const [asB] = await toConversationDTOs([await prisma.conversation.findUniqueOrThrow({ where: { id: CONV1 } })], new Map(), undefined, b);
+  assert.equal(asB.sales?.mine, false, "b 睇：唔係佢負責");
+  await prisma.conversation.update({ where: { id: CONV1 }, data: { salesIntent: "BOGUS" } });
+  const [weird] = await toConversationDTOs([await prisma.conversation.findUniqueOrThrow({ where: { id: CONV1 } })], new Map(), undefined, a);
+  assert.equal(weird.salesIntent, null, "怪值唔入 DTO");
+  await prisma.conversation.update({ where: { id: CONV1 }, data: { salesIntent: null } });
+  await prisma.salesOwnership.deleteMany({ where: { patientApricotId: { in: PIDS } } });
+});

@@ -219,7 +219,7 @@ export const PUT = handle(async (req: NextRequest, ctx: Ctx) => {
               await tx.message.create({
                 data: {
                   conversationId: h.id, direction: "OUT", channel: "INTERNAL", type: "note",
-                  body: "原負責人帳號已停用，對話已放返公海。", status: "SENT",
+                  body: "原負責人帳號已停用，對話已放返未指派。", status: "SENT",
                   sentByStaffId: admin.staff.id, waTimestamp: new Date(),
                 },
               });

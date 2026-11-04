@@ -379,7 +379,7 @@ export async function runSandboxTurn(input: SandboxTurnInput): Promise<SandboxTu
           summary: `命中規則「${routing.rule.name}」→ ${routing.rule.targetType === "GROUP" ? "技能組" : "職員"}（沙盤唔落 assignee）`,
           detail: { ruleId: routing.rule.id, ruleName: routing.rule.name, targetType: routing.rule.targetType, targetGroupId: routing.rule.targetGroupId, targetStaffId: routing.rule.targetStaffId },
         }
-      : { n: 5, name: STEP_NAMES[5], status: "skip", summary: "無規則命中（對話留公海）", detail: { rule: null } }
+      : { n: 5, name: STEP_NAMES[5], status: "skip", summary: "無規則命中（對話留喺未指派）", detail: { rule: null } }
   );
   // ⑥ 出文
   const guardBits: string[] = [];

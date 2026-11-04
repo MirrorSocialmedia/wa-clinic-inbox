@@ -25,7 +25,7 @@ import { runDisabledAssigneeSweep } from "@/lib/auto-release";
 const REPO = path.join(import.meta.dirname, "..");
 const BASE = process.env.E2E_BASE ?? "http://127.0.0.1:3100";
 const prisma = new PrismaClient();
-const NOTE_BODY = "原負責人帳號已停用，對話已放返公海。";
+const NOTE_BODY = "原負責人帳號已停用，對話已放返未指派。";
 
 function ok(label: string): void {
   console.log(`  ✅ ${label}`);
