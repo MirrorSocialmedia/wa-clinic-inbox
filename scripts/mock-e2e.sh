@@ -3764,10 +3764,13 @@ PC_FAIL=0
 pc_refresh_days() { PC_D1=$(date -d '+1 day' +%F); PC_D2=$(date -d '+2 day' +%F); PC_D3=$(date -d '+3 day' +%F); }
 pc_refresh_days
 # pc_pick <clinicId> <providerApricotId|''> <offset> → "providerApricotId|date"（15:00 open 槽）
+# ★ CI d8564ad PC-G4 實錘：provider-sync（roster fixture）將 MF 名錄換成「王醫生」→ L2 仲有 T27 時 seed 醫生（張家俊）嘅舊 row；
+#   pc_pick 揀中舊 row，但 bot getSlots 過 5 分鐘重抓 mock（只得現役醫生）→ 王醫生嗰日剛好閉診（djb2%7）→「該日冇開診」。
+#   → 只揀「現役 ProviderClinic 醫生」嘅槽（= mock 重抓會回嘅集合），唔再食舊 cache。
 pc_pick() {
   local prov="${2:-}"
   pc_refresh_days
-  q "SELECT (\"providerApricotId\"||'|'||\"date\") v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$1' AND \"startTime\"='15:00' AND \"isOpen\"=true AND \"bookedCount\"=0 AND \"date\" IN ('$PC_D1','$PC_D2','$PC_D3')${prov:+ AND \"providerApricotId\"='$prov'} ORDER BY \"date\",\"providerApricotId\" LIMIT 1 OFFSET ${3:-0}" | jf v
+  q "SELECT (\"providerApricotId\"||'|'||\"date\") v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$1' AND \"startTime\"='15:00' AND \"isOpen\"=true AND \"bookedCount\"=0 AND \"date\" IN ('$PC_D1','$PC_D2','$PC_D3')${prov:+ AND \"providerApricotId\"='$prov'} AND \"providerApricotId\" IN (SELECT p.\"apricotId\" FROM \"Provider\" p JOIN \"ProviderClinic\" pc ON pc.\"providerId\"=p.id WHERE pc.\"clinicId\"='$1' AND p.active AND p.\"apricotId\" IS NOT NULL) ORDER BY \"date\",\"providerApricotId\" LIMIT 1 OFFSET ${3:-0}" | jf v
 }
 pc_prov_name() { q "SELECT name FROM \"Provider\" WHERE \"apricotId\"='$1'" | jf name; }
 pc_surname() { local n; n=$(pc_prov_name "$1"); echo "${n%% *}"; }
@@ -4005,6 +4008,11 @@ fi
 # ── PC-G4. L4 自動落單（pinned + 預設 visit reason → AUTO_BOOK 全鏈）──
 echo "[PC] G4: L4 auto-book ..."
 PC4_CID="$MF_CLINIC_ID"; PC4_CODE="MF"
+# L2 對齊現役名錄（provider-sync 之後 MF 只剩 roster fixture 醫生）：MF/WTC 過期 → sync job 重抓 → 等新 row 落庫先揀槽
+PC4_WTC_ID=$(q "SELECT id FROM \"Clinic\" WHERE code='WTC'" | jf id)
+q "UPDATE \"AvailabilitySlot\" SET \"syncedAt\"=\"syncedAt\"-interval '1 hour' WHERE \"clinicId\" IN ('$MF_CLINIC_ID','$PC4_WTC_ID')" >/dev/null
+pnpm -s e2e:cron sync-availability >/dev/null 2>&1
+wait_for "SELECT (count(*)>0)::text f FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$MF_CLINIC_ID' AND \"syncedAt\">now()-interval '5 minutes'" '[{"f":"true"}]' 90 || echo "  (PC-G4：MF L2 未見重 sync — pc_pick 仍只揀現役醫生)"
 PC4_SLOT=$(pc_pick "$MF_CLINIC_ID" "" 0)
 if [ -z "$PC4_SLOT" ]; then
   PC4_CID=$(q "SELECT id FROM \"Clinic\" WHERE code='WTC'" | jf id); PC4_CODE="WTC"
