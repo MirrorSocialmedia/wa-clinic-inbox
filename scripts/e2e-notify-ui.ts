@@ -386,18 +386,6 @@ async function waitForSpy(P: PageLike, cond: (s: Awaited<ReturnType<typeof spy>>
   }
 }
 
-/** silent 類：對比 baseline — 斷言冇新增（頁面之前已有事件時防誤判） */
-type SpyBaseline = { notifications: number; mediaPlays: number; ctxCreations: number };
-async function assertNoNew(P: PageLike, what: string, before?: SpyBaseline): Promise<void> {
-  await new Promise((r) => setTimeout(r, 5000));
-  const s = await spy(P);
-  const b = before ?? { notifications: 0, mediaPlays: 0, ctxCreations: 0 };
-  if (s.notifications.length > b.notifications || s.ctxCreations > b.ctxCreations || s.mediaPlays.length > b.mediaPlays) {
-    fail(
-      `${what}: 期望靜但新增（Δnotif=${s.notifications.length - b.notifications} Δchime=${s.ctxCreations - b.ctxCreations} Δmedia=${s.mediaPlays.length - b.mediaPlays}）spy=${JSON.stringify(s)}`
-    );
-  }
-}
 
 /**
  * 交付證明：重 publish 直到指定文字出現（列表 preview / 對話欄）。
@@ -737,7 +725,15 @@ async function main(): Promise<void> {
       const baseA = await unlockAudio(a.P); // cwi-realtime-fix §7.2：解鎖後先斷 chime
       const sA = await publishAndRing(a.P, "A（assignee）", () => publish(clinic, "message:new", messagePayload(convA, clinic, { unread: 1, contact: false, body: "e2e-notify-t161-a" })), (s) => titleMatches(s, `新訊息 · ${CLINIC_SHORT}`));
       if (chimePlays(sA) - chimePlays(baseA) < 1) fail("t161 A: 冇 chime（unlock 後 Δ=0）");
-      await assertNoNew(b.P, "t161 B（非 assignee）");
+      // ★ 同 T162 一樣（cwi-final B9 教訓）：後端 cron（escalation sweep／SYSTEM notice）會喺任意時刻 broadcast
+      //   唔相干 notice:new 入開住嘅 tab（CI 40198ca 實錘：B 收到「通知 · TKW」notice:new → 全量 assertNoNew 假紅）。
+      //   只斷本 scenario 嗰條 message:new（tag=convA／title「新訊息 · …」）+ v1 beep 退役。
+      await new Promise((r) => setTimeout(r, 5000));
+      const sB = await spy(b.P);
+      const msgNotifsB = sB.notifications.filter((n) => n.tag === convA || (n.title ?? "").startsWith("新訊息"));
+      if (msgNotifsB.length > 0 || sB.ctxCreations > 0) {
+        fail(`t161 B（非 assignee）: 期望靜（msgNotifs=${JSON.stringify(msgNotifsB)} spy=${JSON.stringify(sB)}）`);
+      }
       console.log("NOTIFY-UI-OK");
     } else if (scenario === "t162") {
       // 正開住嗰個對話 → 唔響唔彈（純列表/訊息更新）
