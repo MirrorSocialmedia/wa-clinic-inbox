@@ -184,6 +184,26 @@ const FILTERS: [PatientFilter, string][] = [
   ["MEDIUM", "意向中"],
   ["LOW", "意向低"],
 ];
+type PatientSort = "default" | "intent" | "expiry";
+const PATIENT_SORTS: [PatientSort, string][] = [
+  ["default", "預設"],
+  ["intent", "意向高先"],
+  ["expiry", "就到期先"],
+];
+const SORT_KEY = "wa:sales-mine:patient-sort";
+const INTENT_RANK: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+const INTENT_CHIP_CLS: Record<string, string> = {
+  HIGH: "bg-danger-soft text-danger-text font-semibold",
+  MEDIUM: "bg-warn-soft text-warn-text font-semibold",
+  LOW: "bg-panel-2 text-t2",
+};
+/** 預設 = server 次序（保護中先、就到期先）；意向高先 → 同級就到期先；就到期先 → 綁定排尾 */
+function sortPatients(list: MyPatient[], sort: PatientSort): MyPatient[] {
+  if (sort === "default") return list;
+  const exp = (p: MyPatient) => (p.state === "PROTECTED" && p.daysLeft != null ? p.daysLeft : Number.POSITIVE_INFINITY);
+  const ir = (p: MyPatient) => (p.intent ? (INTENT_RANK[p.intent] ?? 3) : 3);
+  return [...list].sort((a, b) => (sort === "intent" ? ir(a) - ir(b) || exp(a) - exp(b) : exp(a) - exp(b) || ir(a) - ir(b)));
+}
 function matchFilter(p: MyPatient, f: PatientFilter): boolean {
   if (f === "ALL") return true;
   if (f === "PROTECTED" || f === "BOUND") return p.state === f;
@@ -193,6 +213,23 @@ function matchFilter(p: MyPatient, f: PatientFilter): boolean {
 
 export default function SalesMineClient() {
   const [pf, setPf] = useState<PatientFilter>("ALL");
+  const [psort, setPsort] = useState<PatientSort>("default");
+  useEffect(() => {
+    try {
+      const v = window.localStorage.getItem(SORT_KEY);
+      if (v === "intent" || v === "expiry") setPsort(v);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const changeSort = (v: PatientSort) => {
+    setPsort(v);
+    try {
+      window.localStorage.setItem(SORT_KEY, v);
+    } catch {
+      /* ignore */
+    }
+  };
   const [directOpen, setDirectOpen] = useState(false);
   const [month, setMonth] = useState(nowMonth());
   const [data, setData] = useState<Data | null>(null);
@@ -302,17 +339,38 @@ export default function SalesMineClient() {
                       </button>
                     );
                   })}
+                  <label className="ml-auto inline-flex items-center gap-1 text-[11px] text-t2">
+                    排序
+                    <select
+                      value={psort}
+                      onChange={(e) => changeSort(e.target.value as PatientSort)}
+                      className="rounded-full border border-line bg-panel px-2 py-0.5 text-[11px] text-t1"
+                      data-e2e="sales-mine-sort"
+                    >
+                      {PATIENT_SORTS.map(([k, l]) => (
+                        <option key={k} value={k}>
+                          {l}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
                 <ul className="divide-y divide-line max-h-80 overflow-y-auto">
-                  {data.patients!.filter((p) => matchFilter(p, pf)).map((p) => (
+                  {sortPatients(data.patients!.filter((p) => matchFilter(p, pf)), psort).map((p) => (
                     <li key={p.patientApricotId} className="px-4 py-2 flex items-center gap-3 text-sm" data-e2e="sales-mine-patient">
                       <div className="min-w-0 flex-1">
-                        <Patient code={p.patientCode} name={p.patientName} conv={p.conversationId} />
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <Patient code={p.patientCode} name={p.patientName} conv={p.conversationId} />
+                          {p.intent && INTENT_TEXT[p.intent] && (
+                            <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full ${INTENT_CHIP_CLS[p.intent]}`} data-e2e="sales-mine-intent">
+                              {INTENT_TEXT[p.intent]}
+                            </span>
+                          )}
+                        </div>
                         <div className="text-[11px] text-t3">
                           {p.state === "BOUND" ? "綁定" : `保護中 · 第 ${p.rounds} 輪`}
                           {p.lastApptDate ? ` · 預約 ${p.lastApptDate.slice(5).replace("-", "/")}` : ""}
                           {p.highValue ? " · 高價" : ""}
-                          {p.intent ? ` · 意向${INTENT_TEXT[p.intent] ?? p.intent}` : ""}
                           {p.noShowStreak > 0 ? ` · 爽約 ${p.noShowStreak} 次` : ""}
                         </div>
                       </div>
@@ -381,9 +439,13 @@ export default function SalesMineClient() {
                 </ul>
               )}
             </section>
-            {(data.pool?.length ?? 0) > 0 && (
-              <section className="rounded-2xl bg-panel border border-line" data-e2e="sales-mine-pool">
-                <div className="px-4 py-2.5 text-[11px] font-semibold text-t2 border-b border-line">銷售公海（最近 60 日放返出嚟 — 邊個約到就係邊個）</div>
+            <section className="rounded-2xl bg-panel border border-line" data-e2e="sales-mine-pool">
+              <div className="px-4 py-2.5 text-[11px] font-semibold text-t2 border-b border-line">銷售公海（最近 60 日放返出嚟 — 邊個約到就係邊個）</div>
+              {(data.pool?.length ?? 0) === 0 ? (
+                <div className="px-4 py-4 text-[12px] text-t3" data-e2e="sales-mine-pool-empty">
+                  而家冇病人喺銷售公海 — 保護期過咗、冇約到嘅病人會喺度出現，邊個約到就係邊個。
+                </div>
+              ) : (
                 <ul className="divide-y divide-line max-h-64 overflow-y-auto">
                   {data.pool!.map((p) => (
                     <li key={p.patientApricotId} className="px-4 py-2 flex items-center gap-3 text-sm" data-e2e="sales-mine-pool-row">
@@ -396,8 +458,8 @@ export default function SalesMineClient() {
                     </li>
                   ))}
                 </ul>
-              </section>
-            )}
+              )}
+            </section>
             <p className="text-[11px] text-t3">傭金跟每筆付款計（每晚同步，前台收都計）；付款被作廢會扣返。月結之後先入糧單。</p>
           </>
         )}

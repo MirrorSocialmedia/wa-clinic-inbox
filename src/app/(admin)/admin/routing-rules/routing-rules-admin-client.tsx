@@ -90,7 +90,7 @@ function conditionSummary(r: RuleRow): string {
 function targetSummary(r: RuleRow): string {
   if (r.targetType === "GROUP") return `👥 ${r.targetGroupName ?? "?"} 組`;
   if (r.targetType === "STAFF") return `👤 ${r.targetStaffName ?? "?"}`;
-  return "🏪 該店公海";
+  return "🏪 該店未指派";
 }
 
 export default function RoutingRulesAdmin() {
@@ -596,7 +596,7 @@ function RuleEditor({
               [
                 ["GROUP", "技能組"],
                 ["STAFF", "單人"],
-                ["CLINIC_POOL", "該店公海"],
+                ["CLINIC_POOL", "該店未指派"],
               ] as const
             ).map(([v, label]) => (
               <button

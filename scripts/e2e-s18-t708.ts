@@ -159,12 +159,13 @@ async function main(): Promise<void> {
     // counts 順帶 fetch — 等「跟進 3」渲染出（最多 10s）
     await page.waitForFunction(
       () => document.querySelector('[data-e2e="capsule-followup"]')?.textContent?.trim() === "跟進 3",
+      undefined, // ★ 簽名 (fn, arg, options) — options 唔可以放 arg 位
       { timeout: 10_000 }
     ).catch(() => {});
     const fuText = (await page.locator('[data-e2e="capsule-followup"]').textContent())?.trim();
     check("360px：「跟進 3」可見（待跟進永遠喺可見列）", fuText === "跟進 3", fuText);
     check("360px：四粒膠囊（2+2 兩行）", (await row.locator("button").count()) === 4, await row.locator("button").count());
-    for (const re of [/^公海 \d+$/, /^派我 \d+$/, /^我負責 \d+$/, /^跟進 3$/]) {
+    for (const re of [/^未指派 \d+$/, /^派我 \d+$/, /^我負責 \d+$/, /^跟進 3$/]) {
       check(`360px 短字膠囊：${re}`, (await row.locator("button", { hasText: re }).count()) === 1);
     }
     check("360px：冇 ⋯ 溢出按鈕", (await row.locator('button[data-e2e="capsule-more"]').count()) === 0);
@@ -214,7 +215,7 @@ type PwLocMin = {
 type PwPageMin = {
   locator(sel: string, opts?: { hasText?: string | RegExp }): PwLocMin;
   getByText(t: string, o?: { exact?: boolean }): PwLocMin;
-  waitForFunction(fn: unknown, o?: { timeout?: number }): Promise<void>;
+  waitForFunction(fn: unknown, arg?: unknown, o?: { timeout?: number }): Promise<void>;
   waitForTimeout(n: number): Promise<void>;
   goto(u: string, o?: { waitUntil?: string; timeout?: number }): Promise<void>;
   screenshot(o: { path: string }): Promise<void>;

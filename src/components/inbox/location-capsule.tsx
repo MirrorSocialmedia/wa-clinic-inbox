@@ -258,7 +258,7 @@ function TransferDialog({
         <div className="rounded-xl bg-panel-2 px-3 py-2 text-[12px] text-t2 space-y-0.5">
           <div>✔ {targetClinic?.code ?? "新分店"} 同事會喺列表見到，收通知</div>
           <div>✔ 預約、時間表預設用 {targetClinic?.code ?? "新分店"}</div>
-          <div>✔ {assignTo ? "直接指派俾揀咗嘅同事" : "負責人清空，回到新分店公海"}</div>
+          <div>✔ {assignTo ? "直接指派俾揀咗嘅同事" : "負責人清空，回到新分店嘅未指派"}</div>
           {targetClinic?.crossCompany && (
             <>
               <div className="text-warn-text">⚠ {targetClinic.companyName ?? "對方公司"} 嘅同事會見到成段對話同病人電話</div>
@@ -284,7 +284,7 @@ function TransferDialog({
             onChange={(e) => setAssignTo(e.target.value)}
             className="mt-1 w-full rounded-full border border-line bg-panel px-3 py-1.5 text-sm text-t1"
           >
-            <option value="">唔指派 — 放入 {targetClinic?.code ?? "新分店"} 公海</option>
+            <option value="">唔指派 — 放入 {targetClinic?.code ?? "新分店"} 未指派</option>
             {targetStaff.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}

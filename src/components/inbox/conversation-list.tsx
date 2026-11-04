@@ -15,6 +15,9 @@ import { isIOSLike, isStandalone, requestInstall } from "@/components/inbox/inst
 // cwi-setnav NAV-02：系統返回鍵圖層堆疊
 import { useBackLayer } from "@/lib/back-stack";
 import { PatientStatusChip } from "./patient-status-chip";
+// ★ 銷售意向・排序（只係銷售帳號）
+import { SalesListControls, SalesRowChips, useSalesListPrefs } from "./sales-list-controls";
+import { filterByIntent, intentCounts, salesCompare } from "@/lib/inbox/sales-sort";
 
 // ── ★ cwi-final S6-7：單行對話卡片（React.memo）────────────────────────────────────
 // 由列表 items 循環抽出 — virtualization 後只有 viewport 內行掛 DOM；
@@ -33,10 +36,12 @@ interface ConversationRowProps {
   allClinics?: ClinicLite[];
   allStaff?: StaffInfo[];
   onLocationChanged?: (c: LocationChange) => void;
+  /** ★ 銷售帳號：行內顯示意向 + 銷售負責標籤 */
+  showSales?: boolean;
 }
 
 const ConversationRow = memo(function ConversationRow(props: ConversationRowProps) {
-  const { c, selected, onSelect, userRole, activeClinicId, myClinicIds, clinicById, myStaffId, mentionUnread, allClinics, allStaff, onLocationChanged } = props;
+  const { c, selected, onSelect, userRole, activeClinicId, myClinicIds, clinicById, myStaffId, mentionUnread, allClinics, allStaff, onLocationChanged, showSales } = props;
 
           const intentMeta = c.intent ? INTENT_META[c.intent] : null;
           const urgentRow = c.urgent && c.status !== "RESOLVED";
@@ -187,6 +192,7 @@ const ConversationRow = memo(function ConversationRow(props: ConversationRowProp
                     ))}
                     {/* ★ cwi-patient-identify：新客／舊客 */}
                     <PatientStatusChip status={c.contact?.patientStatus} count={c.contact?.identifiedCount} size="xs" />
+                    {showSales && <SalesRowChips c={c} />}
                     {/* cwi-multiclinic-20260903（MD A.6.4）：「待跟進」— 未指派 + 最後一條係客人來訊（前端導出，零新欄） */}
                     {needsFollow && (
                       <span
@@ -346,6 +352,8 @@ interface Props {
   myGroupIds?: string[];
   /** ★ H1：自己 staffId — 負責人 chip 三狀態（自己=綠「你」/ 別人=琥珀名 / unassigned=無 chip） */
   myStaffId: string;
+  /** ★ 銷售人員 — 意向篩選／排序／行內標籤 */
+  isSales?: boolean;
   /** cwi-multiclinic-20260903（MD A.6.4）：自己綁定店集合（STAFF；ADMIN = []）— 跨店線店名 badge 判定 */
   myClinicIds?: string[];
   /** cwi-multiclinic-20260903：clinic id → 基本資料（店名 badge 顯示 code） */
@@ -527,7 +535,7 @@ export function ConversationList(p: Props) {
   const capsuleDefs: { key: CapKey4; label: string; count: number; active: boolean; cls: string; onClick: () => void; title?: string }[] = [
     {
       key: "unassigned",
-      label: `公海 ${fmtCap(p.counts?.unassigned)}`,
+      label: `未指派 ${fmtCap(p.counts?.unassigned)}`,
       count: p.counts?.unassigned ?? 0,
       active: p.assignedFilter === "unassigned",
       // 唯一有色膠囊（橙）— 冇人跟＝會漏單
@@ -641,8 +649,10 @@ export function ConversationList(p: Props) {
       setTestBusy(false);
     }
   };
-  const items = useMemo(() => {
-    if (p.searchResults) return p.searchResults;
+  const salesPrefs = useSalesListPrefs(!!p.isSales);
+  // ① 膠囊 + 狀態篩選（意向篩選之前 — 意向計數用呢份：揀「高」唔會令「中」數字變 0）
+  const baseList = useMemo(() => {
+    if (p.searchResults) return null;
     let list = p.conversations;
     // ★ cwi-final S1-2（L-3）：膠囊 filter 改用 matchCapsule（client / server / counts 三處同源）—
     //   unassigned 加 clinic 維度雙保險（I-2）；followup 唔 filter status（S2-3：包含 RESOLVED）。
@@ -665,7 +675,22 @@ export function ConversationList(p: Props) {
       }
       if (p.statusFilter !== "ALL") list = list.filter((c) => c.status === p.statusFilter);
     }
+    return list;
+  }, [p.conversations, p.searchResults, p.statusFilter, p.assignedFilter, p.myStaffId, p.myGroupIds, p.scopeClinicIds, p.activeClinicId]);
+  const intentCountsNow = useMemo(() => intentCounts(baseList ?? []), [baseList]);
+  // ② 意向篩選 + 排序
+  const items = useMemo(() => {
+    if (p.searchResults) return p.searchResults;
+    const list = filterByIntent(baseList ?? [], salesPrefs.intent);
+    const salesSort = salesPrefs.sort;
     return [...list].sort((a, b) => {
+      // ★ 銷售排序（意向／保護期到期）：揀咗就喺任何膠囊入面生效；急症照舊排頂、已解決照舊排尾
+      if (salesSort !== "recent") {
+        const rk = (c: ConversationItem) => (c.urgent && c.status !== "RESOLVED" ? 0 : c.status === "RESOLVED" ? 2 : 1);
+        const d = rk(a) - rk(b);
+        if (d !== 0) return d;
+        return salesCompare(a, b, salesSort);
+      }
       // ★ cwi-followup-v3（MD §2.1）：待跟進列表 = 建議日期最舊先（唔係最新）— 久咗未跟先最緊要
       if (p.assignedFilter === "followup") {
         const at = a.followupDueAt ? new Date(a.followupDueAt).getTime() : Infinity;
@@ -680,7 +705,7 @@ export function ConversationList(p: Props) {
       if (ar !== br) return ar - br;
       return new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime();
     });
-  }, [p.conversations, p.searchResults, p.statusFilter, p.assignedFilter, p.myStaffId, p.myGroupIds, p.scopeClinicIds, p.activeClinicId]);
+  }, [baseList, p.searchResults, p.assignedFilter, salesPrefs.intent, salesPrefs.sort]);
 
   // ★ cwi-final S6-7：stable ref — ConversationRow memo 依賴（props 陣列每 render 新建會令全行 invalid）
   const myClinicIdsStable = useMemo(() => p.myClinicIds ?? [], [p.myClinicIds]);
@@ -1216,11 +1241,26 @@ export function ConversationList(p: Props) {
         )}
       </div>
 
+      {p.isSales && !p.searchResults && (
+        <SalesListControls
+          narrow={narrow}
+          intent={salesPrefs.intent}
+          sort={salesPrefs.sort}
+          counts={intentCountsNow}
+          capsuleLabel={
+            p.assignedFilter === "all"
+              ? "全部"
+              : { unassigned: "未指派", routed: "派俾我", mine: "我負責", followup: "待跟進" }[p.assignedFilter]
+          }
+          onIntent={salesPrefs.changeIntent}
+          onSort={salesPrefs.changeSort}
+        />
+      )}
       {/* list — ★ cwi-final S6-7：virtualization（react-virtuoso；endReached ≈ 舊近底 30px 觸發；行高可變 — 量測式） */}
       {items.length === 0 ? (
         <div className="flex flex-col items-center gap-2 py-10 text-t3">
           <MessageCircle size={28} strokeWidth={2.75} />
-          <div className="text-sm">{p.search ? "冇搜到相關病人" : "冇對話"}</div>
+          <div className="text-sm">{p.search ? "冇搜到相關病人" : salesPrefs.intent !== "ALL" ? "呢個意向冇對話" : "冇對話"}</div>
         </div>
       ) : (
         <Virtuoso
@@ -1254,6 +1294,7 @@ export function ConversationList(p: Props) {
                 allClinics={p.allClinics}
                 allStaff={p.allStaff}
                 onLocationChanged={p.onLocationChanged}
+                showSales={p.isSales}
               />
             </div>
           )}

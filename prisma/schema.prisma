@@ -1444,3 +1444,51 @@ model SalesDelegation {
   @@index([toStaffId, revokedAt])
 }
 
+
+// ── ★ cwi-workgroup-20261104：工作群（inbox 內部團隊群組 — 唔經 WhatsApp，Meta 唔收費）──
+// 群組同成員全部由老闆（集團管理員）自己管：開群、改名、加／刪任何員工、封存。冇自動加人。
+// 員工 id 用 plain string（同 SalesOwnership 一樣 — 員工只停用唔刪，唔做 FK 連鎖）。
+model WorkGroup {
+  id            String             @id @default(cuid())
+  name          String             @db.VarChar(40)
+  createdById   String
+  createdAt     DateTime           @default(now()) @db.Timestamptz
+  updatedAt     DateTime           @updatedAt @db.Timestamptz
+  /// 封存 = 唯讀（成員仲睇到舊訊息，唔可以再發）；唔硬刪（保留紀錄）
+  archivedAt    DateTime?          @db.Timestamptz
+  lastMessageAt DateTime?          @db.Timestamptz
+  members       WorkGroupMember[]
+  messages      WorkGroupMessage[]
+}
+
+model WorkGroupMember {
+  groupId    String
+  staffId    String
+  addedById  String
+  addedAt    DateTime  @default(now()) @db.Timestamptz
+  /// 未讀 = 呢個時間之後、唔係自己發嘅訊息
+  lastReadAt DateTime? @db.Timestamptz
+  group      WorkGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, staffId])
+  @@index([staffId])
+}
+
+model WorkGroupMessage {
+  id             String    @id @default(cuid())
+  groupId        String
+  senderId       String
+  /// 內文（員工之間 — 可能提到病人；log 永遠唔記內文）
+  body           String    @db.Text
+  /// 被 @ 嘅員工 id（只限發送嗰刻嘅成員）
+  mentions       String[]  @default([])
+  /// 分享對話卡：病人資料唔存喺度 — 顯示時按睇嘅人權限即時查
+  conversationId String?
+  /// 防重複發送（同一個人同一個 key 只寫一次）
+  clientKey      String?   @db.VarChar(64)
+  createdAt      DateTime  @default(now()) @db.Timestamptz
+  group          WorkGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, clientKey])
+  @@index([groupId, createdAt])
+}

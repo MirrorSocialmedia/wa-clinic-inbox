@@ -35,6 +35,12 @@ export interface SalesView {
 }
 
 const LEVELS: SalesIntentLevel[] = ["HIGH", "MEDIUM", "LOW"];
+/** 揀咗嘅意向用返列表標籤同一套顏色（高 = 紅、中 = 橙、低 = 灰） */
+const INTENT_ON_CLS: Record<SalesIntentLevel, string> = {
+  HIGH: "bg-danger-soft text-danger-text border-danger font-semibold",
+  MEDIUM: "bg-warn-soft text-warn-text border-warn font-semibold",
+  LOW: "bg-panel-2 text-t1 border-line-strong font-semibold",
+};
 
 const md = (iso: string | null) => {
   if (!iso) return "";
@@ -167,7 +173,10 @@ export function SalesCard({
       });
       const data = (await res.json().catch(() => null)) as { sales?: SalesView; message?: string } | null;
       if (!res.ok) setErr(data?.message ?? "做唔到");
-      else if (data?.sales) setView(data.sales);
+      else {
+        if (data?.sales) setView(data.sales);
+        notifySalesChanged(conversationId); // 列表行（意向標籤／篩選／排序）跟住更新
+      }
     } catch {
       setErr("網絡錯誤");
     } finally {
@@ -212,17 +221,18 @@ export function SalesCard({
                     disabled={!canIntent || busy}
                     onClick={() => void setIntent(on ? null : lv)}
                     className={`flex-1 text-xs py-1 rounded-full border disabled:opacity-50 ${
-                      on ? "bg-brand text-panel border-brand" : "bg-panel border-line text-t1 hover:bg-panel-2"
+                      on ? INTENT_ON_CLS[lv] : "bg-panel border-line text-t1 hover:bg-panel-2"
                     }`}
                   >
                     {view.intentLabels[i] ?? lv}
+                    {on ? " ✓" : ""}
                   </button>
                 );
               })}
             </div>
             {view.intent && (
-              <div className="text-[10px] text-t3 mt-1">
-                {view.intent.byName ?? "同事"} · {mdhm(view.intent.at)}
+              <div className="text-[10px] text-t3 mt-1" data-e2e="sales-intent-by">
+                {mdhm(view.intent.at)} 由 {view.intent.byName ?? "同事"} 設
               </div>
             )}
           </div>

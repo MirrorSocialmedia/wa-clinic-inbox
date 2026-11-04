@@ -394,6 +394,40 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/admin/sales/commission/authz-none?month=2026-10" }),
     expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
   },
+  // ★ cwi-workgroup-20261104：工作群 — 管理只限集團管理員；訊息只限成員（matrix 身份都唔係成員 → 404，零寫入）
+  "GET /api/admin/workgroups": {
+    fixture: () => ({ url: "/api/admin/workgroups" }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 200 },
+  },
+  "POST /api/admin/workgroups": {
+    // 空 body → 400（冇群名，零寫入）
+    fixture: () => ({ url: "/api/admin/workgroups", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 400 },
+  },
+  "PATCH /api/admin/workgroups/[id]": {
+    fixture: () => ({ url: "/api/admin/workgroups/authz-none", method: "PATCH", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 403, SUPERVISOR: 403, ADMIN_COMPANY_B: 403, ADMIN_ALL: 404 },
+  },
+  "GET /api/workgroups": {
+    fixture: () => ({ url: "/api/workgroups" }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, SUPERVISOR: 200, ADMIN_ALL: 200 },
+  },
+  "GET /api/workgroups/unread": {
+    fixture: () => ({ url: "/api/workgroups/unread" }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, SUPERVISOR: 200, ADMIN_ALL: 200 },
+  },
+  "GET /api/workgroups/[id]/messages": {
+    fixture: () => ({ url: "/api/workgroups/authz-none/messages" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "POST /api/workgroups/[id]/messages": {
+    fixture: () => ({ url: "/api/workgroups/authz-none/messages", method: "POST", body: JSON.stringify({ body: "authz" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "POST /api/workgroups/[id]/read": {
+    fixture: () => ({ url: "/api/workgroups/authz-none/read", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
   "GET /api/sales/mine": {
     // ★ cwi-sales 第 3 期：我的銷售 — 只限銷售人員（matrix 角色都唔係銷售 → 403）
     fixture: () => ({ url: "/api/sales/mine?month=2026-10" }),

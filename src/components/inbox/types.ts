@@ -82,6 +82,15 @@ export interface FollowupSuggestion {
   createdAt: string;
 }
 
+export type SalesIntentLevel = "HIGH" | "MEDIUM" | "LOW";
+export interface ConversationSalesInfo {
+  state: "PROTECTED" | "BOUND";
+  ownerName: string;
+  /** 負責人係我 */
+  mine: boolean;
+  protectedUntil: string | null;
+}
+
 export interface ConversationItem {
   id: string;
   clinicId: string;
@@ -126,6 +135,10 @@ export interface ConversationItem {
   followupAdvice?: boolean;
   /** ★ cwi-reminder-20261025：未處理「⏰ 待跟進」提醒（null = 冇） */
   reminder?: ConversationReminder | null;
+  /** ★ 銷售意向（高／中／低；null = 未設）— 列表標籤／篩選／排序（只係銷售帳號先顯示） */
+  salesIntent?: SalesIntentLevel | null;
+  /** ★ 銷售負責摘要（綁定優先；多個保護中揀最早到期）— null = 冇銷售負責 */
+  sales?: ConversationSalesInfo | null;
   /** ★ cwi-followup-p3（鐵律 5）：badge「跟進回覆」— 24h 內由 client derive */
   followupRepliedAt?: string | null;
   contact: ContactInfo | null;
@@ -323,6 +336,8 @@ export interface UserCtx {
   myGroupIds?: string[];
   /** ★ cwi-final S6-9（③）：per-staff UI 偏好（StaffUser.uiPrefs；e.g. { enterSends: boolean }；null = 預設） */
   uiPrefs?: { enterSends?: boolean } | null;
+  /** ★ 銷售人員 — 列表意向篩選／排序／標籤只係銷售見到 */
+  isSales?: boolean;
 }
 
 /** socket message:new payload（同 worker notify 對齊） */

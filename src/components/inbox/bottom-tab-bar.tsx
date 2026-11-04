@@ -2,7 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { CalendarDays, MessageCircle, Settings, Stethoscope, User } from "lucide-react";
+import { CalendarDays, MessageCircle, Settings, Stethoscope, User, UsersRound } from "lucide-react";
+import { useWorkgroupUnread } from "@/components/workgroups/use-wg-unread";
 
 /**
  * 手機底部 tab bar（md 以下顯示；桌面用 NavRail）。
@@ -27,6 +28,7 @@ export function BottomTabBar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const wg = useWorkgroupUnread();
   // 下一次 pathname 變完（router push/replace 完成）後要喺新 entry 打嘅 waFrom 標記
   const pendingMarkRef = useRef<string | null>(null);
 
@@ -72,6 +74,8 @@ export function BottomTabBar({
   const items = [
     { href: "/inbox", label: "收件箱", icon: MessageCircle, badge: unreadCount },
     { href: "/bookings", label: "預約", icon: CalendarDays },
+    // ★ cwi-workgroup：工作群（內部團隊群組）
+    { href: "/workgroups", label: "工作群", icon: UsersRound, badge: wg.unread },
     { href: "/schedule", label: "時間表", icon: Stethoscope },
     // ADMIN / SUPERVISOR（★ cwi-routing-20260906 §8：主管入管理殼睇 AI 級別/建議）→ 管理；STAFF → 我的
     role === "ADMIN" || role === "SUPERVISOR"

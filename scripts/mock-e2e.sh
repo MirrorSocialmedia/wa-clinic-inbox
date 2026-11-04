@@ -2185,6 +2185,43 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE
 check "T54D 設返 → 200" "$CODE" "200"
 curl -s -o /dev/null -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"DRAFT"}'
 check "T54D 部分更新（只改 aiMode）唔會清走 Apricot 編號" "$(q "SELECT \"apricotClinicId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf apricotClinicId)" "${T54D_ORIG:-MOCK_APRICOT_TKW}"
+
+# ── T54W. 工作群（cwi-workgroup）：老闆管群、成員先睇到、對話卡權限、防重複 ──
+echo "[AR-3] T54W: workgroups authz..."
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X GET "$BASE/api/workgroups")
+check "T54W 冇 session → 401" "$CODE" "401"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/admin/workgroups" -H 'Content-Type: application/json' -d '{"name":"WGE2E staff"}')
+check "T54W STAFF 開群 → 403" "$CODE" "403"
+TKW_SID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$TKW_EMAIL'" | jf id)
+CODE=$(curl -s -o /tmp/e2e-wg-new.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/workgroups" -H 'Content-Type: application/json' -d '{"name":"WGE2E 群","memberIds":["'$TKW_SID'"]}')
+check "T54W 老闆開群 → 201" "$CODE" "201"
+WG_ID=$(jf id < /tmp/e2e-wg-new.json)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/workgroups" -H 'Content-Type: application/json' -d '{"name":"WGE2E x","evil":1}')
+check "T54W 多餘欄位 → 400（strict）" "$CODE" "400"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/api/workgroups/$WG_ID/messages")
+check "T54W 老闆唔係成員 → 睇唔到內容 404" "$CODE" "404"
+WGK="wge2e$(date +%s)k"
+CODE=$(curl -s -o /tmp/e2e-wg-m1.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WG_ID/messages" -H 'Content-Type: application/json' -d '{"body":"e2e hi","clientKey":"'$WGK'"}')
+check "T54W 成員發訊息 → 201" "$CODE" "201"
+CODE=$(curl -s -o /tmp/e2e-wg-m2.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WG_ID/messages" -H 'Content-Type: application/json' -d '{"body":"e2e hi","clientKey":"'$WGK'"}')
+check "T54W 同 clientKey 重發 → 200（唔重複）" "$CODE" "200"
+check "T54W 重發同一條 id" "$(jf messageId < /tmp/e2e-wg-m2.json)" "$(jf messageId < /tmp/e2e-wg-m1.json)"
+check "T54W DB 只得一條" "$(q "SELECT count(*)::text n FROM \"WorkGroupMessage\" WHERE \"groupId\"='$WG_ID'" | jf n)" "1"
+MF_CONV=$(q "SELECT id FROM \"Conversation\" WHERE \"clinicId\"='$MF_CLINIC_ID' LIMIT 1" | jf id)
+if [ -n "$MF_CONV" ]; then
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WG_ID/messages" -H 'Content-Type: application/json' -d '{"body":"","conversationId":"'$MF_CONV'"}')
+  check "T54W 分享其他店對話 → 403（唔可以借群探對話）" "$CODE" "403"
+fi
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WG_ID/messages" -H 'Content-Type: application/json' -d '{"body":"   "}')
+check "T54W 空白訊息 → 400" "$CODE" "400"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X PATCH "$BASE/api/admin/workgroups/$WG_ID" -H 'Content-Type: application/json' -d '{"removeIds":["'$TKW_SID'"]}')
+check "T54W STAFF 改成員 → 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/workgroups/$WG_ID" -H 'Content-Type: application/json' -d '{"removeIds":["'$TKW_SID'"]}')
+check "T54W 老闆刪成員 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/workgroups/$WG_ID/messages")
+check "T54W 被刪成員即時睇唔到 → 404" "$CODE" "404"
+q "DELETE FROM \"WorkGroup\" WHERE id='$WG_ID'" >/dev/null 2>&1 || true
+q "DELETE FROM \"AuditLog\" WHERE \"entityId\"='$WG_ID'" >/dev/null 2>&1 || true
 AUD_AFTER=$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
 check "T54 hermetic：ES_ONBOARD 審計已清" "$AUD_AFTER" "0"
 # ★ token/code/PIN 零入 log（grep 自證）
@@ -3727,10 +3764,13 @@ PC_FAIL=0
 pc_refresh_days() { PC_D1=$(date -d '+1 day' +%F); PC_D2=$(date -d '+2 day' +%F); PC_D3=$(date -d '+3 day' +%F); }
 pc_refresh_days
 # pc_pick <clinicId> <providerApricotId|''> <offset> → "providerApricotId|date"（15:00 open 槽）
+# ★ CI d8564ad PC-G4 實錘：provider-sync（roster fixture）將 MF 名錄換成「王醫生」→ L2 仲有 T27 時 seed 醫生（張家俊）嘅舊 row；
+#   pc_pick 揀中舊 row，但 bot getSlots 過 5 分鐘重抓 mock（只得現役醫生）→ 王醫生嗰日剛好閉診（djb2%7）→「該日冇開診」。
+#   → 只揀「現役 ProviderClinic 醫生」嘅槽（= mock 重抓會回嘅集合），唔再食舊 cache。
 pc_pick() {
   local prov="${2:-}"
   pc_refresh_days
-  q "SELECT (\"providerApricotId\"||'|'||\"date\") v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$1' AND \"startTime\"='15:00' AND \"isOpen\"=true AND \"bookedCount\"=0 AND \"date\" IN ('$PC_D1','$PC_D2','$PC_D3')${prov:+ AND \"providerApricotId\"='$prov'} ORDER BY \"date\",\"providerApricotId\" LIMIT 1 OFFSET ${3:-0}" | jf v
+  q "SELECT (\"providerApricotId\"||'|'||\"date\") v FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$1' AND \"startTime\"='15:00' AND \"isOpen\"=true AND \"bookedCount\"=0 AND \"date\" IN ('$PC_D1','$PC_D2','$PC_D3')${prov:+ AND \"providerApricotId\"='$prov'} AND \"providerApricotId\" IN (SELECT p.\"apricotId\" FROM \"Provider\" p JOIN \"ProviderClinic\" pc ON pc.\"providerId\"=p.id WHERE pc.\"clinicId\"='$1' AND p.active AND p.\"apricotId\" IS NOT NULL) ORDER BY \"date\",\"providerApricotId\" LIMIT 1 OFFSET ${3:-0}" | jf v
 }
 pc_prov_name() { q "SELECT name FROM \"Provider\" WHERE \"apricotId\"='$1'" | jf name; }
 pc_surname() { local n; n=$(pc_prov_name "$1"); echo "${n%% *}"; }
@@ -3968,6 +4008,11 @@ fi
 # ── PC-G4. L4 自動落單（pinned + 預設 visit reason → AUTO_BOOK 全鏈）──
 echo "[PC] G4: L4 auto-book ..."
 PC4_CID="$MF_CLINIC_ID"; PC4_CODE="MF"
+# L2 對齊現役名錄（provider-sync 之後 MF 只剩 roster fixture 醫生）：MF/WTC 過期 → sync job 重抓 → 等新 row 落庫先揀槽
+PC4_WTC_ID=$(q "SELECT id FROM \"Clinic\" WHERE code='WTC'" | jf id)
+q "UPDATE \"AvailabilitySlot\" SET \"syncedAt\"=\"syncedAt\"-interval '1 hour' WHERE \"clinicId\" IN ('$MF_CLINIC_ID','$PC4_WTC_ID')" >/dev/null
+pnpm -s e2e:cron sync-availability >/dev/null 2>&1
+wait_for "SELECT (count(*)>0)::text f FROM \"AvailabilitySlot\" WHERE \"clinicId\"='$MF_CLINIC_ID' AND \"syncedAt\">now()-interval '5 minutes'" '[{"f":"true"}]' 90 || echo "  (PC-G4：MF L2 未見重 sync — pc_pick 仍只揀現役醫生)"
 PC4_SLOT=$(pc_pick "$MF_CLINIC_ID" "" 0)
 if [ -z "$PC4_SLOT" ]; then
   PC4_CID=$(q "SELECT id FROM \"Clinic\" WHERE code='WTC'" | jf id); PC4_CODE="WTC"
