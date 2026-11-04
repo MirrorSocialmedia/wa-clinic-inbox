@@ -15,7 +15,7 @@
 
 // ★ cwi-realtime-fix §8.3 (T279)：版本標記 — activate 時 console.info（console 可追溯 SW 更新）。
 //   SW 邏輯任何改動都要 bump 呢個值（byte 變 → 瀏覽器自動偵測新 version）。
-const SW_VERSION = "2026-10-02-notify-a"; // ★ cwi-notify-a4/a5：push 收件回報 + 前台唔雙聲 + 測試通知標題
+const SW_VERSION = "2026-11-04-workgroup"; // ★ cwi-workgroup：工作群 @ 通知（撳 → /workgroups?g=） // ★ cwi-notify-a4/a5：push 收件回報 + 前台唔雙聲 + 測試通知標題
 
 self.addEventListener("install", (e) => self.skipWaiting());
 self.addEventListener("activate", (e) => {
@@ -74,7 +74,9 @@ self.addEventListener("push", (event) => {
         ? `⚠ 升級 · ${d.clinicShort}`
         : d.kind === "routing"
           ? `新個案 · ${d.clinicShort}`
-          : `新訊息 · ${d.clinicShort}`;
+          : d.kind === "workgroup"
+            ? `工作群 · ${d.clinicShort} · 有人 @ 你`
+            : `新訊息 · ${d.clinicShort}`;
   // F-7（cwi-notify-fix）：通知來源留痕 — SW push 係唯一准觸發通知嘅非 socket 來源
   console.debug("notify:", "sw:push");
   event.waitUntil(
@@ -84,11 +86,11 @@ self.addEventListener("push", (event) => {
       const quiet = !d.test && d.kind !== "urgent" && (await pageWillSound());
       await self.registration.showNotification(title, {
         silent: quiet, // 背景／鎖屏 = false（cwi-realtime-fix §7.1：明確 false 先至用系統通知音）
-        tag: d.test ? "push-test" : d.conversationId,
+        tag: d.test ? "push-test" : d.kind === "workgroup" ? `wg-${d.groupId}` : d.conversationId,
         renotify: true,
         requireInteraction: d.kind === "urgent" || d.kind === "routing-escalation",
         vibrate: d.kind === "urgent" ? [200, 100, 200] : [120],
-        data: { conversationId: d.conversationId },
+        data: { conversationId: d.conversationId, groupId: d.kind === "workgroup" ? d.groupId : undefined },
         badge: "/icon-badge.png",
         icon: "/icon-192.png",
       });
@@ -100,9 +102,15 @@ self.addEventListener("push", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const id = event.notification.data?.conversationId;
+  const groupId = event.notification.data?.groupId;
   const url = id ? `/inbox?conv=${id}` : "/inbox"; // ★ cwi-final S0-2：page 讀 ?conv=（舊 ?c= 係死參數）
   event.waitUntil(
     (async () => {
+      // ★ cwi-workgroup：工作群 @ → 開返嗰個群（id 只准英數 — 唔砌任意 URL）
+      if (groupId && /^[A-Za-z0-9_-]{1,64}$/.test(groupId)) {
+        await self.clients.openWindow(`/workgroups?g=${groupId}`);
+        return;
+      }
       const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       const hit = all.find((c) => c.url.includes("/inbox"));
       if (hit) {
