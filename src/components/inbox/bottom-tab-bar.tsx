@@ -75,7 +75,7 @@ export function BottomTabBar({
     { href: "/inbox", label: "收件箱", icon: MessageCircle, badge: unreadCount },
     { href: "/bookings", label: "預約", icon: CalendarDays },
     // ★ cwi-workgroup：工作群（內部團隊群組）
-    { href: "/workgroups", label: "工作群", icon: UsersRound, badge: wg.unread },
+    { href: "/workgroups", label: "工作群", icon: UsersRound, badge: wg.unread + wg.external },
     { href: "/schedule", label: "時間表", icon: Stethoscope },
     // ADMIN / SUPERVISOR（★ cwi-routing-20260906 §8：主管入管理殼睇 AI 級別/建議）→ 管理；STAFF → 我的
     role === "ADMIN" || role === "SUPERVISOR"

@@ -69,6 +69,12 @@ export function clinicPredicate(s: ListScope): Prisma.ConversationWhereInput {
  * ★ 一律用 AND 組合（唔准 spread — 兩個 OR spread 會互相覆蓋 = 越權）。
  */
 export function baseScope(s: ListScope): Prisma.ConversationWhereInput {
+  // ★ cwi-workgroup-p2-20261105：外部對話（Lab／供應商）唔入收件箱列表／計數 — 喺「工作群 → 外部對話」
+  return { AND: [{ external: false }, baseScopeWithExternal(s)] };
+}
+
+/** 同 baseScope 一樣嘅權限範圍，但包埋外部對話 — 只限定點開（?ids= 深連結：工作群「外部對話」撳入嚟） */
+export function baseScopeWithExternal(s: ListScope): Prisma.ConversationWhereInput {
   if (s.scopedSet === null) return s.clinicParam ? locationIn(s.clinicParam) : {};
   return { OR: [clinicPredicate(s), { assigneeId: s.meId }, routedPredicate(s)] };
 }
@@ -174,8 +180,10 @@ export async function loadConversationRows(
     if (o.after) extra.push({ lastMessageAt: { gte: o.after } });
     if (o.contactId) extra.push({ contactId: o.contactId });
     if (o.ids) extra.push({ id: { in: o.ids } });
+    // ★ cwi-workgroup-p2：純 ids 定點（深連結開對話）可以開外部對話；delta／contact 照舊排除
+    const scope = o.ids && !o.after && !o.contactId ? baseScopeWithExternal(s) : base;
     const rows = await prisma.conversation.findMany({
-      where: { AND: [base, ...extra] },
+      where: { AND: [scope, ...extra] },
       orderBy: [{ urgent: "desc" }, { lastMessageAt: "desc" }, { id: "desc" }],
       take: LIST_PAGE_SIZE,
     });
@@ -309,7 +317,7 @@ export async function toConversationDTOs(
   const [contacts, groups, bookings, myUnreadMap, adviceRows, reminderMap] = await Promise.all([
     prisma.contact.findMany({
       where: { id: { in: contactIds } },
-      select: { id: true, waId: true, profileName: true, labels: true, patientStatus: true, identifiedCount: true },
+      select: { id: true, waId: true, profileName: true, labels: true, patientStatus: true, identifiedCount: true, externalName: true, externalOrg: true },
     }),
     prisma.skillGroup.findMany({ where: { id: { in: groupIds } }, select: { id: true, name: true, code: true } }),
     prisma.bookingRequest.findMany({
@@ -422,6 +430,8 @@ export async function toConversationDTOs(
       routedGroupName: cv.routedGroupId ? (groupMap.get(cv.routedGroupId)?.name ?? null) : null,
       routedStaffName: cv.routedStaffId ? (staffMap.get(cv.routedStaffId) ?? null) : null,
       contact: contactMap.get(cv.contactId) ?? null,
+      // ★ cwi-workgroup-p2：外部對話（收件箱列表唔顯示；直接開 /inbox?conv= 時頂部出 banner）
+      external: cv.external,
       // ★ booking-ui（A）：已釘住舊客（藍掣可見性）— 只回 id（姓名喺 patient-context API）
       // ★ audit3 P2-32：形狀統一 = API 版（SSR 舊版 {patientApricotId} 已廢）
       pinnedPatientApricotId: cv.pinnedPatientApricotId,

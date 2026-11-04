@@ -2,6 +2,7 @@
 
 import { Fragment, forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, memo, useRef, useState } from "react";
 import { ShareToWorkgroupDialog } from "@/components/workgroups/share-dialog";
+import { MarkExternalDialog, ExternalBanner } from "@/components/workgroups/external-ui";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
   AlertTriangle,
@@ -699,6 +700,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   const [flagMenuOpen, setFlagMenuOpen] = useState(false);
   // ★ cwi-workgroup：⋯ →「分享去工作群」
   const [shareOpen, setShareOpen] = useState(false);
+  // ★ cwi-workgroup-p2：⋯ →「標記做外部人 → 移去工作群」（Lab／供應商）
+  const [extOpen, setExtOpen] = useState(false);
   const [flagBusy, setFlagBusy] = useState(false);
   const [flagMsg, setFlagMsg] = useState<string | null>(null);
   // cwi-setnav NAV-02：確認彈窗 + 旗標選單入返回堆疊
@@ -1318,6 +1321,18 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 >
                   分享去工作群
                 </button>
+                {!c?.external && p.userRole !== "SUPERVISOR" && (
+                  <button
+                    data-e2e="mark-external-btn"
+                    onClick={() => {
+                      setFlagMenuOpen(false);
+                      setExtOpen(true);
+                    }}
+                    className="w-full text-left px-3 py-1.5 text-sm text-t1 hover:bg-panel-2"
+                  >
+                    標記做外部人 → 移去工作群
+                  </button>
+                )}
                 {/* ★ cwi-ux UX-05：〔放手〕收入 ⋯ 選單（手機）— 兩段確認同獨立掣一致（再撳一次放手？） */}
                 {canRelease && (
                   <button
@@ -1346,7 +1361,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             </>
           ) : null}
         </div>
-        {shareOpen && c && <ShareToWorkgroupDialog conversationId={c.id} onClose={() => setShareOpen(false)} />}
+        {shareOpen && c && <ShareToWorkgroupDialog conversationId={c.id} canRelease={canRelease} onClose={() => setShareOpen(false)} />}
+        {extOpen && c && <MarkExternalDialog conversationId={c.id} defaultName={c.contact?.profileName ?? ""} onClose={() => setExtOpen(false)} />}
         {/* cwi-multiclinic-20260903（MD A.6.1）：〔放手〕— 現任負責人 ∨ ADMIN 見；兩段確認防誤觸
             ★ cwi-ux UX-05：手機收入 ⋯ 選單（release-menu-btn），獨立掣只 md: 以上 */}
         {canRelease && (
@@ -1397,6 +1413,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
         </span>
       </div>
 
+      {/* ★ cwi-workgroup-p2：外部對話（Lab／供應商）橫額 — 唔觸發 AI／預約／銷售；可以取消標記 */}
+      {c.external && <ExternalBanner conversationId={c.id} name={c.contact?.externalName ?? null} org={c.contact?.externalOrg ?? null} canEdit={p.userRole !== "SUPERVISOR"} />}
       {/* ★ 擁有人 2026-10-18：🙋 要求真人／🔕 已退訂 橫額（對話欄頂部 — 唔使開右欄都見到） */}
       <ConversationStatusBanners conversationId={c.id} lastInboundId={lastInboundId} compact={isMobile} />
       {/* ★ cwi-sales-20261028：綁定／保護中病人 — 唔係負責銷售 → 顯示邊個負責 + 請求轉交／強制接手 */}

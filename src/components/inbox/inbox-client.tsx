@@ -101,7 +101,8 @@ function mergeKeepRealtime(prev: ConversationItem[], serverRows: ConversationIte
   for (const c of prev) {
     if (serverIds.has(c.id)) continue;
     const t = new Date(c.lastMessageAt).getTime();
-    if (rtAdded.has(c.id) || t > serverMax) out.push(c);
+    // ★ cwi-workgroup-p2：外部對話永遠唔喺 server 列表（收件箱排除）— 深連結開咗嘅 row 要保留，否則全量 refetch 一嚟就變空白
+    if (rtAdded.has(c.id) || t > serverMax || c.external) out.push(c);
   }
   return out;
 }
@@ -717,6 +718,8 @@ export function InboxClient({
           aiSummary: existing?.aiSummary ?? null,
           // ★ cwi-statusrole2-20260910（MD §3）：翻開事件帶返 reopenedAt（24h badge）；唔帶 = 沿用舊值
           reopenedAt: e.conversation.reopenedAt ?? existing?.reopenedAt ?? null,
+          // ★ cwi-workgroup-p2：外部對話新訊息 → row 帶 external（列表 filter 收埋；唔好由 realtime 偷偷入收件箱）
+          external: e.conversation.external ?? existing?.external ?? false,
           contact: e.contact ?? existing?.contact ?? null,
           pendingBooking: existing?.pendingBooking ?? null,
           holdEvent: existing?.holdEvent ?? null,
@@ -834,6 +837,8 @@ export function InboxClient({
                   : {}),
                 ...(typeof e.assignVersion === "number" ? { assignVersion: e.assignVersion } : {}),
                 ...(typeof e.unreadCount === "number" ? { unreadCount: e.unreadCount } : {}),
+                // ★ cwi-workgroup-p2：標記／取消外部人 → 列表即時收／出
+                ...(typeof e.external === "boolean" ? { external: e.external } : {}),
                 // ★ cwi-inbox-r3 Q5：轉地點 — patch 地點欄
                 ...(e.locationChanged
                   ? {
@@ -854,7 +859,8 @@ export function InboxClient({
         )
       );
       // ★ cwi-inbox-r3 Q5：轉地點 → 列表成員變（新分店要見到 / 舊分店要消失）→ 重拉
-      if (e.locationChanged) scheduleListRefreshRef.current();
+      // ★ cwi-workgroup-p2：取消外部 → 對話返收件箱（未載入嘅 row 要重拉）
+      if (e.locationChanged || e.external === false) scheduleListRefreshRef.current();
     });
 
     // ── ★ cwi-ux UX-01：一鍵已讀跨裝置同步（staff:{staffId} room 定向；其他裝置 badge 同步變 0）──

@@ -165,6 +165,11 @@ export async function handleAiJob(job: Job<AiJobData>): Promise<Record<string, u
     log.warn({ jobId: job.id, conversationId: data.conversationId }, "ai job: clinic mismatch — skip (no retry)");
     return { skipped: "clinic-mismatch" };
   }
+  // ★ cwi-workgroup-p2-20261105：外部對話（Lab／供應商）唔行 AI（排咗隊之後先標外部 / stuck-sweep 補排都喺度擋）
+  if (conv.external) {
+    log.info({ jobId: job.id, conversationId: conv.id }, "ai job: external conversation — skip (no retry)");
+    return { skipped: "external" };
+  }
   const clinic = await prisma.clinic.findUnique({ where: { id: conv.clinicId } });
   if (!clinic) {
     log.warn({ jobId: job.id, clinicId: conv.clinicId }, "ai job: clinic gone — skip (no retry)");

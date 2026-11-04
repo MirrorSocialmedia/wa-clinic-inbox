@@ -64,7 +64,7 @@ export async function runAutoReleaseSweep(
   now: Date = new Date()
 ): Promise<{ checked: number; released: number; failed: number }> {
   const rows = await prisma.conversation.findMany({
-    where: { assigneeId: { not: null }, status: "OPEN" },
+    where: { assigneeId: { not: null }, status: "OPEN", external: false }, // ★ cwi-workgroup-p2：外部對話唔自動放手
     select: {
       id: true,
       clinicId: true,

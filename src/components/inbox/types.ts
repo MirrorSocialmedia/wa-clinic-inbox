@@ -29,6 +29,9 @@ export interface ContactInfo {
   /** ★ cwi-patient-identify：EXISTING 舊客／NEW 新客／UNKNOWN 未確定；null = 未判定 */
   patientStatus?: string | null;
   identifiedCount?: number | null;
+  /** ★ cwi-workgroup-p2：外部人（Lab／供應商）名同公司；null = 病人 */
+  externalName?: string | null;
+  externalOrg?: string | null;
 }
 
 export interface WindowState {
@@ -141,6 +144,8 @@ export interface ConversationItem {
   sales?: ConversationSalesInfo | null;
   /** ★ cwi-followup-p3（鐵律 5）：badge「跟進回覆」— 24h 內由 client derive */
   followupRepliedAt?: string | null;
+  /** ★ cwi-workgroup-p2：外部對話（Lab／供應商）— 收件箱列表唔顯示，喺工作群「外部對話」 */
+  external?: boolean;
   contact: ContactInfo | null;
   /** ★ booking-ui（A）：已釘住舊客（chat 卡藍掣「幫我喺 Apricot 落單」可見性）— null = 未釘住
    * ★ cwi-final S1-2（裁決 8 / audit3 P2-32）：形狀統一 = 一律用 flat API 版（舊 {patientApricotId} 形狀已廢） */
@@ -355,6 +360,8 @@ export interface NewMessageEvent {
     lastInboundAt: string | null;
     /** ★ cwi-statusrole2-20260910（MD §3）：翻開事件帶返（badge 即時顯示） */
     reopenedAt?: string | null;
+    /** ★ cwi-workgroup-p2：外部對話（Lab／供應商）— 收件箱列表唔顯示 */
+    external?: boolean;
   };
 }
 
@@ -381,6 +388,8 @@ export interface ConvUpdatedEvent {
   /** ★ Realtime P0 (R5)：新 version（PATCH assigneeId 變動 → +1） */
   assignVersion?: number;
   unreadCount?: number;
+  /** ★ cwi-workgroup-p2：標記／取消外部人 */
+  external?: boolean;
   /** ★ cwi-inbox-r3 Q5：轉地點（locationChanged=true 時有值） */
   handlingClinicId?: string | null;
   locationClinicId?: string;

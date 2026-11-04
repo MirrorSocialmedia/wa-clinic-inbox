@@ -428,6 +428,44 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/workgroups/authz-none/read", method: "POST", body: JSON.stringify({}) }),
     expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
   },
+  // ★ cwi-workgroup-p2-20261105：我接／置頂／搜尋／附件 — 非成員一律 404（零寫入）；附件檔非成員 404（唔洩露存在性）
+  "POST /api/workgroups/[id]/messages/[mid]/claim": {
+    fixture: () => ({ url: "/api/workgroups/authz-none/messages/authz-none/claim", method: "POST", body: JSON.stringify({}) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "POST /api/workgroups/[id]/messages/[mid]/pin": {
+    fixture: () => ({ url: "/api/workgroups/authz-none/messages/authz-none/pin", method: "POST", body: JSON.stringify({ pin: true }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "GET /api/workgroups/[id]/search": {
+    fixture: () => ({ url: "/api/workgroups/authz-none/search?q=authz" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "POST /api/workgroups/[id]/attachments": {
+    // multipart route — matrix api() 冇 body → formData 炸 → 400（未落碟）
+    fixture: () => ({ url: "/api/workgroups/authz-none/attachments", method: "POST" }),
+    expect: { UNAUTH: 401, STAFF_TY: 400, SUPERVISOR: 400, ADMIN_ALL: 400 },
+  },
+  "GET /api/workgroups/files/[file]": {
+    fixture: () => ({ url: "/api/workgroups/files/wg-00000000-0000-0000-0000-000000000000.png" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "GET /api/workgroups/external": {
+    fixture: () => ({ url: "/api/workgroups/external" }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, SUPERVISOR: 200, ADMIN_ALL: 200 },
+  },
+  "POST /api/conversations/[id]/external": {
+    fixture: () => ({ url: "/api/conversations/nope/external", method: "POST", body: JSON.stringify({ name: "authz" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "DELETE /api/conversations/[id]/external": {
+    fixture: () => ({ url: "/api/conversations/nope/external", method: "DELETE" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "GET /api/conversations/[id]/external": {
+    fixture: () => ({ url: "/api/conversations/nope/external" }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, SUPERVISOR: 200, ADMIN_ALL: 200 },
+  },
   "GET /api/sales/mine": {
     // ★ cwi-sales 第 3 期：我的銷售 — 只限銷售人員（matrix 角色都唔係銷售 → 403）
     fixture: () => ({ url: "/api/sales/mine?month=2026-10" }),

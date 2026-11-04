@@ -25,10 +25,10 @@ enum Direction {
 }
 
 enum Channel {
-  API        // 系統發
-  APP_ECHO   // 店員手機 App 發嘅回音
-  HISTORY    // 舊 chat 匯入
-  INTERNAL   // ★ H1：內部備註（staff↔staff；永不出 Graph API — 物理上唔入 outbound queue）
+  API // 系統發
+  APP_ECHO // 店員手機 App 發嘅回音
+  HISTORY // 舊 chat 匯入
+  INTERNAL // ★ H1：內部備註（staff↔staff；永不出 Graph API — 物理上唔入 outbound queue）
 }
 
 enum ConvStatus {
@@ -76,23 +76,23 @@ enum DraftStatus {
 // AI Workflow Phase A（cwi-ai-20260824-t1）：內部通知軌（D-8/D-9）—「AI 通知俾職員」
 // 同「客戶 WhatsApp 通知」兩條軌完全分開。kind 決定 UI 圖示/顏色；新 kind 先加 enum。
 enum NoticeKind {
-  MEDIA_RECEIVED    // 病人 send 相/檔案（Phase A2）
+  MEDIA_RECEIVED // 病人 send 相/檔案（Phase A2）
   URGENT_ESCALATION // 急症（socket-only 升級為持久化 — 離線員工唔漏）
-  HANDOFF_REQUEST   // session 卡死 / 病人要真人（Phase C 用）
-  BOOKING_AUTO      // L4：AI 已自動落單（資訊性）
-  SUGGESTION_READY  // 學習迴路有新建議（Phase E 用）
+  HANDOFF_REQUEST // session 卡死 / 病人要真人（Phase C 用）
+  BOOKING_AUTO // L4：AI 已自動落單（資訊性）
+  SUGGESTION_READY // 學習迴路有新建議（Phase E 用）
   SYSTEM
   // ★ cwi-routing-20260906：規則式指派通知軌（§2.4 / §3）
-  ROUTING_ASSIGNED  // 路由命中 → 組/單人標記 + 通知（title「新個案 · {組} · {店}」零 PII）
+  ROUTING_ASSIGNED // 路由命中 → 組/單人標記 + 通知（title「新個案 · {組} · {店}」零 PII）
   ROUTING_ESCALATION // 投訴 N 分鐘未接手 → 升級第二級組（title「升級 · {原組} 未處理 · {店}」）
-  FOLLOWUP_ADVICE    // ★ cwi-advice-20261024：醫生建議跟進（定向：負責人 → 顧問組 → 全店）
-  FOLLOWUP_REMINDER  // ★ cwi-reminder-20261025：員工自設「⏰ 待跟進」提醒到期（定向：設提醒嗰個人／負責人）
+  FOLLOWUP_ADVICE // ★ cwi-advice-20261024：醫生建議跟進（定向：負責人 → 顧問組 → 全店）
+  FOLLOWUP_REMINDER // ★ cwi-reminder-20261025：員工自設「⏰ 待跟進」提醒到期（定向：設提醒嗰個人／負責人）
   // ★ cwi-sales-20261028：銷售系統（定向通知）
-  SALES_PROTECTION   // 保護期開始／到期出公海（定向：個銷售）
-  SALES_HANDOVER     // 請銷售轉交／銷售已轉交／主管強制接手（定向：銷售 or 接手人）
-  SALES_UNANSWERED   // 綁定病人 N 分鐘冇人覆（定向：主管 + ADMIN）
-  SALES_REVIEW      // ★ 第 5 期：老闆批／拒／扣起你張單（定向：個銷售；冇對話 → 撳入「我的銷售」）
-  SALES_ADMIN       // ★ 第 5 期：傭金同步停咗／失敗（定向：集團管理員；撳入「銷售」管理）
+  SALES_PROTECTION // 保護期開始／到期出公海（定向：個銷售）
+  SALES_HANDOVER // 請銷售轉交／銷售已轉交／主管強制接手（定向：銷售 or 接手人）
+  SALES_UNANSWERED // 綁定病人 N 分鐘冇人覆（定向：主管 + ADMIN）
+  SALES_REVIEW // ★ 第 5 期：老闆批／拒／扣起你張單（定向：個銷售；冇對話 → 撳入「我的銷售」）
+  SALES_ADMIN // ★ 第 5 期：傭金同步停咗／失敗（定向：集團管理員；撳入「銷售」管理）
 }
 
 // Phase 2b：逐舖 AI 模式（指揮大神 2026-08-18 決定，覆蓋 MD D5「AI 永不發送」）
@@ -140,68 +140,68 @@ enum PainTriageStatus {
 // 知識庫 = staff 管嘅參數（同 params 同級）— 改即刻生效、可審計、可 rollback（Admin UI + AuditLog）。
 // R-8 事實鐵律：時段/醫生/病人記錄唔准入知識庫（骨架只係「係咩/幾多次/幾耐/痛唔痛」級嘅通用描述）。
 enum KnowledgeKind {
-  SERVICE   // 服務項目（洗牙/補牙/杜牙根/...）
-  POST_OP   // 術後護理
-  POLICY    // 診所政策（改期/付款/... — 唔寫實際時間）
-  PRICE     // 收費範圍（disclaimer 必填，code 強制附加）
-  PREP      // 到診準備
-  FAQ       // 其他常見問題
+  SERVICE // 服務項目（洗牙/補牙/杜牙根/...）
+  POST_OP // 術後護理
+  POLICY // 診所政策（改期/付款/... — 唔寫實際時間）
+  PRICE // 收費範圍（disclaimer 必填，code 強制附加）
+  PREP // 到診準備
+  FAQ // 其他常見問題
 }
 
 // ★ Part F（F.2）：診所知識庫（RAG 兩階段檢索嘅語料）。
 // clinicId null = 全局條目；有值 = 該店（覆寫/補充）。
 // title 進目錄（要夠精準）；keywords 口語+書面（檢索匹配用）；body ≤600 字（超長拆條）。
 model KnowledgeDoc {
-  id         String        @id @default(cuid())
-  clinicId   String?                    // null = 全局；有值 = 該店覆寫
-  kind       KnowledgeKind
-  title      String                     // 進目錄，要夠精準
-  keywords   String[]                   // 口語+書面
-  body       String    @db.Text         // ≤600 字，超長拆條
-  disclaimer String?                    // kind=PRICE 必填（zod refine，長度 ≥8）
+  id              String        @id @default(cuid())
+  clinicId        String? // null = 全局；有值 = 該店覆寫
+  kind            KnowledgeKind
+  title           String // 進目錄，要夠精準
+  keywords        String[] // 口語+書面
+  body            String        @db.Text // ≤600 字，超長拆條
+  disclaimer      String? // kind=PRICE 必填（zod refine，長度 ≥8）
   // ★ consult v2.1 C1（§0.5-B-2）：短版 disclaimer（≤12 字）— 高價值 PRICE 條目必填（zod refine）。
   //   高價值 = priceMax/priceMin > 1.5 或 priceMax >= 5000（price-guard §0.5-B-1 只喺高價值先 append）。
   shortDisclaimer String?
-  priceMin   Int?
-  priceMax   Int?                       // priceMin <= priceMax
-  enabled    Boolean   @default(true)
-  version    Int       @default(1)
-  updatedBy  String?
-  updatedAt  DateTime  @updatedAt
+  priceMin        Int?
+  priceMax        Int? // priceMin <= priceMax
+  enabled         Boolean       @default(true)
+  version         Int           @default(1)
+  updatedBy       String?
+  updatedAt       DateTime      @updatedAt
 
   @@index([clinicId, enabled])
 }
 
 // ★ Part F（F.5）：GoldenCase 評測集（零 PII — 入庫前強制 deid；唔存 conversationId/messageId）。
 enum GoldenSource {
-  INBOX_BUTTON   // inbox「加入測試集」掣（STAFF 可加，ADMIN 可編輯/停用）
+  INBOX_BUTTON // inbox「加入測試集」掣（STAFF 可加，ADMIN 可編輯/停用）
   HISTORY_SAMPLE // 歷史對話取樣（AI 預標 + 人手審核；未審核 enabled=false 唔入 eval）
-  MANUAL         // 人手建立
+  MANUAL // 人手建立
 }
 
 // ★ cwi-hub-a-20260914（Part A）：公司層 — 三公司 × 六診所（MD A.0 A-1～A-4）。
 // code = A/B/C（老細拍板 2026-09-14）：A 菁薈（TY）/ B 臻善（YMT,TW,MF）/ C 匯樂（TKW,YL；dev WTC 歸 C）。
 model Company {
-  id        String   @id @default(cuid())
-  code      String   @unique          // A / B / C
-  name      String
-  enabled   Boolean  @default(true)
+  id                   String   @id @default(cuid())
+  code                 String   @unique // A / B / C
+  name                 String
+  enabled              Boolean  @default(true)
   // ★ cwi-followup-p0-20260915（MD §1.1）：workforce 公司主資料快取 key（= CWM Company.id）。
   //   首次同步按 name 對應填；對唔上 → null + hub UI 紅字要求人手配對。
-  sourceId  String?  @unique
+  sourceId             String?  @unique
   // ★ cwi-inbox-r4（擁有人拍板 2026-10-17）：轉地點白名單 — 呢間公司嘅對話可以轉去邊幾間其他公司嘅分店
   //   （單向；空 = 只限同公司）。只有全公司權限 ADMIN 改得（PATCH /api/admin/companies/[id]）。
   transferToCompanyIds String[] @default([])
-  clinics   Clinic[]
-  createdAt DateTime @default(now())
+  clinics              Clinic[]
+  createdAt            DateTime @default(now())
 }
 
 // ★ cwi-followup-p0-20260915（MD §1.1）：公司同步運行記錄（hub 健康列 + e2e 斷言）
 model CompanySyncRun {
   id      String   @id @default(cuid())
   runAt   DateTime @default(now())
-  status  String   // ok / failed
-  summary String   // JSON：{ companies, clinicsMapped, unmatched, source }
+  status  String // ok / failed
+  summary String // JSON：{ companies, clinicsMapped, unmatched, source }
   error   String?
 
   @@index([runAt])
@@ -211,85 +211,86 @@ model CompanySyncRun {
 model ProviderSyncRun {
   id      String   @id @default(cuid())
   runAt   DateTime @default(now())
-  status  String   // ok / failed
-  summary String   // JSON：{ clinicsRemote, clinicsMatched, unmatchedClinics, providersUpserted, linksAdded, linksPruned, pruneDeferred, providersDeactivated, staleClinics, source }
+  status  String // ok / failed
+  summary String // JSON：{ clinicsRemote, clinicsMatched, unmatchedClinics, providersUpserted, linksAdded, linksPruned, pruneDeferred, providersDeactivated, staleClinics, source }
   error   String?
 
   @@index([runAt])
 }
 
 model Clinic {
-  id               String  @id @default(cuid())
-  code             String  @unique            // TKW / MF ...（同 clinic-workforce 用同一套 code，方便對照）
-  name             String
+  id                  String           @id @default(cuid())
+  code                String           @unique // TKW / MF ...（同 clinic-workforce 用同一套 code，方便對照）
+  name                String
   // ★ cwi-hub-a-20260914（Part A）：公司歸屬 — nullable（migration 期間容許未分配；
   //   回填後驗證 SELECT count(*) WHERE companyId IS NULL = 0 先繼續，MD A.1 第 5 步）。
   //   COMPANY 範圍員工見自己公司全部店（公司加店自動包含 — A.4）。
-  companyId        String?
-  company          Company? @relation(fields: [companyId], references: [id])
-  waPhoneNumberId  String  @unique            // Meta phone_number_id — 分流嘅 key
+  companyId           String?
+  company             Company?         @relation(fields: [companyId], references: [id])
+  waPhoneNumberId     String           @unique // Meta phone_number_id — 分流嘅 key
   // ★ Phase B（cwi-tmpl-20260824-b1）：WABA id（template 列表 API 作用域 —
   //   GET /{wabaId}/message_templates）。onboarding exchange 帶到先寫入；nullable（舊店可後補）。
-  waBusinessAccountId String? 
-  waDisplayNumber  String
-  apricotClinicId  String?                    // 對照 provider-roster 已有實值
-  greetingConfig   Json?                      // 營業時間/地址/常見 FAQ，餵畀 AI 草稿用
+  waBusinessAccountId String?
+  waDisplayNumber     String
+  apricotClinicId     String? // 對照 provider-roster 已有實值
+  greetingConfig      Json? // 營業時間/地址/常見 FAQ，餵畀 AI 草稿用
   // Phase 2b：逐舖 AI 模式（default DRAFT = 舊行為；AUTO = AI 可直接自動發）
-  aiMode           AiMode  @default(DRAFT)
-  @@index([companyId])
+  aiMode              AiMode           @default(DRAFT)
   // Phase 3：該店醫生名錄（SCREEN_PROVIDER 來源；sync 表 — 多對多，醫生可以跨店）
-  providers        ProviderClinic[]
+  providers           ProviderClinic[]
   // ★ cwi-h6-20260830：多店員工綁定（StaffClinic M2M）
-  staff            StaffClinic[]
+  staff               StaffClinic[]
   // Phase 4：webhook 最後事件時間（inbound worker 每 event 更新）— 5 分鐘健康自檢
   // stale 判斷用：有 traffic（!= null）但 > 30 分鐘無事件 → 警報；null = 從來無 traffic 唔計。
-  lastWebhookEventAt DateTime? @db.Timestamptz
+  lastWebhookEventAt  DateTime?        @db.Timestamptz
   // Phase 4：quality_rating 每日檢查結果（GREEN/YELLOW/RED）+ 上次檢查時間（/admin 顯示）
-  qualityRating    String?                    // GREEN / YELLOW / RED
-  qualityCheckedAt DateTime? @db.Timestamptz
+  qualityRating       String? // GREEN / YELLOW / RED
+  qualityCheckedAt    DateTime?        @db.Timestamptz
   // ★ H3：該店自動派單政策（app 內設定）— { mode: "MANUAL_CLAIM"|"ROUND_ROBIN"|"DUTY_ROSTER" }
   // NULL = 預設 MANUAL_CLAIM（新對話入店隊列 unassigned，員工接手/首發 auto-claim）
-  assignPolicy     Json?
+  assignPolicy        Json?
+
+  @@index([companyId])
 }
 
 model StaffUser {
-  id           String  @id @default(cuid())
-  email        String  @unique
-  passwordHash String
-  name         String
-  role         Role
+  id                    String             @id @default(cuid())
+  email                 String             @unique
+  passwordHash          String
+  name                  String
+  role                  Role
   // @deprecated（cwi-h6-20260830）：改用 StaffClinic M2M；保留做 primary fallback + 舊 session 兼容（唔 drop）
-  clinicId     String?
+  clinicId              String?
   // ★ cwi-hub-a-20260914（Part A，MD A.1）：角色同範圍拆兩個維度（A-1：角色＝可以做咩；範圍＝喺邊度做）。
   // scopeType = ALL（全集團）| COMPANY（某公司 — 公司加店自動包含 A-4）| CLINICS（指定診所 StaffClinic，可跨公司）。
   // 舊 session（JWT 無 scopeType）fallback：ADMIN→ALL、STAFF→CLINICS（MD A.2；SUPERVISOR 照現行全店）。
-  scopeType      String  @default("CLINICS")
-  scopeCompanyId String?
+  scopeType             String             @default("CLINICS")
+  scopeCompanyId        String?
   // ★ cwi-h6-20260830：多店員工（M2M）— STAFF 可綁多間店；ADMIN 唔插（全店）
-  clinics      StaffClinic[]
-  active       Boolean @default(true)
+  clinics               StaffClinic[]
+  active                Boolean            @default(true)
   // 安全審計 H-2：ADMIN TOTP（RFC 6238）secret — AES-256-GCM 密文（iv|tag|ct base64，
   // 見 src/lib/totp-enc.ts，key = TOTP_ENC_KEY）。NULL = 未啟用；啟用後 ADMIN 登入
   // 第二步要 TOTP code；STAFF 永遠 NULL（登入流程完全唔變）。
-  totpSecretEnc String?
+  totpSecretEnc         String?
   // ★ cwi-final S3-5：TOTP enroll 待確認密文（新 secret 先寫呢度 — confirm 過 code 先搬去
   // totpSecretEnc；NULL = 冇進行中 enroll）。同 totpSecretEnc 同格式（AES-256-GCM，TOTP_ENC_KEY）。
-  totpPendingEnc String?
+  totpPendingEnc        String?
   // ★ H3：自動派單 round-robin 用（「上次被派時間」最耐嗰個先；NULL = 從未派）
-  lastAssignedAt DateTime? @db.Timestamptz
+  lastAssignedAt        DateTime?          @db.Timestamptz
   // ★ cwi-notify-v2-20260903：push 偏好（DB = server 推送之源；localStorage 只做即時 UI）。
   //   Json: { mutedClinics: string[], adminMsgClinics: string[] } — desktop/sound 係 per-device，唔入 DB。
-  pushPrefs         Json?
+  pushPrefs             Json?
   // ★ cwi-final S6-9（③）：per-staff UI 偏好 — Json: { enterSends?: boolean }（預設 true = 現行為）
-  uiPrefs           Json?
-  pushSubscriptions PushSubscription[]
+  uiPrefs               Json?
+  pushSubscriptions     PushSubscription[]
   // ★ cwi-sales-20261028：「☑ 銷售人員」— 勾咗先套用銷售系統（保護期、綁定、對話鎖、開單、傭金）。
   //   salesApricotUserId = Apricot vita-users id（invoice sales 欄；一個 Apricot 帳號只可以綁一個 inbox 帳號）。
   //   workforceEmployeeId = workforce Employee.id（打卡核實、糧單）。Name 欄只係顯示快照。
-  isSales               Boolean @default(false)
-  salesApricotUserId    String? @unique
+  isSales               Boolean            @default(false)
+  salesApricotUserId    String?            @unique
   salesApricotUserName  String?
-  workforceEmployeeId   String? @unique
+  workforceEmployeeId   String?            @unique
   workforceEmployeeName String?
 }
 
@@ -299,10 +300,11 @@ model StaffClinic {
   // - ADMIN 唔插行（佢全店）；STAFF 至少一行（登入時寫入 session clinicIds）。
   staffId   String
   clinicId  String
-  isPrimary Boolean  @default(false)
-  createdAt DateTime @default(now()) @db.Timestamptz
+  isPrimary Boolean   @default(false)
+  createdAt DateTime  @default(now()) @db.Timestamptz
   staff     StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
   clinic    Clinic    @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
   @@id([staffId, clinicId])
   @@index([clinicId])
 }
@@ -311,45 +313,53 @@ model StaffClinic {
 //   endpoint unique（subscribe 冪等 upsert）；lastOkAt = 最後 2xx 發送時間（運維/e2e 驗證）；
 //   staff 刪除/登出 → Cascade 清（共用前台機鐵律：唔好換人登入仲收到上一個人嘅通知）。
 model PushSubscription {
-  id        String    @id @default(cuid())
-  staffId   String
-  endpoint  String    @unique
-  p256dh    String
-  auth      String
-  userAgent String?
-  createdAt DateTime  @default(now()) @db.Timestamptz
-  lastOkAt  DateTime? @db.Timestamptz
+  id             String    @id @default(cuid())
+  staffId        String
+  endpoint       String    @unique
+  p256dh         String
+  auth           String
+  userAgent      String?
+  createdAt      DateTime  @default(now()) @db.Timestamptz
+  lastOkAt       DateTime? @db.Timestamptz
   // ★ cwi-notify-a4（2026-10-02）：手機 SW 真正收到推送嘅時間（sw.js push → POST /api/push/ack）—
   //   lastOkAt = 推送服務（Google/Apple）收貨；lastReceivedAt = 部機收到。兩者差 = 中間斷咗（診斷用）。
   lastReceivedAt DateTime? @db.Timestamptz
-  staff     StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  staff          StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
   @@index([staffId])
 }
 
 model Contact {
-  id          String @id @default(cuid())
-  clinicId    String
-  waId        String                          // 852XXXXXXXX
-  profileName String?
-  labels      String[]
+  id                         String               @id @default(cuid())
+  clinicId                   String
+  waId                       String // 852XXXXXXXX
+  profileName                String?
+  labels                     String[]
   // ★ cwi-followup-p3-20260916（MD §4.2/§4.6）：follow-up opt-out — 永遠優先，任何規則唔可 override。
   // 自動偵測（inbound 關鍵詞）/ 手動（病人卡 toggle）；唔影響病人主動查詢嘅正常回覆。
-  followupOptOut Boolean @default(false)
-  optOutAt       DateTime?
-  optOutSource   String?                      // auto（關鍵詞）| manual（staff toggle）
-  salutation     String?                      // 先生／小姐／太太（template 顯示用；B-9：唔自動估 — AI 唔准由名估性別）
-  locale         String?                      // ★ cwi-followup-v3 B-9：zh（default）| en — 決定 *_en template
+  followupOptOut             Boolean              @default(false)
+  optOutAt                   DateTime?
+  optOutSource               String? // auto（關鍵詞）| manual（staff toggle）
+  salutation                 String? // 先生／小姐／太太（template 顯示用；B-9：唔自動估 — AI 唔准由名估性別）
+  locale                     String? // ★ cwi-followup-v3 B-9：zh（default）| en — 決定 *_en template
   // ★ cwi-patient-identify-20261017（擁有人拍板）：新客／舊客判定 — 用電話直接搜晒全部 Apricot 帳號（唔使有預約）。
   //   patientStatus：EXISTING（任何帳號有病人檔 = 舊客，包括已登記未到診）／NEW（全部帳號搜過都冇）／
   //   UNKNOWN（有帳號查唔到 — 唔當新客，稍後重試）；null = 未判定。
-  patientStatus             String?
-  patientCheckedAt          DateTime?
-  identifiedPatientApricotId String?           // 只認到一個病人先填（多個 → null，staff 喺病人卡揀）
-  identifiedCount           Int?
-  identifiedPatientCode     String?           // ★ cwi-flow-quick：認到唯一病人嘅 Apricot 編號（頂部 chip 用 — 索引未有到診都顯示到）
-  consents      ContactConsent[]
-  patientLinks  ContactPatientLink[]
-  @@unique([clinicId, waId])                  // 同一病人喺兩間店 = 兩條 Contact（隔離）
+  patientStatus              String?
+  patientCheckedAt           DateTime?
+  identifiedPatientApricotId String? // 只認到一個病人先填（多個 → null，staff 喺病人卡揀）
+  identifiedCount            Int?
+  identifiedPatientCode      String? // ★ cwi-flow-quick：認到唯一病人嘅 Apricot 編號（頂部 chip 用 — 索引未有到診都顯示到）
+  // ★ cwi-workgroup-p2-20261105：外部人（例如 Lab 師傅、供應商 — 唔係病人）。標咗之後佢嘅對話搬去「工作群 → 外部對話」，
+  //   唔入收件箱／未指派計數，唔觸發 AI、預約、銷售、跟進、病人判定。null = 病人（預設）。
+  externalAt                 DateTime?            @db.Timestamptz
+  externalName               String?              @db.VarChar(40)
+  externalOrg                String?              @db.VarChar(60)
+  externalById               String?
+  consents                   ContactConsent[]
+  patientLinks               ContactPatientLink[]
+
+  @@unique([clinicId, waId]) // 同一病人喺兩間店 = 兩條 Contact（隔離）
 }
 
 // ★ cwi-multi-patient-20261018（擁有人拍板）：一個電話連幾個病人檔（本人／年老父母／子女共用一個 WhatsApp）。
@@ -363,9 +373,9 @@ model ContactPatientLink {
   patientApricotId String
   patientCode      String?
   patientName      String?
-  relation         String?  // SELF 本人／PARENT 父母／CHILD 子女／SPOUSE 配偶／SIBLING 兄弟姊妹／OTHER 其他；null = 未填
-  source           String   // IDENTIFIED | LOOKUP | SEARCH
-  createdByStaffId String?  // 系統自動 = null
+  relation         String? // SELF 本人／PARENT 父母／CHILD 子女／SPOUSE 配偶／SIBLING 兄弟姊妹／OTHER 其他；null = 未填
+  source           String // IDENTIFIED | LOOKUP | SEARCH
+  createdByStaffId String? // 系統自動 = null
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -384,12 +394,13 @@ model ContactConsent {
   contactId       String
   clinicId        String
   kind            String   @default("PROACTIVE_CONTACT") // 固定 — 未來擴充（如 MARKETING）先加
-  source          String   // WHATSAPP_MESSAGE（病人回覆偵測）| STAFF_MANUAL（staff 重新啟用）
-  purpose         String   // 聯絡用途（staff 必填；自動偵測 = 固定文案）
-  sourceMessageId String?  // 觸發嘅 inbound Message.id（WHATSAPP_MESSAGE 必有；STAFF_MANUAL null）
-  staffId         String?  // 經手 staff（STAFF_MANUAL 必有；自動偵測 null）
+  source          String // WHATSAPP_MESSAGE（病人回覆偵測）| STAFF_MANUAL（staff 重新啟用）
+  purpose         String // 聯絡用途（staff 必填；自動偵測 = 固定文案）
+  sourceMessageId String? // 觸發嘅 inbound Message.id（WHATSAPP_MESSAGE 必有；STAFF_MANUAL null）
+  staffId         String? // 經手 staff（STAFF_MANUAL 必有；自動偵測 null）
   createdAt       DateTime @default(now())
-  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  contact         Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
   @@index([contactId, createdAt])
 }
 
@@ -397,17 +408,17 @@ model ContactConsent {
 // 鐵律（R-2）：路由結果只寫 Conversation.routed* 標記欄，**唔掂 assigneeId** —
 // 對話仍然「未指派」（公海照見、任何人接手得、Send Lock 唔生效）。
 enum RoutingTargetType {
-  GROUP        // 技能組（初版三個 + 主管組 SUPV）
-  STAFF        // 單人（= 組得一個人）
-  CLINIC_POOL  // 該店公海（唔做任何標記 = 現行行為）
+  GROUP // 技能組（初版三個 + 主管組 SUPV）
+  STAFF // 單人（= 組得一個人）
+  CLINIC_POOL // 該店公海（唔做任何標記 = 現行行為）
 }
 
 model SkillGroup {
-  id          String  @id @default(cuid())
-  name        String                          // 療程顧問 / 投訴處理 / 前台 / 主管
-  code        String  @unique                 // CONSULT / COMPLAINT / FRONTDESK / SUPV
+  id          String   @id @default(cuid())
+  name        String // 療程顧問 / 投訴處理 / 前台 / 主管
+  code        String   @unique // CONSULT / COMPLAINT / FRONTDESK / SUPV
   description String?
-  enabled     Boolean @default(true)
+  enabled     Boolean  @default(true)
   createdAt   DateTime @default(now())
 
   // 裸 String join 欄（MD §1 原樣 — 唔開 Prisma relation：路由/組管理都係 app 層 join，
@@ -415,9 +426,10 @@ model SkillGroup {
 }
 
 model SkillGroupMember {
-  groupId String
-  staffId String
+  groupId   String
+  staffId   String
   createdAt DateTime @default(now()) @db.Timestamptz
+
   @@id([groupId, staffId])
   @@index([staffId])
 }
@@ -425,189 +437,194 @@ model SkillGroupMember {
 model SkillGroupClinic {
   groupId  String
   clinicId String
+
   @@id([groupId, clinicId])
   @@index([clinicId])
 }
 
 model RoutingRule {
-  id            String   @id @default(cuid())
-  clinicId      String?                       // null = 全局；有值 = 該店覆寫（同 name/priority 覆蓋全局）
-  name          String                        // 「箍牙/植牙 → 療程顧問」
-  priority      Int                           // 細數行先；首個命中即停
-  enabled       Boolean  @default(true)
+  id                String            @id @default(cuid())
+  clinicId          String? // null = 全局；有值 = 該店覆寫（同 name/priority 覆蓋全局）
+  name              String // 「箍牙/植牙 → 療程顧問」
+  priority          Int // 細數行先；首個命中即停
+  enabled           Boolean           @default(true)
   // ── 條件（空 = 唔限；有值要全中 — intents includes + keywords 任一 canonical 命中 + patientType 相等）
-  intents       String[] @default([])         // ["QUESTION","BOOKING_REQUEST"]
-  keywords      String[] @default([])         // lexicon canonical 後比對：["矯齒","植牙"]
-  patientType   String?                       // NEW | RETURNING | null（靠 patient-lookup；查唔到當 NEW）
+  intents           String[]          @default([]) // ["QUESTION","BOOKING_REQUEST"]
+  keywords          String[]          @default([]) // lexicon canonical 後比對：["矯齒","植牙"]
+  patientType       String? // NEW | RETURNING | null（靠 patient-lookup；查唔到當 NEW）
   // ★ cwi-followup-p0-20260915（MD §1.3）：治療類型（VISIT_REASON 字典 code，下拉選 — 唔准人手打字）。
   //   P0 只存 + 校驗（code 必喺字典）；matching 語義等 P1 索引管道帶 visitReasons 先啟用。
-  treatmentTypes String[] @default([])
+  treatmentTypes    String[]          @default([])
   // ── 目標
-  targetType    RoutingTargetType
-  targetGroupId String?                       // GROUP → 組 id
-  targetStaffId String?                       // STAFF → 單人 id
+  targetType        RoutingTargetType
+  targetGroupId     String? // GROUP → 組 id
+  targetStaffId     String? // STAFF → 單人 id
   // ── 行為
-  autoReplyTemplate String?                   // R-7：命中後 L2 首覆文案（可空；L1 → 出草稿）
-  escalateAfterMin  Int?                      // R-5：N 分鐘未處理升級（null = 唔升級；出廠 15）
-  escalateToGroupId String?                   // 第二級組（升級只一次 — escalatedAt 防重複）
-  createdBy     String?
-  updatedAt     DateTime @updatedAt
+  autoReplyTemplate String? // R-7：命中後 L2 首覆文案（可空；L1 → 出草稿）
+  escalateAfterMin  Int? // R-5：N 分鐘未處理升級（null = 唔升級；出廠 15）
+  escalateToGroupId String? // 第二級組（升級只一次 — escalatedAt 防重複）
+  createdBy         String?
+  updatedAt         DateTime          @updatedAt
+
   @@index([clinicId, enabled, priority])
 }
 
 model Conversation {
-  id               String     @id @default(cuid())
-  clinicId         String
-  contactId        String
-  status           ConvStatus @default(OPEN)
-  assigneeId       String?
+  id                        String           @id @default(cuid())
+  clinicId                  String
+  contactId                 String
+  status                    ConvStatus       @default(OPEN)
+  assigneeId                String?
   // ★ Realtime P0 (R5, cwi-rt-20260823-a1)：manual assign 樂觀鎖版本號。
   // 人手 assign/takeover 必帶 client 端 version → updateMany({where:{id, assignVersion:v}}) 命中先 +1；
   // 兩 staff 併發 → 後到者 count=0 → 409 ASSIGN_CONFLICT（UI 提示「啱啱俾 {name} 接咗手」+ refetch）。
   // AUTO_CLAIM / SYSTEM 路徑唔帶 version（保留 assigneeId 舊 lock 語義）。
-  assignVersion    Int        @default(0)
+  assignVersion             Int              @default(0)
   // ★ H1：最近一次 assign/transfer/unassign 時間（Send Lock 轉交追蹤；null = 從未派過）
-  assignedAt       DateTime? @db.Timestamptz
+  assignedAt                DateTime?        @db.Timestamptz
   // ★ cwi-h6-20260830（h5 §1）：現任負責人最近一次「對病人線有實質動作」時間。
   // 四寫入點：assign 成功 / 發送成功 / 落內部備註 / 發 Flow（都係 assignee 自己嘅動作先計）。
   // release（unassign）→ null。auto-release 三條件之一：now - 呢個 ≥ N（負責人齋夠 N）。
-  assigneeLastActionAt DateTime? @db.Timestamptz
-  intent           String?                    // 最近一次分類結果
-  intentConfidence Float?
+  assigneeLastActionAt      DateTime?        @db.Timestamptz
+  intent                    String? // 最近一次分類結果
+  intentConfidence          Float?
   // Phase 2（AI triage）：
   // - urgency/aiSummary 同 intent 一齊落 Conversation（唔係 Message）：
   //   UI 隊列欄/側欄要喺對話層顯示，且語義係「呢個對話而家嘅狀態」，
   //   跟緊 Phase 1 已建嘅 intent 欄慣例，避免加新表多一層 join。
   // - urgent 鐵律旗：urgency=HIGH 或 intent=URGENT_PAIN 時由 AI worker 置 true；
   //   對話轉 RESOLVED 或 staff 手動清；置 true 後唔會自動清（避免新訊息蓋過未處理急症）。
-  urgency          String?                    // LOW / MED / HIGH（最近一次分類）
-  urgent           Boolean  @default(false)
+  urgency                   String? // LOW / MED / HIGH（最近一次分類）
+  urgent                    Boolean          @default(false)
   // ★ cwi-sales-20261028：銷售意向分級（HIGH / MEDIUM / LOW；null = 未分級）— 只限銷售人員設
-  salesIntent          String?   @db.VarChar(8)
-  salesIntentByStaffId String?
-  salesIntentAt        DateTime? @db.Timestamptz
+  salesIntent               String?          @db.VarChar(8)
+  salesIntentByStaffId      String?
+  salesIntentAt             DateTime?        @db.Timestamptz
   // ★ cwi-sales-20261028：綁定／保護中對話冇人覆已通知主管嘅時間（< lastInboundAt = 新 inbound 未通知）
-  salesUnansweredNotifiedAt DateTime? @db.Timestamptz
-  aiSummary        String?                    // ≤50 字摘要（側欄顯示；語言跟病人）
+  salesUnansweredNotifiedAt DateTime?        @db.Timestamptz
+  aiSummary                 String? // ≤50 字摘要（側欄顯示；語言跟病人）
   // ★ booking-ui（2026-08-23, cwi-bkui-20260823-a1）：patient-context 釘住舊客（lookup match 後落 DB）
-  pinnedPatientApricotId String?               // Apricot 病人 id（proxy 落單 patient.patientApricotId 來源）
-  pinnedPatientName      String?               // 快照顯示（唔 join；PII 白名單 v2：姓名許可）
-  pinnedPhoneHash        String?               // 64-hex HMAC-SHA256（raw phone 永遠唔入 DB）
+  pinnedPatientApricotId    String? // Apricot 病人 id（proxy 落單 patient.patientApricotId 來源）
+  pinnedPatientName         String? // 快照顯示（唔 join；PII 白名單 v2：姓名許可）
+  pinnedPhoneHash           String? // 64-hex HMAC-SHA256（raw phone 永遠唔入 DB）
   // ★ booking-ui（E）：改期 Flow 進行中標記（nfm_reply 見到此欄 → 走 reschedule 變體而非新建 BookingRequest）
-  reschedulingApptId     String?               // 目標 Apricot appointment id（null = 無改期進行中）
-  lastInboundAt    DateTime? @db.Timestamptz                  // ★ 24h 窗口由呢個欄計
-  lastMessageAt    DateTime @db.Timestamptz
-  unreadCount      Int        @default(0)
+  reschedulingApptId        String? // 目標 Apricot appointment id（null = 無改期進行中）
+  lastInboundAt             DateTime?        @db.Timestamptz // ★ 24h 窗口由呢個欄計
+  lastMessageAt             DateTime         @db.Timestamptz
+  unreadCount               Int              @default(0)
   // ★ cwi-statusrole2-20260910（MD §4）：最後一條 OUT（已落 SENT）訊息時間 —
   //   auto-resolve 守門 ②`lastInboundAt <= lastOutboundAt`（病人最後一句已覆）。null = 從未有 staff/AI 回覆。
   //   維護點：outbound.worker SENT transition / handleEchoes SENT / handleHistory isOut bulk touch（GREATEST 冪等）。
-  lastOutboundAt   DateTime? @db.Timestamptz
+  lastOutboundAt            DateTime?        @db.Timestamptz
   // ★ cwi-statusrole2-20260910（MD §3）：已解決對話收到病人 inbound 自動翻開 — 翻開時間（badge「↻ 重新開啟」24h 窗口）。
   //   只由 inbound.worker reopen 分支寫；翻開即清 resolvedBy/resolvedAt（翻開 = 未再解決）。
-  reopenedAt       DateTime? @db.Timestamptz
+  reopenedAt                DateTime?        @db.Timestamptz
   // ★ cwi-statusrole2-20260910（MD §4）：解決者 — staffId（手動）/ "AUTO"（cron auto-resolve）；null = 未解決。
-  resolvedBy       String?
-  resolvedAt       DateTime? @db.Timestamptz
+  resolvedBy                String?
+  resolvedAt                DateTime?        @db.Timestamptz
   // cwi-inboxfix-20260905（MD §1.4 I-5）：公海 SLA 提醒防重複旗（null = 未提醒/已接手；
   // cron 標 now，assign 成功清返）
-  slaNotifiedAt    DateTime? @db.Timestamptz
+  slaNotifiedAt             DateTime?        @db.Timestamptz
   // ★ cwi-followup-p3-20260916（MD §4.5）：病人回覆咗 follow-up（task COMPLETED 聯動）—
   //   badge「跟進回覆」24h 內顯示（同 reopenedAt 口徑；client derive）。
-  followupRepliedAt DateTime? @db.Timestamptz
+  followupRepliedAt         DateTime?        @db.Timestamptz
   // ★ cwi-followup-v3-20260916（B-6）：C 類術後關懷跟進建議發出後開 72h 窗口 —
   //   窗口內病人痛症訊號（intent=PAIN）→ AI pipeline 強制 PAIN_TRIAGE（唔入 consult）。
   //   由 engine.sendFollowupTask（trigger=AFTER_TREATMENT）寫；null = 無窗口。
-  postOpFollowupAt DateTime? @db.Timestamptz
+  postOpFollowupAt          DateTime?        @db.Timestamptz
   // ★ cwi-routing-20260906（R-2 鐵律）：路由結果標記（唔係 assignee — 公海照見、Send Lock 唔生效）。
   // routed* 只由路由引擎寫（classify 後掛鉤）；assign 流程零改動。
-  routedGroupId  String?                      // 路由命中組（CLINIC_POOL 目標 = null）
-  routedStaffId  String?                      // R-9：當值單人 → 標人；多於一個/冇當值 → null（只標組）
-  routedRuleId   String?                      // 命中規則（audit 追溯）
-  routedAt       DateTime? @db.Timestamptz    // 路由時間（升級 N 分鐘起點）
-  escalatedAt    DateTime? @db.Timestamptz    // 升級過先有值（防重複升級 — 只升一次）
+  routedGroupId             String? // 路由命中組（CLINIC_POOL 目標 = null）
+  routedStaffId             String? // R-9：當值單人 → 標人；多於一個/冇當值 → null（只標組）
+  routedRuleId              String? // 命中規則（audit 追溯）
+  routedAt                  DateTime?        @db.Timestamptz // 路由時間（升級 N 分鐘起點）
+  escalatedAt               DateTime?        @db.Timestamptz // 升級過先有值（防重複升級 — 只升一次）
   // ★ cwi-auditfix-20260908（B-3）：R-7 首覆原子閘 — 每對話只生效一次（updateMany where=null 搶佔）。
   //   防「規則未標記 → 每條訊息重發 autoReplyTemplate」。null = 未發過首覆。
-  routedFirstReplyAt DateTime? @db.Timestamptz
+  routedFirstReplyAt        DateTime?        @db.Timestamptz
   // ★ consult v2.1 C1（§2.2 M-2）：最近一輪 inbound 嘅最終 consult trigger（FLOOR 定死 ?? LLM 值）。
   //   "ORTHODONTIC_CONSULT" | "IMPLANT_CONSULT" | null（非 consult / 未分過類）。暫住 Conversation —
   //   C2 建 ConsultSession 後語義移去 session（MD §3）。
-  sessionTrigger String?
+  sessionTrigger            String?
   // ★ consult v2.1 C1（§2.3 M-3 gate 級）：最近一輪嘅 consult 閘動作 — 過窗 + consult trigger →
   //   "WINDOW_EXPIRED_HANDOFF"（唔出 free-form 草稿、出既有三出路、對話保留唔關）；其餘輪 = null。
-  consultGateAction String?
+  consultGateAction         String?
   // ★ consult v2.1 C1（§2.1 M-1）：店員自己打字（source=typed）→ true → consult 路徑停止出草稿；
   //   「交返 AI 繼續」掣（C5 UI）負責清返 false。採用（source=adopted）唔置呢個旗。
-  humanTookOver  Boolean  @default(false)
+  humanTookOver             Boolean          @default(false)
   // ★ wa-meta-compliance-20261016（C.1）：病人要求真人（consult engine row 3 HANDOFF_HUMAN 置 true）。
   //   效果：AI 唔再自動開新 session / 唔再 AUTO 發（auto-send gate 擋）；staff 照可以手動覆。
   //   只可經「交返 AI 繼續」掣（consult-sessions route）清 — audit 留痕。
-  patientRequestedHuman Boolean @default(false)
-  patientRequestedHumanAt DateTime? @db.Timestamptz
+  patientRequestedHuman     Boolean          @default(false)
+  patientRequestedHumanAt   DateTime?        @db.Timestamptz
   // ★ consult v2.1 C1（§2.1 M-1）：實際發出嘅最後 OUT 文字（採用/改過/typing/AUTO 都記）— 下輪 context 用。
   //   C2 起 consult 路徑改寫 ConsultSession 同名欄（session 建立時由呢度複製 — 橋接搬遷；
   //   Conversation 欄保留：C1 e2e + 非 consult 路徑仍用）。
-  lastOutboundText String?
+  lastOutboundText          String?
   // ★ cwi-inbox-r3 Q5（2026-10-17）：跟進分店（轉地點）— null = 由 clinicId（病人 WhatsApp 嗰間店）跟進。
   //   有值 = 列表／權限／通知／預約預設跟呢間店；WhatsApp 收發照用 clinicId 嘅號碼（號碼改唔到）。
   //   只由 POST /api/conversations/[id]/location 寫（同公司分店；轉返原店 = 清返 null）。
-  handlingClinicId String?
+  handlingClinicId          String?
   // ★ cwi-final S1-12：通用更新時間戳 — S1-2 delta 改 `updatedAt >= after`，
   //   令狀態／指派／分類改動都入 delta（@default(now()) 必有 — 否則現有行 migration 失敗）。
-  updatedAt        DateTime   @default(now()) @updatedAt @db.Timestamptz
+  updatedAt                 DateTime         @default(now()) @updatedAt @db.Timestamptz
   // ★ consult v2.1 C2（MD §3）：CONSULT 銷售 session（C3 規則引擎落；一對話同時最多一個 active）。
-  consultSessions ConsultSession[]
+  consultSessions           ConsultSession[]
+
+  // ★ cwi-workgroup-p2-20261105：外部對話（= Contact.externalAt 非 null；冗餘一份方便列表過濾）
+  external Boolean @default(false)
 
   @@unique([clinicId, contactId])
   @@index([clinicId, status, lastMessageAt])
-  @@index([clinicId, updatedAt])              // ★ cwi-final S1-12：S1-2 delta 用
-  @@index([routedGroupId, assigneeId])        // 「派俾我」膠囊 + 升級 sweep 輔助
+  @@index([clinicId, updatedAt]) // ★ cwi-final S1-12：S1-2 delta 用
+  @@index([routedGroupId, assigneeId]) // 「派俾我」膠囊 + 升級 sweep 輔助
   @@index([routedStaffId])
   @@index([handlingClinicId, status, lastMessageAt]) // ★ cwi-inbox-r3 Q5：跟進分店列表
 }
 
 model Message {
-  id             String    @id @default(cuid())
-  conversationId String
+  id               String      @id @default(cuid())
+  conversationId   String
   // Phase 1 改動：waMessageId 由 NOT NULL 變 nullable。
   // 原因：outbound 發送鏈係「先寫 Message(OUT,API,QUEUED) 先入 queue」，
   // Graph API 回傳 wamid 之後先 UPDATE 入呢欄（MD §6.3）。NOT NULL 會令
   // QUEUED row 寫唔到。Postgres unique index 允許多 NULL，冪等語義唔變
   // （inbound/status 永遠有 wamid，webhook 冪等仍然成立）。
-  waMessageId    String?   @unique            // ★ 冪等 key（webhook 會重發）
+  waMessageId      String?     @unique // ★ 冪等 key（webhook 會重發）
   // ★ Realtime P0 (R1, cwi-rt-20260823-a1)：client 端冪等 key（clientMessageId）。
   // composer 每次「新發送意圖」生成一個 UUID；網絡 retry / 雙擊重發用同一個 key。
   // send route 命中已存在 row → 直接回舊 Message（200 冪等）唔再入 queue。
   // 只 OUT/API 訊息有用；inbound/echo 永遠 null（Postgres unique 允許多 NULL）。
-  clientMessageId String?   @unique
-  direction      Direction
-  channel        Channel
-  type           String                       // text/image/audio/document/interactive/nfm_reply...
-  body           String?                      // 文字內容（at-rest 加密 = 部署層 LUKS/雲碟加密，見 deploy 文件；log 絕不出現）
+  clientMessageId  String?     @unique
+  direction        Direction
+  channel          Channel
+  type             String // text/image/audio/document/interactive/nfm_reply...
+  body             String? // 文字內容（at-rest 加密 = 部署層 LUKS/雲碟加密，見 deploy 文件；log 絕不出現）
   // ★ H1：內部備註 @ 咗邊啲 staffId（只 channel=INTERNAL 先有意義；UI autocomplete 入）
-  mentions       String[]  @default([])
-  mediaPath      String?                      // 落地 /srv/wa-media/<id>，唔存 Meta URL（會過期）
+  mentions         String[]    @default([])
+  mediaPath        String? // 落地 /srv/wa-media/<id>，唔存 Meta URL（會過期）
   // ★ cwi-final S6-3②（audit3 P1-21）：media 檔 basename（serve 用 unique 查詢鍵 — /api/media/[file]
   //   findUnique 落 Index Scan；mediaPath 全路徑保留俾 retention/備份用）。saveMediaFile 寫入時
   //   一齊落 basename；backfill 喺 migration 20260927000000（regexp_replace 去路徑）。
   //   unique 前先跑重複檢查（任何 >0 = STOP 報 CEO，禁自行刪數據）。
-  mediaKey       String?   @unique
+  mediaKey         String?     @unique
   // ★ cwi-final S6-9④（audit3 P2-03）：文件顯示名（已清洗 cleanDocName；只 OUT document 用）。
   //   PII：檔名可能含病人姓名 → 只入 DB + UI + Content-Disposition；log / AuditLog 永不入。
-  mediaName      String?
+  mediaName        String?
   // ★ cwi-final S6-9④：Graph /media 上載後嘅 id（重試/重發沿用 → 唔重複上載；Meta 30 日有效）。
   //   唔回 client（messages API strip；message:new payload 亦冇呢欄）。
-  waMediaId      String?
+  waMediaId        String?
   // ★ Realtime P0 (R4, cwi-rt-20260823-a1)：media 下載狀態（見 MediaStatus enum 註釋）
-  mediaStatus    MediaStatus @default(READY)
-  status         MsgStatus
-  errorCode      String?
-  sentByStaffId  String?
-  aiDraftId      String?
+  mediaStatus      MediaStatus @default(READY)
+  status           MsgStatus
+  errorCode        String?
+  sentByStaffId    String?
+  aiDraftId        String?
   // Phase 2b：AI 自動發送標記（AUTO 模式）。設計決策：唔加獨立 `source` enum —
   // 現有 channel(API/APP_ECHO/HISTORY) + sentByStaffId(null) + aiDraftId 已足夠
   // 識別「系統 AI 自動發」；再加 source 會同 channel 雙重事實來源（drift 風險）。
   // AUTO 訊息 = direction=OUT + channel=API + sentByStaffId=null + aiAutoSent=true。
-  aiAutoSent     Boolean  @default(false)
+  aiAutoSent       Boolean     @default(false)
   // ★ AI Workflow Phase C（cwi-sess-20260824-c1）：呢條 OUT 訊息屬邊個 slot-filling session
   //   （追溯 session 回覆用；null = 非 session 訊息。無 FK — session 行清唔會阻訊息 retention）。
   bookingSessionId String?
@@ -620,11 +637,11 @@ model Message {
   // 結構：{ name, language, components }（components = [{type:"body",parameters:[...]}]）。
   // ★ PII：只有 template 名/語言/日期時間醫生診所變數 — 零病人自由文本。
   // body 欄 = 預覽文字（UI 顯示；同 template 實際渲染一致）。
-  templateMeta   Json?
+  templateMeta     Json?
   // cwi-window-20260901（P1）：計費類別 — SERVICE（窗口內人手/AI 自由回覆）| UTILITY | MARKETING | AUTH（template 按其類別）| NONE（echo/INTERNAL 備註，唔計費）。
   // 2026-10-01 WhatsApp 新 API 起每條 OUT 個別計費 → 呢欄係 /admin/usage 用量統計嘅基礎。
   // 寫入規則（同 backfill 規則一致）：OUT+API+template → 類別；OUT+API 其他 → SERVICE；APP_ECHO/INTERNAL → NONE；IN/HISTORY → NULL（入站唔計費）。
-  billingCategory String?
+  billingCategory  String?
   // ★ cwi-inboxfix-20260905（MD §5.3）：已作廢標記（純內部 — 8 秒窗過後訊息已出街，
   //   病人端照見；staff 標記「呢句當佢冇發過」+ UI 內部 tag + 更正草稿入口）。
   //   唔會通知 Meta — WhatsApp Cloud API 冇刪除已發訊息 endpoint。
@@ -633,21 +650,22 @@ model Message {
   //   | null（舊 row / template 發送 — 無標記）。
   //   cooldown 閘計 HUMAN_TYPED + HUMAN_APP（MD §2.1：採用唔係「真人插嘴」— 死鎖根治；
   //   手機 App 覆 = 真人喺度 → 近段壓 auto-send，但唔設 humanTookOver — 草稿照出）。
-  sentVia        String?
+  sentVia          String?
   // ★ wa-meta-compliance-20261016（B.1/B.2）：主動訊息標記 — 發送前最後 opt-out 攔截用。
   //   true = 系統主動發起（follow-up / 預約提醒 / 術後跟進 / template / AI AUTO 覆）；
   //   false = 被動回覆（staff 打字 / staff 採用草稿 / 病人 flow 完成後確認 — 病人動作觸發）。
   //   寫入點：followup engine / reminder / AI auto-send gate 建 Message 時置 true；其餘預設 false。
   //   outbound worker Graph 前最後一刻核：proactive=true + Contact.followupOptOut → CANCELLED（PROACTIVE_OPT_OUT）。
-  proactive      Boolean @default(false)
-  voidedAt       DateTime? @db.Timestamptz
-  waTimestamp    DateTime @db.Timestamptz
-  createdAt      DateTime @db.Timestamptz  @default(now())
+  proactive        Boolean     @default(false)
+  voidedAt         DateTime?   @db.Timestamptz
+  waTimestamp      DateTime    @db.Timestamptz
+  createdAt        DateTime    @default(now()) @db.Timestamptz
   // ★ cwi-final S1-15 (P0-07)：行更新時間（Prisma @updatedAt 自動維護 — claim / 狀態寫入都會更新）。
   //   用途：outbound-sweep stuck SENDING 判斷（>5 min 未更新 → UNKNOWN + SENDING_TIMEOUT）。
   //   DB 欄 NOT NULL + DEFAULT now()（20260921174425 seg3-fix 對齊 schema — raw SQL INSERT
   //   唔帶欄自動補 now()；可空版本令 e2e raw-INSERT NULL 行 → Prisma 讀 500，T300–T302/T85）。
-  updatedAt      DateTime @db.Timestamptz @updatedAt
+  updatedAt        DateTime    @updatedAt @db.Timestamptz
+
   @@index([conversationId, waTimestamp])
   // ★ cwi-final S1-1d（=S1-11）：延遲送達 reload 唔見 — latest page / before 改 createdAt 軸
   @@index([conversationId, createdAt, id])
@@ -670,7 +688,7 @@ model TelemetryCounter {
 model PendingStatus {
   id         String   @id @default(cuid())
   wamid      String
-  status     String   // SENT | DELIVERED | READ | FAILED（STATUS_MAP 之後）
+  status     String // SENT | DELIVERED | READ | FAILED（STATUS_MAP 之後）
   errorCode  String?
   clinicId   String
   receivedAt DateTime @default(now()) @db.Timestamptz
@@ -683,9 +701,10 @@ model PendingStatus {
 // 前端 IntersectionObserver 入 viewport → POST /api/notes/[id]/read upsert（冪等）。
 model NoteReadReceipt {
   id        String   @id @default(cuid())
-  messageId String                                  // channel=INTERNAL 嘅 Message
+  messageId String // channel=INTERNAL 嘅 Message
   staffId   String
-  readAt    DateTime @db.Timestamptz @default(now())
+  readAt    DateTime @default(now()) @db.Timestamptz
+
   @@unique([messageId, staffId])
 }
 
@@ -696,10 +715,11 @@ model NoteReadReceipt {
 model AutomationPolicy {
   id        String   @id @default(cuid())
   clinicId  String
-  category  String                       // intent；"*" = 該店預設
-  level     String                       // L1 / L2 / L3 / L4
+  category  String // intent；"*" = 該店預設
+  level     String // L1 / L2 / L3 / L4
   updatedBy String?
-  updatedAt DateTime @db.Timestamptz @updatedAt
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
   @@unique([clinicId, category])
 }
 
@@ -711,12 +731,13 @@ model BookingSession {
   conversationId String
   clinicId       String
   status         BookingSessionStatus @default(ACTIVE)
-  slots          Json                 // SessionSlots（見 src/lib/ai/session-types.ts）
+  slots          Json // SessionSlots（見 src/lib/ai/session-types.ts）
   turns          Int                  @default(0)
   noProgress     Int                  @default(0)
-  createdAt      DateTime @db.Timestamptz @default(now())
-  updatedAt      DateTime @db.Timestamptz @updatedAt
-  expiresAt      DateTime @db.Timestamptz
+  createdAt      DateTime             @default(now()) @db.Timestamptz
+  updatedAt      DateTime             @updatedAt @db.Timestamptz
+  expiresAt      DateTime             @db.Timestamptz
+
   @@index([conversationId, status])
   @@index([status, expiresAt])
 }
@@ -738,9 +759,9 @@ model PainTriageSession {
   closeReason    String?
   impression     String?
   autoPostOp     Boolean          @default(false)
-  createdAt      DateTime @db.Timestamptz @default(now())
-  updatedAt      DateTime @db.Timestamptz @updatedAt
-  expiresAt      DateTime @db.Timestamptz
+  createdAt      DateTime         @default(now()) @db.Timestamptz
+  updatedAt      DateTime         @updatedAt @db.Timestamptz
+  expiresAt      DateTime         @db.Timestamptz
 
   @@index([conversationId, status])
   @@index([status, expiresAt])
@@ -754,18 +775,19 @@ model AiDraft {
   model              String
   latencyMs          Int
   status             DraftStatus @default(PROPOSED)
-  finalText          String?                  // 員工改完實際發出嘅版本 → 攞嚟計採用率+做微調數據
+  finalText          String? // 員工改完實際發出嘅版本 → 攞嚟計採用率+做微調數據
   // ★ Phase E（cwi-ai-20260825-t5）：per-draft intent 快照（統計要「當時」intent —
   //   Conversation.intent 係「最新」會漂移）。歷史 row null → 統計歸 UNKNOWN（唔 backfill）。
   intent             String?
-  createdAt          DateTime @db.Timestamptz    @default(now())
+  createdAt          DateTime    @default(now()) @db.Timestamptz
   // cwi-window-20260901（P2）：草稿模式 — NORMAL（默認）| COPY_ONLY（過窗草稿：只可複製去手機 App，
   // 唔可採用/發送；adoptRate 分母剔除 — 過窗唔係「AI 唔夠好」，唔好拖累自動化升級統計）。
-  mode               String    @default("NORMAL")
+  mode               String      @default("NORMAL")
   // ★ Part F（cwi-raggolden-20260904，F.7）：trace panel 數據源 — ai.worker 每輪寫入
   // （workflow key + params 版本／過咗邊幾道閘／lexicon 命中詞／檢索揀咗邊幾條 title+id／
   //   impression key／price-guard 有冇介入／latency）。nullable — 歷史 row null = 舊 draft。
   traceJson          Json?
+
   // Phase 2 冪等：同一條 inbound Message 只可有一條 draft。
   // AI job 重試（attempts 3）或部分失敗重跑時，唯一約束 + findUnique 前置檢查
   // 保證唔會生成重複 draft。一條訊息只觸發一次 AI 分類，語義上多 draft 無意義。
@@ -779,19 +801,19 @@ model AiDraft {
 // 唔存 conversationId/messageId（避免原對話 purge 後穿窿 + 零 PII）。
 // expectDocIds：期望檢索引用嘅 KnowledgeDoc id 集（eval 知識引用命中指標用）。
 model GoldenCase {
-  id             String       @id @default(cuid())
-  clinicId       String?
-  source         GoldenSource
-  utterance      String       @db.Text // 去識別化後
-  contextBefore  String[]                  // 之前 0-2 句（同樣去識別化）
-  expectIntent   String
-  expectRedFlag  Boolean      @default(false)
-  expectAutoOk   Boolean      @default(false)
-  expectDocIds   String[]                  @default([])
-  note           String?
-  enabled        Boolean      @default(true)
-  createdBy      String?
-  createdAt      DateTime     @db.Timestamptz @default(now())
+  id            String       @id @default(cuid())
+  clinicId      String?
+  source        GoldenSource
+  utterance     String       @db.Text // 去識別化後
+  contextBefore String[] // 之前 0-2 句（同樣去識別化）
+  expectIntent  String
+  expectRedFlag Boolean      @default(false)
+  expectAutoOk  Boolean      @default(false)
+  expectDocIds  String[]     @default([])
+  note          String?
+  enabled       Boolean      @default(true)
+  createdBy     String?
+  createdAt     DateTime     @default(now()) @db.Timestamptz
 
   @@index([clinicId, enabled])
 }
@@ -800,54 +822,55 @@ model GoldenCase {
 // 由 AI worker 每次 call 後 atomic upsert；web process（admin 頁/API）讀。
 // 唔存任何 prompt/response 內容 — 只係計數 + 時間 + 錯訊短句（metadata only）。
 model AiCallStats {
-  id         Int       @id @default(1)
-  totalCalls Int       @default(0)
-  okCalls    Int       @default(0)
-  lastOkAt   DateTime? @db.Timestamptz
-  lastError  String?
+  id            Int       @id @default(1)
+  totalCalls    Int       @default(0)
+  okCalls       Int       @default(0)
+  lastOkAt      DateTime? @db.Timestamptz
+  lastError     String?
   // Phase 2b：最近一次成功 call 嘅 latency/tokens（admin AI 狀態卡實測數據；metadata only）
   lastLatencyMs Int?
   lastTokens    Int?
-  updatedAt  DateTime  @db.Timestamptz @default(now()) @updatedAt
+  updatedAt     DateTime  @default(now()) @updatedAt @db.Timestamptz
 }
 
 model BookingRequest {
   id                String        @id @default(cuid())
   conversationId    String
   clinicId          String
-  flowToken         String        @unique     // 發 Flow 時生成，nfm_reply 對返
+  flowToken         String        @unique // 發 Flow 時生成，nfm_reply 對返
   providerApricotId String
-  providerName      String                    // 快照，唔 join
-  requestedDate     String                    // YYYY-MM-DD（HK 日界）
-  requestedTime     String?                   // HH:mm（pure requirement 變體 = null，改 timeOfDay）
-  precheckPassed    Boolean?                  // 發卡嗰刻對照空檔 cache 嘅結果；null = 未經核對（資料源離線，pure requirement 變體）
-  timeOfDay         String?                   // MORNING / AFTERNOON / EVENING（pure requirement 變體嘅時段偏好；正常預約 = null）
+  providerName      String // 快照，唔 join
+  requestedDate     String // YYYY-MM-DD（HK 日界）
+  requestedTime     String? // HH:mm（pure requirement 變體 = null，改 timeOfDay）
+  precheckPassed    Boolean? // 發卡嗰刻對照空檔 cache 嘅結果；null = 未經核對（資料源離線，pure requirement 變體）
+  timeOfDay         String? // MORNING / AFTERNOON / EVENING（pure requirement 變體嘅時段偏好；正常預約 = null）
   status            BookingStatus @default(PENDING)
   handledByStaffId  String?
-  handledAt         DateTime? @db.Timestamptz
+  handledAt         DateTime?     @db.Timestamptz
   // ★ booking-ui（2026-08-23, cwi-bkui-20260823-a1）：代落單（CONFIRMED 態 + rollback + 審計）
-  apricotApptId     String?                    // Apricot 單號（workforce create 後寫入；rollback 後清 null）
+  apricotApptId     String? // Apricot 單號（workforce create 後寫入；rollback 後清 null）
   // ★ Phase B（cwi-tmpl-20260824-b1）：T-24h 提醒已發時間（冪等旗 — null = 未提醒）。
   // 改期/rollback 時 reset null（新時間/重新確認會再提醒）。
-  remindedAt        DateTime? @db.Timestamptz  // Phase B 建表 drift（migration 建 TIMESTAMP(3)）— pre-existing，Phase D 唔經手
-  visitReasonCode   String?                    // 卡上揀咗嘅 visit reason（dictionaries code；審計 + remarks 組裝）
-  chiefComplaint    String?                    // 主訴快照（Flow 完成時由 conversation.aiSummary 摘；≤50 字）
+  remindedAt        DateTime?     @db.Timestamptz // Phase B 建表 drift（migration 建 TIMESTAMP(3)）— pre-existing，Phase D 唔經手
+  visitReasonCode   String? // 卡上揀咗嘅 visit reason（dictionaries code；審計 + remarks 組裝）
+  chiefComplaint    String? // 主訴快照（Flow 完成時由 conversation.aiSummary 摘；≤50 字）
   // ★ AI Workflow Phase C（cwi-sess-20260824-c1）：L4 AI 自動落單標記（Phase E rollback 統計鈎）。
   //   staff 三掣 / 普通 Flow 路徑 = false；BookingSession AUTO_BOOK 成功 = true。
-  autoBooked        Boolean @default(false)
+  autoBooked        Boolean       @default(false)
   // ★ cwi-final S5-1（F1）：async 寫入狀態機 — createBooking 搬去 booking-write worker（concurrency 1）。
   //   null = 從未寫 / 寫完清回；WRITING = worker 處理緊；UNKNOWN = timeout/結果未知（唔好人手落單，可同 key 重試）；
   //   FAILED = 確定性失敗（writeError = workforce code）。
-  writeState        String? @db.VarChar(16)
-  writeAttemptAt    DateTime? @db.Timestamptz
+  writeState        String?       @db.VarChar(16)
+  writeAttemptAt    DateTime?     @db.Timestamptz
   // ★ cwi-final S5-6（F1）：冪等試次 — 同 booking 重試用同一 idemAttempt → 同 idempotency key / 同 clientMessageId（uuidv5）。
-  idemAttempt       Int @default(0)
-  writeError        String? @db.VarChar(64)
+  idemAttempt       Int           @default(0)
+  writeError        String?       @db.VarChar(64)
   // ★ cwi-ux UX-07（2026-10-01）：預約喺邊間店做（目標店）— null = 同 clinicId（舊資料零改動）。
   //   clinicId 意思唔變 = 對話所屬店（權限範圍 / /bookings 隊列 / 通知）；
   //   時段／Apricot／確認訊息／改期／取消／提醒 一律用 effectiveBookingClinicId()。
-  bookingClinicId   String? @db.VarChar(36)
-  createdAt         DateTime @db.Timestamptz      @default(now())
+  bookingClinicId   String?       @db.VarChar(36)
+  createdAt         DateTime      @default(now()) @db.Timestamptz
+
   // Phase 3：/bookings 隊列查詢（本店 + 狀態 + 時間）
   @@index([clinicId, status, createdAt])
   // ★ UX-07：目標店時段重複防護（existingPending 按目標店查）
@@ -859,15 +882,15 @@ model BookingRequest {
 // （2026-08-23 workforce 切換：舊 Apricot 醫生 sync 已拆 — workforce API 只提供空檔，無名錄 endpoint。）
 // ★ PII：只存醫生名 + Apricot ext id — 零病人資料。
 model Provider {
-  id        String   @id @default(cuid())
-  name      String                    // 醫生名（顯示用）
-  apricotId String?  @unique          // Apricot practitioner ext id（mock = mock-pract-<clinic>-<n>）
-  active    Boolean  @default(true)
+  id               String           @id @default(cuid())
+  name             String // 醫生名（顯示用）
+  apricotId        String?          @unique // Apricot practitioner ext id（mock = mock-pract-<clinic>-<n>）
+  active           Boolean          @default(true)
   // ★ cwi-roster-20261001：workforce Provider.id —— 同一醫生喺唔同 Apricot 帳號會有多行（每帳號一個 apricotId），
   //   用呢欄認返係同一個人（顯示／報表合併用；null = workforce 未綁或者 seed 行）
   sourceProviderId String?
-  createdAt DateTime @db.Timestamptz @default(now())
-  clinics   ProviderClinic[]
+  createdAt        DateTime         @default(now()) @db.Timestamptz
+  clinics          ProviderClinic[]
 
   @@index([sourceProviderId])
 }
@@ -875,9 +898,10 @@ model Provider {
 model ProviderClinic {
   providerId String
   clinicId   String
-  createdAt  DateTime @db.Timestamptz @default(now())
+  createdAt  DateTime @default(now()) @db.Timestamptz
   provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
   clinic     Clinic   @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
   @@id([providerId, clinicId])
 }
 
@@ -885,22 +909,23 @@ model ProviderClinic {
 // status: SENT（流緊）/ COMPLETED（病人撳 Complete）/ FAILED（precheck 失敗，已重出）/ ABANDONED（48h 棄單）
 // ★ 只存 token + 關聯 id — 零病人選擇內容（選擇喺 BookingRequest）。
 model FlowSession {
-  id               String    @id @default(cuid())
-  conversationId   String
-  clinicId         String
-  flowToken        String    @unique        // 簽咗 conversationId+clinicId 嘅 JWT（UX-07：可加簽 bookingClinicId）
+  id                 String    @id @default(cuid())
+  conversationId     String
+  clinicId           String
+  flowToken          String    @unique // 簽咗 conversationId+clinicId 嘅 JWT（UX-07：可加簽 bookingClinicId）
   // ★ cwi-ux UX-07（2026-10-01）：預約目標店（token 簽名帶 — 病人揀完用同一間店；payload 改店 → 拒）。
   //   null = 對話所屬店（舊 flow 零改動）。
-  bookingClinicId  String?   @db.VarChar(36)
-  flowMessageWamid String?                   // 發出嘅 interactive flow 訊息 wamid（metadata）
-  messageId        String?                   // cwi-r1close (D)：對應 interactive Message 內部 id —
-                                             // 發送最終 FAILED 時回滾本 session（防 dedup 誤中 → UI 謊報「已發咗」）
-  status           String    @default("SENT")
+  bookingClinicId    String?   @db.VarChar(36)
+  flowMessageWamid   String? // 發出嘅 interactive flow 訊息 wamid（metadata）
+  messageId          String? // cwi-r1close (D)：對應 interactive Message 內部 id —
+  // 發送最終 FAILED 時回滾本 session（防 dedup 誤中 → UI 謊報「已發咗」）
+  status             String    @default("SENT")
   // ★ cwi-final S5-8②（F2）：T4 改期唔取消舊單 — 發 Flow 時由 Conversation.reschedulingApptId 複製
   //   （submit_confirm claim 時帶入 FlowHoldEvent → hold 卡紅標 + commit 後 102 舊單）
   rescheduleOfApptId String?
-  createdAt        DateTime  @db.Timestamptz @default(now())
-  completedAt      DateTime? @db.Timestamptz
+  createdAt          DateTime  @default(now()) @db.Timestamptz
+  completedAt        DateTime? @db.Timestamptz
+
   @@index([conversationId, status])
   @@index([status, createdAt])
   @@index([messageId])
@@ -914,40 +939,41 @@ model FlowSession {
 //   RELEASED/EXPIRED = 終態（workforce 放開 / 預約時間已過 / sweep 對返發現消失）。
 // patientPhone = 病人 WA 號（Contact.waId join 點 — 卡渲染用）。
 model FlowHoldEvent {
-  id              String    @id @default(cuid())
-  flowToken       String    @unique             // 冪等（Meta 重試 / T4 submit_confirm 重放）
-  workforceHoldId String?                           // workforce ProviderHold.id（hold_01J...）
-  clinicCode      String                            // workforce clinic code（shortName）
-  clinicId        String?                           // inbox Clinic.id（scope 用；null = 搵唔到店）
-  providerName    String
-  providerId      String?                           // workforce provider id（對 held API 用）
-  date            String                            // YYYY-MM-DD（HK 日界）
-  startMin        Int                               // 0-1410（30m 格）
-  endMin          Int                               // 30m 格 = startMin+30
-  status          String    @default("HELD")       // HELD | IN_APRICOT | COMMITTED | RELEASED | EXPIRED
-  patientName     String?
-  patientPhone    String?                           // 病人 WA 號（= Contact.waId）— ★ S5-11（F4）：nullable 俾 retention-purge 90 日清 PII（終態 PURGED）
-  notes           String?
+  id                 String    @id @default(cuid())
+  flowToken          String    @unique // 冪等（Meta 重試 / T4 submit_confirm 重放）
+  workforceHoldId    String? // workforce ProviderHold.id（hold_01J...）
+  clinicCode         String // workforce clinic code（shortName）
+  clinicId           String? // inbox Clinic.id（scope 用；null = 搵唔到店）
+  providerName       String
+  providerId         String? // workforce provider id（對 held API 用）
+  date               String // YYYY-MM-DD（HK 日界）
+  startMin           Int // 0-1410（30m 格）
+  endMin             Int // 30m 格 = startMin+30
+  status             String    @default("HELD") // HELD | IN_APRICOT | COMMITTED | RELEASED | EXPIRED
+  patientName        String?
+  patientPhone       String? // 病人 WA 號（= Contact.waId）— ★ S5-11（F4）：nullable 俾 retention-purge 90 日清 PII（終態 PURGED）
+  notes              String?
   // ★ cwi-final S5-8②（F2）：改期 context — 由 FlowSession.rescheduleOfApptId 帶入（submit_confirm）；
   //   hold 卡紅標 + commit 成功後 updateBookingStatus(old, 102, idempotencyKey=resched-${hold.id})
   rescheduleOfApptId String?
   // ★ cwi-final S5-8②（F2）：對話關聯（本批加好俾 S5-11（F4）hold sweep 先用 — 避免二次 migration）
-  conversationId  String?
+  conversationId     String?
   // ★ cwi-final S5-11（F4）：病人喺 Flow 打嘅電話（同 patientPhone = WA 號分清；卡顯示「病人留嘅電話」）
-  contactPhone    String?
+  contactPhone       String?
   // ★ cwi-final S5-11（F4）：commit 必填嘅 Apricot 單號（fetchAppointments 核對存在 + 時間一致先 COMMITTED）
-  apricotRef      String?
-  source          String    @default("whatsapp_flow")
-  committedAt     DateTime? @db.Timestamptz
-  createdAt       DateTime  @db.Timestamptz @default(now())
-  updatedAt       DateTime  @db.Timestamptz @updatedAt
+  apricotRef         String?
+  source             String    @default("whatsapp_flow")
+  committedAt        DateTime? @db.Timestamptz
+  createdAt          DateTime  @default(now()) @db.Timestamptz
+  updatedAt          DateTime  @updatedAt @db.Timestamptz
+
   @@index([patientPhone, status])
   @@index([clinicCode, status])
   @@index([conversationId, status])
 }
 
-model AvailabilitySlot {                       // workforce API 嘅 L2 cache（switch 後來源 = clinic-workforce /api/external/v1/availability）
-                                               // ★ 只存時段佔用，零病人資料（contract zod schema 已 strip 唔識欄位）
+model AvailabilitySlot {
+  // ★ 只存時段佔用，零病人資料（contract zod schema 已 strip 唔識欄位）
   id                String   @id @default(cuid())
   clinicId          String
   providerApricotId String
@@ -955,9 +981,10 @@ model AvailabilitySlot {                       // workforce API 嘅 L2 cache（s
   startTime         String
   endTime           String
   bookedCount       Int
-  isOpen            Boolean                    // workforce response slot.isOpen
-  remainingCapacity Int?                       // §D（cwi-r2）：workforce「仲收幾多」（併诊規則後）；null = 缺欄 → fallback 當 1
-  syncedAt          DateTime @db.Timestamptz   // 用 response 嘅 syncedAt（source 新鮮度）
+  isOpen            Boolean // workforce response slot.isOpen
+  remainingCapacity Int? // §D（cwi-r2）：workforce「仲收幾多」（併诊規則後）；null = 缺欄 → fallback 當 1
+  syncedAt          DateTime @db.Timestamptz // 用 response 嘅 syncedAt（source 新鮮度）
+
   @@unique([clinicId, providerApricotId, date, startTime])
 }
 
@@ -967,29 +994,29 @@ model AvailabilitySlot {                       // workforce API 嘅 L2 cache（s
 model WorkforceSyncState {
   clinicId      String    @id
   lastOkAt      DateTime  @db.Timestamptz
-  lastStale     Boolean?  // 最近一次成功 response 嘅 stale 旗（workforce 對上游過咗 30 分鐘）
+  lastStale     Boolean? // 最近一次成功 response 嘅 stale 旗（workforce 對上游過咗 30 分鐘）
   lastErrorAt   DateTime? @db.Timestamptz
-  lastErrorCode String?   // metadata 短碼（http_500 / timeout / zod_invalid / clinic_not_found ...）
-  updatedAt     DateTime  @db.Timestamptz @updatedAt
+  lastErrorCode String? // metadata 短碼（http_500 / timeout / zod_invalid / clinic_not_found ...）
+  updatedAt     DateTime  @updatedAt @db.Timestamptz
 }
 
-model WebhookEvent {                           // 冪等 + 除錯（★ 唔存 payload 原文，只存 metadata）
-  id          String   @id                     // wamid / event id
+model WebhookEvent {
+  id          String    @id // wamid / event id
   field       String
-  receivedAt  DateTime @db.Timestamptz @default(now())
+  receivedAt  DateTime  @default(now()) @db.Timestamptz
   processedAt DateTime? @db.Timestamptz
 }
 
 model AuditLog {
   id        String   @id @default(cuid())
-  staffId   String?                              // AI 自動發送 = null（無 staff 參與）
-  action    String                             // SEND / AI_AUTO_SEND / CONFIRM_BOOKING / LOGIN / EXPORT ...
+  staffId   String? // AI 自動發送 = null（無 staff 參與）
+  action    String // SEND / AI_AUTO_SEND / CONFIRM_BOOKING / LOGIN / EXPORT ...
   entity    String?
   entityId  String?
   // Phase 2b：附加 metadata（metadata only — 永不存訊息原文 PII）。
   // AI_AUTO_SEND 用：{ conversationId, draftId, intent, urgency }
   meta      Json?
-  createdAt DateTime @db.Timestamptz @default(now())
+  createdAt DateTime @default(now()) @db.Timestamptz
 }
 
 // Phase 4：健康自檢 / 監控警報（MD §9.3）。
@@ -1001,13 +1028,14 @@ model AuditLog {
 //   ai_breaker_open / apricot_sync_stale / disk_low）= null。
 model Alert {
   id         String    @id @default(cuid())
-  type       String    // webhook_stale | queue_depth | ai_breaker_open | apricot_sync_stale | disk_low | quality_rating
-  severity   String    // MEDIUM | HIGH
+  type       String // webhook_stale | queue_depth | ai_breaker_open | apricot_sync_stale | disk_low | quality_rating
+  severity   String // MEDIUM | HIGH
   clinicId   String?
-  clinicCode String?   // 快照（顯示用；唔 join — 店被刪都睇到）
-  detail     Json?     // metadata only
-  createdAt  DateTime  @db.Timestamptz @default(now())
+  clinicCode String? // 快照（顯示用；唔 join — 店被刪都睇到）
+  detail     Json? // metadata only
+  createdAt  DateTime  @default(now()) @db.Timestamptz
   resolvedAt DateTime? @db.Timestamptz
+
   @@index([type, clinicId, resolvedAt])
   @@index([resolvedAt, createdAt])
 }
@@ -1018,12 +1046,13 @@ model Alert {
 // retention：30 日清（retention-purge step 5；守 S0-11 skipped gate）。
 model DeadLetter {
   id         String    @id @default(cuid())
-  queue      String    // 現在只 "inbound"；schema 通用（將來 outbound/ai 都用得）
-  jobId      String?   // BullMQ job id（debug 用）
-  payloadEnc String    @db.Text   // AES-256-GCM（同 media key：MEDIA_ENC_KEY）
-  error      String    // 最終失敗 error message（前 500 字；log 零病人原文）
+  queue      String // 現在只 "inbound"；schema 通用（將來 outbound/ai 都用得）
+  jobId      String? // BullMQ job id（debug 用）
+  payloadEnc String    @db.Text // AES-256-GCM（同 media key：MEDIA_ENC_KEY）
+  error      String // 最終失敗 error message（前 500 字；log 零病人原文）
   createdAt  DateTime  @default(now()) @db.Timestamptz
   replayedAt DateTime? @db.Timestamptz
+
   @@index([queue, replayedAt])
 }
 
@@ -1045,11 +1074,12 @@ model StaffNotice {
   kind           NoticeKind
   title          String
   meta           Json?
-  createdAt      DateTime       @db.Timestamptz @default(now())
+  createdAt      DateTime   @default(now()) @db.Timestamptz
   readByStaffId  String?
-  readAt         DateTime?      @db.Timestamptz
+  readAt         DateTime?  @db.Timestamptz
   // ★ cwi-advice-20261024：定向通知 — 空 = 全店（舊行為）；有值 = 只呢幾個 staff 嘅 bell 見到
-  targetStaffIds String[]       @default([])
+  targetStaffIds String[]   @default([])
+
   @@index([clinicId, readAt, createdAt])
 }
 
@@ -1060,6 +1090,7 @@ model ConversationRead {
   conversationId String
   staffId        String
   lastReadAt     DateTime @db.Timestamptz
+
   @@id([conversationId, staffId])
   @@index([staffId])
 }
@@ -1070,6 +1101,7 @@ model StaffNoticeRead {
   noticeId String
   staffId  String
   readAt   DateTime @default(now()) @db.Timestamptz
+
   @@id([noticeId, staffId])
   @@index([staffId])
 }
@@ -1085,12 +1117,13 @@ model PatientFact {
   id              String   @id @default(cuid())
   contactId       String
   clinicId        String
-  kind            String   // PREFERENCE / LOGISTICS / SELF_REPORTED
-  text            String   // ≤100 字，scrub 後先落庫
-  sourceMessageId String   // 必填 — 邊條訊息講嘅（可追溯）
+  kind            String // PREFERENCE / LOGISTICS / SELF_REPORTED
+  text            String // ≤100 字，scrub 後先落庫
+  sourceMessageId String // 必填 — 邊條訊息講嘅（可追溯）
   sourceWamid     String?
-  model           String?  // 抽取者（deterministic 抽 = null）
-  createdAt       DateTime @db.Timestamptz @default(now())
+  model           String? // 抽取者（deterministic 抽 = null）
+  createdAt       DateTime @default(now()) @db.Timestamptz
+
   @@index([contactId, createdAt])
 }
 
@@ -1102,27 +1135,29 @@ model PatientFact {
 // - v1 執行器唔係 graph interpreter — 執行仍係現有 code path，每決策點讀 ACTIVE params。
 model WorkflowDefinition {
   id          String    @id @default(cuid())
-  clinicId    String?                        // null = 全局；店行有自己 ACTIVE 就 override
-  key         String                         // "triage" | "booking-session" | "reminder"
+  clinicId    String? // null = 全局；店行有自己 ACTIVE 就 override
+  key         String // "triage" | "booking-session" | "reminder"
   version     Int
-  status      String                         // DRAFT / ACTIVE / ARCHIVED
-  graph       Json                           // { nodes, edges }（顯示用，由內建模板生成）
-  params      Json                           // 實際生效參數（見 src/lib/workflow/definitions.ts 每 key schema）
+  status      String // DRAFT / ACTIVE / ARCHIVED
+  graph       Json // { nodes, edges }（顯示用，由內建模板生成）
+  params      Json // 實際生效參數（見 src/lib/workflow/definitions.ts 每 key schema）
   createdBy   String?
   publishedAt DateTime? @db.Timestamptz
-  createdAt   DateTime  @db.Timestamptz @default(now())
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+
   @@unique([clinicId, key, version])
   @@index([key, status])
 }
 
 model OpsReport {
   id          String   @id @default(cuid())
-  periodStart DateTime @db.Timestamptz   // 週一 00:00（本地）
-  periodEnd   DateTime @db.Timestamptz   // 下週一 00:00（exclusive）
-  clinicId    String   @default("")      // "" = ALL（全部店；Postgres unique 對 NULL 唔生效 → 用 "" sentinel）
+  periodStart DateTime @db.Timestamptz // 週一 00:00（本地）
+  periodEnd   DateTime @db.Timestamptz // 下週一 00:00（exclusive）
+  clinicId    String   @default("") // "" = ALL（全部店；Postgres unique 對 NULL 唔生效 → 用 "" sentinel）
   metrics     Json
-  text        String                     // 人類可讀報表（俾 ALERT_CHANNEL 推送；metadata only）
-  createdAt   DateTime @db.Timestamptz @default(now())
+  text        String // 人類可讀報表（俾 ALERT_CHANNEL 推送；metadata only）
+  createdAt   DateTime @default(now()) @db.Timestamptz
+
   @@unique([periodStart, clinicId])
   @@index([periodStart])
 }
@@ -1132,15 +1167,16 @@ model OpsReport {
 // wamid 只做 reference（UI 撳先跳 inbox 睇原文 — 卡唔複製原文）。
 model SuggestionCard {
   id        String    @id @default(cuid())
-  clinicId  String?                          // null = 全局建議
-  kind      String                           // FAQ / TEMPLATE / WORKFLOW_DIFF
+  clinicId  String? // null = 全局建議
+  kind      String // FAQ / TEMPLATE / WORKFLOW_DIFF
   title     String
-  payload   Json                             // 建議內容（每 kind shape 見 mining.ts）
-  evidence  Json                             // { counts, samples: [{...}] } — 全 scrub
-  status    String    @default("PROPOSED")   // PROPOSED / APPROVED / REJECTED
+  payload   Json // 建議內容（每 kind shape 見 mining.ts）
+  evidence  Json // { counts, samples: [{...}] } — 全 scrub
+  status    String    @default("PROPOSED") // PROPOSED / APPROVED / REJECTED
   decidedBy String?
   decidedAt DateTime? @db.Timestamptz
-  createdAt DateTime  @db.Timestamptz @default(now())
+  createdAt DateTime  @default(now()) @db.Timestamptz
+
   @@index([status, createdAt])
 }
 
@@ -1149,8 +1185,8 @@ model SuggestionCard {
 model AutomationStat {
   id            String @id @default(cuid())
   clinicId      String
-  category      String                       // intent；draft 冇 intent 記錄嘅落 "UNKNOWN"
-  weekStart     String                       // YYYY-MM-DD（HK 週一）
+  category      String // intent；draft 冇 intent 記錄嘅落 "UNKNOWN"
+  weekStart     String // YYYY-MM-DD（HK 週一）
   draftCount    Int    @default(0)
   adoptedAsIs   Int    @default(0)
   adoptedEdited Int    @default(0)
@@ -1158,6 +1194,7 @@ model AutomationStat {
   autoSent      Int    @default(0)
   complaints    Int    @default(0)
   rollbacks     Int    @default(0)
+
   @@unique([clinicId, category, weekStart])
 }
 
@@ -1173,27 +1210,28 @@ model AutomationStat {
 //   （terminal=null；turnCount/stage 保留）；≥ 7 日唔復活（新 session 由 C3 觸發時先開）。
 // - auto-resolve 守門 ④（T244）：有 active（terminal IS NULL）session → 唔 auto-close。
 model ConsultSession {
-  id             String   @id @default(cuid())
-  conversationId String
-  clinicId       String
-  workflow       String                     // ORTHODONTIC_CONSULT | IMPLANT_CONSULT
-  stage          String   @default("DISCOVER")
-  terminal       String?                    // COMPLETED|HANDOFF|EXPIRED|HUMAN_TOOK_OVER
-  slots          Json     @default("{}")
-  objections     Json     @default("[]")
-  candidateCategory String?                 // CLEAR_ALIGNER | FIXED | null（★ 類別，唔係產品）
-  comparedProducts String[] @default([])
-  askedSlots     String[] @default([])
-  turnCount      Int      @default(0)
-  purchaseIntent Float    @default(0)
-  lastAction     String?
-  nextAction     String?
-  ctaGiven       Boolean  @default(false)
-  humanTookOver  Boolean  @default(false)
-  lastOutboundText String? @db.Text
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  id                String       @id @default(cuid())
+  conversationId    String
+  clinicId          String
+  workflow          String // ORTHODONTIC_CONSULT | IMPLANT_CONSULT
+  stage             String       @default("DISCOVER")
+  terminal          String? // COMPLETED|HANDOFF|EXPIRED|HUMAN_TOOK_OVER
+  slots             Json         @default("{}")
+  objections        Json         @default("[]")
+  candidateCategory String? // CLEAR_ALIGNER | FIXED | null（★ 類別，唔係產品）
+  comparedProducts  String[]     @default([])
+  askedSlots        String[]     @default([])
+  turnCount         Int          @default(0)
+  purchaseIntent    Float        @default(0)
+  lastAction        String?
+  nextAction        String?
+  ctaGiven          Boolean      @default(false)
+  humanTookOver     Boolean      @default(false)
+  lastOutboundText  String?      @db.Text
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  conversation      Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
   @@index([conversationId, terminal])
 }
 
@@ -1204,28 +1242,29 @@ model ConsultSession {
 // - @@unique([clinicId, workflow, code])：同店同 workflow 唔准重複 code（Postgres NULL 唔撞 unique —
 //   全局 row 可有多個 code，由 application 層守衛）。
 model ConsultProduct {
-  id            String  @id @default(cuid())
-  clinicId      String?                     // null = 全局
-  workflow      String
-  code          String                      // TRAD | IGO | IFULL | HIOSSEN_ETIII | STRAUMANN_ROXOLID …
-  displayName   String
-  category      String?                     // CLEAR_ALIGNER | FIXED | IMPLANT
-  brand         String?
-  productFamily String?
-  model         String?
-  material      String?
-  surface       String?
-  positioning   String  @db.Text            // 呢個方案係咩（L2/L3）
-  approvedWording String @db.Text           // ★ 可以照講嘅句子
-  avoidPhrases  String[] @default([])       // ★ 唔准講
-  timeWording   String? @db.Text            // 療程時間點講（留空 = 唔准講時間）
-  packageNote   String? @db.Text
-  warrantyNote  String? @db.Text
-  priceDocTitle String?                     // 對應 KnowledgeDoc(kind=PRICE).title
-  sortOrder     Int     @default(0)
-  enabled       Boolean @default(true)
-  approvedBy    String?
-  approvedAt    DateTime?
+  id              String    @id @default(cuid())
+  clinicId        String? // null = 全局
+  workflow        String
+  code            String // TRAD | IGO | IFULL | HIOSSEN_ETIII | STRAUMANN_ROXOLID …
+  displayName     String
+  category        String? // CLEAR_ALIGNER | FIXED | IMPLANT
+  brand           String?
+  productFamily   String?
+  model           String?
+  material        String?
+  surface         String?
+  positioning     String    @db.Text // 呢個方案係咩（L2/L3）
+  approvedWording String    @db.Text // ★ 可以照講嘅句子
+  avoidPhrases    String[]  @default([]) // ★ 唔准講
+  timeWording     String?   @db.Text // 療程時間點講（留空 = 唔准講時間）
+  packageNote     String?   @db.Text
+  warrantyNote    String?   @db.Text
+  priceDocTitle   String? // 對應 KnowledgeDoc(kind=PRICE).title
+  sortOrder       Int       @default(0)
+  enabled         Boolean   @default(true)
+  approvedBy      String?
+  approvedAt      DateTime?
+
   @@unique([clinicId, workflow, code])
 }
 
@@ -1240,6 +1279,7 @@ model ConsultSetting {
   key       String
   value     Json
   updatedAt DateTime @updatedAt
+
   @@unique([clinicId, key])
 }
 
@@ -1248,36 +1288,40 @@ model ConsultSetting {
 //   零臨床全文、零原始電話（只 phoneHashes）；wa-inbox 唔存臨床全文（MD §6）。
 //   （F 欠款類已隨 v3 整類剷走 — 餘額只做病人記錄側欄中性顯示，唔入 contextJson）
 enum FollowupTrigger {
-  CONVERSATION_IDLE   // A 對話跟進（wa-inbox 自己 lastInboundAt/lastOutboundAt 空窗）
-  BEFORE_APPOINTMENT  // B 預約提醒（bookingStatus ∈ {0,102}，應診前）
-  AFTER_NO_SHOW       // B 爽約跟進（bookingStatus = -3 — 明確 = -3，唔照抄 treatment-summary 的 >= 0）
+  CONVERSATION_IDLE // A 對話跟進（wa-inbox 自己 lastInboundAt/lastOutboundAt 空窗）
+  BEFORE_APPOINTMENT // B 預約提醒（bookingStatus ∈ {0,102}，應診前）
+  AFTER_NO_SHOW // B 爽約跟進（bookingStatus = -3 — 明確 = -3，唔照抄 treatment-summary 的 >= 0）
   // ★ cwi-followup-v3-20260916：F 欠款 trigger 整類剷走 — enum 值已遷走（20260917000004/5），
   //   schema 同 DB 對齊（S5 T420 核收時發現 schema 殘留，補剔 — 避免未來 db push 漂移）。
-  AFTER_TREATMENT     // C 術後關懷（P4）
-  RECALL_NO_REPEAT    // D 定期召回（P4）
-  QUOTED_NOT_BOOKED   // E 報價未成交（P4）
-  DOCTOR_ADVICE       // ★ cwi-advice-20261024：醫生建議跟進（診症記錄有 advise/suggest/recommend…）
+  AFTER_TREATMENT // C 術後關懷（P4）
+  RECALL_NO_REPEAT // D 定期召回（P4）
+  QUOTED_NOT_BOOKED // E 報價未成交（P4）
+  DOCTOR_ADVICE // ★ cwi-advice-20261024：醫生建議跟進（診症記錄有 advise/suggest/recommend…）
 }
+
 enum FollowupLevel {
   L1 // 入「待跟進」隊列等人撳（AI_ADOPTED）— v3 恒此級
   L2 // v3 已唔用（cron 直接發已取消 — 欄值保留避免 migration）
 }
+
 enum FollowupUnit {
   HOUR
   DAY
   WEEK
   MONTH
 }
+
 // ★ cwi-followup-v3-20260916：Follow-up 重新定位 — 「自動發訊息」→「員工提示層」。
 // 語義：FollowupTask = 未處理建議（唔再係「待發送任務」）；cron 零 outbound（T430）。
 enum FollowupStatus {
   SUGGESTED // 未處理建議（取代 SCHEDULED/DUE — 建 task 即此態；UI 膠囊/建議卡讀此）
-  SENT      // 員工採用後已發（記 sentMessageId）
-  SKIPPED   // 跳過（cancelReason = MANUAL（員工撳跳過）/ NO_TEMPLATE（窗過 + template 未審批 — 建 task 前抑制用））
+  SENT // 員工採用後已發（記 sentMessageId）
+  SKIPPED // 跳過（cancelReason = MANUAL（員工撳跳過）/ NO_TEMPLATE（窗過 + template 未審批 — 建 task 前抑制用））
   CANCELLED // 取消條件命中（OPT_OUT/REPLIED/BOOKED/ARRIVED/RESOLVED/NO_CONVERSATION）或人手取消（MANUAL）
   COMPLETED // 病人自己回覆咗（唔 claim，對話落公海 + badge）
-  EXPIRED   // 時效過期（§2.4 — 自動；唔通知唔提示，過咗就算）
+  EXPIRED // 時效過期（§2.4 — 自動；唔通知唔提示，過咗就算）
 }
+
 enum FollowupSource {
   RULE
   MANUAL
@@ -1285,58 +1329,60 @@ enum FollowupSource {
 }
 
 model FollowupRule {
-  id          String          @id @default(cuid())
-  clinicId    String?          // null = 全局
-  name        String
-  enabled     Boolean         @default(true)
-  trigger     FollowupTrigger
-  delayValue  Int
-  delayUnit   FollowupUnit
-  reasonCodes String[]         // visitReason code（C/D 類）
+  id                  String          @id @default(cuid())
+  clinicId            String? // null = 全局
+  name                String
+  enabled             Boolean         @default(true)
+  trigger             FollowupTrigger
+  delayValue          Int
+  delayUnit           FollowupUnit
+  reasonCodes         String[] // visitReason code（C/D 類）
   // ★ cwi-advice-20261024：DOCTOR_ADVICE 觸發字／排除字（唔分大細楷；排除字 = 段內含就成段唔計）
-  keywords        String[]     @default([])
-  excludeKeywords String[]     @default([])
-  templateName String          // → FollowupTemplate.key
-  level       FollowupLevel   @default(L1)   // ★ cwi-final S2-8：v3 恒 L1（L2 直接發已取消；enum 保留避免 migration；PATCH 只收 L1）
-  maxSends    Int             @default(1)
-  cancelOnReply    Boolean    @default(true)
-  cancelOnBooking  Boolean    @default(true)
-  cancelOnArrival  Boolean    @default(true)
-  cancelOnResolved Boolean    @default(true)
+  keywords            String[]        @default([])
+  excludeKeywords     String[]        @default([])
+  templateName        String // → FollowupTemplate.key
+  level               FollowupLevel   @default(L1) // ★ cwi-final S2-8：v3 恒 L1（L2 直接發已取消；enum 保留避免 migration；PATCH 只收 L1）
+  maxSends            Int             @default(1)
+  cancelOnReply       Boolean         @default(true)
+  cancelOnBooking     Boolean         @default(true)
+  cancelOnArrival     Boolean         @default(true)
+  cancelOnResolved    Boolean         @default(true)
   // ★ cwi-followup-v3：B-4 跨店去重窗口（日；老細拍板 default 7，可配）
-  dedupWindowDays    Int        @default(7)
+  dedupWindowDays     Int             @default(7)
   // ★ cwi-followup-v3 §3：B1 首次啟用確認彈窗（確認診所無其他渠道發預約提醒）— null = 未確認
-  firstUseConfirmedAt DateTime? @db.Timestamptz
+  firstUseConfirmedAt DateTime?       @db.Timestamptz
   // ★ cwi-followup-v3 A-1：依賴斷線留痕 — 每輪 scan 後寫（OK|DEP_FAIL|EMPTY）；3 連 DEP_FAIL → hub 紅字
-  lastScanAt     DateTime? @db.Timestamptz
-  lastScanResult String?    // OK | DEP_FAIL | EMPTY
-  createdBy   String?
-  updatedAt   DateTime        @updatedAt
+  lastScanAt          DateTime?       @db.Timestamptz
+  lastScanResult      String? // OK | DEP_FAIL | EMPTY
+  createdBy           String?
+  updatedAt           DateTime        @updatedAt
+
   @@index([clinicId, enabled])
 }
 
 model FollowupTask {
-  id             String         @id @default(cuid())
-  clinicId       String
-  conversationId String?
+  id               String         @id @default(cuid())
+  clinicId         String
+  conversationId   String?
   patientApricotId String?
-  phoneHashes    String[]       // 只 hash（零原始電話）
-  ruleId         String?
-  source         FollowupSource @default(RULE)
-  dueAt          DateTime       @db.Timestamptz
-  status         FollowupStatus @default(SUGGESTED)
-  templateName   String?        // → FollowupTemplate.key
-  templateVars   Json?          // 渲染變數（顯示用：日期/金額/醫生名 — 零 PII 原文）
-  contextJson    Json?          // ★ 顯示用結構化數據（到診日期/預約 apptId）— 零臨床全文（欠款已隨 F 類剷走）
+  phoneHashes      String[] // 只 hash（零原始電話）
+  ruleId           String?
+  source           FollowupSource @default(RULE)
+  dueAt            DateTime       @db.Timestamptz
+  status           FollowupStatus @default(SUGGESTED)
+  templateName     String? // → FollowupTemplate.key
+  templateVars     Json? // 渲染變數（顯示用：日期/金額/醫生名 — 零 PII 原文）
+  contextJson      Json? // ★ 顯示用結構化數據（到診日期/預約 apptId）— 零臨床全文（欠款已隨 F 類剷走）
   // ★ cwi-final S2-1：業務科目（appt:<id> / noshow:<id> / tx:<visitId> / recall:<patient>:<lastVisit> / quote:<quoteId> / idle:<conv>:<lastInboundAtISO> / advice:<patient>:<visitDate>）— 科目級終態去重
-  subjectKey     String?
-  note           String?
-  createdBy      String?
-  handledBy      String?
-  handledAt      DateTime?      @db.Timestamptz
-  cancelReason   String?        // OPT_OUT/REPLIED/BOOKED/ARRIVED/RESOLVED/MANUAL/DEDUP/NO_CONVERSATION/NO_TEMPLATE
-  sentMessageId  String?
-  createdAt      DateTime       @default(now())
+  subjectKey       String?
+  note             String?
+  createdBy        String?
+  handledBy        String?
+  handledAt        DateTime?      @db.Timestamptz
+  cancelReason     String? // OPT_OUT/REPLIED/BOOKED/ARRIVED/RESOLVED/MANUAL/DEDUP/NO_CONVERSATION/NO_TEMPLATE
+  sentMessageId    String?
+  createdAt        DateTime       @default(now())
+
   @@index([clinicId, status, dueAt])
   @@index([conversationId, status])
   @@index([ruleId, subjectKey])
@@ -1348,17 +1394,17 @@ model FollowupTask {
 // - approved=false 默認（老細審批中）— 未審批 + 窗口過咗 → task SKIPPED(NO_TEMPLATE) 唔會真發（安全設計）。
 // - text 內 {{var}} 由 templateVars 渲染；window 內發送當 free-form text（body = 渲染後文字）。
 model FollowupTemplate {
-  key          String    @id    // conversation_followup / appt_reminder / no_show / post_op_check / recall_cleaning / quote_followup
-  name         String     // 顯示名（中文）
-  text         String     // 中文正文（{{var}} 佔位）
-  language     String    @default("zh_HK")
-  waTemplateName String?  // 過窗 template 發送用嘅 WA Manager 名稱（null = 用 key；上線前需喺 WA Manager 登記）
-  approved     Boolean   @default(false)
-  approvedAt   DateTime?
-  approvedBy   String?
+  key            String    @id // conversation_followup / appt_reminder / no_show / post_op_check / recall_cleaning / quote_followup
+  name           String // 顯示名（中文）
+  text           String // 中文正文（{{var}} 佔位）
+  language       String    @default("zh_HK")
+  waTemplateName String? // 過窗 template 發送用嘅 WA Manager 名稱（null = 用 key；上線前需喺 WA Manager 登記）
+  approved       Boolean   @default(false)
+  approvedAt     DateTime?
+  approvedBy     String?
   // ★ cwi-final S2-5：過窗 template 參數次序（registry 記變數次序 — components.parameters 排序用）
-  paramOrder   String[]  @default([])
-  updatedAt    DateTime  @updatedAt
+  paramOrder     String[]  @default([])
+  updatedAt      DateTime  @updatedAt
 }
 
 // ★ cwi-sales-20261028：銷售系統第 1 期（保護期／綁定／對話鎖）。計錢（invoice、付款、傭金）喺 workforce。
@@ -1367,14 +1413,14 @@ model FollowupTemplate {
 // 銷售規則設定（單行 id = "global"；老闆喺 /admin/sales 改）
 model SalesSettings {
   id                      String   @id @default("global")
-  protectionDays          Int      @default(7)   // 保護到「預約日後 N 日」
-  highValueProtectionDays Int      @default(14)  // 高價項目（第 2 期開單時按傭金項目類別套用）
-  maxDaysAhead            Int      @default(30)  // 預約日最遠幾多日內先有保護
-  cycleCap                Int      @default(3)   // 循環邀約上限（同一銷售連續續期輪數）
-  noShowCap               Int      @default(2)   // 連續 no-show 次數 → 出公海（第 3 期接 Apricot 到診狀態）
-  concurrentCap           Int      @default(30)  // 每個銷售同時保護中病人上限
-  boundAutoReleaseMonths  Int      @default(24)  // 綁定病人幾多個月冇付款自動解除（第 3 期）
-  unansweredNotifyMinutes Int      @default(30)  // 綁定／保護中對話 N 分鐘冇人覆 → 通知主管
+  protectionDays          Int      @default(7) // 保護到「預約日後 N 日」
+  highValueProtectionDays Int      @default(14) // 高價項目（第 2 期開單時按傭金項目類別套用）
+  maxDaysAhead            Int      @default(30) // 預約日最遠幾多日內先有保護
+  cycleCap                Int      @default(3) // 循環邀約上限（同一銷售連續續期輪數）
+  noShowCap               Int      @default(2) // 連續 no-show 次數 → 出公海（第 3 期接 Apricot 到診狀態）
+  concurrentCap           Int      @default(30) // 每個銷售同時保護中病人上限
+  boundAutoReleaseMonths  Int      @default(24) // 綁定病人幾多個月冇付款自動解除（第 3 期）
+  unansweredNotifyMinutes Int      @default(30) // 綁定／保護中對話 N 分鐘冇人覆 → 通知主管
   notifyWindowStart       String   @default("09:00") @db.VarChar(5) // 冇人覆通知只喺呢段時間（香港時間）
   notifyWindowEnd         String   @default("21:00") @db.VarChar(5)
   intentLabels            String[] @default(["高", "中", "低"]) // HIGH / MEDIUM / LOW 顯示名
@@ -1386,27 +1432,28 @@ model SalesSettings {
 
 enum SalesOwnershipState {
   PROTECTED // 保護中：銷售經 inbox 落預約／發 Flow
-  BOUND     // 綁定：開咗傭金項目 invoice 兼收過錢（第 2–3 期）／老闆手動指派
-  POOL      // 銷售公海：保護到期冇成交
+  BOUND // 綁定：開咗傭金項目 invoice 兼收過錢（第 2–3 期）／老闆手動指派
+  POOL // 銷售公海：保護到期冇成交
 }
 
 // 病人歸屬（一個 Apricot 病人一行）
 model SalesOwnership {
-  id               String              @id @default(cuid())
-  patientApricotId String              @unique
-  state            SalesOwnershipState
-  salesStaffId     String?             // PROTECTED / BOUND = 負責銷售；POOL = null
-  lastSalesStaffId String?             // 最近一個負責銷售（POOL 後保留，報表用）
-  protectedUntil   DateTime?           @db.Timestamptz // PROTECTED 到幾時（預約日後 N 日 23:59:59 香港時間）
-  rounds           Int                 @default(0)     // 同一銷售連續保護輪數（循環邀約上限）
-  noShowStreak     Int                 @default(0)
-  lastApptId       String?             // 最近一張計數嘅 Apricot 預約
-  lastApptDate     String?             @db.VarChar(10) // YYYY-MM-DD（香港日界）
-  clinicId         String?             // 最近預約所屬店（通知／報表）
+  id                String              @id @default(cuid())
+  patientApricotId  String              @unique
+  state             SalesOwnershipState
+  salesStaffId      String? // PROTECTED / BOUND = 負責銷售；POOL = null
+  lastSalesStaffId  String? // 最近一個負責銷售（POOL 後保留，報表用）
+  protectedUntil    DateTime?           @db.Timestamptz // PROTECTED 到幾時（預約日後 N 日 23:59:59 香港時間）
+  rounds            Int                 @default(0) // 同一銷售連續保護輪數（循環邀約上限）
+  noShowStreak      Int                 @default(0)
+  lastApptId        String? // 最近一張計數嘅 Apricot 預約
+  lastApptDate      String?             @db.VarChar(10) // YYYY-MM-DD（香港日界）
+  clinicId          String? // 最近預約所屬店（通知／報表）
   highValue         Boolean             @default(false) // ★ 第 5 期：開咗高價傭金項目單 → 保護期用「高價項目保護期」
   expiryRemindedFor DateTime?           @db.Timestamptz // ★ 第 5 期：已經為呢個 protectedUntil 發過到期提醒
-  since            DateTime            @default(now()) @db.Timestamptz // 進入而家狀態嘅時間
-  updatedAt        DateTime            @updatedAt @db.Timestamptz
+  since             DateTime            @default(now()) @db.Timestamptz // 進入而家狀態嘅時間
+  updatedAt         DateTime            @updatedAt @db.Timestamptz
+
   @@index([salesStaffId, state])
   @@index([state, protectedUntil])
 }
@@ -1416,7 +1463,7 @@ model SalesBooking {
   id               String   @id @default(cuid())
   apricotApptId    String   @unique
   patientApricotId String
-  salesStaffId     String?  // 歸屬銷售（Flow 發送人優先，其次落單人；都唔係銷售 = null）
+  salesStaffId     String? // 歸屬銷售（Flow 發送人優先，其次落單人；都唔係銷售 = null）
   conversationId   String?
   clinicId         String?
   apptDate         String   @db.VarChar(10)
@@ -1425,6 +1472,7 @@ model SalesBooking {
   /// ★ 第 5 期：預約日過咗之後嘅到診結果 — SHOWN / NO_SHOW / CANCELLED / RESCHEDULED（null = 未查）
   attendance       String?  @db.VarChar(12)
   createdAt        DateTime @default(now()) @db.Timestamptz
+
   @@index([patientApricotId, createdAt])
   @@index([salesStaffId, createdAt])
 }
@@ -1440,10 +1488,10 @@ model SalesDelegation {
   expiresAt      DateTime? @db.Timestamptz
   revokedAt      DateTime? @db.Timestamptz
   createdAt      DateTime  @default(now()) @db.Timestamptz
+
   @@index([conversationId, revokedAt])
   @@index([toStaffId, revokedAt])
 }
-
 
 // ── ★ cwi-workgroup-20261104：工作群（inbox 內部團隊群組 — 唔經 WhatsApp，Meta 唔收費）──
 // 群組同成員全部由老闆（集團管理員）自己管：開群、改名、加／刪任何員工、封存。冇自動加人。
@@ -1486,9 +1534,22 @@ model WorkGroupMessage {
   conversationId String?
   /// 防重複發送（同一個人同一個 key 只寫一次）
   clientKey      String?   @db.VarChar(64)
+  /// ★ p2：分享並放手 — 分享嗰刻將對話放返「未指派」；卡上出「我接」
+  released       Boolean   @default(false)
+  claimedById    String?
+  claimedAt      DateTime? @db.Timestamptz
+  /// ★ p2：附件（一條訊息最多一個；碟上加密，檔名 wg-<uuid>.<ext>）
+  attachKey      String?   @unique @db.VarChar(80)
+  attachName     String?   @db.VarChar(120)
+  attachMime     String?   @db.VarChar(60)
+  attachSize     Int?
+  /// ★ p2：置頂（每群最多 3 條）
+  pinnedAt       DateTime? @db.Timestamptz
+  pinnedById     String?
   createdAt      DateTime  @default(now()) @db.Timestamptz
   group          WorkGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
   @@unique([senderId, clientKey])
   @@index([groupId, createdAt])
+  @@index([groupId, pinnedAt])
 }

@@ -47,6 +47,7 @@ export async function runUnassignedSlaSweep(
   const rows = await prisma.conversation.findMany({
     where: {
       assigneeId: null,
+      external: false, // ★ cwi-workgroup-p2：外部對話唔計未指派 SLA
       status: { not: "RESOLVED" },
       slaNotifiedAt: null,
       lastInboundAt: { not: null, lte: floorCutoff },

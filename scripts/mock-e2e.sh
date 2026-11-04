@@ -2222,6 +2222,70 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/workgr
 check "T54W 被刪成員即時睇唔到 → 404" "$CODE" "404"
 q "DELETE FROM \"WorkGroup\" WHERE id='$WG_ID'" >/dev/null 2>&1 || true
 q "DELETE FROM \"AuditLog\" WHERE \"entityId\"='$WG_ID'" >/dev/null 2>&1 || true
+
+# ── T54X. 工作群第 2 期（cwi-workgroup-p2）：分享並放手 →「我接」、附件（magic bytes + 只限成員）、外部對話（停 AI + 離開收件箱）──
+echo "[AR-3] T54X: workgroups p2 + external..."
+ADMIN_SID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$ADMIN_EMAIL'" | jf id)
+CODE=$(curl -s -o /tmp/e2e-wgx-new.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/workgroups" -H 'Content-Type: application/json' -d '{"name":"WGE2E p2","memberIds":["'$TKW_SID'","'$ADMIN_SID'"]}')
+check "T54X 開群 → 201" "$CODE" "201"
+WGX_ID=$(jf id < /tmp/e2e-wgx-new.json)
+WGX_WA="8526054${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$WGX_WA" --text "e2e 想約洗牙" --wamid "wamid.E2E_WGX_1_${EPOCH}" --name "E2E WGX" >/dev/null 2>&1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_WGX_1_${EPOCH}'" '[{"c":"1"}]' 45 || fail "T54X 首訊未落庫"
+WGX_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$WGX_WA'" | jf id)
+# 分享並放手：TKW 係負責人 → 放手 + 卡；admin 撳「我接」；TKW 再撳 409
+q "UPDATE \"Conversation\" SET \"assigneeId\"='$TKW_SID' WHERE id='$WGX_CONV'" >/dev/null
+CODE=$(curl -s -o /tmp/e2e-wgx-rel.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WGX_ID/messages" -H 'Content-Type: application/json' -d '{"body":"我放假，邊個接？","conversationId":"'$WGX_CONV'","release":true}')
+check "T54X 分享並放手 → 201" "$CODE" "201"
+grep -q '"released":true' /tmp/e2e-wgx-rel.json && pass "T54X released=true" || fail "T54X 放手未生效（=$(cat /tmp/e2e-wgx-rel.json)）"
+check "T54X 對話變未指派" "$(q "SELECT coalesce(\"assigneeId\",'none') a FROM \"Conversation\" WHERE id='$WGX_CONV'" | jf a)" "none"
+WGX_MID=$(jf messageId < /tmp/e2e-wgx-rel.json)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X POST "$BASE/api/workgroups/$WGX_ID/messages/$WGX_MID/claim")
+check "T54X 非成員撳我接 → 404" "$CODE" "404"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/workgroups/$WGX_ID/messages/$WGX_MID/claim")
+check "T54X 成員我接 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WGX_ID/messages/$WGX_MID/claim")
+check "T54X 第二個撳 → 409" "$CODE" "409"
+check "T54X 負責人 = 撳我接嗰個" "$(q "SELECT \"assigneeId\" a FROM \"Conversation\" WHERE id='$WGX_CONV'" | jf a)" "$ADMIN_SID"
+# 附件：PNG（magic bytes）→ 201；假 PNG（MZ exe）→ 415；成員攞到、非成員 404
+printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82' > /tmp/e2e-wgx.png
+printf 'MZ\x90\x00fake-exe' > /tmp/e2e-wgx-evil.png
+CODE=$(curl -s -o /tmp/e2e-wgx-att.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WGX_ID/attachments" -F "file=@/tmp/e2e-wgx.png;type=image/png" -F "body=牙模相")
+check "T54X 附件 PNG → 201" "$CODE" "201"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WGX_ID/attachments" -F "file=@/tmp/e2e-wgx-evil.png;type=image/png")
+check "T54X 改名 exe → 415（magic bytes）" "$CODE" "415"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X POST "$BASE/api/workgroups/$WGX_ID/attachments" -F "file=@/tmp/e2e-wgx.png;type=image/png")
+check "T54X 非成員上載 → 404（唔落碟）" "$CODE" "404"
+WGX_KEY=$(q "SELECT \"attachKey\" k FROM \"WorkGroupMessage\" WHERE \"groupId\"='$WGX_ID' AND \"attachKey\" IS NOT NULL" | jf k)
+CODE=$(curl -s -o /tmp/e2e-wgx-dl.bin -D /tmp/e2e-wgx-dl.h -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/workgroups/files/$WGX_KEY")
+check "T54X 成員攞附件 → 200" "$CODE" "200"
+cmp -s /tmp/e2e-wgx-dl.bin /tmp/e2e-wgx.png && pass "T54X 附件內容一致（碟上加密 → 透明解密）" || fail "T54X 附件內容唔一致"
+grep -qi '^x-content-type-options: nosniff' /tmp/e2e-wgx-dl.h && pass "T54X nosniff" || fail "T54X 缺 nosniff"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/workgroups/files/$WGX_KEY")
+check "T54X 非成員攞附件 → 404" "$CODE" "404"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/workgroups/files/..%2F..%2Fetc%2Fpasswd")
+check "T54X 路徑穿越 → 404" "$CODE" "404"
+# 外部對話：標記 → 新訊息唔入 AI queue、收件箱列表冇、外部列表有；取消 → 返收件箱
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X POST "$BASE/api/conversations/$WGX_CONV/external" -H 'Content-Type: application/json' -d '{"name":"陳師傅"}')
+check "T54X 其他店標記外部 → 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/conversations/$WGX_CONV/external" -H 'Content-Type: application/json' -d '{"name":"陳師傅","org":"明德 Lab"}')
+check "T54X 標記外部 → 200" "$CODE" "200"
+pnpm -s mock-inbound message --clinic TKW --from "$WGX_WA" --text "張太個牙模今日 5 點前送到" --wamid "wamid.E2E_WGX_2_${EPOCH}" --name "E2E WGX" >/dev/null 2>&1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_WGX_2_${EPOCH}'" '[{"c":"1"}]' 45 || fail "T54X 外部訊息未落庫"
+WGX_M2=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_WGX_2_${EPOCH}'" | jf id)
+sleep 3
+check "T54X 外部訊息唔入 AI queue" "$(redis-cli EXISTS "wa-inbox:ai:ai-$WGX_M2" 2>/dev/null)" "0"
+check "T54X 外部訊息零 AI draft" "$(q "SELECT count(*)::text c FROM \"AiDraft\" WHERE \"inReplyToMessageId\"='$WGX_M2'" | jf c)" "0"
+curl -s -b "$COOKIE_TKW" "$BASE/api/conversations?contactId=$(q "SELECT \"contactId\" c FROM \"Conversation\" WHERE id='$WGX_CONV'" | jf c)" > /tmp/e2e-wgx-list.json
+grep -q "$WGX_CONV" /tmp/e2e-wgx-list.json && fail "T54X 外部對話仲喺收件箱列表" || pass "T54X 外部對話唔喺收件箱列表"
+curl -s -b "$COOKIE_TKW" "$BASE/api/conversations?ids=$WGX_CONV" | grep -q "$WGX_CONV" && pass "T54X 深連結仲開到" || fail "T54X 深連結開唔到外部對話"
+curl -s -b "$COOKIE_TKW" "$BASE/api/workgroups/external" | grep -q "$WGX_CONV" && pass "T54X 外部對話列表有" || fail "T54X 外部列表冇"
+curl -s -b "$COOKIE_MF" "$BASE/api/workgroups/external" | grep -q "$WGX_CONV" && fail "T54X 其他店睇到外部對話" || pass "T54X 其他店睇唔到"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X DELETE "$BASE/api/conversations/$WGX_CONV/external")
+check "T54X 取消外部 → 200" "$CODE" "200"
+check "T54X 返返收件箱" "$(q "SELECT external::text e FROM \"Conversation\" WHERE id='$WGX_CONV'" | jf e)" "false"
+q "DELETE FROM \"WorkGroup\" WHERE id='$WGX_ID'" >/dev/null 2>&1 || true
+q "DELETE FROM \"AuditLog\" WHERE \"entityId\"='$WGX_ID'" >/dev/null 2>&1 || true
 AUD_AFTER=$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
 check "T54 hermetic：ES_ONBOARD 審計已清" "$AUD_AFTER" "0"
 # ★ token/code/PIN 零入 log（grep 自證）

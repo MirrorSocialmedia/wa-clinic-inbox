@@ -24,6 +24,7 @@ export default async function InboxLayout({
   const unreadCount = await prisma.conversation.count({
     where: {
       unreadCount: { gt: 0 },
+      external: false, // ★ cwi-workgroup-p2：外部對話未讀計喺工作群
       status: { not: "RESOLVED" },
       ...(session.role === "STAFF" && session.clinicId
         ? { clinicId: session.clinicId }

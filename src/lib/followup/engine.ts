@@ -407,6 +407,7 @@ async function scanIdleConversations(
     where: {
       clinicId: { in: clinicIds },
       status: "OPEN",
+      external: false, // ★ cwi-workgroup-p2：外部人唔跟進
       lastInboundAt: { lte: cutoff, not: null },
       OR: [{ lastOutboundAt: { lte: cutoff } }, { lastOutboundAt: null }],
     },
@@ -925,7 +926,7 @@ async function scanQuotedNotBooked(
   // patient → 對話（釘選 → 電話認到／此電話嘅病人 — 本地）
   const clinicIds = clinics.map((c) => c.id);
   const convs = await prisma.conversation.findMany({
-    where: { clinicId: { in: clinicIds } },
+    where: { clinicId: { in: clinicIds }, external: false },
     select: { id: true, clinicId: true, contactId: true, pinnedPatientApricotId: true },
   });
   const convByPatient = new Map<string, { id: string; clinicId: string; contactId: string }>();
@@ -1077,6 +1078,7 @@ async function adviceConversationFor(
   ]);
   const convs = await prisma.conversation.findMany({
     where: {
+      external: false,
       OR: [
         { pinnedPatientApricotId: patientApricotId },
         ...(linked.length ? [{ contactId: { in: linked.map((l) => l.contactId) } }] : []),

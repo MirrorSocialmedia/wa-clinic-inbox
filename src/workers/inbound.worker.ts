@@ -200,12 +200,14 @@ async function findOrCreateConversation(
   db: Db,
   clinicId: string,
   contactId: string,
-  fallbackLastMessageAt: Date
+  fallbackLastMessageAt: Date,
+  /** ★ cwi-workgroup-p2：Contact 已標外部人 → 新對話都係外部對話 */
+  external = false
 ): Promise<Conversation> {
   return db.conversation.upsert({
     where: { clinicId_contactId: { clinicId, contactId } },
     update: {},
-    create: { clinicId, contactId, lastMessageAt: fallbackLastMessageAt },
+    create: { clinicId, contactId, lastMessageAt: fallbackLastMessageAt, external },
   });
 }
 
@@ -303,7 +305,7 @@ async function notifyNewMessage(
   }
 
   // ★ cwi-sales-20261028：綁定／保護中病人嘅新訊息 → 派返負責銷售（best-effort；先派後推，推送跟新負責人）
-  if (msg.direction === "IN") {
+  if (msg.direction === "IN" && !conv.external) {
     const { routeLockedConversation } = await import("@/lib/sales/core");
     await routeLockedConversation(conv.id);
   }
@@ -359,7 +361,7 @@ async function ensureSideEffects(
       );
     }
   }
-  if (msg.direction === "IN" && msg.channel === "API" && msg.type === "text") {
+  if (msg.direction === "IN" && msg.channel === "API" && msg.type === "text" && !conv.external) {
     // ★ cwi-final S1-14：紅旗 intake 補做（冪等 — urgent 已 true 唔重推；notice 按 msgId 查重）
     const urgentHit = await urgentIntake({
       clinicId: clinic.id, convId: conv.id, msgId: msg.id, wamid: msg.waMessageId, body: msg.body, type: msg.type,
@@ -445,7 +447,7 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
       }
 
       const contact = await upsertContact(tx, clinic.id, waId, profileName);
-      const conv = await findOrCreateConversation(tx, clinic.id, contact.id, waTs);
+      const conv = await findOrCreateConversation(tx, clinic.id, contact.id, waTs, !!contact.externalAt);
       // ★ cwi-statusrole2-20260910（MD §3）：RESOLVED + 病人 inbound → 翻開前置檢查 —
       //   原負責人停用 → 跌公海（dropAssignee）；active → 保留（tx 內直查保證同 message commit 一致）。
       const wasResolved = conv.status === "RESOLVED";
@@ -576,6 +578,12 @@ async function handleMessages(clinic: Clinic, value: NonNullable<WaChange["value
       } catch (err) {
         log.warn({ wamid, err: err instanceof Error ? err.message : String(err) }, "inbound: notifyNewMessage failed（best-effort — 唔 fail job）");
       }
+    }
+
+    // ★ cwi-workgroup-p2-20261105：外部對話（Lab／供應商）— 只落庫 + 通知；唔行紅旗、跟進、病人判定、預約、AI
+    if (result.conv.external || result.convUpdated?.external) {
+      log.info({ clinic: clinic.code, wamid, type: msgTypeOf(m) }, "inbound: external conversation — skip AI/followup/urgent");
+      continue;
     }
 
     // ★ cwi-final S1-14：deterministic 紅旗 intake — inbound 落庫後即行（唔等 LLM、唔等 AI queue）。
@@ -733,7 +741,7 @@ async function handleEchoes(clinic: Clinic, value: NonNullable<WaChange["value"]
       }
 
       const contact = await upsertContact(tx, clinic.id, recipient, null);
-      const conv = await findOrCreateConversation(tx, clinic.id, contact.id, waTs);
+      const conv = await findOrCreateConversation(tx, clinic.id, contact.id, waTs, !!contact.externalAt);
       let msg: Message;
       try {
         msg = await tx.message.create({
@@ -969,7 +977,7 @@ async function handleHistory(clinic: Clinic, value: NonNullable<WaChange["value"
   const imported: { patientMasked: string; count: number }[] = [];
   for (const [patientWaId, rows0] of perPatient) {
     const contact = await upsertContact(prisma, clinic.id, patientWaId, profileNames.get(patientWaId) ?? null);
-    const conv = await findOrCreateConversation(prisma, clinic.id, contact.id, new Date(0));
+    const conv = await findOrCreateConversation(prisma, clinic.id, contact.id, new Date(0), !!contact.externalAt);
     const rows = rows0.map((r) => ({ ...r, conversationId: conv.id }));
     // 分批 500 條（幾萬條級別）
     for (let i = 0; i < rows.length; i += 500) {

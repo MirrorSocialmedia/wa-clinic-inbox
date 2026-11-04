@@ -1,7 +1,8 @@
 /**
  * ★ cwi-workgroup-20261104：工作群訊息。
  * GET  ?before=<messageId>&limit= → { group, messages, hasMore }（只限成員；對話卡按睇嘅人權限即時查）
- * POST { body, mentions?, conversationId?, clientKey? } → 201 { messageId, duplicate }
+ * POST { body, mentions?, conversationId?, clientKey?, release? } → 201 { messageId, duplicate, released, releaseFailed }
+ *   ★ p2 release=true（分享並放手）：只限負責人／管理員；對話放返未指派 + 卡出「我接」
  *   成員先發到；封存 409；分享對話要自己睇得到；@ 只限成員；clientKey 防重複；每人每分鐘 30 條。
  *   commit 後：成員收 socket `workgroup:message`（零內文）；被 @ 嘅人另外收 push（只帶群名）。
  */
@@ -24,6 +25,7 @@ const postSchema = z
     mentions: z.array(z.string().max(64)).max(50).optional(),
     conversationId: z.string().min(1).max(64).nullish(),
     clientKey: z.string().max(64).nullish(),
+    release: z.boolean().optional(),
   })
   .strict();
 
@@ -55,7 +57,10 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
     for (const sid of r.mentioned) {
       void pushToStaff(sid, { kind: "workgroup", clinicShort: r.groupName.slice(0, 20), conversationId: "", groupId: id });
     }
-    return NextResponse.json({ messageId: r.messageId, duplicate: r.duplicate }, { status: r.duplicate ? 200 : 201 });
+    return NextResponse.json(
+      { messageId: r.messageId, duplicate: r.duplicate, released: r.released, releaseFailed: r.releaseFailed },
+      { status: r.duplicate ? 200 : 201 },
+    );
   } catch (e) {
     return wgError(e);
   }

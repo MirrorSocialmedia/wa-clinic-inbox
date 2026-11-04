@@ -52,6 +52,8 @@ export interface MessageNewPayload extends Record<string, unknown> {
     lastMessageAt: Date | null;
     lastInboundAt: Date | null;
     reopenedAt: Date | null;
+    /** ★ cwi-workgroup-p2：外部對話 — client 唔好喺收件箱列表插 row */
+    external: boolean;
   };
 }
 
@@ -68,6 +70,7 @@ export async function buildMessageNewPayload(messageId: string): Promise<Message
       lastMessageAt: true,
       lastInboundAt: true,
       reopenedAt: true,
+      external: true,
     },
   });
   if (!conv) throw new Error(`buildMessageNewPayload: conversation not found: ${msg.conversationId}`);
@@ -105,6 +108,7 @@ export async function buildMessageNewPayload(messageId: string): Promise<Message
       lastMessageAt: conv.lastMessageAt,
       lastInboundAt: conv.lastInboundAt,
       reopenedAt: conv.reopenedAt,
+      external: conv.external,
     },
   };
 }

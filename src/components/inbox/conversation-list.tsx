@@ -653,7 +653,8 @@ export function ConversationList(p: Props) {
   // ① 膠囊 + 狀態篩選（意向篩選之前 — 意向計數用呢份：揀「高」唔會令「中」數字變 0）
   const baseList = useMemo(() => {
     if (p.searchResults) return null;
-    let list = p.conversations;
+    // ★ cwi-workgroup-p2：外部對話（Lab／供應商）唔喺收件箱列表出現（深連結開咗都唔加入列表）
+    let list = p.conversations.filter((c) => !c.external);
     // ★ cwi-final S1-2（L-3）：膠囊 filter 改用 matchCapsule（client / server / counts 三處同源）—
     //   unassigned 加 clinic 維度雙保險（I-2）；followup 唔 filter status（S2-3：包含 RESOLVED）。
     const isResolvedView = p.statusFilter === "RESOLVED";

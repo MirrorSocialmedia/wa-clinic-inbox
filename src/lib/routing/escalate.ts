@@ -51,6 +51,7 @@ export async function runRoutingEscalateSweep(): Promise<EscalateSweepResult> {
       routedRuleId: { in: [...ruleMap.keys()] },
       escalatedAt: null,
       assigneeId: null,
+      external: false, // ★ cwi-workgroup-p2：外部對話唔升級
       status: { not: "RESOLVED" },
     },
     select: { id: true, clinicId: true, routedRuleId: true, routedAt: true, routedGroupId: true },
