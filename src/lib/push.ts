@@ -26,9 +26,11 @@ import { groupMembersCached } from "@/lib/notify";
 import type { Prisma } from "@prisma/client";
 
 export interface PushPayload {
-  kind: "message" | "notice" | "urgent" | "routing" | "routing-escalation";
+  kind: "message" | "notice" | "urgent" | "routing" | "routing-escalation" | "workgroup";
   clinicShort: string;
   conversationId: string;
+  /** ★ cwi-workgroup：工作群 @ 通知（clinicShort = 群名；唔帶訊息內容） */
+  groupId?: string;
   /** ★ cwi-notify-a4：推送 id（隨機、零 PII）— SW 收到後連 endpoint 回報 /api/push/ack（診斷「部機有冇收到」） */
   pushId?: string;
   /** ★ cwi-notify-a4：設定面板「發測試通知」— SW 標題顯示「測試通知」 */

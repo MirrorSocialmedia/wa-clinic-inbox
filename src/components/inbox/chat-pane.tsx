@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, memo, useRef, useState } from "react";
+import { ShareToWorkgroupDialog } from "@/components/workgroups/share-dialog";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
   AlertTriangle,
@@ -696,6 +697,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
     !!p.onRelease;
   // ★ Phase E（cwi-ai-20260825-t5）：header「⋯」menu — 標記投訴 / AI 錯誤（即時記帳；STAFF 可用）
   const [flagMenuOpen, setFlagMenuOpen] = useState(false);
+  // ★ cwi-workgroup：⋯ →「分享去工作群」
+  const [shareOpen, setShareOpen] = useState(false);
   const [flagBusy, setFlagBusy] = useState(false);
   const [flagMsg, setFlagMsg] = useState<string | null>(null);
   // cwi-setnav NAV-02：確認彈窗 + 旗標選單入返回堆疊
@@ -1305,6 +1308,16 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 >
                   標記 AI 錯誤
                 </button>
+                <button
+                  data-e2e="share-workgroup-btn"
+                  onClick={() => {
+                    setFlagMenuOpen(false);
+                    setShareOpen(true);
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-sm text-t1 hover:bg-panel-2"
+                >
+                  分享去工作群
+                </button>
                 {/* ★ cwi-ux UX-05：〔放手〕收入 ⋯ 選單（手機）— 兩段確認同獨立掣一致（再撳一次放手？） */}
                 {canRelease && (
                   <button
@@ -1333,6 +1346,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
             </>
           ) : null}
         </div>
+        {shareOpen && c && <ShareToWorkgroupDialog conversationId={c.id} onClose={() => setShareOpen(false)} />}
         {/* cwi-multiclinic-20260903（MD A.6.1）：〔放手〕— 現任負責人 ∨ ADMIN 見；兩段確認防誤觸
             ★ cwi-ux UX-05：手機收入 ⋯ 選單（release-menu-btn），獨立掣只 md: 以上 */}
         {canRelease && (

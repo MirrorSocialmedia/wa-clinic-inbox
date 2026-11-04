@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { BadgeDollarSign, BadgePercent, CalendarDays, LogOut, MessageCircle, Settings, Stethoscope } from "lucide-react";
+import { UsersRound, BadgeDollarSign, BadgePercent, CalendarDays, LogOut, MessageCircle, Settings, Stethoscope } from "lucide-react";
+import { useWorkgroupUnread } from "@/components/workgroups/use-wg-unread";
 import { logoutWithPushCleanup } from "@/lib/notify-client";
 
 /**
@@ -51,6 +52,8 @@ export function NavRail({
     };
   }, []);
 
+  const wg = useWorkgroupUnread();
+
   async function logout() {
     setBusy(true);
     // MD §3.6：先清 push subscription（client）→ server 兜底 → 清 session → /login
@@ -59,6 +62,8 @@ export function NavRail({
 
   const items: { href: string; label: string; icon: React.ReactNode; adminOnly?: boolean; salesOnly?: boolean; badge?: number }[] = [
     { href: "/inbox", label: "收件箱", icon: <MessageCircle size={18} strokeWidth={2.75} /> },
+    // ★ cwi-workgroup：工作群（內部團隊群組）— badge = 未讀
+    { href: "/workgroups", label: "工作群", icon: <UsersRound size={18} strokeWidth={2.75} />, badge: wg.unread },
     { href: "/bookings", label: "預約", icon: <CalendarDays size={18} strokeWidth={2.75} /> },
     { href: "/schedule", label: "醫生時間表", icon: <Stethoscope size={18} strokeWidth={2.75} /> },
     // cwi-setnav SET-04：報價入口（前線日常用 — 紅點 = 待確認數）

@@ -2185,6 +2185,43 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE
 check "T54D 設返 → 200" "$CODE" "200"
 curl -s -o /dev/null -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/clinics/$TKW_CLINIC_ID" -H 'Content-Type: application/json' -d '{"aiMode":"DRAFT"}'
 check "T54D 部分更新（只改 aiMode）唔會清走 Apricot 編號" "$(q "SELECT \"apricotClinicId\" FROM \"Clinic\" WHERE id='$TKW_CLINIC_ID'" | jf apricotClinicId)" "${T54D_ORIG:-MOCK_APRICOT_TKW}"
+
+# ── T54W. 工作群（cwi-workgroup）：老闆管群、成員先睇到、對話卡權限、防重複 ──
+echo "[AR-3] T54W: workgroups authz..."
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X GET "$BASE/api/workgroups")
+check "T54W 冇 session → 401" "$CODE" "401"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/admin/workgroups" -H 'Content-Type: application/json' -d '{"name":"WGE2E staff"}')
+check "T54W STAFF 開群 → 403" "$CODE" "403"
+TKW_SID=$(q "SELECT id FROM \"StaffUser\" WHERE email='$TKW_EMAIL'" | jf id)
+CODE=$(curl -s -o /tmp/e2e-wg-new.json -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/workgroups" -H 'Content-Type: application/json' -d '{"name":"WGE2E 群","memberIds":["'$TKW_SID'"]}')
+check "T54W 老闆開群 → 201" "$CODE" "201"
+WG_ID=$(jf id < /tmp/e2e-wg-new.json)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X POST "$BASE/api/admin/workgroups" -H 'Content-Type: application/json' -d '{"name":"WGE2E x","evil":1}')
+check "T54W 多餘欄位 → 400（strict）" "$CODE" "400"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" "$BASE/api/workgroups/$WG_ID/messages")
+check "T54W 老闆唔係成員 → 睇唔到內容 404" "$CODE" "404"
+WGK="wge2e$(date +%s)k"
+CODE=$(curl -s -o /tmp/e2e-wg-m1.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WG_ID/messages" -H 'Content-Type: application/json' -d '{"body":"e2e hi","clientKey":"'$WGK'"}')
+check "T54W 成員發訊息 → 201" "$CODE" "201"
+CODE=$(curl -s -o /tmp/e2e-wg-m2.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WG_ID/messages" -H 'Content-Type: application/json' -d '{"body":"e2e hi","clientKey":"'$WGK'"}')
+check "T54W 同 clientKey 重發 → 200（唔重複）" "$CODE" "200"
+check "T54W 重發同一條 id" "$(jf messageId < /tmp/e2e-wg-m2.json)" "$(jf messageId < /tmp/e2e-wg-m1.json)"
+check "T54W DB 只得一條" "$(q "SELECT count(*)::text n FROM \"WorkGroupMessage\" WHERE \"groupId\"='$WG_ID'" | jf n)" "1"
+MF_CONV=$(q "SELECT id FROM \"Conversation\" WHERE \"clinicId\"='$MF_CLINIC_ID' LIMIT 1" | jf id)
+if [ -n "$MF_CONV" ]; then
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WG_ID/messages" -H 'Content-Type: application/json' -d '{"body":"","conversationId":"'$MF_CONV'"}')
+  check "T54W 分享其他店對話 → 403（唔可以借群探對話）" "$CODE" "403"
+fi
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/workgroups/$WG_ID/messages" -H 'Content-Type: application/json' -d '{"body":"   "}')
+check "T54W 空白訊息 → 400" "$CODE" "400"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X PATCH "$BASE/api/admin/workgroups/$WG_ID" -H 'Content-Type: application/json' -d '{"removeIds":["'$TKW_SID'"]}')
+check "T54W STAFF 改成員 → 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_ADMIN" -X PATCH "$BASE/api/admin/workgroups/$WG_ID" -H 'Content-Type: application/json' -d '{"removeIds":["'$TKW_SID'"]}')
+check "T54W 老闆刪成員 → 200" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/workgroups/$WG_ID/messages")
+check "T54W 被刪成員即時睇唔到 → 404" "$CODE" "404"
+q "DELETE FROM \"WorkGroup\" WHERE id='$WG_ID'" >/dev/null 2>&1 || true
+q "DELETE FROM \"AuditLog\" WHERE \"entityId\"='$WG_ID'" >/dev/null 2>&1 || true
 AUD_AFTER=$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
 check "T54 hermetic：ES_ONBOARD 審計已清" "$AUD_AFTER" "0"
 # ★ token/code/PIN 零入 log（grep 自證）
