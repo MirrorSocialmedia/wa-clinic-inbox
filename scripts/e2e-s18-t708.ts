@@ -159,6 +159,7 @@ async function main(): Promise<void> {
     // counts 順帶 fetch — 等「跟進 3」渲染出（最多 10s）
     await page.waitForFunction(
       () => document.querySelector('[data-e2e="capsule-followup"]')?.textContent?.trim() === "跟進 3",
+      undefined, // ★ 簽名 (fn, arg, options) — options 唔可以放 arg 位
       { timeout: 10_000 }
     ).catch(() => {});
     const fuText = (await page.locator('[data-e2e="capsule-followup"]').textContent())?.trim();
@@ -214,7 +215,7 @@ type PwLocMin = {
 type PwPageMin = {
   locator(sel: string, opts?: { hasText?: string | RegExp }): PwLocMin;
   getByText(t: string, o?: { exact?: boolean }): PwLocMin;
-  waitForFunction(fn: unknown, o?: { timeout?: number }): Promise<void>;
+  waitForFunction(fn: unknown, arg?: unknown, o?: { timeout?: number }): Promise<void>;
   waitForTimeout(n: number): Promise<void>;
   goto(u: string, o?: { waitUntil?: string; timeout?: number }): Promise<void>;
   screenshot(o: { path: string }): Promise<void>;

@@ -48,7 +48,7 @@ interface PageLite {
   goto: (url: string, o?: Record<string, unknown>) => Promise<unknown>;
   waitForTimeout: (ms: number) => Promise<void>;
   waitForSelector: (sel: string, o?: Record<string, unknown>) => Promise<unknown>;
-  waitForFunction: (fn: string | ((...a: unknown[]) => unknown), o?: Record<string, unknown>) => Promise<unknown>;
+  waitForFunction: (fn: string | ((...a: unknown[]) => unknown), arg?: unknown, o?: Record<string, unknown>) => Promise<unknown>;
   getByText: (t: string, o?: Record<string, unknown>) => { first: () => { count: () => Promise<number>; click: (o?: Record<string, unknown>) => Promise<void> } };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on: (ev: string, cb: (r: any) => void) => void;
@@ -147,7 +147,10 @@ async function main(): Promise<void> {
   try {
     await P.waitForFunction(
       () => document.body.innerText.includes("陳志強") && !document.body.innerText.includes("林小曼"),
+      // ★ playwright waitForFunction 簽名係 (fn, arg, options) — 之前 options 放咗喺 arg 位 → 60s 從未生效，
+      //   實際用預設 30s（CI 診斷：elapsed 43s、卡住請求 32s 就判失敗；server probe 3s 回 = 只係慢唔係死）
       // 30s → 60s：CI runner 慢嗰陣（同一 commit authz 步 6–8 分鐘）右欄 /flows 會排喺其他請求後面
+      undefined,
       { timeout: 60000 }
     );
   } catch {
