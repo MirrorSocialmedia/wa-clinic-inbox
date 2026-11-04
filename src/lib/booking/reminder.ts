@@ -3,7 +3,7 @@
  *
  * 揀單：BookingRequest CONFIRMED + apricotApptId≠null + remindedAt=null
  *       + requestedTime≠null + HK 開診時刻 ∈ [now+minH, now+maxH]（預設 23–25h）
- * 冪等：remindedAt 同 Message 同一 transaction 寫 — 掃兩次唔會重發。
+ * 冪等：remindedAt 同 Message 同一 transaction 寫 — 掃兩次唔會重發；並發掃描靠條件式 updateMany 搶單（只一個寫到 Message）。
  * 降級（★ cwi-final S1-15）：enqueue uncertain（timeout/Redis）→ Message **唔標 FAILED**（job 可能已落隊列 —
  *       jobId 冪等）— 留 QUEUED，outbound-sweep 120s 後重加兜底；remindedAt 已寫 = 呢單唔會再提醒。
  *       （`failed` 計數保留喺 return 形但不再遞增 — S1-15 後 enqueue uncertain ≠ 失敗）。
@@ -35,14 +35,22 @@ async function lazyEnqueue(messageId: string) {
   const { enqueueOutboundSend } = await import("@/lib/queue");
   await Promise.race([
     enqueueOutboundSend(messageId),
-    new Promise<never>((_, rej) => setTimeout(() => rej(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS)),
+    new Promise<never>((_, rej) =>
+      setTimeout(() => rej(new Error("enqueue timeout")), ENQUEUE_TIMEOUT_MS),
+    ),
   ]);
 }
 
 // ★ cwi-final S1-4/S1-7：完整 payload（buildMessageNewPayload 單一來源）+ publishConvEvent（跨店 targeting + eventId 去重）
 async function lazyNotifyMessageNew(
   messageId: string,
-  conv: { id: string; clinicId: string; assigneeId: string | null; routedStaffId: string | null; routedGroupId: string | null }
+  conv: {
+    id: string;
+    clinicId: string;
+    assigneeId: string | null;
+    routedStaffId: string | null;
+    routedGroupId: string | null;
+  },
 ): Promise<void> {
   const { publishConvEvent, convRef } = await import("@/lib/notify");
   const { buildMessageNewPayload } = await import("@/lib/realtime-payload");
@@ -58,7 +66,12 @@ export function hkApptEpochMs(dateStr: string, timeStr: string): number {
 }
 
 /** 純窗口判斷（unit 可測）：開診時刻喺 [now+minH, now+maxH] 內先提醒。 */
-export function inReminderWindow(tMs: number, nowMs: number, minH: number, maxH: number): boolean {
+export function inReminderWindow(
+  tMs: number,
+  nowMs: number,
+  minH: number,
+  maxH: number,
+): boolean {
   return tMs >= nowMs + minH * 3_600_000 && tMs <= nowMs + maxH * 3_600_000;
 }
 
@@ -68,7 +81,34 @@ export interface ReminderScanResult {
   failed: number;
 }
 
-export async function runReminderScan(now: Date = new Date()): Promise<ReminderScanResult> {
+/**
+ * ★ 2026-11-04 修（CI T90 實錘：並發掃描 → 同一張單 2 條 template）：搶單 + 寫 Message 同一 transaction。
+ * 舊版先 findUnique 再 create — READ COMMITTED 冇鎖，兩個掃描同時行（worker 開機掃 + cron／手動掃）會兩邊都見
+ * remindedAt=null → 病人收兩次提醒。改：條件式 updateMany 搶單（行鎖；第二個 tx 等第一個 commit 後重驗 WHERE →
+ * count=0 → 唔寫），搶到先寫 Message。單已取消（status≠CONFIRMED）同樣搶唔到。
+ * @returns 新 Message；搶唔到（已提醒／已取消）→ null
+ */
+export async function createReminderMessageOnce(
+  bookingId: string,
+  conversationId: string,
+  data: Omit<Prisma.MessageUncheckedCreateInput, "conversationId">,
+): Promise<{ id: string; waTimestamp: Date } | null> {
+  return prisma.$transaction(async (tx) => {
+    const claimed = await tx.bookingRequest.updateMany({
+      where: { id: bookingId, remindedAt: null, status: "CONFIRMED" },
+      data: { remindedAt: new Date() },
+    });
+    if (claimed.count === 0) return null;
+    return tx.message.create({
+      data: { ...data, conversationId },
+      select: { id: true, waTimestamp: true },
+    });
+  });
+}
+
+export async function runReminderScan(
+  now: Date = new Date(),
+): Promise<ReminderScanResult> {
   // ★ Phase D：窗口 + template 參數由 workflow params 讀（fail-soft → env 底 defaults）
   const reminderParams = await getParams("reminder", null);
   const minH = reminderParams.minHours;
@@ -98,35 +138,50 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
     const t = hkApptEpochMs(b.requestedDate, b.requestedTime);
     if (!inReminderWindow(t, now.getTime(), minH, maxH)) continue;
 
-    const conv = await prisma.conversation.findUnique({ where: { id: b.conversationId } });
+    const conv = await prisma.conversation.findUnique({
+      where: { id: b.conversationId },
+    });
     // ★ UX-07：提醒用預約目標店（null = 對話所屬店 — 舊單零改動）
-    const clinic = await prisma.clinic.findUnique({ where: { id: effectiveBookingClinicId(b) } });
+    const clinic = await prisma.clinic.findUnique({
+      where: { id: effectiveBookingClinicId(b) },
+    });
     if (!conv || !clinic) continue;
 
     // ★ cwi-final S5-7（F2）：發前 fetchAppointments 核對 — 預約狀態必須 = 0（booked）。
     //   102 = 舊單已改期 / -7 = 已取消 / 搵唔到（單已消失）/ workforce 離線 → fail-closed skip：
     //   remindedAt 留 null（下輪 scan 重試）— 寧可遲提醒，唔提醒已取消嘅單。
-    const contact = await prisma.contact.findUnique({ where: { id: conv.contactId } });
+    const contact = await prisma.contact.findUnique({
+      where: { id: conv.contactId },
+    });
     if (!contact?.waId) continue;
     // ★ wa-meta-compliance-20261016（B.1）：opt-out 病人唔發預約提醒（上游攔截；worker 層另有最後一刻核）。
     if (contact.followupOptOut) {
-      log.info({ bookingId: b.id }, "reminder: patient opted out → skip（PROACTIVE_OPT_OUT）");
+      log.info(
+        { bookingId: b.id },
+        "reminder: patient opted out → skip（PROACTIVE_OPT_OUT）",
+      );
       continue;
     }
     try {
-      const appts = await fetchAppointments(phoneHash(contact.waId), hkDateOffset(-7), hkDateOffset(30));
-      const found = appts.appointments.find((a) => a.apricotApptId === b.apricotApptId);
+      const appts = await fetchAppointments(
+        phoneHash(contact.waId),
+        hkDateOffset(-7),
+        hkDateOffset(30),
+      );
+      const found = appts.appointments.find(
+        (a) => a.apricotApptId === b.apricotApptId,
+      );
       if (found?.bookingStatus !== 0) {
         log.info(
           { bookingId: b.id, apptStatus: found?.bookingStatus ?? null },
-          "reminder: appt status != 0（或已消失）→ skip（fail-closed，唔提醒）"
+          "reminder: appt status != 0（或已消失）→ skip（fail-closed，唔提醒）",
         );
         continue;
       }
     } catch (err) {
       log.warn(
         { bookingId: b.id, err: err instanceof Error ? err.name : "?" },
-        "reminder: fetchAppointments failed → skip（fail-closed，下輪重試）"
+        "reminder: fetchAppointments failed → skip（fail-closed，下輪重試）",
       );
       continue;
     }
@@ -139,38 +194,29 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
     };
     // ── 冪等核心：Message + remindedAt 同一 transaction ──
     // re-check 防競態：掃描取候選之後 單被取消/rollback → skip（唔會提醒已取消單）。
-    const msg = await prisma.$transaction(async (tx) => {
-      const fresh = await tx.bookingRequest.findUnique({
-        where: { id: b.id },
-        select: { remindedAt: true, status: true },
-      });
-      if (!fresh || fresh.remindedAt !== null || fresh.status !== "CONFIRMED") return null;
-      const m = await tx.message.create({
-        data: {
-          conversationId: b.conversationId,
-          direction: "OUT",
-          channel: "API",
-          type: "template",
-          body: reminderPreviewText(input),
-          templateMeta: {
-            name: reminderParams.templateName,
-            language: reminderParams.templateLang,
-            // cwi-window-20260901（P1）：類別快照（同 send route 一致）— 預約提醒範本係 UTILITY 類
-            category: "UTILITY",
-            components: buildTemplateComponents(input),
-          } as unknown as Prisma.InputJsonValue,
-          status: "QUEUED",
-          sentByStaffId: null,
-          // ★ wa-meta-compliance-20261016（B.1）：預約提醒 = 系統主動 → 入統一 opt-out 攔截網
-          proactive: true,
-          // cwi-window-20260901（P1）：預約提醒 template — 類別 UTILITY（declared：cron 寫入點無辦法讀
-          // WA Manager 即時類別；該範本在 WA Manager 登記為 UTILITY）
-          billingCategory: "UTILITY",
-          waTimestamp: new Date(),
-        },
-      });
-      await tx.bookingRequest.update({ where: { id: b.id }, data: { remindedAt: new Date() } });
-      return m;
+    // ★ 2026-11-04 修：舊版先 findUnique 再 create — READ COMMITTED 冇鎖，兩個掃描同時行（worker 開機掃 +
+    //   cron／手動掃，CI T90 實錘 2 條 template）會兩邊都見 remindedAt=null → 病人收兩次提醒。
+    //   改：條件式 updateMany 搶單（行鎖；第二個 tx 等第一個 commit 後重驗 WHERE → count=0 → skip），搶到先寫 Message。
+    const msg = await createReminderMessageOnce(b.id, b.conversationId, {
+      direction: "OUT",
+      channel: "API",
+      type: "template",
+      body: reminderPreviewText(input),
+      templateMeta: {
+        name: reminderParams.templateName,
+        language: reminderParams.templateLang,
+        // cwi-window-20260901（P1）：類別快照（同 send route 一致）— 預約提醒範本係 UTILITY 類
+        category: "UTILITY",
+        components: buildTemplateComponents(input),
+      } as unknown as Prisma.InputJsonValue,
+      status: "QUEUED",
+      sentByStaffId: null,
+      // ★ wa-meta-compliance-20261016（B.1）：預約提醒 = 系統主動 → 入統一 opt-out 攔截網
+      proactive: true,
+      // cwi-window-20260901（P1）：預約提醒 template — 類別 UTILITY（declared：cron 寫入點無辦法讀
+      // WA Manager 即時類別；該範本在 WA Manager 登記為 UTILITY）
+      billingCategory: "UTILITY",
+      waTimestamp: new Date(),
     });
     if (!msg) continue;
 
@@ -180,8 +226,11 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
       // ★ cwi-final S1-15 (P0-07)：enqueue uncertain — **唔標 FAILED**（job 可能已落隊列 — jobId 冪等）。
       // 留 QUEUED → outbound-sweep 120s 後重加兜底（唔雙發）。remindedAt 已寫 = 呢單唔會再提醒。
       log.warn(
-        { bookingId: b.id, err: err instanceof Error ? err.message : String(err) },
-        "reminder: enqueue uncertain — message stays QUEUED (sweep will requeue; remindedAt already written)"
+        {
+          bookingId: b.id,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "reminder: enqueue uncertain — message stays QUEUED (sweep will requeue; remindedAt already written)",
       );
     }
     try {
@@ -191,14 +240,22 @@ export async function runReminderScan(now: Date = new Date()): Promise<ReminderS
     } catch (err) {
       // lastMessageAt / notify 係 fail-soft — 訊息已入隊（或會由 sweep 重加）；唔再標 FAILED（S1-15）
       log.warn(
-        { bookingId: b.id, err: err instanceof Error ? err.message : String(err) },
-        "reminder: post-queue notify failed (fail-soft — message QUEUED)"
+        {
+          bookingId: b.id,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "reminder: post-queue notify failed (fail-soft — message QUEUED)",
       );
     }
     sent++;
     log.info(
-      { bookingId: b.id, clinicId: b.clinicId, bookingClinicId: b.bookingClinicId ?? null, date: b.requestedDate },
-      "reminder: template queued"
+      {
+        bookingId: b.id,
+        clinicId: b.clinicId,
+        bookingClinicId: b.bookingClinicId ?? null,
+        date: b.requestedDate,
+      },
+      "reminder: template queued",
     );
   }
   return { scanned: candidates.length, sent, failed };
