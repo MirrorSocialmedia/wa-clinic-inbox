@@ -14,6 +14,9 @@ import { toMessageDto } from "./message-dto";
  *                         幾分鐘 → 做同步游標會永久漏）
  * - （都唔給）            初始載入「最新一頁」：最新 N 條（waTimestamp desc 攞 + reverse），升序回傳
  * - limit  預設 50（MD：分頁 50 條/頁），上限 100
+ * - until=<messageId>（★ cwi-search-20261107，要同 before 一齊用）：搜尋跳轉 — 一次過攞
+ *   「before 游標之前、直至（包括）呢條訊息」嘅全部訊息（連續，唔留洞；上限 2000 條，超過 413）；
+ *   hasMore = 呢條之前仲有冇更舊訊息
  *
  * 回傳 { messages, hasMore, oldest, newest } — messages 係完整 row（含 createdAt，
  * client 游標/排序用）— UI 用 oldest 做「再向上」cursor。
@@ -46,6 +49,29 @@ export const GET = handle(async (req: NextRequest, ctx: Ctx) => {
   const after = parseTs(url.searchParams.get("after"));
   // ★ cwi-final S1-1d（=S1-11）：before keyset — client 帶 beforeId，同 createdAt 同值邊界唔重唔漏
   const beforeId = url.searchParams.get("beforeId") ?? undefined;
+
+  // ★ cwi-search-20261107：搜尋跳轉 — 補載到目標訊息（連續）
+  const untilId = url.searchParams.get("until");
+  if (untilId && before) {
+    const target = await prisma.message.findFirst({ where: { id: untilId, conversationId: id }, select: { id: true, createdAt: true } });
+    if (!target) return NextResponse.json({ error: "message not found" }, { status: 404 });
+    const span = {
+      conversationId: id,
+      AND: [
+        beforeId ? { OR: [{ createdAt: { lt: before } }, { createdAt: before, id: { lt: beforeId } }] } : { createdAt: { lt: before } },
+        { OR: [{ createdAt: { gt: target.createdAt } }, { createdAt: target.createdAt, id: { gte: target.id } }] },
+      ],
+    };
+    const UNTIL_MAX = 2000;
+    const spanRows = await prisma.message.findMany({ where: span, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: UNTIL_MAX + 1 });
+    if (spanRows.length > UNTIL_MAX) return NextResponse.json({ error: "too far", message: "嗰條訊息太舊（相隔超過 2000 條）" }, { status: 413 });
+    const older = await prisma.message.findFirst({
+      where: { conversationId: id, OR: [{ createdAt: { lt: target.createdAt } }, { createdAt: target.createdAt, id: { lt: target.id } }] },
+      select: { id: true },
+    });
+    const msgs = spanRows.map(toMessageDto);
+    return NextResponse.json({ messages: msgs, hasMore: !!older, oldest: msgs[0] ?? null, newest: msgs[msgs.length - 1] ?? null });
+  }
 
   const where: Record<string, unknown> = { conversationId: id };
   if (before && beforeId) {

@@ -13,7 +13,10 @@ import { handle } from "@/lib/api-error";
 import { hit } from "@/lib/rate-limit";
 import { publishStaffNotify } from "@/lib/notify";
 import { pushToStaff } from "@/lib/push";
-import { groupMessages, sendGroupMessage, WG_BODY_MAX } from "@/lib/workgroups";
+import { randomUUID } from "node:crypto";
+import { assertCanPost, findByClientKey, groupMessages, sendGroupMessage, WG_BODY_MAX } from "@/lib/workgroups";
+import { copyStickerFile, StickerError, touchSticker, usableSticker } from "@/lib/stickers";
+import { stickerError } from "@/lib/stickers-http";
 import { wgError } from "@/lib/workgroups-http";
 
 export const dynamic = "force-dynamic";
@@ -26,6 +29,8 @@ const postSchema = z
     conversationId: z.string().min(1).max(64).nullish(),
     clientKey: z.string().max(64).nullish(),
     release: z.boolean().optional(),
+    /** ★ cwi-sticker：發貼圖（自己嘅 + 診所嘅） */
+    stickerId: z.string().min(1).max(64).nullish(),
   })
   .strict();
 
@@ -47,8 +52,26 @@ export const POST = handle(async (req: NextRequest, ctx: Ctx) => {
   const parsed = postSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "bad_request", message: "訊息格式唔啱" }, { status: 400 });
   if (!(await hit(`wg:send:${auth.staff.id}`, 30, 60))) return NextResponse.json({ error: "rate_limited", message: "發得太快，等一陣再試" }, { status: 429 });
+  // ★ cwi-sticker：貼圖 → 複製一份做群附件（wg-<uuid>.webp；刪貼圖唔影響已發）— 先驗成員／封存先落碟
+  let attachment: { key: string; name: string; mime: string; size: number } | null = null;
+  const { stickerId, ...input } = parsed.data;
+  if (stickerId) {
+    try {
+      await assertCanPost(id, auth.staff.id);
+      const prevId = await findByClientKey(id, auth.staff.id, input.clientKey ?? null);
+      if (prevId) return NextResponse.json({ messageId: prevId, duplicate: true }, { status: 200 });
+      const st = await usableSticker(stickerId, auth.staff.id);
+      const key = `wg-${randomUUID()}.webp`;
+      const c = await copyStickerFile(st.fileKey, key);
+      attachment = { key, name: "貼圖.webp", mime: "image/webp", size: c.bytes };
+      void touchSticker(st.id);
+    } catch (e) {
+      if (e instanceof StickerError) return stickerError(e);
+      return wgError(e);
+    }
+  }
   try {
-    const r = await sendGroupMessage(id, auth, parsed.data);
+    const r = await sendGroupMessage(id, auth, { ...input, attachment });
     // ★ commit-then-emit：sendGroupMessage 已 commit
     for (const sid of r.notify) {
       publishStaffNotify(sid, "", "workgroup:message", { groupId: id, messageId: r.messageId, mention: r.mentioned.includes(sid) });

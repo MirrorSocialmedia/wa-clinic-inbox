@@ -62,6 +62,7 @@ interface WaMsg {
   type: string;
   text?: { body: string };
   image?: { id: string; caption?: string }; // ★ 同真 webhook 一樣用 `id`（2026-10-25）
+  sticker?: { id: string; mime_type?: string; animated?: boolean }; // ★ cwi-sticker：--media sticker
 }
 
 function entry(change: { field: string; value: unknown; phoneId: string }) {
@@ -82,9 +83,10 @@ function buildMessage(clinicPhoneId: string, bizNumber: string, o: {
     from: o.from,
     id: o.wamid,
     timestamp: ts,
-    type: o.media ? "image" : "text",
+    type: o.media === "sticker" ? "sticker" : o.media ? "image" : "text",
   };
-  if (o.media) msg.image = { id: `mockmedia_${o.wamid}`, caption: o.text };
+  if (o.media === "sticker") msg.sticker = { id: `mockmedia_${o.wamid}`, mime_type: "image/webp", animated: false };
+  else if (o.media) msg.image = { id: `mockmedia_${o.wamid}`, caption: o.text };
   else msg.text = { body: o.text };
   return entry({
     field: "messages",
@@ -228,7 +230,7 @@ function buildUnknown(clinicPhoneId: string): unknown {
 async function main(): Promise<void> {
   if (!cmd || !["message", "echo", "status", "history", "unknown"].includes(cmd)) {
     console.error("usage: mock-inbound <message|echo|status|history|unknown> [options]");
-    console.error("  message: --clinic <code> --from <waId> --text <t> [--wamid] [--name] [--media image]");
+    console.error("  message: --clinic <code> --from <waId> --text <t> [--wamid] [--name] [--media image|sticker]");
     console.error("  echo:    --clinic <code> --to <waId> --text <t> [--wamid]");
     console.error("  status:  --wamid <id> --status <sent|delivered|read|failed> [--clinic <code>]");
     console.error("  history: --clinic <code> --from <waId> [--count N] [--name] [--from2 <waId2>] [--name2]");

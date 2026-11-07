@@ -61,6 +61,10 @@ interface MessageHit {
   clinicId: string;
   contactWaId: string;
   contactName: string | null;
+  /** ★ cwi-search-20261107：跳轉用（createdAt 軸）+ 內部備註標記 + 外部對話 */
+  createdAt?: Date;
+  channel?: string;
+  external?: boolean;
 }
 
 export const GET = handle(async (req: NextRequest) => {
@@ -84,7 +88,9 @@ export const GET = handle(async (req: NextRequest) => {
   const includeInternal = url.searchParams.get("internal") === "1";
   // ★ S6-3：電話號碼 digits（剔晒非 digits；≥4 位先當電話搜 — 1-3 位誤報太多）
   const digits = q.replace(/\D/g, "");
-  const isPhone = digits.length >= 4;
+  // ★ cwi-search-20261107：成句都係電話字元（數字／空格／+ - ( )）先當電話搜 — 舊版「SSKEY1794…」呢類夾字會
+  //   抽出數字去配電話 → 成個病人所有訊息都當命中（全部病人訊息搜尋實測）
+  const isPhone = digits.length >= 4 && /^[\d\s+\-()]+$/.test(q);
   // ★ S6-3：keyset cursor（message = waTimestamp ISO/epoch；contact = 上一頁最後 similarity score）
   const beforeParam = url.searchParams.get("before");
   const beforeIdParam = url.searchParams.get("beforeId");
@@ -136,13 +142,14 @@ export const GET = handle(async (req: NextRequest) => {
         if (type === "message") {
           return clinicIds
             ? await tx.$queryRaw<MessageHit[]>`
-                SELECT m.id, m."conversationId", m.direction, m.type,
-                       left(m.body, 80) AS snippet, m."waTimestamp",
-                       cv."clinicId", c."waId" AS "contactWaId", c."profileName" AS "contactName"
+                SELECT m.id, m."conversationId", m.direction, m.type, m.channel, m."createdAt",
+                       left(m.body, 2000) AS snippet, m."waTimestamp",
+                       cv."clinicId", cv.external, c."waId" AS "contactWaId",
+                       coalesce(cv."pinnedPatientName", c."externalName", c."profileName") AS "contactName"
                 FROM "Message" m
                 JOIN "Conversation" cv ON cv.id = m."conversationId"
                 JOIN "Contact" c ON c.id = cv."contactId"
-                WHERE (cv."clinicId" = ANY(${clinicIds}) OR cv."assigneeId" = ${selfId})
+                WHERE (cv."clinicId" = ANY(${clinicIds}) OR cv."handlingClinicId" = ANY(${clinicIds}) OR cv."assigneeId" = ${selfId})
                   AND m."voidedAt" IS NULL
                   AND (${includeInternal} OR m."channel" <> 'INTERNAL')
                   AND (
@@ -157,9 +164,10 @@ export const GET = handle(async (req: NextRequest) => {
                 ORDER BY m."waTimestamp" DESC, m.id DESC
                 LIMIT 20`
             : await tx.$queryRaw<MessageHit[]>`
-                SELECT m.id, m."conversationId", m.direction, m.type,
-                       left(m.body, 80) AS snippet, m."waTimestamp",
-                       cv."clinicId", c."waId" AS "contactWaId", c."profileName" AS "contactName"
+                SELECT m.id, m."conversationId", m.direction, m.type, m.channel, m."createdAt",
+                       left(m.body, 2000) AS snippet, m."waTimestamp",
+                       cv."clinicId", cv.external, c."waId" AS "contactWaId",
+                       coalesce(cv."pinnedPatientName", c."externalName", c."profileName") AS "contactName"
                 FROM "Message" m
                 JOIN "Conversation" cv ON cv.id = m."conversationId"
                 JOIN "Contact" c ON c.id = cv."contactId"
@@ -219,6 +227,11 @@ export const GET = handle(async (req: NextRequest) => {
       return NextResponse.json({ error: "search timed out" }, { status: 504 });
     }
     throw e;
+  }
+  // ★ cwi-search-20261107：訊息片段改由命中位置前後截取（SQL 攞頭 2000 字 → JS 截）
+  if (type === "message") {
+    const { snippetAround } = await import("@/lib/search/snippet");
+    rows = (rows as MessageHit[]).map((r) => ({ ...r, snippet: snippetAround(r.snippet, q) }));
   }
   return NextResponse.json({ type, results: rows });
 });

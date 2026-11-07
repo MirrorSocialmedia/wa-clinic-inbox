@@ -2286,6 +2286,88 @@ check "T54X 取消外部 → 200" "$CODE" "200"
 check "T54X 返返收件箱" "$(q "SELECT external::text e FROM \"Conversation\" WHERE id='$WGX_CONV'" | jf e)" "false"
 q "DELETE FROM \"WorkGroup\" WHERE id='$WGX_ID'" >/dev/null 2>&1 || true
 q "DELETE FROM \"AuditLog\" WHERE \"entityId\"='$WGX_ID'" >/dev/null 2>&1 || true
+
+# ── T54S. 搜尋（對話內 + 全部病人）+ 貼圖（收、加、發、權限）（cwi-search / cwi-sticker）──
+echo "[AR-3] T54S: search + stickers..."
+SS_WA="8526055${EPOCH}"
+pnpm -s mock-inbound message --clinic TKW --from "$SS_WA" --text "e2e 第一句 想問 SSKEY${EPOCH} 隱形矯齒幾錢" --wamid "wamid.E2E_SS_1_${EPOCH}" --name "E2E SS" >/dev/null 2>&1
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_SS_1_${EPOCH}'" '[{"c":"1"}]' 45 || fail "T54S 首訊未落庫"
+for i in 2 3 4; do pnpm -s mock-inbound message --clinic TKW --from "$SS_WA" --text "e2e 第 $i 句 普通訊息" --wamid "wamid.E2E_SS_${i}_${EPOCH}" --name "E2E SS" >/dev/null 2>&1; done
+wait_for "SELECT count(*)::text c FROM \"Message\" WHERE \"waMessageId\" LIKE 'wamid.E2E_SS_%_${EPOCH}'" '[{"c":"4"}]' 45 || fail "T54S 訊息未齊"
+SS_CONV=$(q "SELECT c.id FROM \"Conversation\" c JOIN \"Contact\" x ON x.id=c.\"contactId\" WHERE x.\"waId\"='$SS_WA'" | jf id)
+SS_M1=$(q "SELECT id FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_SS_1_${EPOCH}'" | jf id)
+CODE=$(curl -s -o /tmp/e2e-ss-1.json -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/conversations/$SS_CONV/search?q=sskey${EPOCH}")
+check "T54S 對話內搜尋 → 200" "$CODE" "200"
+grep -q "\"id\":\"$SS_M1\"" /tmp/e2e-ss-1.json && pass "T54S 搵到（唔分大小寫）" || fail "T54S 搵唔到（=$(head -c 300 /tmp/e2e-ss-1.json)）"
+CODE=$(curl -s -o /tmp/e2e-ss-2.json -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/conversations/$SS_CONV/search?q=%25")
+check "T54S % 唔係萬用字 → total 0" "$(grep -o '"total":[0-9]*' /tmp/e2e-ss-2.json)" '"total":0'
+# 路由規則可能將呢條派咗去跨店技能組（技能組成員有單線授權）→ 跨店斷言前清走路由，只驗店範圍
+q "UPDATE \"Conversation\" SET \"routedGroupId\"=NULL, \"routedStaffId\"=NULL WHERE id='$SS_CONV'" >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/conversations/$SS_CONV/search?q=e2e")
+check "T54S 其他店搜對話 → 403" "$CODE" "403"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/conversations/$SS_CONV/search?q=")
+check "T54S 空字 → 400" "$CODE" "400"
+# 跳轉：before=而家 + until=第一句 → 連續攞返第一句至今
+NOWISO=$(date -u -d '+1 min' +%Y-%m-%dT%H:%M:%SZ)
+CODE=$(curl -s -o /tmp/e2e-ss-3.json -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/conversations/$SS_CONV/messages?before=$NOWISO&until=$SS_M1")
+check "T54S until 跳轉 → 200" "$CODE" "200"
+grep -q "\"id\":\"$SS_M1\"" /tmp/e2e-ss-3.json && pass "T54S until 包括目標訊息" || fail "T54S until 冇目標"
+check "T54S until 連續（4 條 IN 都喺）" "$(grep -o 'wamid.E2E_SS_[0-9]_' /tmp/e2e-ss-3.json | sort -u | wc -l | tr -d ' ')" "4"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/conversations/$SS_CONV/messages?before=$NOWISO&until=$SS_M1")
+check "T54S 其他店 until → 403" "$CODE" "403"
+# 全部病人搜尋：片段包命中字
+curl -s -b "$COOKIE_TKW" "$BASE/api/search?type=message&q=SSKEY${EPOCH}" > /tmp/e2e-ss-4.json
+grep -q "SSKEY${EPOCH}" /tmp/e2e-ss-4.json && pass "T54S 全部病人搜尋片段有命中字" || fail "T54S 全局搜尋冇片段（=$(head -c 300 /tmp/e2e-ss-4.json)）"
+curl -s -b "$COOKIE_MF" "$BASE/api/search?type=message&q=SSKEY${EPOCH}" | grep -q "$SS_M1" && fail "T54S 其他店搜到 TKW 訊息" || pass "T54S 其他店搜唔到"
+# 收 sticker：要入媒體下載隊列（舊版漏咗 → READY 冇檔「媒體未落地」）
+pnpm -s mock-inbound message --clinic TKW --from "$SS_WA" --text "" --wamid "wamid.E2E_SS_STK_${EPOCH}" --name "E2E SS" --media sticker >/dev/null 2>&1
+wait_for "SELECT type t FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_SS_STK_${EPOCH}'" '[{"t":"sticker"}]' 45 || fail "T54S 收 sticker 未落庫"
+wait_for "SELECT (\"mediaStatus\"::text <> 'READY')::text x FROM \"Message\" WHERE \"waMessageId\"='wamid.E2E_SS_STK_${EPOCH}'" '[{"x":"true"}]' 30 || fail "T54S sticker 冇入下載隊列（mediaStatus 仲係 READY）"
+# 貼圖庫：加（PNG → WebP）、重複、權限、發送
+python3 -c "
+import struct,zlib
+w,h=64,64
+raw=b''.join(b'\x00'+bytes([30,140,90,255]*w) for _ in range(h))
+def ch(t,d): return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+open('/tmp/e2e-stk.png','wb').write(b'\x89PNG\r\n\x1a\n'+ch(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))+ch(b'IDAT',zlib.compress(raw))+ch(b'IEND',b''))
+"
+CODE=$(curl -s -o /tmp/e2e-stk-1.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/stickers" -F "file=@/tmp/e2e-stk.png;type=image/png" -F "name=收到" -F "scope=mine")
+check "T54S 加貼圖 → 201" "$CODE" "201"
+STK_ID=$(grep -o '"id":"[^"]*"' /tmp/e2e-stk-1.json | head -1 | cut -d'"' -f4)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/stickers" -F "file=@/tmp/e2e-stk.png;type=image/png" -F "scope=mine")
+check "T54S 重複加 → 200（唔重複）" "$CODE" "200"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/stickers" -F "file=@/tmp/e2e-stk.png;type=image/png" -F "scope=clinic")
+check "T54S STAFF 加診所貼圖 → 403" "$CODE" "403"
+printf 'MZ\x90\x00fake' > /tmp/e2e-stk-evil.png
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/stickers" -F "file=@/tmp/e2e-stk-evil.png;type=image/png" -F "scope=mine")
+check "T54S 改名 exe → 415" "$CODE" "415"
+STK_KEY=$(q "SELECT \"fileKey\" k FROM \"Sticker\" WHERE id='$STK_ID'" | jf k)
+CODE=$(curl -s -o /tmp/e2e-stk.webp -D /tmp/e2e-stk.h -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/stickers/file/$STK_KEY")
+check "T54S 自己攞貼圖檔 → 200" "$CODE" "200"
+grep -qi '^content-type: image/webp' /tmp/e2e-stk.h && pass "T54S 貼圖係 WebP" || fail "T54S 貼圖唔係 WebP"
+check "T54S 貼圖檔頭 RIFF/WEBP" "$(head -c 12 /tmp/e2e-stk.webp | tail -c 4)" "WEBP"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" "$BASE/api/stickers/file/$STK_KEY")
+check "T54S 其他人攞我的貼圖 → 404" "$CODE" "404"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X DELETE "$BASE/api/stickers/$STK_ID")
+check "T54S 其他人刪 → 404" "$CODE" "404"
+q "UPDATE \"Conversation\" SET \"assigneeId\"=NULL WHERE id='$SS_CONV'" >/dev/null
+SS_CMID=$(cat /proc/sys/kernel/random/uuid)
+CODE=$(curl -s -o /tmp/e2e-stk-send.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/messages/sticker" -H 'Content-Type: application/json' -d '{"conversationId":"'$SS_CONV'","stickerId":"'$STK_ID'","clientMessageId":"'$SS_CMID'"}')
+check "T54S 發貼圖 → 202" "$CODE" "202"
+SS_SMID=$(jf messageId < /tmp/e2e-stk-send.json)
+CODE=$(curl -s -o /tmp/e2e-stk-send2.json -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/messages/sticker" -H 'Content-Type: application/json' -d '{"conversationId":"'$SS_CONV'","stickerId":"'$STK_ID'","clientMessageId":"'$SS_CMID'"}')
+check "T54S 同 clientMessageId 重發 → 200（唔雙發）" "$CODE" "200"
+wait_for "SELECT status::text s FROM \"Message\" WHERE id='$SS_SMID'" '[{"s":"SENT"}]' 45 || fail "T54S 貼圖未發出（outbound）"
+check "T54S 發出 type=sticker" "$(q "SELECT type t FROM \"Message\" WHERE id='$SS_SMID'" | jf t)" "sticker"
+q "UPDATE \"Conversation\" SET \"routedGroupId\"=NULL, \"routedStaffId\"=NULL WHERE id='$SS_CONV'" >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_MF" -X POST "$BASE/api/messages/sticker" -H 'Content-Type: application/json' -d '{"conversationId":"'$SS_CONV'","stickerId":"'$STK_ID'"}')
+check "T54S 其他店發貼圖 → 403" "$CODE" "403"
+q "UPDATE \"Conversation\" SET \"lastInboundAt\"=now()-interval '25 hours' WHERE id='$SS_CONV'" >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X POST "$BASE/api/messages/sticker" -H 'Content-Type: application/json' -d '{"conversationId":"'$SS_CONV'","stickerId":"'$STK_ID'"}')
+check "T54S 過窗發貼圖 → 422" "$CODE" "422"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" -X DELETE "$BASE/api/stickers/$STK_ID")
+check "T54S 自己刪貼圖 → 200" "$CODE" "200"
+check "T54S 刪貼圖唔影響已發訊息（另有副本）" "$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_TKW" "$BASE/api/media/$(q "SELECT \"mediaKey\" k FROM \"Message\" WHERE id='$SS_SMID'" | jf k)")" "200"
 AUD_AFTER=$(q "SELECT count(*)::text n FROM \"AuditLog\" WHERE action='ES_ONBOARD' AND \"entityId\"='$TKW_CLINIC_ID'" | jf n)
 check "T54 hermetic：ES_ONBOARD 審計已清" "$AUD_AFTER" "0"
 # ★ token/code/PIN 零入 log（grep 自證）

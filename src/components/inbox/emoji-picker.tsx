@@ -9,6 +9,7 @@
  * 內部備註欄唔加（擁有人拍板）。
  */
 import { useEffect, useState } from "react";
+import { StickerGrid, type StickerItem } from "./sticker-panel";
 
 const CATEGORIES: { key: string; label: string; emojis: string[] }[] = [
   {
@@ -61,24 +62,30 @@ export function EmojiPicker({
   variant,
   onPick,
   onClose,
+  onPickSticker,
+  stickerDisabledReason,
 }: {
   variant: "sheet" | "popover";
   onPick: (emoji: string) => void;
   onClose: () => void;
+  /** ★ cwi-sticker-20261107：有傳 = 多一個「貼圖」分頁（撳一下即發） */
+  onPickSticker?: (s: StickerItem) => void;
+  /** 過咗 24 小時窗口等 → 貼圖灰咗 + 原因 */
+  stickerDisabledReason?: string | null;
 }) {
   const [tab, setTab] = useState("recent");
   const [recent, setRecent] = useState<string[]>(DEFAULT_RECENT);
   useEffect(() => setRecent(readRecent()), []);
 
   const list = tab === "recent" ? recent : (CATEGORIES.find((c) => c.key === tab)?.emojis ?? []);
-  const tabs = [{ key: "recent", label: "常用" }, ...CATEGORIES.map((c) => ({ key: c.key, label: c.label }))];
+  const tabs = [{ key: "recent", label: "常用" }, ...CATEGORIES.map((c) => ({ key: c.key, label: c.label })), ...(onPickSticker ? [{ key: "sticker", label: "貼圖" }] : [])];
 
   const panel = (
     <div
       className={
         variant === "sheet"
           ? "rounded-2xl border border-line bg-panel px-2 pt-1.5 pb-2"
-          : "absolute bottom-full left-0 mb-2 z-30 w-[320px] rounded-2xl border border-line bg-panel shadow-lg px-2 pt-1.5 pb-2"
+          : "absolute bottom-full left-0 mb-2 z-30 w-[340px] rounded-2xl border border-line bg-panel shadow-lg px-2 pt-1.5 pb-2"
       }
       data-e2e="emoji-picker"
       role="dialog"
@@ -96,6 +103,9 @@ export function EmojiPicker({
           </button>
         ))}
       </div>
+      {tab === "sticker" && onPickSticker ? (
+        <StickerGrid onPick={onPickSticker} disabledReason={stickerDisabledReason} compact={variant === "sheet"} />
+      ) : (
       <div className={`grid grid-cols-8 gap-0.5 overflow-y-auto ${variant === "sheet" ? "max-h-[176px]" : "max-h-[200px]"}`}>
         {list.map((e) => (
           <button
@@ -114,6 +124,7 @@ export function EmojiPicker({
           </button>
         ))}
       </div>
+      )}
     </div>
   );
 

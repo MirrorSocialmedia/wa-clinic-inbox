@@ -1553,3 +1553,22 @@ model WorkGroupMessage {
   @@index([groupId, createdAt])
   @@index([groupId, pinnedAt])
 }
+
+// ★ cwi-sticker-20261107：貼圖庫（同 WhatsApp 一樣自己加／收藏收到嘅貼圖）。
+//   ownerKey = 員工 id →「我的貼圖」（只有自己見）；ownerKey = "clinic" →「診所貼圖」（全部同事用，只有集團管理員加刪）。
+//   檔案 = 512×512 WebP（靜態 ≤100KB／動態 ≤500KB），碟上加密（stk-<uuid>.webp）；發出去時另複製一份 out-<uuid>.webp 掛喺 Message。
+model Sticker {
+  id          String    @id @default(cuid())
+  ownerKey    String    @db.VarChar(40)
+  name        String?   @db.VarChar(30)
+  fileKey     String    @unique @db.VarChar(80)
+  animated    Boolean   @default(false)
+  bytes       Int
+  sha256      String    @db.VarChar(64)
+  createdById String
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+  lastUsedAt  DateTime? @db.Timestamptz
+
+  @@unique([ownerKey, sha256])
+  @@index([ownerKey, createdAt])
+}

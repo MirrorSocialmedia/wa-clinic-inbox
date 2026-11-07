@@ -462,6 +462,40 @@ export const MATRIX: Record<string, { fixture: (f: Fixtures) => RequestInit & { 
     fixture: () => ({ url: "/api/conversations/nope/external", method: "DELETE" }),
     expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
   },
+  // ★ cwi-search-20261107 / cwi-sticker-20261107：對話內搜尋、貼圖庫、發貼圖
+  "GET /api/conversations/[id]/search": {
+    fixture: () => ({ url: "/api/conversations/nope/search?q=authz" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "GET /api/stickers": {
+    fixture: () => ({ url: "/api/stickers" }),
+    expect: { UNAUTH: 401, STAFF_TY: 200, SUPERVISOR: 200, ADMIN_ALL: 200 },
+  },
+  "POST /api/stickers": {
+    // multipart — 冇 body → formData 炸 → 400（未落碟）
+    fixture: () => ({ url: "/api/stickers", method: "POST" }),
+    expect: { UNAUTH: 401, STAFF_TY: 400, SUPERVISOR: 400, ADMIN_ALL: 400 },
+  },
+  "POST /api/stickers/from-message": {
+    fixture: () => ({ url: "/api/stickers/from-message", method: "POST", body: JSON.stringify({ messageId: "nope" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "PATCH /api/stickers/[id]": {
+    fixture: () => ({ url: "/api/stickers/nope", method: "PATCH", body: JSON.stringify({ name: "x" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "DELETE /api/stickers/[id]": {
+    fixture: () => ({ url: "/api/stickers/nope", method: "DELETE" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "GET /api/stickers/file/[file]": {
+    fixture: () => ({ url: "/api/stickers/file/stk-00000000-0000-0000-0000-000000000000.webp" }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
+  "POST /api/messages/sticker": {
+    fixture: () => ({ url: "/api/messages/sticker", method: "POST", body: JSON.stringify({ conversationId: "nope", stickerId: "nope" }) }),
+    expect: { UNAUTH: 401, STAFF_TY: 404, SUPERVISOR: 404, ADMIN_ALL: 404 },
+  },
   "GET /api/conversations/[id]/external": {
     fixture: () => ({ url: "/api/conversations/nope/external" }),
     expect: { UNAUTH: 401, STAFF_TY: 200, SUPERVISOR: 200, ADMIN_ALL: 200 },

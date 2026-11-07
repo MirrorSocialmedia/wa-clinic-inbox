@@ -36,6 +36,7 @@ import type {
   StaffNoticeItem,
   UrgentEscalationEvent,
   UserCtx,
+  MessageSearchHit,
 } from "./types";
 // ★ cwi-final S1-2：列表常量（純常量 — client bundle 可 import；
 //   list-constants 獨立檔正係因為 conversation-list.ts（server loader）帶 prisma）
@@ -192,6 +193,8 @@ export function InboxClient({
   const [allClinics, setAllClinics] = useState<ClinicLite[]>([]);
   // ★ cwi-inbox-r4：對話串首頁載完未（換對話 → null；首頁 apply／fetch 失敗 → convId）— 未載完唔顯示「冇訊息」
   const [threadLoadedFor, setThreadLoadedFor] = useState<string | null>(null);
+  const threadLoadedForRef = useRef<string | null>(null);
+  threadLoadedForRef.current = threadLoadedFor;
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -259,6 +262,11 @@ export function InboxClient({
   assignedFilterRef.current = assignedFilter;
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<ConversationItem[] | null>(null);
+  // ★ cwi-search-20261107：列表搜尋模式（病人／訊息）+ 訊息命中
+  const [searchMode, setSearchMode] = useState<"contact" | "message">("contact");
+  const [msgHits, setMsgHits] = useState<MessageSearchHit[] | null>(null);
+  const [msgHitsInternal, setMsgHitsInternal] = useState(false);
+  const [msgHitsLoading, setMsgHitsLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   // Phase 2：pending AI 草稿（per conversationId）+ 急症 toast
@@ -2353,11 +2361,69 @@ export function InboxClient({
     [ensureConversationLoaded, fetchBundle]
   );
   // ★ Part B：socket handler（[] deps）要最新 selectConversation — ref 避 stale closure
-  const selectConvRef = useRef<(id: string) => void>(() => {});
+  const selectConvRef = useRef<(id: string) => Promise<void> | void>(() => {});
   const chatPaneApiRef = useRef<ChatPaneHandle | null>(null); // ★ cwi-final S6-7：virtualized thread 跳行（mention bell / 通知卡）
-  selectConvRef.current = (id: string) => {
-    void selectConversation(id);
-  };
+
+  // ── ★ cwi-search-20261107：搜尋跳轉 — 開對話（如需要）→ 補載到目標訊息（連續，唔留洞）→ 捲 + 閃 ──
+  //   內部備註唔喺對話串（喺右邊備註欄）→ 行 jumpToMention（開備註欄 + 閃）。
+  const jumpToMessage = useCallback(
+    async (convId: string, hit: { id: string; channel?: string }): Promise<boolean> => {
+      const sleep = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
+      if (selectedIdRef.current !== convId) await selectConvRef.current(convId);
+      // 等對話串載入（bundle）— 最多 8 秒；同一個對話但仲載緊（例如開咗就即刻搜）都要等，否則 virtuoso 未掛好捲唔到
+      for (let i = 0; i < 80 && !(selectedIdRef.current === convId && threadLoadedForRef.current === convId); i++) await sleep(100);
+      if (selectedIdRef.current !== convId) return false;
+      if (hit.channel === "INTERNAL") {
+        openNotesRef.current();
+        setHighlightNoteId(hit.id);
+        window.setTimeout(() => setHighlightNoteId((cur) => (cur === hit.id ? null : cur)), 3000);
+        return true;
+      }
+      // 捲完要核實真係喺畫面（virtuoso 啱啱掛好時嘅「貼底」初始定位會蓋過我哋嘅捲動）→ 唔喺就再捲（最多 4 輪）
+      const inView = () => {
+        const el = document.getElementById(`msg-${hit.id}`);
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        return r.bottom > 0 && r.top < window.innerHeight;
+      };
+      const tryScroll = async () => {
+        for (let round = 0; round < 4; round++) {
+          let issued = false;
+          for (let i = 0; i < 25 && !issued; i++) {
+            issued = !!chatPaneApiRef.current?.scrollToMessage(hit.id);
+            if (!issued) await sleep(120);
+          }
+          if (!issued) return false;
+          await sleep(700);
+          if (inView()) return true;
+        }
+        return inView();
+      };
+      if (messagesRef.current.some((m) => m.id === hit.id)) return tryScroll();
+      const list = messagesRef.current;
+      const oldest = list.find((m) => m.channel !== "HISTORY") ?? list[0];
+      if (!oldest) return false;
+      try {
+        const res = await fetch(
+          `/api/conversations/${encodeURIComponent(convId)}/messages?before=${encodeURIComponent(oldest.createdAt)}&beforeId=${encodeURIComponent(oldest.id)}&until=${encodeURIComponent(hit.id)}`
+        );
+        if (!res.ok) return false;
+        const data = (await res.json()) as { messages: MessageItem[]; hasMore: boolean };
+        if (selectedIdRef.current !== convId) return false;
+        setMessages((prev) => {
+          const ids = new Set(prev.map((m) => m.id));
+          const added = data.messages.filter((m) => !ids.has(m.id));
+          return added.length ? [...added, ...prev].sort(msgSortCmp) : prev;
+        });
+        setHasMore(data.hasMore);
+      } catch {
+        return false;
+      }
+      return tryScroll();
+    },
+    []
+  );
+  selectConvRef.current = (id: string) => selectConversation(id);
 
   // ★ cwi-audit2-20260908 T1（防呆 effect）：最後防線 — 所有選中路徑必經 selectConversation
   //   （ref 同步 + setMessages([]) + 載入 + markRead）。日後任何路徑若直接 setSelectedConvId
@@ -2681,6 +2747,58 @@ export function InboxClient({
         setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
         URL.revokeObjectURL(objectUrl);
         return { ok: false, error: "網絡錯誤" };
+      }
+    },
+    [user.staffId]
+  );
+
+  // ── ★ cwi-sticker-20261107：發貼圖（optimistic 氣泡 = 貼圖庫圖；2xx 換 server id + mediaUrl）──
+  const sendSticker = useCallback(
+    async (sticker: { id: string; url: string }): Promise<{ ok: boolean; error?: string }> => {
+      const convId = selectedIdRef.current;
+      if (!convId) return { ok: false, error: "未選擇對話" };
+      const clientMessageId = crypto.randomUUID();
+      const now = new Date().toISOString();
+      const optimistic: MessageItem = {
+        id: `optimistic-${clientMessageId}`,
+        conversationId: convId,
+        waMessageId: null,
+        direction: "OUT",
+        channel: "API",
+        type: "sticker",
+        body: null,
+        mediaPath: sticker.url,
+        clientMessageId,
+        status: "QUEUED",
+        errorCode: null,
+        sentByStaffId: user.staffId,
+        aiAutoSent: false,
+        waTimestamp: now,
+        createdAt: now,
+      };
+      setMessages((prev) => [...prev, optimistic]);
+      const drop = (error: string) => {
+        setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+        return { ok: false, error };
+      };
+      try {
+        const res = await fetch("/api/messages/sticker", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversationId: convId, stickerId: sticker.id, clientMessageId }),
+        });
+        const data = (await res.json().catch(() => null)) as { messageId?: string; status?: string; mediaUrl?: string; message?: string; error?: string } | null;
+        if (selectedIdRef.current !== convId) return { ok: res.ok };
+        if (!res.ok) return drop(data?.message ?? data?.error ?? `發送失敗（${res.status}）`);
+        const serverId = data?.messageId ?? null;
+        setMessages((prev) => {
+          if (serverId && prev.some((m) => m.id === serverId)) return prev.filter((m) => m.id !== optimistic.id);
+          return prev.map((m) => (m.id === optimistic.id ? { ...m, id: serverId ?? m.id, mediaPath: data?.mediaUrl ?? m.mediaPath, status: data?.status ?? m.status } : m));
+        });
+        setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, lastMessageAt: now, preview: "貼圖", status: c.status === "RESOLVED" ? "OPEN" : c.status } : c)));
+        return { ok: true };
+      } catch {
+        return drop("網絡錯誤");
       }
     },
     [user.staffId]
@@ -3010,9 +3128,12 @@ export function InboxClient({
     if (searchTimer.current) clearTimeout(searchTimer.current);
     if (!search.trim()) {
       setSearchResults(null);
+      setMsgHits(null);
       return;
     }
     searchTimer.current = setTimeout(async () => {
+      if (searchMode === "message") return; // 「訊息」模式由下面獨立 effect 處理（唔跟 conversations 變動重搜）
+      setMsgHits(null);
       try {
         const clinicQs = activeClinicId !== "all" ? `&clinicId=${activeClinicId}` : "";
         const res = await fetch(`/api/search?type=contact&q=${encodeURIComponent(search.trim())}${clinicQs}`);
@@ -3057,7 +3178,37 @@ export function InboxClient({
     return () => {
       if (searchTimer.current) clearTimeout(searchTimer.current);
     };
-  }, [search, activeClinicId, conversations]);
+  }, [search, activeClinicId, conversations, searchMode]);
+
+  // ── ★ cwi-search-20261107：「訊息」模式 — 搵全部病人講過嘅內容（獨立 effect：唔跟 realtime 列表變動重搜，防撞 rate limit）──
+  const msgSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (msgSearchTimer.current) clearTimeout(msgSearchTimer.current);
+    if (searchMode !== "message" || !search.trim()) {
+      setMsgHits(null);
+      setMsgHitsLoading(false);
+      return;
+    }
+    setSearchResults(null);
+    let cancelled = false;
+    msgSearchTimer.current = setTimeout(async () => {
+      setMsgHitsLoading(true);
+      try {
+        const clinicQs = activeClinicId !== "all" ? `&clinicId=${activeClinicId}` : "";
+        const res = await fetch(`/api/search?type=message&q=${encodeURIComponent(search.trim())}${clinicQs}${msgHitsInternal ? "&internal=1" : ""}`);
+        const data = res.ok ? ((await res.json()) as { results: MessageSearchHit[] }) : { results: [] };
+        if (!cancelled) setMsgHits(data.results);
+      } catch {
+        if (!cancelled) setMsgHits([]);
+      } finally {
+        if (!cancelled) setMsgHitsLoading(false);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      if (msgSearchTimer.current) clearTimeout(msgSearchTimer.current);
+    };
+  }, [search, activeClinicId, searchMode, msgHitsInternal]);
 
   // ── 隊列列表 filter（client 端：activeClinicId + statusFilter 喺 component 內做） ──
   // ★ cwi-final S1-2（裁決 5）：statusFilter=RESOLVED → 列表用獨立 resolvedRows（mode=resolved 分頁）
@@ -3134,7 +3285,15 @@ export function InboxClient({
         onClearSearch={() => {
           setSearch("");
           setSearchResults(null);
+          setMsgHits(null);
         }}
+        searchMode={searchMode}
+        onSearchMode={setSearchMode}
+        msgHits={msgHits}
+        msgHitsLoading={msgHitsLoading}
+        msgHitsInternal={msgHitsInternal}
+        onMsgHitsInternal={setMsgHitsInternal}
+        onMsgHit={(h) => void jumpToMessage(h.conversationId, { id: h.id, channel: h.channel })}
         myStaffId={user.staffId}
         isSales={!!user.isSales}
         myGroupIds={myGroupIds}
@@ -3170,6 +3329,7 @@ export function InboxClient({
         key={`chat-${selectedConv?.id ?? "none"}`} // ★ cwi-final S1-1e（=S1-6）：換對話 remount — 舊對話殘留 messages 唔會漏入新 pane
         ref={chatPaneApiRef} // ★ cwi-final S6-7：virtualized thread 跳行 API（mention bell / 通知卡）
         onBack={closeConv} // ★ cwi-audit2-20260908 T1：取消選中同步 ref — cwi-setnav NAV-02 改行 closeConv（+ history 同步）
+        onJumpToMessage={(hit) => (selectedIdRef.current ? jumpToMessage(selectedIdRef.current, hit) : Promise.resolve(false))}
         onOpenDetail={() => setDetailOpen(true)}
         conversation={selectedConv}
         conversationLoading={selectedConvId !== null && selectedConv === null && selConvLoading} // ★ cwi-final S1-3（N-3）
@@ -3182,6 +3342,7 @@ export function InboxClient({
         window={selectedConv?.window ?? null}
         onSend={sendMessage}
         onSendMedia={sendMedia}
+        onSendSticker={sendSticker}
         onSendTemplate={sendTemplate}
         // ★ cwi-followup-v3：對話內跟進建議卡（MD §2.2）
         suggestion={selectedConv ? suggestion : null}

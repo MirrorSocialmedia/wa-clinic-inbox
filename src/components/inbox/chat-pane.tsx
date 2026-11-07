@@ -3,6 +3,8 @@
 import { Fragment, forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, memo, useRef, useState } from "react";
 import { ShareToWorkgroupDialog } from "@/components/workgroups/share-dialog";
 import { MarkExternalDialog, ExternalBanner } from "@/components/workgroups/external-ui";
+import { ConversationSearchBar, HighlightText, type ConvSearchHit } from "./conversation-search";
+import { saveStickerFromMessage, type StickerItem } from "./sticker-panel";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
   AlertTriangle,
@@ -17,6 +19,7 @@ import {
   Lock,
   MessageCircle,
   MoreHorizontal,
+  Search,
   Paperclip,
   Smile,
   RotateCw,
@@ -91,6 +94,10 @@ import { ReminderCard } from "./reminder-card";
 import { useBackLayer } from "@/lib/back-stack";
 
 interface Props {
+  /** ★ cwi-sticker-20261107：發貼圖（窗口內；同附件一樣過 Send Lock／銷售鎖） */
+  onSendSticker?: (s: StickerItem) => Promise<{ ok: boolean; error?: string }>;
+  /** ★ cwi-search-20261107：對話內搜尋跳轉（parent 補載到目標訊息 + 捲 + 閃；內部備註 → 開備註欄） */
+  onJumpToMessage?: (hit: ConvSearchHit) => Promise<boolean>;
   conversation: ConversationItem | null;
   /** ★ cwi-final S1-3（N-3）：selectedConvId 有值但 row 正經補載（ensureConversationLoaded 進行中）
    *  → skeleton + 返回掣（手機唔好空白 / 唔好「揀一個對話開始」） */
@@ -293,6 +300,8 @@ function mediaSrc(mediaPath: string | null): string | null {
   if (!mediaPath) return null;
   // ★ cwi-final S6-9④：optimistic 氣泡嘅 blob: objectURL 原样透傳（本地預覽；2xx 後會換成 server mediaUrl）
   if (mediaPath.startsWith("blob:")) return mediaPath;
+  // ★ cwi-sticker：optimistic 貼圖氣泡 = 貼圖庫 URL（/api/stickers/file/…）原樣用；/api/media/… 本身已係 URL
+  if (mediaPath.startsWith("/api/stickers/") || mediaPath.startsWith("/api/media/")) return mediaPath;
   const base = mediaPath.split("/").pop() ?? mediaPath;
   return `/api/media/${encodeURIComponent(base)}`;
 }
@@ -406,6 +415,10 @@ interface MessageBubbleProps {
   onRetryMessage?: (id: string) => Promise<{ ok: boolean; error?: string }>;
   openGolden: (id: string) => void;
   onInsertCorrection: (body: string) => void;
+  /** ★ cwi-search-20261107：搜尋字（命中標黃）；null = 冇搜尋 */
+  hl?: string | null;
+  /** ★ cwi-sticker-20261107：收到嘅貼圖 → 加到我的貼圖 */
+  onSaveSticker?: (messageId: string) => void;
 }
 
 const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
@@ -421,12 +434,15 @@ const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
     onRetryMessage,
     openGolden,
     onInsertCorrection,
+    hl,
+    onSaveSticker,
   } = props;
 
           const isOut = m.direction === "OUT";
           const isEcho = m.channel === "APP_ECHO";
           const isHistory = m.channel === "HISTORY";
           const isFlow = m.type === "interactive";
+          const isSticker = m.type === "sticker";
           const isAuto = isOut && m.aiAutoSent === true;
           const media = mediaSrc(m.mediaPath);
           // ★ T2：中間斷層分隔線插喺此 row 之前（gapBefore = parent 計好傳入）
@@ -460,10 +476,12 @@ const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
               )}
             <div id={`msg-${m.id}`} className={`group flex ${isOut ? "justify-end" : "justify-start"}`}>
               <div
-                className={`max-w-[70%] px-3.5 py-2.5 text-[13.5px] leading-[1.6] ${
-                  isOut
-                    ? "bg-bubble-out text-ok-text rounded-[22px] rounded-br-[6px]"
-                    : "bg-bubble-in text-t1 shadow-sm rounded-[22px] rounded-bl-[6px]"
+                className={`max-w-[70%] text-[13.5px] leading-[1.6] ${
+                  isSticker
+                    ? "px-1 py-1" // ★ cwi-sticker：貼圖冇泡泡底色（同 WhatsApp 一樣）
+                    : isOut
+                      ? "px-3.5 py-2.5 bg-bubble-out text-ok-text rounded-[22px] rounded-br-[6px]"
+                      : "px-3.5 py-2.5 bg-bubble-in text-t1 shadow-sm rounded-[22px] rounded-bl-[6px]"
                 } ${isFlow ? "border border-brand/40" : ""} ${isHistory ? "opacity-60" : ""}`}
               >
                 {isAuto && (
@@ -482,11 +500,29 @@ const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
                     {isOut ? "預約連結（WhatsApp Flow）已發" : "病人完成預約 Flow（nfm_reply）"}
                   </div>
                 ) : m.type === "text" && m.body ? (
-                  <div className="whitespace-pre-wrap break-words">{m.body}</div>
+                  <div className="whitespace-pre-wrap break-words">
+                    <HighlightText text={m.body} q={hl} />
+                  </div>
                 ) : (
                   <div className="flex flex-col gap-1">
                     {media ? (
-                      m.type === "image" ? (
+                      m.type === "sticker" ? (
+                        <span className="relative inline-block" data-e2e="sticker-bubble">
+                          <img src={media} alt="貼圖" className="h-32 w-32 object-contain" loading="lazy" />
+                          {onSaveSticker && (
+                            <button
+                              type="button"
+                              onClick={() => onSaveSticker(m.id)}
+                              className="absolute -right-1 -top-1 rounded-full bg-panel px-1.5 py-0.5 text-[11px] shadow md:opacity-0 md:group-hover:opacity-100"
+                              title="加到我的貼圖"
+                              aria-label="加到我的貼圖"
+                              data-e2e="sticker-save"
+                            >
+                              ⭐
+                            </button>
+                          )}
+                        </span>
+                      ) : m.type === "image" ? (
                         <img src={media} alt="" className="rounded-xl max-h-64 max-w-full" />
                       ) : m.type === "audio" ? (
                         <audio controls src={media} className="max-w-full" />
@@ -506,7 +542,11 @@ const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
                         <Paperclip size={11} strokeWidth={2.75} /> {m.type}（媒體未落地）
                       </span>
                     )}
-                    {m.body && <div className="whitespace-pre-wrap break-words">{m.body}</div>}
+                    {m.body && (
+                      <div className="whitespace-pre-wrap break-words">
+                        <HighlightText text={m.body} q={hl} />
+                      </div>
+                    )}
                   </div>
                 )}
                 <div className={`flex items-center gap-1 mt-1 ${isOut ? "justify-end" : ""}`}>
@@ -702,6 +742,37 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
   const [shareOpen, setShareOpen] = useState(false);
   // ★ cwi-workgroup-p2：⋯ →「標記做外部人 → 移去工作群」（Lab／供應商）
   const [extOpen, setExtOpen] = useState(false);
+  // ★ cwi-sticker-20261107：貼圖（發 + 收藏）— 結果用細提示
+  const [stickerToast, setStickerToast] = useState<string | null>(null);
+  const toast = useCallback((t: string) => {
+    setStickerToast(t);
+    window.setTimeout(() => setStickerToast((cur) => (cur === t ? null : cur)), 2500);
+  }, []);
+  const stickerBlock = p.conversation && !p.conversation.window.open ? "過咗 24 小時窗口 — WhatsApp 規定只可以發範本，貼圖唔發得" : null;
+  const pickSticker = useCallback(
+    (s: StickerItem) => {
+      if (!p.onSendSticker) return;
+      void p.onSendSticker(s).then((r) => {
+        if (!r.ok) toast(r.error ?? "貼圖發唔到");
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [p.onSendSticker, toast]
+  );
+  const onSaveSticker = useCallback(
+    (messageId: string) => {
+      void saveStickerFromMessage(messageId).then((r) => toast(r.message));
+    },
+    [toast]
+  );
+  // ★ cwi-search-20261107：對話內搜尋（🔍）— 換對話自動收埋
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQ, setSearchQ] = useState<string | null>(null);
+  const convIdForSearch = p.conversation?.id ?? null;
+  useEffect(() => {
+    setSearchOpen(false);
+    setSearchQ(null);
+  }, [convIdForSearch]);
   const [flagBusy, setFlagBusy] = useState(false);
   const [flagMsg, setFlagMsg] = useState<string | null>(null);
   // cwi-setnav NAV-02：確認彈窗 + 旗標選單入返回堆疊
@@ -1279,6 +1350,21 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
           <ClipboardList size={13} strokeWidth={2.75} className="md:hidden" />
           <span className="text-[11px]">病人記錄</span>
         </button>
+        {/* ★ cwi-search-20261107：對話內搜尋 */}
+        {p.onJumpToMessage && (
+          <button
+            data-e2e="conv-search-open"
+            onClick={() => {
+              setSearchOpen((v) => !v);
+              setSearchQ(null);
+            }}
+            aria-label="搜尋對話"
+            title="搜尋呢個對話"
+            className={`order-7 md:order-none p-1.5 rounded-full text-t2 hover:bg-black/[.04] ${searchOpen ? "bg-black/[.06]" : ""}`}
+          >
+            <Search size={16} strokeWidth={2.75} />
+          </button>
+        )}
         {/* ★ Phase E：「⋯」menu — 標記投訴 / 標記 AI 錯誤（前線先見到問題） */}
         <div className="relative order-7 md:order-none">
           <button
@@ -1413,6 +1499,23 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
         </span>
       </div>
 
+      {stickerToast && (
+        <div className="pointer-events-none fixed left-1/2 top-20 z-[70] -translate-x-1/2 rounded-full bg-t1 px-3 py-1 text-[12px] text-panel shadow" data-e2e="sticker-toast">
+          {stickerToast}
+        </div>
+      )}
+      {searchOpen && p.onJumpToMessage && (
+        <ConversationSearchBar
+          key={c.id}
+          conversationId={c.id}
+          onJump={p.onJumpToMessage}
+          onQueryChange={setSearchQ}
+          onClose={() => {
+            setSearchOpen(false);
+            setSearchQ(null);
+          }}
+        />
+      )}
       {/* ★ cwi-workgroup-p2：外部對話（Lab／供應商）橫額 — 唔觸發 AI／預約／銷售；可以取消標記 */}
       {c.external && <ExternalBanner conversationId={c.id} name={c.contact?.externalName ?? null} org={c.contact?.externalOrg ?? null} canEdit={p.userRole !== "SUPERVISOR"} />}
       {/* ★ 擁有人 2026-10-18：🙋 要求真人／🔕 已退訂 橫額（對話欄頂部 — 唔使開右欄都見到） */}
@@ -1502,6 +1605,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                   onRetryMessage={p.onRetryMessage}
                   openGolden={openGolden}
                   onInsertCorrection={onInsertCorrection}
+                  hl={searchOpen ? searchQ : null}
+                  onSaveSticker={onSaveSticker}
                 />
               )}
             />
@@ -1966,7 +2071,9 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 >
                   <Smile size={17} strokeWidth={2.2} />
                 </button>
-                {emojiOpen && !isMobile && <EmojiPicker variant="popover" onPick={insertEmoji} onClose={() => setEmojiOpen(false)} />}
+                {emojiOpen && !isMobile && (
+                  <EmojiPicker variant="popover" onPick={insertEmoji} onClose={() => setEmojiOpen(false)} onPickSticker={p.onSendSticker ? pickSticker : undefined} stickerDisabledReason={stickerBlock} />
+                )}
               </div>
               <textarea
                 ref={composerRef}
@@ -2031,7 +2138,9 @@ export const ChatPane = forwardRef<ChatPaneHandle, Props>(function ChatPane(p, r
                 {sending && pendingFile ? <WMark size={15} /> : <Send size={15} strokeWidth={2.75} />}
               </button>
             </div>
-            {emojiOpen && isMobile && <EmojiPicker variant="sheet" onPick={insertEmoji} onClose={() => setEmojiOpen(false)} />}
+            {emojiOpen && isMobile && (
+              <EmojiPicker variant="sheet" onPick={insertEmoji} onClose={() => setEmojiOpen(false)} onPickSticker={p.onSendSticker ? pickSticker : undefined} stickerDisabledReason={stickerBlock} />
+            )}
             {/* ★ cwi-final S6-9（③）：右下細字 toggle「Enter 發送／Enter 換行」（撳即存 PATCH /api/staff/me/prefs）
                 ★ cwi-mobile-ux-20261018：手機唔顯示（細字佔位；手機撳掣發送）*/}
             {p.onToggleEnterSends && (

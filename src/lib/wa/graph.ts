@@ -365,7 +365,7 @@ export async function uploadMedia(opts: {
 export async function sendMediaMessage(opts: {
   phoneNumberId: string;
   to: string;
-  kind: "image" | "document";
+  kind: "image" | "document" | "sticker";
   mediaId: string;
   caption?: string | null;
   filename?: string | null;
@@ -396,7 +396,8 @@ export async function sendMediaMessage(opts: {
   }
 
   const media: Record<string, unknown> = { id: mediaId };
-  if (opts.caption) media.caption = opts.caption;
+  // ★ cwi-sticker：sticker 唔支援 caption（Meta 會拒）
+  if (opts.caption && kind !== "sticker") media.caption = opts.caption;
   if (kind === "document" && opts.filename) media.filename = opts.filename;
   const res = await graphFetch(
     `${GRAPH_BASE}/${phoneNumberId}/messages`,

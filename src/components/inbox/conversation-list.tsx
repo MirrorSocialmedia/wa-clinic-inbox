@@ -3,7 +3,8 @@
 import { fmtMonthDay } from "./reminder-control";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, BellRing, CalendarDays, MessageCircle, Search, Settings, X, BadgeDollarSign } from "lucide-react";
-import type { ClinicInfo, ClinicLite, ConversationItem, ConvStatus, StaffInfo, StaffNoticeItem } from "./types";
+import type { ClinicInfo, ClinicLite, ConversationItem, ConvStatus, MessageSearchHit, StaffInfo, StaffNoticeItem } from "./types";
+import { HighlightText } from "./conversation-search";
 import { LocationCapsule, type LocationChange } from "./location-capsule";
 import { relTime } from "./time";
 // ★ cwi-final S1-2（L-3）：膠囊 predicate — client 同 server 共用單一來源（計數不變式）
@@ -348,6 +349,14 @@ interface Props {
   onSearch: (q: string) => void;
   searchResults: ConversationItem[] | null;
   onClearSearch: () => void;
+  /** ★ cwi-search-20261107：搜尋模式（病人＝搵名／電話；訊息＝搵全部病人講過嘅內容） */
+  searchMode?: "contact" | "message";
+  onSearchMode?: (m: "contact" | "message") => void;
+  msgHits?: MessageSearchHit[] | null;
+  msgHitsLoading?: boolean;
+  msgHitsInternal?: boolean;
+  onMsgHitsInternal?: (v: boolean) => void;
+  onMsgHit?: (h: MessageSearchHit) => void;
   /** ★ cwi-routing-20260906（MD §4.3）：我嘅技能組 id — 「派俾我」膠囊 client 端 filter */
   myGroupIds?: string[];
   /** ★ H1：自己 staffId — 負責人 chip 三狀態（自己=綠「你」/ 別人=琥珀名 / unassigned=無 chip） */
@@ -651,6 +660,7 @@ export function ConversationList(p: Props) {
   };
   const salesPrefs = useSalesListPrefs(!!p.isSales);
   // ① 膠囊 + 狀態篩選（意向篩選之前 — 意向計數用呢份：揀「高」唔會令「中」數字變 0）
+  const msgMode = (p.searchMode ?? "contact") === "message";
   const baseList = useMemo(() => {
     if (p.searchResults) return null;
     // ★ cwi-workgroup-p2：外部對話（Lab／供應商）唔喺收件箱列表出現（深連結開咗都唔加入列表）
@@ -1101,22 +1111,54 @@ export function ConversationList(p: Props) {
           <input
             value={p.search}
             onChange={(e) => p.onSearch(e.target.value)}
-            placeholder="搜尋病人姓名或號碼"
-            className="w-full text-sm rounded-full bg-panel-2 border border-transparent pl-8 pr-8 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel"
+            placeholder={msgMode ? "搵全部病人講過嘅字（例如：退款）" : "搜尋病人姓名或號碼"}
+            className={`w-full text-sm rounded-full bg-panel-2 border border-transparent pl-8 py-1.5 text-t1 placeholder:text-t3 focus:outline-none focus:border-brand focus:bg-panel ${p.onSearchMode ? "pr-[118px]" : "pr-8"}`}
+            data-e2e="list-search-input"
           />
           {p.search && (
             <button
               onClick={p.onClearSearch}
               aria-label="清除搜尋"
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-t3 hover:text-t1"
+              className={`absolute top-1/2 -translate-y-1/2 text-t3 hover:text-t1 ${p.onSearchMode ? "right-[92px]" : "right-2"}`}
             >
               <X size={14} strokeWidth={2.75} />
             </button>
           )}
+          {p.onSearchMode && (
+            <div className="absolute right-1 top-1/2 -translate-y-1/2 inline-flex rounded-full bg-panel p-0.5 text-[11px]" role="tablist" data-e2e="list-search-mode">
+              {(
+                [
+                  ["contact", "病人"],
+                  ["message", "訊息"],
+                ] as const
+              ).map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="tab"
+                  aria-selected={(p.searchMode ?? "contact") === k}
+                  onClick={() => p.onSearchMode?.(k)}
+                  className={`rounded-full px-2 py-0.5 ${(p.searchMode ?? "contact") === k ? "bg-t1 font-semibold text-panel" : "text-t2"}`}
+                  data-e2e={`list-search-mode-${k}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-        {p.searchResults && (
+        {p.searchResults && !msgMode && (
           <div className="text-[11px] text-t3 px-1 pt-1">
             搜尋結果（{p.searchResults.length}）— 點擊進入對話
+          </div>
+        )}
+        {msgMode && p.search.trim() && (
+          <div className="flex items-center text-[11px] text-t3 px-1 pt-1">
+            <span>{p.msgHitsLoading ? "搵緊…" : p.msgHits ? `搵到 ${p.msgHits.length}${p.msgHits.length >= 20 ? "+" : ""} 條訊息 · ${new Set(p.msgHits.map((h) => h.conversationId)).size} 個對話` : ""}</span>
+            <label className="ml-auto inline-flex items-center gap-1">
+              <input type="checkbox" checked={!!p.msgHitsInternal} onChange={(e) => p.onMsgHitsInternal?.(e.target.checked)} />
+              包埋內部備註
+            </label>
           </div>
         )}
       </div>
@@ -1258,7 +1300,37 @@ export function ConversationList(p: Props) {
         />
       )}
       {/* list — ★ cwi-final S6-7：virtualization（react-virtuoso；endReached ≈ 舊近底 30px 觸發；行高可變 — 量測式） */}
-      {items.length === 0 ? (
+      {msgMode && p.search.trim() ? (
+        <div className="flex-1 min-h-0 overflow-y-auto px-2.5 pb-3" data-e2e="msg-hits">
+          {p.msgHits && p.msgHits.length === 0 && !p.msgHitsLoading && (
+            <div className="flex flex-col items-center gap-2 py-10 text-t3">
+              <MessageCircle size={28} strokeWidth={2.75} />
+              <div className="text-sm">冇訊息有呢個字</div>
+            </div>
+          )}
+          {(p.msgHits ?? []).map((h) => (
+            <button
+              key={h.id}
+              type="button"
+              onClick={() => p.onMsgHit?.(h)}
+              className={`mb-1 block w-full rounded-2xl px-3 py-2 text-left hover:bg-panel-2 ${p.selectedId === h.conversationId ? "bg-brand-soft" : ""}`}
+              data-e2e="msg-hit"
+            >
+              <span className="flex items-center gap-1.5 text-[13px] font-semibold text-t1">
+                <span className="truncate">{h.contactName ?? h.contactWaId}</span>
+                {p.clinicById?.get(h.clinicId)?.code && <span className="shrink-0 rounded-full bg-panel-2 px-1.5 text-[10px] font-normal text-t2">{p.clinicById.get(h.clinicId)!.code}</span>}
+                {h.external && <span className="shrink-0 rounded-full bg-ok-soft px-1.5 text-[10px] font-normal text-ok-text">外部</span>}
+                {h.channel === "INTERNAL" && <span className="shrink-0 rounded-full bg-warn-soft px-1.5 text-[10px] font-normal text-warn-text">備註</span>}
+                <span className="ml-auto shrink-0 text-[11px] font-normal text-t3">{relTime(h.waTimestamp)}</span>
+              </span>
+              <span className="mt-0.5 block text-[12.5px] leading-snug text-t2">
+                {h.direction === "OUT" && h.channel !== "INTERNAL" ? "你哋：" : ""}
+                <HighlightText text={h.snippet ?? ""} q={p.search} />
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : items.length === 0 ? (
         <div className="flex flex-col items-center gap-2 py-10 text-t3">
           <MessageCircle size={28} strokeWidth={2.75} />
           <div className="text-sm">{p.search ? "冇搜到相關病人" : salesPrefs.intent !== "ALL" ? "呢個意向冇對話" : "冇對話"}</div>

@@ -800,3 +800,19 @@ export interface NoteRxLine {
   caution?: string;
 }
 export type NoteText = (NoteStandard | NoteTemplate) & { rx?: NoteRxLine[] };
+
+/** ★ cwi-search-20261107：列表「訊息」搜尋命中（GET /api/search?type=message） */
+export interface MessageSearchHit {
+  id: string;
+  conversationId: string;
+  direction: string;
+  type: string;
+  channel?: string;
+  snippet: string | null;
+  waTimestamp: string;
+  createdAt?: string;
+  clinicId: string;
+  contactWaId: string;
+  contactName: string | null;
+  external?: boolean;
+}

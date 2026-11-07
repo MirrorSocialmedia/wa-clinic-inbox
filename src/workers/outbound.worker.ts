@@ -97,7 +97,7 @@ async function processOutboundJob(job: Job<OutboundJobData>): Promise<void> {
     //   mock 發送係本地決定性（無外呼）：kill 喺 mock send 中段 = 肯定未發 → 重新 claim
     //   重發（沿用 waMediaId、唔重複上載）。
     //   非媒體 / 真 mode：上次 attempt 死咗 mid-Graph-call → 結果未知 → UNKNOWN（S1-15，防雙發）。
-    const isUploadedMedia = (cur?.type === "image" || cur?.type === "document") && !!cur?.waMediaId;
+    const isUploadedMedia = (cur?.type === "image" || cur?.type === "document" || cur?.type === "sticker") && !!cur?.waMediaId;
     if (cur?.status === "SENDING" && !cur.waMessageId && isUploadedMedia && waMock()) {
       log.info({ messageId, waMediaId: cur.waMediaId }, "outbound: mock media re-claim（upload done、send 被打斷 — 沿用 waMediaId 重發）");
       // ★ 重讀完整行：開頭嘅 msg 係舊快照（waMediaId 仍 null）— 唔重讀會重複上載（破 T698-5）
@@ -269,7 +269,7 @@ export async function runOutboundSend(job: OutboundJobLike, msg: MessageRow, dep
 
     // 2) 發送
     const body = msg.body;
-    const isMedia = msg.type === "image" || msg.type === "document"; // ★ cwi-final S6-9④
+    const isMedia = msg.type === "image" || msg.type === "document" || msg.type === "sticker"; // ★ cwi-final S6-9④ + cwi-sticker
     if (!body && !isMedia) { // ★ S6-9④：圖片可以冇 caption（body=null）— 媒體豁免空 body guard
       // 空 body 嘅 OUT API message = 壞數據（API route 已擋）→ 標 FAILED 唔重試
       await prisma.message.update({
@@ -303,7 +303,8 @@ export async function runOutboundSend(job: OutboundJobLike, msg: MessageRow, dep
         const enc = await readFile(msg.mediaPath);
         const key = getMediaKey();
         const plain = key && isEncryptedMedia(enc) ? decryptMedia(enc, key) : enc;
-        const mime = msg.type === "image" ? (msg.mediaPath.endsWith(".png") ? "image/png" : "image/jpeg") : "application/pdf";
+        const mime =
+          msg.type === "sticker" ? "image/webp" : msg.type === "image" ? (msg.mediaPath.endsWith(".png") ? "image/png" : "image/jpeg") : "application/pdf";
         try {
           const up = await deps.uploadMedia({
             phoneNumberId: clinic.waPhoneNumberId ?? "",
@@ -326,7 +327,7 @@ export async function runOutboundSend(job: OutboundJobLike, msg: MessageRow, dep
       const r = await deps.sendMediaMessage({
         phoneNumberId: clinic.waPhoneNumberId ?? "",
         to: contactRow.waId,
-        kind: msg.type as "image" | "document",
+        kind: msg.type as "image" | "document" | "sticker",
         mediaId,
         caption: msg.body,
         filename: msg.mediaName,

@@ -257,7 +257,7 @@ async function toViews(rows: MsgRow[], groupId: string, viewer: Viewer): Promise
 
 function previewOf(r: { body: string; conversationId: string | null; attachName: string | null }): string {
   if (r.body) return r.body.slice(0, 80);
-  if (r.attachName) return `〔檔案〕${r.attachName}`;
+  if (r.attachName) return r.attachName === "貼圖.webp" ? "〔貼圖〕" : `〔檔案〕${r.attachName}`;
   if (r.conversationId) return "〔分享咗一個對話〕";
   return "";
 }

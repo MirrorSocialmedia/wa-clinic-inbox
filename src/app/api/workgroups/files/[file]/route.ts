@@ -16,7 +16,7 @@ export const runtime = "nodejs";
 export const GET = handle(async (req: NextRequest, ctx: { params: Promise<{ file: string }> }) => {
   const auth = await requireAuth(req);
   const { file } = await ctx.params;
-  if (file !== path.basename(file) || file.includes("..") || !/^wg-[0-9a-f-]{36}\.(jpg|png|pdf)$/.test(file)) {
+  if (file !== path.basename(file) || file.includes("..") || !/^wg-[0-9a-f-]{36}\.(jpg|png|pdf|webp)$/.test(file)) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
   const meta = await attachmentForViewer(file, auth.staff.id);

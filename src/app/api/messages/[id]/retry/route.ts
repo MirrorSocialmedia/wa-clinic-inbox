@@ -53,7 +53,7 @@ export const POST = handle(async (req: NextRequest, { params }: Ctx) => {
   }
   // ★ FX-27：24h 窗口檢查媒體同 text 一樣（image/document — 舊 code 只查 text）；
   //   template/interactive 豁免（過窗發送本係佢哋嘅合法場景 — 同 send route 分流一致）。
-  if ((msg.type === "text" || msg.type === "image" || msg.type === "document") && !getWindowState(conv.lastInboundAt).open) {
+  if ((msg.type === "text" || msg.type === "image" || msg.type === "document" || msg.type === "sticker") && !getWindowState(conv.lastInboundAt).open) {
     return NextResponse.json({ error: "WINDOW_CLOSED" }, { status: 422 });
   }
   const r = await prisma.message.updateMany({

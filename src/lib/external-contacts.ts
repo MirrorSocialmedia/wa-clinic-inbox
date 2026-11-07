@@ -143,7 +143,7 @@ export async function listExternalConversations(ctx: Ctx): Promise<ExternalConvV
       org: ct?.externalOrg ?? null,
       clinicCode: clinicOf.get(c.handlingClinicId ?? c.clinicId) ?? null,
       lastMessageAt: c.lastMessageAt.toISOString(),
-      lastPreview: lm ? (lm.body ? lm.body.slice(0, 60) : `〔${lm.type === "image" ? "相片" : lm.type === "document" ? "文件" : lm.type}〕`) : null,
+      lastPreview: lm ? (lm.body ? lm.body.slice(0, 60) : `〔${lm.type === "image" ? "相片" : lm.type === "document" ? "文件" : lm.type === "sticker" ? "貼圖" : lm.type}〕`) : null,
       lastFromThem: lm?.direction === "IN",
       unread: c.unreadCount,
       assigneeName: c.assigneeId ? (staffOf.get(c.assigneeId) ?? null) : null,

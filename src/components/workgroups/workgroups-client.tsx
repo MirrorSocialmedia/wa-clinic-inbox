@@ -14,7 +14,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { io } from "socket.io-client";
-import { ArrowLeft, Archive, FileText, MessageSquareShare, Paperclip, Pin, PinOff, Search, Send, Settings2, Users, X } from "lucide-react";
+import { ArrowLeft, Archive, FileText, MessageSquareShare, Paperclip, Pin, PinOff, Search, Send, Settings2, Smile, Users, X } from "lucide-react";
+import { StickerGrid, type StickerItem } from "@/components/inbox/sticker-panel";
 import { WLoading } from "@/components/ui/w-loader";
 import { WorkgroupManageDialog } from "./manage-dialog";
 
@@ -175,6 +176,12 @@ function ConvCard({ m, onClaim, claiming }: { m: Msg; onClaim: (m: Msg) => void;
 
 function Attachment({ a }: { a: NonNullable<Msg["attachment"]> }) {
   const url = `/api/workgroups/files/${encodeURIComponent(a.key)}`;
+  // ★ cwi-sticker：貼圖（webp）細細張、冇框
+  if (a.mime === "image/webp")
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src={url} alt="貼圖" className="mt-1 h-28 w-28 object-contain" loading="lazy" data-e2e="wg-sticker" />
+    );
   if (a.mime.startsWith("image/"))
     return (
       <a href={url} target="_blank" rel="noopener noreferrer" className="mt-1 block" data-e2e="wg-attach-img">
@@ -277,6 +284,7 @@ export default function WorkgroupsClient({
   const [results, setResults] = useState<Msg[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  const [stickerOpen, setStickerOpen] = useState(false);
   const pendingKey = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -468,6 +476,30 @@ export default function WorkgroupsClient({
       await loadMsgs(sel);
     } catch {
       setErr("網絡錯誤 — 再撳一次會重試（唔會重複發）");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function sendSticker(st: StickerItem) {
+    if (!sel || sending) return;
+    setSending(true);
+    setErr(null);
+    try {
+      const r = await fetch(`/api/workgroups/${encodeURIComponent(sel)}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "", stickerId: st.id, clientKey: newKey() }),
+      });
+      const d = (await r.json().catch(() => null)) as { message?: string } | null;
+      if (!r.ok) {
+        setErr(d?.message ?? "貼圖發唔到");
+        return;
+      }
+      setStickerOpen(false);
+      await loadMsgs(sel);
+    } catch {
+      setErr("網絡錯誤，請再試");
     } finally {
       setSending(false);
     }
@@ -796,6 +828,26 @@ export default function WorkgroupsClient({
                   onChange={(e) => pickFile(e.target.files?.[0] ?? null)}
                   data-e2e="wg-file-input"
                 />
+                <div className="relative">
+                  <button
+                    type="button"
+                    disabled={archived || sending}
+                    onClick={() => setStickerOpen((v) => !v)}
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-line text-t2 hover:bg-panel-2 disabled:opacity-40"
+                    aria-label="貼圖"
+                    data-e2e="wg-sticker-open"
+                  >
+                    <Smile className="h-4 w-4" aria-hidden />
+                  </button>
+                  {stickerOpen && (
+                    <>
+                      <div className="fixed inset-0 z-20" onClick={() => setStickerOpen(false)} aria-hidden="true" />
+                      <div className="absolute bottom-full left-0 z-30 mb-2 w-[300px] rounded-2xl border border-line bg-panel p-2 shadow-lg" data-e2e="wg-sticker-panel">
+                        <StickerGrid onPick={(st) => void sendSticker(st)} compact />
+                      </div>
+                    </>
+                  )}
+                </div>
                 <button
                   type="button"
                   disabled={archived || sending}

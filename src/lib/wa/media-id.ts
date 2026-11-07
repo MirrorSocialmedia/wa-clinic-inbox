@@ -6,7 +6,8 @@
  *   舊版只讀 `media_id`（mock-inbound 假資料用嘅名）→ 真病人傳嘅相／語音／文件全部冇 mediaId
  *   → media worker 標 SKIPPED → UI「媒體未落地」。`id` 優先；`media_id` 保留兼容舊 fixture。
  */
-export const WA_MEDIA_TYPES = new Set(["image", "video", "audio", "document"]);
+// ★ cwi-sticker-20261107：sticker（WebP，靜態／動態）都係媒體 — 舊版漏咗 → 病人傳貼圖只見「sticker（媒體未落地）」
+export const WA_MEDIA_TYPES = new Set(["image", "video", "audio", "document", "sticker"]);
 
 export function mediaIdOf(m: { type?: string }): string | undefined {
   if (!m.type || !WA_MEDIA_TYPES.has(m.type)) return undefined;
